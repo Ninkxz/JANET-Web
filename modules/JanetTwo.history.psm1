@@ -405,8 +405,13 @@ function Invoke-JanetToolAction {
         $fails = 0; $idx = 0
         $rows = New-Object System.Collections.ArrayList
         foreach ($r in $sorted) {
-            if ([string]$r.Result -eq 'Failure') { $fails++ }
-            if ($r.Tool) { [void]$tools.Add([string]$r.Tool) }
+            # Count over logical events only (audit#24): a TouchedHosts row is a mirror
+            # of its Detail row, so counting both roughly doubled fails/tools. The row
+            # is still STREAMED below (the grid's Source column shows the provenance);
+            # only the summary rollup excludes the mirror.
+            $isMirror = ([string]$r.Source -eq 'TouchedHosts')
+            if (-not $isMirror -and [string]$r.Result -eq 'Failure') { $fails++ }
+            if (-not $isMirror -and $r.Tool) { [void]$tools.Add([string]$r.Tool) }
             $idx++
             $row = @{ _rk=("t{0}" -f $idx); Timestamp=[string]$r.Timestamp; Tool=[string]$r.Tool; Action=[string]$r.Action; Result=[string]$r.Result; Operator=[string]$r.Operator; Detail=[string]$r.Detail; Source=[string]$r.Source }
             [void]$rows.Add($row); & $send (@{ type='row' } + $row)
@@ -435,7 +440,11 @@ function Invoke-JanetToolAction {
         # Pass the cutoff into the reader so the 50k ceiling counts only in-window
         # rows (whole out-of-window months were previously read in full, letting the
         # ceiling trip on ancient rows and drop alphabetically-late tools' newest).
-        $res = Read-HistoryRows -Root $root -Months $tokens -IncludeDetail $true -IncludeTouched $true -HostMatch $null -MinDate $cutoff -Cap $script:HistReadCeiling
+        # Detail rows only (audit#14): a TouchedHosts row is a MIRROR of its detail
+        # row, and recent-activity has no Source column - reading both double-counted
+        # every host-touching action and inflated the failure %. (Same rationale as
+        # operator-summary's -IncludeTouched $false.)
+        $res = Read-HistoryRows -Root $root -Months $tokens -IncludeDetail $true -IncludeTouched $false -HostMatch $null -MinDate $cutoff -Cap $script:HistReadCeiling
         $sorted = @($res.Rows | Sort-Object -Property TS -Descending)
 
         $capped = $false
