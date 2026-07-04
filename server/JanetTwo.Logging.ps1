@@ -668,8 +668,13 @@ function Write-JanetTwoSessionLog {
             "Operator: $($Context.Operator)  (EDIPI: $($Context.Edipi))  on $($Context.SourceHost)"
         )
         $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        $entry = "[$ts] [USER: $($Context.Operator)] [ACTION: $Action] [TARGET: $Target] [RESULT: $Result]"
-        if ($Detail) { $entry += " [DETAIL: $Detail]" }
+        # Scrub CR/LF (and the bracket delimiters) from narrative fields (audit#20) so a
+        # JSON body key carrying \r\n can't inject forged transcript lines. The tamper-
+        # relevant record (detail/usage CSVs) is separately sanitized; this keeps the
+        # human transcript honest too.
+        $scrub = { param($v) ([string]$v) -replace '[\r\n]+',' ' -replace '[\[\]]',' ' }
+        $entry = "[$ts] [USER: $(& $scrub $Context.Operator)] [ACTION: $(& $scrub $Action)] [TARGET: $(& $scrub $Target)] [RESULT: $(& $scrub $Result)]"
+        if ($Detail) { $entry += " [DETAIL: $(& $scrub $Detail)]" }
         Add-JanetTwoTextLine -NetworkPath $netFile -LocalPath $localFile -HeaderBlock $headerBlock -Line $entry -Context $Context
     } catch {}
 }

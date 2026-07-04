@@ -599,7 +599,9 @@ function Start-JanetTwoServer {
                 if ($verb -eq 'GET' -and $path -eq '/api/logs/tail') {
                     $lc = $state.LogCtx
                     $toolId = [string]$req.QueryString['tool']; if ([string]::IsNullOrWhiteSpace($toolId)) { $toolId = 'acas' }
-                    $n = 200; [int]::TryParse([string]$req.QueryString['n'], [ref]$n) | Out-Null
+                    # audit#21: TryParse writes 0 into [ref]$n on a missing/bad value,
+                    # clobbering the default; only accept a successful parse.
+                    $n = 200; $parsedN = 0; if ([int]::TryParse([string]$req.QueryString['n'], [ref]$parsedN)) { $n = $parsedN }
                     if ($n -lt 1) { $n = 1 } elseif ($n -gt 2000) { $n = 2000 }
                     $toolName = Resolve-JanetTwoToolName -ToolId $toolId
                     $root = if ($lc.OnShare) { $lc.NetRoot } else { $lc.JanetLocal }
@@ -624,7 +626,7 @@ function Start-JanetTwoServer {
                 if ($verb -eq 'GET' -and $path -eq '/api/logs/transcript') {
                     $lc = $state.LogCtx
                     $toolId = [string]$req.QueryString['tool']; if ([string]::IsNullOrWhiteSpace($toolId)) { $toolId = 'acas' }
-                    $n = 800; [int]::TryParse([string]$req.QueryString['n'], [ref]$n) | Out-Null
+                    $n = 800; $parsedN = 0; if ([int]::TryParse([string]$req.QueryString['n'], [ref]$parsedN)) { $n = $parsedN }  # audit#21
                     if ($n -lt 1) { $n = 1 } elseif ($n -gt 5000) { $n = 5000 }
                     $tgt  = Get-JanetTwoSessionLogTarget -Context $lc -Tool $toolId
                     $file = if ($lc.OnShare) { $tgt.Net } else { $tgt.Local }
