@@ -212,10 +212,11 @@
       updateSel();
     }
     function getChecked(options) {
-      // No-arg: every checked row (unchanged). { visibleOnly:true }: drop rows the
-      // active quick-filter is hiding, so a destructive action can't hit rows the
-      // operator can't see (matches selectAll/selectWhere filter-safety).
-      var visibleOnly = !!(options && options.visibleOnly) && !!filterFn;
+      // Filter-safe by DEFAULT (audit#19): drop rows the active quick-filter is
+      // hiding so a destructive action can't hit rows the operator can't see -
+      // matching selectAll/selectWhere. Pass { visibleOnly:false } to opt out and
+      // get every checked row regardless of the filter (e.g. a bulk export).
+      var visibleOnly = (!options || options.visibleOnly !== false) && !!filterFn;
       return Array.from(checked).filter(function (k) { return !visibleOnly || filterFn(rows[k]); }).map(function (k) { return rows[k]; });
     }
 
