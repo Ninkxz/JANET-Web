@@ -1,0 +1,32 @@
+# JANET TWO
+*.zip
+*.tmp
+*.log
+Thumbs.db
+desktop.ini
+# take-to-work / archives (built, not source)
+**/Take to Work/
+# runtime spool / uploads (when the server exists)
+spool/
+uploads/
+# runtime package drop-folder (server seeds Log4j staging on boot; env-specific data)
+Packages/
+# local spool of central-CSV logs when the share is unreachable
+JanetLocal/*
+# ...but the KEV seed catalog IS shipped (the KEV Cross-Check tool needs it on a
+# fresh clone; operator add-kev edits are then version-trackable too)
+!JanetLocal/KevCatalog.txt
+# ...and the C2C Readiness baseline seed (the C2C tool needs it on a fresh clone;
+# operator edits to check thresholds / DoD root thumbprints are then trackable too)
+!JanetLocal/c2c-baseline.json
+# ...and the STIG Checker rule baseline + Reports SLA deadline baseline (same
+# ship-the-seed / track-operator-edits rationale as the two above)
+!JanetLocal/stig-baseline.json
+!JanetLocal/sla-baseline.json
+# ...and the IAVM CVE->IAVA map seed (Reports IAVM tagging + KEV xref need it on a
+# fresh clone; operator Add-IAVM edits are then version-trackable too). The SLA
+# ledger + target-groups are RUNTIME state (accumulated per operator), so they are
+# deliberately NOT negated - they stay ignored.
+!JanetLocal/IavmMap.csv
+# machine-specific editor/preview config
+.claude/

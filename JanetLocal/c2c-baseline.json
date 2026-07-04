@@ -1,0 +1,7 @@
+{
+  "sigMaxAgeDays": 7,
+  "taniumService": "Tanium Client",
+  "securityAgentServices": ["masvc", "mfemms", "macmnsvc", "WinDefend", "Sense"],
+  "hostnamePatterns": ["^MSEKL", "^MSEKW"],
+  "dodRootThumbprints": []
+}

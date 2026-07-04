@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>J.A.N.E.T. TWO</title>
+  <link rel="stylesheet" href="/css/janet.css" />
+  <!-- apply saved theme before first paint (no flash); dark is the default -->
+  <script>try{if(localStorage.getItem('janet-theme')==='light')document.documentElement.setAttribute('data-theme','light');}catch(e){}</script>
+</head>
+<body>
+  <div id="j-root"></div>
+
+  <!-- shared component kit (eagerly loaded; each registers into window.Janet) -->
+  <script src="/js/components/controlfactory.js"></script>
+  <script src="/js/components/store.js"></script>
+  <script src="/js/components/palette.js"></script>
+  <script src="/js/components/xlsx.js"></script>
+  <script src="/js/components/confirmdialog.js"></script>
+  <script src="/js/components/activitylog.js"></script>
+  <script src="/js/components/statcards.js"></script>
+  <script src="/js/components/progressstrip.js"></script>
+  <script src="/js/components/targetmanager.js"></script>
+  <script src="/js/components/runbar.js"></script>
+  <script src="/js/components/resultsgrid.js"></script>
+  <script src="/js/components/tabhost.js"></script>
+
+  <!-- per-tool "How to use" blurbs (window.JANET2_HELP) - must load before the shell -->
+  <script src="/js/help-content.js"></script>
+
+  <!-- AppShell + router + view-registry + ctx + RunController (boots on DOMContentLoaded) -->
+  <!-- per-tool views under /js/views/<id>.view.js are lazy-loaded by the router -->
+  <script src="/js/shell.js"></script>
+</body>
+</html>

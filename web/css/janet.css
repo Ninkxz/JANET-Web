@@ -1,0 +1,597 @@
+/* ============================================================================
+   J.A.N.E.T. TWO  -  ThemeKit
+   The shared JANET tactical look, ported from the desktop WinForms suite:
+   purple (#8C64DC) + gold (#DAB452) on near-black, Cascadia Mono for data /
+   Segoe UI for chrome, corner-bracket cards, pulse/heartbeat dots, striped CTA,
+   scanline status strip. Tokens as CSS vars; styled primitives below.
+
+   No build step, no framework. Every per-tool view composes these classes via
+   the component kit; views must NOT invent their own palette.
+   ========================================================================== */
+
+:root{
+  /* ---- palette (desktop parity, docs/ui-specs/message.md section 6) ------ */
+  --bg:#08080C;             /* form background */
+  --panel:#101016;          /* column / card panels */
+  --panel-light:#1E1C28;    /* raised strips (stats, headers) */
+  --input:#16161E;          /* text inputs */
+  --output:#06060A;         /* activity-log / console pane */
+
+  --accent:#8C64DC;         /* PRIMARY purple */
+  --accent-2:#A480F0;       /* console / bright purple */
+  --accent-wash:rgba(140,100,220,.14);
+  --gold:#DAB452;           /* secondary / bezel tick */
+  --gold-dim:#9B7D34;
+  --gold-wash:rgba(218,180,82,.10);
+
+  --ok:#5CC678;             /* success / delivered / online */
+  --bad:#E0505A;            /* failure / undelivered / offline */
+  --warn:#E6B446;           /* warning / cancelled / amber */
+  --amber:#E6B446;
+  --cyan:#58B4D2;           /* mode / info / ping */
+  --info:#58B4D2;
+
+  --sev-crit:#E0505A;
+  --sev-high:#E6804D;
+  --sev-med:#E6B446;
+  --sev-low:#6E6A7D;
+
+  --text:#F0F0F5;
+  --text-dim:#AAA8B4;
+  --muted:#6E6A7D;
+
+  /* ---- type ------------------------------------------------------------- */
+  --ui:'Segoe UI Semibold','Segoe UI',system-ui,sans-serif;
+  --ui-r:'Segoe UI',system-ui,sans-serif;
+  --mono:'Cascadia Mono','Cascadia Code','Consolas',ui-monospace,monospace;
+
+  /* ---- rhythm / radii / dims -------------------------------------------- */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:28px;
+  --r-chip:2px; --r-card:4px; --r-modal:6px;
+
+  --brand-h:70px;     /* header band */
+  --accent-line:2px;  /* gold rule under header */
+  --strip-h:30px;     /* bottom status strip */
+
+  /* ---- structural shades (tokenized so the light theme can flip them;
+         dark values == the originals, so the dark theme is unchanged) ---- */
+  --bg-deep:#06060A; --bg-rail:#0B0B10; --bg-rail2:#0B0B12; --bg-head:#101018;
+  --hover:#15151D;
+  --line:#1C1C26; --line-soft:#16161E; --line-faint:#14141C;
+  --edge:#26262F; --edge2:#2A2A36; --edge-cyan:#2A4651; --danger-edge:#5A2024;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--ui-r);
+  font-size:13px;
+  line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  overflow:hidden;
+}
+.hidden{display:none !important}
+.mono{font-family:var(--mono)}
+.muted{color:var(--muted)}
+.dim{color:var(--text-dim)}
+.gold{color:var(--gold)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:var(--output)}
+::-webkit-scrollbar-thumb{background:var(--edge2);border:2px solid var(--output);border-radius:6px}
+::-webkit-scrollbar-thumb:hover{background:var(--edge2)}
+
+/* ---- corner-bracket card mixin -----------------------------------------
+   A 1px gold rule fading across the top of a panel + a 6px gold corner tick.
+   Surfaces separate by hairlines + a small luminance step, not shadows. ---- */
+.j-card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card)}
+.j-card::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:1px;pointer-events:none;z-index:2;
+  background:linear-gradient(90deg,var(--gold) 0,rgba(218,180,82,.5) 14%,rgba(218,180,82,.08) 46%,transparent 72%);
+}
+.j-card::after{
+  content:"";position:absolute;top:0;left:0;width:6px;height:6px;pointer-events:none;z-index:3;
+  border-top:1px solid var(--gold);border-left:1px solid var(--gold);
+}
+.j-section-h{font-family:var(--ui);font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--gold);text-transform:uppercase}
+.j-eyebrow{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--gold-dim)}
+
+/* ============================================================================
+   PRIMITIVES (ControlFactory output)
+   ========================================================================== */
+.j-btn{
+  font-family:var(--ui);font-size:12.5px;font-weight:600;letter-spacing:.02em;
+  padding:7px 14px;border:1px solid transparent;border-radius:var(--r-card);
+  cursor:pointer;color:var(--text);background:var(--panel-light);
+  transition:filter .12s ease,background .12s ease;white-space:nowrap;
+}
+.j-btn:hover:not(:disabled){filter:brightness(1.18)}
+.j-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.j-btn:disabled{opacity:.45;cursor:not-allowed}
+.j-btn-gold{background:var(--gold);color:#1A1408;border-color:var(--gold-dim)}
+.j-btn-go{background:var(--accent);color:#0B0712;border-color:var(--accent)}
+.j-btn-danger{background:var(--bad);color:#220A0C}
+.j-btn-cyan{background:transparent;color:var(--cyan);border-color:var(--edge-cyan)}
+.j-btn-ghost{background:transparent;color:var(--text-dim);border-color:var(--edge2)}
+.j-btn-ghost:hover:not(:disabled){color:var(--text);background:var(--hover);filter:none}
+.j-btn-sm{padding:4px 9px;font-size:11.5px}
+/* striped CTA: the big primary button gets diagonal hazard stripes when armed */
+.j-btn-cta{
+  font-size:14px;font-weight:700;letter-spacing:.04em;padding:14px 18px;
+  background:var(--gold);color:#1A1408;border:1px solid var(--gold-dim);
+  text-transform:uppercase;width:100%;
+}
+.j-btn-cta.is-cancel{
+  color:#fff;border-color:#7A1E22;
+  background:repeating-linear-gradient(45deg,#C2444C 0,#C2444C 12px,#A6383F 12px,#A6383F 24px);
+}
+.j-btn-cta.is-cancel:hover:not(:disabled){filter:brightness(1.08)}
+
+.j-input,.j-textarea,.j-select{
+  font-family:var(--mono);font-size:12.5px;color:var(--text);
+  background:var(--input);border:1px solid var(--edge);border-radius:var(--r-chip);
+  padding:7px 9px;width:100%;
+}
+.j-input:focus,.j-textarea:focus,.j-select:focus{outline:none;border-color:var(--accent)}
+.j-textarea{resize:none;line-height:1.5}
+/* Theme native checkboxes/radios (grid row-select, view option toggles) to the
+   accent so they match the dark UI instead of rendering as default white boxes.
+   accent-color is ignored by older engines -> graceful native fallback. */
+input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
+.j-label{display:block;font-family:var(--ui);font-size:11.5px;color:var(--text-dim);margin-bottom:4px}
+.j-field{margin-bottom:var(--s3)}
+
+/* status dots: a steady or pulsing telemetry dot */
+.j-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);vertical-align:middle;flex:0 0 auto}
+.j-dot-ok{background:var(--ok)}
+.j-dot-bad{background:var(--bad)}
+.j-dot-warn{background:var(--warn)}
+.j-dot-pulse{animation:j-pulse 1.6s ease-in-out infinite}
+@keyframes j-pulse{0%,100%{box-shadow:0 0 0 0 currentColor;opacity:1}50%{box-shadow:0 0 0 4px transparent;opacity:.55}}
+
+/* status text colouring (cells, log lines, pills) */
+.st-ok{color:var(--ok)}
+.st-bad{color:var(--bad)}
+.st-warn{color:var(--warn)}
+.st-info{color:var(--cyan)}
+.st-accent{color:var(--accent-2)}
+.st-dim{color:var(--muted)}
+.cell-dim{color:var(--muted)}
+
+.j-pill{display:inline-block;padding:1px 7px;border-radius:9px;font-family:var(--ui);font-size:11px;font-weight:600;border:1px solid currentColor}
+
+/* ============================================================================
+   APP SHELL  -  brand band, launcher hub, tool host, status strip
+   ========================================================================== */
+#j-app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+/* brand title + clock (used by the sidebar brand and the top bar) */
+.j-brand-title{font-family:var(--ui);font-size:16px;font-weight:700;color:var(--gold);letter-spacing:.03em}
+.j-brand-title b{color:var(--accent-2)}
+.j-brand-sub{font-size:9.5px;font-style:italic;color:var(--muted)}
+#j-clock{font-family:var(--mono);font-size:12px;color:var(--text-dim)}
+
+/* the credential/session compact strip in the header */
+.j-credbar{display:flex;align-items:center;gap:var(--s2);font-size:11.5px}
+.j-credbar .j-cred-status{font-family:var(--ui);font-weight:600}
+
+/* launcher hub: a launchpad of icon tiles (flat responsive grid, no category tabs).
+   each tool is a corner-bracket tile: big icon on top, category eyebrow, name, summary. */
+#j-hub{flex:1;min-height:0;display:flex;overflow:hidden;padding:var(--s4) 0}
+.j-hub-inner{width:100%;max-width:1120px;margin:0 auto;padding:0 var(--s5);display:flex;flex-direction:column;min-height:0}
+.j-hub-lede{flex:0 0 auto;color:var(--text-dim);margin:0 0 var(--s4);font-size:13px}
+.j-hub-lede code{font-family:var(--mono);color:var(--gold)}
+/* fleet snapshot strip on the hub */
+.j-snapshot{flex:0 0 auto;margin:0 0 var(--s4);background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--info);border-radius:var(--r-card);padding:var(--s3)}
+.j-snap-bar{display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap}
+.j-snap-title{font-family:var(--ui);font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--info)}
+.j-snap-group{height:28px;padding:2px 8px;font-size:12px;max-width:220px}
+.j-snap-out{font-size:12.5px;margin-left:auto}
+.j-snap-out b{font-weight:700}
+.j-hub-scroll{flex:1;min-height:0;overflow:auto;padding-bottom:var(--s4)}
+.j-launchpad{display:grid;grid-template-columns:repeat(auto-fill,minmax(208px,1fr));gap:var(--s4);align-content:start}
+.j-toolcard{
+  position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--s1);
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);
+  padding:var(--s5) var(--s4) var(--s4);min-height:176px;cursor:pointer;
+  transition:background .12s ease,border-color .12s ease,transform .12s ease;
+}
+.j-toolcard:hover{background:var(--hover);border-color:var(--accent);transform:translateY(-2px)}
+.j-toolcard:focus-visible{outline:none;border-color:var(--gold)}
+.j-toolcard::after{content:"";position:absolute;top:0;left:0;width:8px;height:8px;border-top:1px solid var(--gold);border-left:1px solid var(--gold)}
+.j-toolcard::before{content:"";position:absolute;bottom:0;right:0;width:8px;height:8px;border-bottom:1px solid var(--accent);border-right:1px solid var(--accent);opacity:.6}
+.j-toolcard .j-tc-icon{font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';font-size:34px;line-height:1;height:52px;display:flex;align-items:center;justify-content:center;color:var(--gold)}
+.j-toolcard .j-tc-cat{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-top:var(--s1)}
+.j-toolcard .j-tc-name{font-family:var(--ui);font-size:14px;font-weight:700;color:var(--text);line-height:1.2}
+.j-toolcard .j-tc-name b{color:var(--gold)}
+.j-toolcard .j-tc-sum{font-size:11px;color:var(--text-dim);margin-top:var(--s1);line-height:1.35;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.j-tc-tag{display:inline-block;font-family:var(--ui);font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:5px;vertical-align:middle}
+.j-tc-tag.beta{background:var(--gold-wash);color:var(--gold);border:1px solid var(--gold-dim)}
+
+/* tool workspace host (a view mounts here) */
+#j-tool{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+#j-tool-head{
+  flex:0 0 auto;display:flex;align-items:center;gap:var(--s3);
+  padding:var(--s3) var(--s5);border-bottom:1px solid var(--line-soft);background:var(--bg-rail);
+}
+#j-tool-head .j-th-back{flex:0 0 auto}
+#j-tool-head .j-th-icon{font-size:20px;font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';color:var(--gold)}
+#j-tool-head .j-th-name{font-family:var(--ui);font-size:15px;font-weight:700;color:var(--text)}
+#j-tool-head .j-th-sum{font-size:11px;color:var(--muted)}
+#j-view-host{flex:1;min-height:0;overflow:hidden;position:relative}
+
+/* "How to use" callout - one per tool, top of the tool area, above the view.
+   Noteworthy brand-purple so it reads as guidance, distinct from amber=warn /
+   red=destructive / cyan=info used inside the views. Compact + always visible. */
+.j-howto{
+  flex:0 0 auto;display:flex;align-items:flex-start;gap:var(--s3);
+  margin:var(--s3) var(--s5) 0;padding:var(--s2) var(--s3);
+  background:var(--accent-wash);border:1px solid var(--accent);
+  border-left:4px solid var(--accent-2);border-radius:var(--r-card,4px);
+  box-shadow:0 0 0 1px rgba(140,100,220,.10),0 4px 18px rgba(140,100,220,.16);
+  font-size:12px;line-height:1.5;color:var(--text-dim);
+}
+.j-howto .j-howto-tag{
+  flex:0 0 auto;align-self:center;display:inline-flex;align-items:center;gap:5px;
+  font-family:var(--ui);font-weight:700;font-size:10px;letter-spacing:.6px;
+  color:#08080C;background:var(--accent-2);padding:2px 8px;border-radius:3px;white-space:nowrap;
+  box-shadow:0 0 10px rgba(164,128,240,.45);
+}
+.j-howto .j-howto-tag::before{
+  content:'\E7E8';   /* Segoe MDL2 Lightbulb -> reads as 'tip / how-to' */
+  font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';font-size:11px;font-weight:400;letter-spacing:0;
+}
+.j-howto .j-howto-text{flex:1;min-width:0}
+.j-howto .j-howto-text b{color:var(--text)}
+/* the WHOLE box is the click target (left chip + text) -> opens the full guide
+   modal. Strong hover + pointer so it is obviously clickable on every tab. */
+.j-howto.is-clickable{cursor:pointer}
+.j-howto.is-clickable:hover{border-color:var(--accent-2);background:rgba(140,100,220,.22);box-shadow:0 0 0 1px rgba(140,100,220,.20),0 6px 22px rgba(140,100,220,.26)}
+.j-howto.is-clickable:hover .j-howto-tag{box-shadow:0 0 14px rgba(164,128,240,.7)}
+.j-howto.is-clickable:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+.j-howto.is-clickable:active{transform:translateY(.5px)}
+
+/* full guide modal body (rendered into .j-modal-body by openHowtoModal) */
+.j-guide{display:flex;flex-direction:column}
+.j-guide-flag{align-self:flex-start;font-family:var(--ui);font-weight:700;font-size:10px;letter-spacing:.6px;padding:3px 9px;border-radius:3px;margin-bottom:var(--s2)}
+.j-guide-flag.is-ok{color:#08120F;background:var(--ok)}
+.j-guide-flag.is-bad{color:#1A0608;background:var(--bad)}
+.j-guide-h{font-family:var(--ui);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--gold);margin:var(--s3) 0 4px}
+.j-guide-what{color:var(--text-dim)}
+.j-guide-what b,.j-guide-patch b,.j-guide-steps b,.j-guide-notes b{color:var(--text)}
+.j-guide-steps{margin:0;padding-left:20px;color:var(--text-dim)}
+.j-guide-steps li{margin:3px 0}
+.j-guide-patch{color:var(--text-dim);background:var(--accent-wash);border-left:3px solid var(--accent);border-radius:3px;padding:7px 10px}
+.j-guide-notes{margin:0;padding-left:18px;color:var(--muted);font-size:12px}
+.j-guide-notes li{margin:2px 0}
+
+/* bottom status strip: scanline texture + SESSION / TARGETS / LOG / heartbeat */
+#j-strip{
+  flex:0 0 var(--strip-h);display:flex;align-items:center;gap:var(--s4);
+  padding:0 var(--s4);font-family:var(--mono);font-size:11px;color:var(--text-dim);
+  background:var(--panel-light);border-top:1px solid #000;
+  background-image:repeating-linear-gradient(0deg,rgba(255,255,255,.018) 0,rgba(255,255,255,.018) 1px,transparent 1px,transparent 3px);
+}
+#j-strip .j-strip-seg{display:flex;align-items:center;gap:6px;white-space:nowrap}
+#j-strip .j-strip-seg b{color:var(--text);font-weight:600}
+#j-strip-spacer{flex:1}
+#j-strip .j-strip-path{overflow:hidden;text-overflow:ellipsis;max-width:42vw}
+
+/* ============================================================================
+   COMMAND SIDEBAR shell - persistent grouped tool nav + top breadcrumb bar
+   (replaces the full-width brand band + back-to-hub model)
+   ============================================================================ */
+#j-shell{flex:1;display:flex;min-height:0;overflow:hidden}
+
+/* --- sidebar --- */
+#j-sidebar{flex:0 0 240px;width:240px;display:flex;flex-direction:column;min-height:0;
+  background:var(--panel);border-right:1px solid var(--line)}
+.j-side-brand{display:flex;align-items:center;gap:10px;width:100%;text-align:left;cursor:pointer;
+  padding:12px 14px;border:none;border-bottom:1px solid var(--line-soft);background:var(--bg-deep)}
+.j-side-brand:hover{background:var(--bg-rail2)}
+.j-side-brand:focus-visible{outline:none;box-shadow:inset 0 0 0 1px var(--accent)}
+.j-side-brand .j-brand-mark{width:30px;height:30px;flex:0 0 30px;border:2px solid var(--accent);border-radius:6px;
+  display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-weight:700;font-size:13px;
+  color:var(--gold);background:var(--accent-wash)}
+.j-side-brand .j-brand-mark span{color:var(--accent);font-size:11px;margin-left:1px}
+.j-side-brand-t{display:flex;flex-direction:column;line-height:1.15;min-width:0}
+.j-side-brand .j-brand-title{font-size:13px}
+.j-side-brand .j-brand-sub{font-style:normal;font-size:8.5px;letter-spacing:.2em;text-transform:uppercase;
+  font-family:var(--mono);color:var(--muted);margin-top:2px}
+
+.j-filter-wrap{position:relative;padding:10px 12px;border-bottom:1px solid var(--line-soft)}
+.j-filter-ico{position:absolute;left:21px;top:50%;transform:translateY(-50%);font-size:12px;color:var(--muted);
+  pointer-events:none;font-family:'Segoe MDL2 Assets','Segoe Fluent Icons'}
+.j-filter-wrap input{width:100%;background:var(--input);border:1px solid var(--edge);border-radius:4px;color:var(--text);
+  font-family:var(--ui-r);font-size:12px;padding:7px 8px 7px 28px}
+.j-filter-wrap input::placeholder{color:var(--muted)}
+.j-filter-wrap input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-wash)}
+
+#j-navlist{flex:1;min-height:0;overflow-y:auto;padding:6px 0 10px}
+.j-cat-group{margin-top:2px}
+.j-cat-head{display:flex;align-items:center;gap:6px;width:100%;text-align:left;cursor:pointer;border:none;
+  background:none;padding:10px 16px 6px;color:var(--gold-dim);font-family:var(--ui);font-size:9.5px;
+  letter-spacing:.16em;text-transform:uppercase}
+.j-cat-head:hover{color:var(--gold)}
+.j-cat-head:focus-visible{outline:none;color:var(--gold)}
+.j-cat-count{font-family:var(--mono);font-size:9px;color:var(--muted)}
+.j-cat-head .j-chev{margin-left:auto;font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';font-size:9px;
+  color:var(--muted);transition:transform .14s}
+.j-cat-group.collapsed .j-chev{transform:rotate(-90deg)}
+.j-cat-group.collapsed .j-cat-items{display:none}
+
+.j-tool-row{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;cursor:pointer;
+  border:none;border-left:2px solid transparent;background:none;padding:8px 16px;color:var(--text-dim);
+  font-family:var(--ui-r);font-size:12.5px;line-height:1.1;
+  transition:background .12s ease,color .12s ease,border-color .12s ease}
+.j-tool-row:hover{background:rgba(255,255,255,.03);color:var(--text)}
+.j-tool-row:hover .j-tr-ico{color:var(--gold)}
+.j-tool-row:focus-visible{outline:none;background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--accent)}
+.j-tool-row .j-tr-ico{flex:0 0 18px;width:18px;text-align:center;font-size:15px;color:var(--gold-dim);
+  font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';transition:color .12s}
+.j-tool-row .j-tr-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.j-tool-row.active{background:var(--accent-wash);color:var(--text);border-left-color:var(--gold)}
+.j-tool-row.active .j-tr-ico{color:var(--gold)}
+.j-tool-row.active .j-tr-name{font-family:var(--ui)}
+.j-tr-beta{flex:0 0 auto;font-family:var(--mono);font-size:8.5px;letter-spacing:.06em;padding:1px 4px;border-radius:3px;
+  background:var(--gold-wash);color:var(--gold);border:1px solid var(--gold-dim)}
+
+.j-side-foot{border-top:1px solid var(--line-soft);padding:10px 14px}
+.j-side-who{display:flex;align-items:center;gap:7px;font-family:var(--ui);font-size:11px;letter-spacing:.03em;color:var(--text-dim)}
+.j-side-log{margin-top:5px;font-family:var(--mono);font-size:9px;color:var(--muted);line-height:1.3;word-break:break-all}
+
+/* --- main column: top bar + body --- */
+#j-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+#j-topbar{flex:0 0 46px;display:flex;align-items:center;gap:12px;padding:0 18px;
+  background:var(--bg-deep);border-bottom:var(--accent-line) solid var(--gold)}
+.j-crumb{display:flex;align-items:center;gap:8px;font-size:12.5px;min-width:0}
+.j-crumb-cat{color:var(--muted);font-family:var(--ui);letter-spacing:.04em}
+.j-crumb-sep{color:var(--edge2);font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';font-size:10px}
+.j-crumb-tool{color:var(--text);font-family:var(--ui)}
+.j-top-spacer{flex:1}
+#j-topbar #j-clock{color:var(--cyan);font-variant-numeric:tabular-nums}
+@media (max-width:1020px){ #j-topbar .j-cred-status{display:none} }
+
+#j-mainbody{flex:1;min-height:0;display:flex;position:relative}
+
+/* ============================================================================
+   SESSION GATE  (launch overlay - mirrors the desktop WPT START tab)
+   ========================================================================== */
+#j-gate{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 0,var(--bg-head) 0,var(--bg-deep) 70%);overflow:auto}
+.j-gate-card{position:relative;width:680px;max-width:94vw;margin:var(--s5);background:var(--panel);border:1px solid var(--line);border-radius:var(--r-modal);padding:var(--s5) var(--s6)}
+.j-gate-card::after{content:"";position:absolute;top:0;left:0;width:10px;height:10px;border-top:2px solid var(--gold);border-left:2px solid var(--gold)}
+.j-gate-brand{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s4)}
+.j-gate-title{font-family:var(--ui);font-size:22px;font-weight:700;color:var(--gold)}
+.j-gate-title b{color:var(--accent-2)}
+.j-gate-sub{font-size:11px;color:var(--muted);font-style:italic}
+.j-gate-sec{padding:var(--s3) 0;border-top:1px solid var(--line)}
+.j-gate-h{font-family:var(--ui);font-weight:600;color:var(--text);margin-bottom:var(--s1)}
+.j-gate-h.warn{color:var(--gold)}
+.j-gate-req{font-size:11px;color:var(--muted);font-weight:400}
+.j-gate-p{font-size:12px;color:var(--text-dim);margin:4px 0 var(--s2)}
+.j-gate-row{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.j-gate-radio{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text);margin:5px 0;cursor:pointer}
+.j-gate-actions{display:flex;gap:var(--s2);margin-top:var(--s4);flex-wrap:wrap}
+.j-gate-status{font-size:11.5px;margin-top:6px}
+
+/* ============================================================================
+   COMPONENT: TargetManager
+   ========================================================================== */
+.j-targets{display:flex;flex-direction:column;height:100%;min-height:0}
+.j-targets .j-tg-hint{font-size:11px;color:var(--muted);margin-bottom:6px}
+.j-targets .j-tg-box{flex:1;min-height:120px;font-family:var(--mono);font-size:12.5px}
+.j-targets .j-tg-bar{display:flex;align-items:center;gap:var(--s2);margin-top:var(--s2);flex-wrap:wrap}
+.j-targets .j-tg-count{font-family:var(--ui);font-weight:600;margin-left:auto}
+.j-tg-count.has{color:var(--ok)}
+.j-tg-count.none{color:var(--muted)}
+.j-tg-count.over{color:var(--bad)}
+/* saved-group library row + cross-tool handoff banner */
+.j-targets .j-tg-lib{margin-top:var(--s1)}
+.j-targets .j-tg-group{height:26px;padding:2px 6px;font-size:11.5px;max-width:180px}
+.j-targets .j-tg-handoff{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2);
+  font-size:11.5px;color:var(--text-dim);background:rgba(88,180,210,.10);border:1px solid var(--info);
+  border-left:3px solid var(--info);border-radius:3px;padding:5px 8px}
+
+/* ============================================================================
+   COMPONENT: RunBar
+   ========================================================================== */
+.j-runbar{display:flex;flex-direction:column;gap:var(--s2)}
+
+/* ============================================================================
+   COMPONENT: ProgressStatusStrip
+   ========================================================================== */
+.j-prog{display:flex;align-items:center;gap:var(--s3)}
+.j-prog .j-prog-count{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text-dim);white-space:nowrap}
+.j-prog .j-prog-count.done{color:var(--ok)}
+.j-prog .j-prog-track{flex:1;height:8px;background:var(--line-soft);border:1px solid var(--edge);border-radius:5px;overflow:hidden}
+.j-prog .j-prog-fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .2s ease}
+.j-prog .j-prog-fill.done{background:var(--ok)}
+.j-prog .j-prog-phase{font-size:11px;color:var(--muted);white-space:nowrap}
+
+/* ============================================================================
+   COMPONENT: StatCards
+   ========================================================================== */
+.j-stats{display:flex;gap:var(--s2)}
+.j-stat{flex:1;position:relative;background:var(--panel-light);border:1px solid var(--line);border-radius:var(--r-card);padding:var(--s2) var(--s3);overflow:hidden}
+.j-stat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent)}
+.j-stat.ok::before{background:var(--ok)}
+.j-stat.bad::before{background:var(--bad)}
+.j-stat.gold::before{background:var(--gold)}
+.j-stat.cyan::before{background:var(--cyan)}
+.j-stat .j-stat-num{font-family:var(--mono);font-size:22px;font-weight:700;line-height:1.1}
+.j-stat.ok .j-stat-num{color:var(--ok)}
+.j-stat.bad .j-stat-num{color:var(--bad)}
+.j-stat.gold .j-stat-num{color:var(--gold)}
+.j-stat.cyan .j-stat-num{color:var(--cyan)}
+.j-stat.accent .j-stat-num{color:var(--accent-2)}
+.j-stat .j-stat-cap{font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-top:1px}
+
+/* ============================================================================
+   COMPONENT: ActivityLog
+   ========================================================================== */
+.j-actlog{display:flex;flex-direction:column;height:100%;min-height:0}
+.j-actlog .j-al-toolbar{display:flex;align-items:center;gap:var(--s2);margin-bottom:6px}
+.j-actlog .j-al-pane{
+  flex:1;min-height:120px;overflow:auto;background:var(--output);border:1px solid var(--line-faint);border-radius:var(--r-chip);
+  font-family:var(--mono);font-size:12px;line-height:1.55;padding:var(--s2) var(--s3);color:var(--accent-2);
+}
+.j-al-line{white-space:pre-wrap;word-break:break-word}
+.j-al-line .j-al-ts{color:var(--muted);margin-right:6px}
+.j-al-line.ok{color:var(--ok)}
+.j-al-line.err,.j-al-line.error{color:var(--bad)}
+.j-al-line.warn{color:var(--amber)}
+.j-al-line.info,.j-al-line.mode{color:var(--cyan)}
+.j-al-line.banner{color:var(--gold);font-weight:600}
+.j-al-line.accent{color:var(--accent-2)}
+.j-al-line.diag{color:var(--muted);font-style:italic}
+/* bottom activity-log dock: a click-to-open drawer - a compact bar by default that
+   expands to the full scrollable pane when the header is clicked. */
+.j-logdock{flex:0 0 auto;min-width:0;min-height:0;display:flex;flex-direction:column;transition:flex-basis .18s ease}
+.j-logdock.is-open{flex:0 0 340px}
+.j-logdock:not(.is-open) .j-al-pane{display:none}
+.j-logdock:not(.is-open) .j-al-toolbar .j-btn{display:none}   /* hide Clear/Copy/Save on the collapsed bar */
+.j-logdock.is-open .j-al-peek{display:none}                   /* hide the preview once the full pane shows */
+.j-logdock:not(.is-open) .j-al-toolbar{margin-bottom:0}
+.j-logdock .j-al-toolbar{cursor:pointer;border-radius:var(--r-chip)}
+.j-logdock:not(.is-open) .j-al-toolbar:hover{background:var(--hover)}
+.j-al-head{display:flex;align-items:center;gap:8px;margin-right:auto;min-width:0;padding:3px 6px}
+.j-al-toggle{color:var(--gold);font-size:11px;flex:0 0 auto}
+.j-al-peek{color:var(--text-dim);font-family:var(--mono);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* ============================================================================
+   COMPONENT: ResultsGrid (ColumnSpec-driven, type-aware colour)
+   ========================================================================== */
+.j-grid-wrap{display:flex;flex-direction:column;height:100%;min-height:0;width:100%;min-width:0}
+.j-grid-toolbar{display:flex;align-items:center;gap:var(--s2);margin-bottom:6px;flex-wrap:wrap}
+.j-grid-sel{font-size:11px;color:var(--text-dim);margin-right:auto}
+.j-grid-scroll{flex:1;min-height:0;overflow:auto;border:1px solid var(--line-soft);border-radius:var(--r-chip);background:var(--panel)}
+table.j-grid{border-collapse:collapse;width:100%;font-size:12px}
+table.j-grid thead th{
+  position:sticky;top:0;z-index:1;background:var(--panel-light);color:var(--gold);
+  font-family:var(--ui);font-weight:600;text-align:left;padding:6px 9px;border-bottom:1px solid var(--edge2);
+  white-space:nowrap;cursor:pointer;user-select:none;
+}
+table.j-grid thead th .j-sort{color:var(--accent-2);margin-left:4px;font-size:10px}
+table.j-grid thead th.j-col-resize{position:relative}
+table.j-grid thead th .j-rsz{position:absolute;right:0;top:0;width:6px;height:100%;cursor:col-resize}
+table.j-grid tbody td{padding:5px 9px;border-bottom:1px solid var(--line-faint);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.j-grid tbody tr{cursor:default}
+table.j-grid tbody tr:hover{background:var(--hover)}
+table.j-grid tbody tr.row-ok{background:rgba(92,198,120,.06)}
+table.j-grid tbody tr.row-bad{background:rgba(224,80,90,.07)}
+table.j-grid tbody tr.row-warn{background:rgba(230,180,70,.06)}
+table.j-grid tbody tr.sel{background:var(--accent-wash)}
+table.j-grid .j-cb-col{width:28px;text-align:center}
+table.j-grid .j-cell-bar{display:block;height:3px;margin-top:3px;border-radius:2px;background:var(--accent)}
+.j-cell-bar.st-bad{background:var(--bad)}
+.j-cell-bar.st-warn{background:var(--warn)}
+.j-cell-bar.st-ok{background:var(--ok)}
+
+/* ============================================================================
+   COMPONENT: TabHost  (panel-swap nav)
+   ========================================================================== */
+.j-tabhost{display:flex;height:100%;min-height:0;width:100%;min-width:0;flex:1 1 auto}
+.j-tabhost.rail-left{flex-direction:row}
+.j-tabhost.rail-top{flex-direction:column}
+.j-tabrail{flex:0 0 auto;display:flex;gap:2px;background:var(--bg-rail)}
+.j-tabhost.rail-left .j-tabrail{flex-direction:column;width:188px;padding:var(--s2);border-right:1px solid var(--line-soft);overflow:auto}
+.j-tabhost.rail-top .j-tabrail{flex-direction:row;padding:var(--s2) var(--s3);border-bottom:1px solid var(--line-soft);overflow-x:auto}
+.j-tab{
+  font-family:var(--ui);font-size:12px;font-weight:600;color:var(--text-dim);
+  padding:8px 12px;border:1px solid transparent;border-radius:var(--r-chip);cursor:pointer;text-align:left;background:transparent;
+}
+.j-tab:hover{color:var(--text);background:var(--hover)}
+.j-tab.active{color:var(--gold);background:var(--panel);border-color:var(--edge2)}
+.j-tabpanels{flex:1;min-width:0;min-height:0;overflow:auto;position:relative;display:flex;flex-direction:column}
+.j-tabpanel{padding:var(--s4);flex:1 1 auto;min-height:0;min-width:0;overflow:auto}
+
+/* ============================================================================
+   COMPONENT: ConfirmDialog / ArmingDialog (themed modal)
+   ========================================================================== */
+.j-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(2,2,6,.72)}
+.j-modal-card{position:relative;width:520px;max-width:92vw;max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--edge);border-radius:var(--r-modal);padding:var(--s4) var(--s5)}
+.j-modal-card::after{content:"";position:absolute;top:0;left:0;width:10px;height:10px;border-top:2px solid var(--gold);border-left:2px solid var(--gold)}
+.j-modal-card.danger{border-color:var(--danger-edge)}
+.j-modal-title{font-family:var(--ui);font-size:15px;font-weight:700;color:var(--text);margin-bottom:var(--s2)}
+.j-modal-title.danger{color:var(--bad)}
+.j-modal-banner{background:rgba(224,80,90,.12);border:1px solid var(--danger-edge);color:var(--bad);font-family:var(--ui);font-weight:600;padding:8px 10px;border-radius:var(--r-chip);margin-bottom:var(--s3)}
+.j-modal-body{font-size:13px;color:var(--text-dim);line-height:1.55}
+.j-modal-body b{color:var(--text)}
+.j-modal-list{font-family:var(--mono);font-size:12px;color:var(--text);background:var(--output);border:1px solid var(--line-faint);border-radius:var(--r-chip);padding:8px 10px;margin:var(--s2) 0;max-height:160px;overflow:auto}
+.j-modal-actions{display:flex;justify-content:flex-end;gap:var(--s2);margin-top:var(--s4)}
+.j-modal-confirm-input{margin-top:var(--s2)}
+
+/* command palette (Ctrl+K) */
+.j-palette-modal{align-items:flex-start;padding-top:12vh}
+.j-palette{width:560px;max-width:92vw;max-height:70vh;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--edge2);border-radius:var(--r-modal);overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.6)}
+.j-palette-input{font-family:var(--ui);font-size:14px;color:var(--text);background:var(--output);border:0;border-bottom:1px solid var(--line);padding:12px 14px;outline:none}
+.j-palette-list{overflow:auto;padding:4px}
+.j-palette-row{display:flex;align-items:baseline;gap:10px;padding:7px 10px;border-radius:4px;cursor:pointer}
+.j-palette-row.active{background:var(--accent-wash);outline:1px solid var(--accent)}
+.j-palette-l{font-family:var(--ui);font-size:13px;color:var(--text);font-weight:600}
+.j-palette-sub{font-size:11px;color:var(--muted);margin-left:auto}
+.j-palette-empty{padding:14px;color:var(--muted);font-size:12px;text-align:center}
+
+/* audit log viewer */
+.j-audit-modal{align-items:flex-start;padding-top:6vh}
+.j-audit-card{width:920px;max-width:94vw;max-height:84vh;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--edge);border-radius:var(--r-modal);padding:var(--s4);gap:var(--s2)}
+.j-audit-head{display:flex;align-items:center;gap:var(--s3)}
+.j-audit-filter{flex:1;height:28px;font-family:var(--mono);font-size:12px;color:var(--text);background:var(--output);border:1px solid var(--line);border-radius:3px;padding:2px 8px;outline:none}
+.j-audit-meta{font-size:11px;color:var(--muted);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.j-audit-table{flex:1;min-height:0;overflow:auto;border:1px solid var(--line-faint);border-radius:var(--r-chip);background:var(--output)}
+.j-audit-tbl{border-collapse:collapse;font-family:var(--mono);font-size:11.5px;width:100%}
+.j-audit-tbl th{position:sticky;top:0;background:var(--bg-head);color:var(--gold);text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.j-audit-tbl td{padding:4px 8px;border-bottom:1px solid var(--line-faint);color:var(--text-dim);white-space:nowrap}
+.j-audit-tbl tr:hover td{background:rgba(140,100,220,.06)}
+
+/* per-host detail / generic kv popup */
+.j-kv{display:grid;grid-template-columns:180px 1fr;gap:2px var(--s3);padding:3px 0;border-bottom:1px solid var(--line-soft)}
+.j-kv-k{font-family:var(--ui);font-size:11.5px;color:var(--gold-dim)}
+.j-kv-v{font-family:var(--mono);font-size:12px;color:var(--text);word-break:break-word}
+
+/* footer credit (per-tool views that mirror the desktop footer) */
+.j-footer{display:flex;align-items:center;gap:var(--s4);padding:var(--s2) var(--s4);font-size:11px;color:var(--muted);border-top:1px solid var(--line-faint)}
+.j-footer .credit{color:var(--gold-dim)}
+
+
+/* ============================================================================
+   LIGHT THEME  -  toggled via <html data-theme="light"> (shell.js + localStorage).
+   Dark is the default (:root). Only tokens + a few dark-text-on-accent fills flip;
+   nothing in the dark rules above changes.
+   ========================================================================== */
+.j-icon-btn{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+  font-family:'Segoe MDL2 Assets','Segoe Fluent Icons';font-size:15px;line-height:1;color:var(--text-dim);
+  background:transparent;border:1px solid var(--edge);border-radius:var(--r-card);cursor:pointer;
+  transition:color .12s ease,border-color .12s ease,background .12s ease}
+.j-icon-btn:hover{color:var(--gold);border-color:var(--gold-dim);background:var(--hover)}
+.j-icon-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+[data-theme="light"]{
+  --bg:#E8E9EF; --panel:#FFFFFF; --panel-light:#F1F2F7; --input:#FFFFFF; --output:#FBFBFD;
+  --bg-deep:#F1F2F7; --bg-rail:#EAEBF1; --bg-rail2:#E2E3EA; --bg-head:#ECEDF3; --hover:#E6E7F0;
+  --line:#D7D8E2; --line-soft:#E3E4EC; --line-faint:#EDEEF2; --edge:#CDCFDA; --edge2:#C2C4D1;
+  --edge-cyan:#A9C8D6; --danger-edge:#E6AEB2;
+  --accent:#6E47C4; --accent-2:#7150CE; --accent-wash:rgba(110,71,196,.10);
+  --gold:#7A5E10; --gold-dim:#6F5614; --gold-wash:rgba(122,94,16,.14);
+  --ok:#16803A; --bad:#C2333D; --warn:#8A6310; --amber:#8A6310; --cyan:#176B88; --info:#176B88;
+  --sev-crit:#C2333D; --sev-high:#B0531E; --sev-med:#8A6310; --sev-low:#6E6C7A;
+  --text:#16161D; --text-dim:#43434E; --muted:#65646E;
+}
+/* dark-text-on-bright-accent fills: keep them legible when the palette lightens */
+[data-theme="light"] .j-btn-go{color:#fff}
+[data-theme="light"] .j-btn-danger{color:#fff}
+[data-theme="light"] .j-btn-gold,
+[data-theme="light"] .j-btn-cta{background:#C99A2E;color:#1A1408;border-color:#9C7C2E}
+[data-theme="light"] .j-howto-tag{color:#fff}
+[data-theme="light"] .j-guide-flag.is-bad{color:#fff}
+[data-theme="light"] .j-tool-row:hover{background:rgba(0,0,0,.05)}
+[data-theme="light"] .j-tool-row:focus-visible{background:rgba(0,0,0,.06)}
+[data-theme="light"] #j-strip{border-top-color:var(--line)}
+/* keep the classification warning legible on a light panel (red text, not white) */
+[data-theme="light"] .j-gate-class{color:#8A1622;background:rgba(200,16,46,.10)}
+[data-theme="light"] .j-guide-flag.is-ok{color:#fff}
+/* re-assert the armed CANCEL hazard stripes; the gold-CTA override above would flatten it */
+[data-theme="light"] .j-btn-cta.is-cancel{color:#fff;border-color:#9E2A30;
+  background:repeating-linear-gradient(45deg,#C2333D 0,#C2333D 12px,#9E2A30 12px,#9E2A30 24px)}

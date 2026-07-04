@@ -1,0 +1,8 @@
+{
+  "kev": 7,
+  "critical": 21,
+  "high": 30,
+  "medium": 90,
+  "low": 180,
+  "note": "days to remediate by severity; kev overrides"
+}
