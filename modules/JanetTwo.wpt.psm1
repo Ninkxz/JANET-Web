@@ -1605,16 +1605,23 @@ $script:WptPatchBlock = {
             $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no patch triggered"
             return $r  # the finally below removes the session
         }
-        $r.UpdatesTriggered = Invoke-Command -Session $sess -EA Stop -ScriptBlock {
+        # Only count a host as triggered when the client-SDK method actually accepted
+        # the request (ReturnValue 0/null). InstallUpdates / CCM_Application.Install can
+        # reject WITHOUT throwing (not applicable, wrong target, agent busy); the old
+        # code discarded the result and reported false success (audit#4).
+        $upResult = Invoke-Command -Session $sess -EA Stop -ScriptBlock {
             $updates = Get-WmiObject -Namespace "ROOT\ccm\ClientSDK" -Query "SELECT * FROM CCM_SoftwareUpdate WHERE ComplianceState = '0'" -EA Stop
-            if ($updates) {
-                Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$updates) -Namespace ROOT\ccm\ClientSDK | Out-Null
-                return @($updates).Count
-            }
-            return 0
+            if (-not $updates) { return @{ Count = 0; Rejected = 0 } }
+            $rv = $null
+            try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$updates) -Namespace ROOT\ccm\ClientSDK).ReturnValue } catch { $rv = -1 }
+            if ($null -ne $rv -and [int]$rv -ne 0) { return @{ Count = 0; Rejected = @($updates).Count; ReturnValue = [int]$rv } }
+            return @{ Count = @($updates).Count; Rejected = 0 }
         }
-        $r.AppsTriggered = Invoke-Command -Session $sess -EA Stop -ScriptBlock {
-            $count = 0
+        $r.UpdatesTriggered = [int]$upResult.Count
+        if ($upResult.Rejected -gt 0) { $r.Error = "Update trigger rejected by client (ReturnValue=$($upResult.ReturnValue)); $($upResult.Rejected) update(s) NOT installed" }
+
+        $appResult = Invoke-Command -Session $sess -EA Stop -ScriptBlock {
+            $count = 0; $rejected = 0
             $apps = Get-CimInstance -Namespace ROOT\ccm\ClientSDK -Class CCM_Application -EA Stop |
                 Where-Object {
                     $_.InstallState -eq 'Installed' -and $_.ApplicabilityState -eq 'Applicable' -and
@@ -1628,11 +1635,16 @@ $script:WptPatchBlock = {
                         IsMachineTarget=[System.Convert]::ToBoolean($app.IsMachineTarget)
                         IsRebootIfNeeded=$false; Priority='High'; Revision="$($app.Revision)"
                     }
-                    Invoke-CimMethod -Namespace root/ccm/clientSDK -ClassName CCM_Application -MethodName Install -Arguments $param | Out-Null
-                    $count++
-                } catch {}
+                    $rv = (Invoke-CimMethod -Namespace root/ccm/clientSDK -ClassName CCM_Application -MethodName Install -Arguments $param).ReturnValue
+                    if ($null -eq $rv -or [int]$rv -eq 0) { $count++ } else { $rejected++ }
+                } catch { $rejected++ }
             }
-            return $count
+            return @{ Count = $count; Rejected = $rejected }
+        }
+        $r.AppsTriggered = [int]$appResult.Count
+        if ($appResult.Rejected -gt 0) {
+            $appErr = "$($appResult.Rejected) app install(s) rejected/failed at the client (not counted as triggered)"
+            $r.Error = if ($r.Error) { "$($r.Error); $appErr" } else { $appErr }
         }
     } catch { $r.Error = $_.Exception.Message }
     finally { Remove-PSSession $sess -EA SilentlyContinue }

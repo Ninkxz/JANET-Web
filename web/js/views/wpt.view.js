@@ -2417,7 +2417,7 @@
           if (needCred()) return;
           var checked = grid.getChecked().filter(function (r) { return r.Type === 'App' || r.Type === 'Update'; });
           if (!checked.length) { notice('Nothing checked', 'Check at least one App/Update to deploy.'); return; }
-          var ok = await ctx.confirm({ title: 'Install Available', danger: true, body: 'Trigger install of <b>' + checked.length + '</b> deployment(s) on <b>' + hn + '</b>? Apps via Software Center, updates via the Software Updates agent.', okText: 'Install', cancelText: 'Cancel' });
+          var ok = await ctx.confirm({ title: 'Install Available', danger: true, body: 'Trigger install of <b>' + checked.length + '</b> deployment(s) on <b>' + esc(hn) + '</b>? Apps via Software Center, updates via the Software Updates agent.', okText: 'Install', cancelText: 'Cancel' });
           if (!ok) { log.append({ text: 'Install cancelled.', level: 'warn' }); return; }
           var items = checked.map(function (r) { return [r.Type, r.Id, r.Revision || '', String(r.Name || '').replace(/[|\r\n]/g, ' ')].join('|'); }).join('\n');
           log.banner('Install Checked - ' + checked.length + ' item(s) on ' + hn);
