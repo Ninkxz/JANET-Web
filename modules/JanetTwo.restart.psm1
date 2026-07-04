@@ -165,6 +165,38 @@ function ConvertTo-JanetHostList {
     return ,$out.ToArray()
 }
 
+# Set of identities that resolve to THIS dispatcher host: shortname, FQDN, all
+# NIC IPs, and loopback. Used to drop the JANET host from a destructive wave so a
+# self-reboot can't kill the HttpListener mid-dispatch (audit#10). Computed once
+# and cached. Returns a case-insensitive HashSet.
+function Get-JanetLocalIdentity {
+    if ($script:JanetLocalIdentity) { return $script:JanetLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    $script:JanetLocalIdentity = $set
+    return $set
+}
+
+# True if a target token names this dispatcher host (short/FQDN/IP/loopback).
+function Test-JanetHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-JanetLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }                      # any loopback literal
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }  # shortname alias, hostnames only
+    }
+    return $false
+}
+
 # -----------------------------------------------------------------------------
 # The interactive consent agent. Staged on the target as agent_<token>.ps1 and
 # launched in the user's session via a one-shot interactive scheduled task. It
@@ -329,8 +361,12 @@ $script:DispatchWorker = {
                 $o.Detail   = "DRYRUN ($authNote): Invoke-Command $targetHost { shutdown /r /t $sec /c <msg> /f }"
                 return $o
             }
+            # IP-literal targets have no DNS indirection (the box answering at that IP
+            # IS the box), and their first dot-token ('192') can never equal a
+            # COMPUTERNAME - so pass '' to skip the name-compare guard for IPs (audit#9).
+            $expectedName = if ($targetHost -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($targetHost -split '\.')[0] }
             $icArgs = @{
-                ArgumentList   = @($sec, $msg, (($targetHost -split '\.')[0]))
+                ArgumentList   = @($sec, $msg, $expectedName)
                 ErrorAction    = 'Stop'
                 # ponytail: this remote shutdown block is duplicated in Invoke-RrsShutdownDirect on
                 # purpose - this worker runs in a CreateDefault runspace (no module scope), so a
@@ -854,7 +890,9 @@ function Invoke-RrsShutdownDirect {
             ComputerName   = $Hostname
             Authentication = 'Negotiate'
             SessionOption  = $wsOpt
-            ArgumentList   = @($LeadSeconds, $Message, (($Hostname -split '\.')[0]))
+            # Skip the name-compare guard for IP-literal targets (audit#9); an IP has no
+            # DNS indirection and its first dot-token can never match a COMPUTERNAME.
+            ArgumentList   = @($LeadSeconds, $Message, $(if ($Hostname -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Hostname -split '\.')[0] }))
             ErrorAction    = 'Stop'
             ScriptBlock    = {
                 param($sec, $msg, $expected)
@@ -1232,6 +1270,24 @@ function Invoke-JanetToolAction {
             if ($targets.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No valid targets.' }
                 return @{ rows=@(); summary=@{ total=0 } }
+            }
+
+            # Self-guard (audit#10): drop the JANET dispatcher host from the wave.
+            # Rebooting ourselves kills the HttpListener mid-dispatch and abandons
+            # every other host in the fan-out. The in-worker DNS-mismatch guard does
+            # NOT catch this (our own name resolves to us, so the compare passes).
+            $selfSkipped = New-Object System.Collections.ArrayList
+            $nonSelf = New-Object System.Collections.ArrayList
+            foreach ($t in $targets) {
+                if (Test-JanetHostIsSelf $t) { [void]$selfSkipped.Add($t) } else { [void]$nonSelf.Add($t) }
+            }
+            if ($selfSkipped.Count -gt 0) {
+                $targets = $nonSelf.ToArray()
+                & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this wave ($($selfSkipped -join ', ')) - a self-reboot would abort the whole dispatch." }
+                if ($targets.Count -eq 0) {
+                    & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to dispatch.' }
+                    return @{ rows=@(); summary=@{ total=0; selfSkipped=$selfSkipped.Count } }
+                }
             }
 
             # Never-restart Exceptions list (1.5.0-beta4). Hosts on it are dropped
