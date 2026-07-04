@@ -3705,6 +3705,15 @@ $script:WptAppActionBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
+        # DNS-mismatch guard (HARD ABORT): never fire a CCM app action on a box that
+        # isn't the one we dialed (audit#2 - every sibling destructive block has this).
+        # Name compare (no PTR on AFNET); if the probe can't run, proceed.
+        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+        $targetShort = ($Computer -split '\.')[0]
+        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"
+            return $r
+        }
         $remote = Invoke-Command @splat -ArgumentList $AppId,$Revision,$IsMachineTarget,$Method,$AppName -ScriptBlock {
             param([string]$Id, [string]$Rev, $Machine, [string]$Mthd, [string]$Nm)
             # Resolve the app from the host's LIVE Software Center catalog so the SDK is
