@@ -217,6 +217,10 @@
           break;
         }
       }
+      // If a newer start() for this key superseded us, do NOT finalize the shared
+      // run-state (audit#17) - that would kill the current generation's poller and
+      // flip its active/terminal flags. Only the current generation finalizes.
+      if (gen[key] !== g) return;
       rs.active = false; rs.terminal = true;
       dispatch(key, 'active', false);
     }
@@ -257,9 +261,14 @@
       (async function () {
         try {
           var r = await api('POST', '/tool/' + toolId + '/action/' + actionId, params || {});
+          // A newer start() for this key already superseded us while the POST was in
+          // flight (audit#17): its job is the one to track. Don't overwrite its jobId
+          // or start a stale poller (which would also double-run a destructive job).
+          if (gen[key] !== g) return;
           rs.jobId = r.jobId;
           poll(key, g);
         } catch (e) {
+          if (gen[key] !== g) return;   // superseded; don't stomp the current run's state
           rs.active = false; rs.terminal = true;
           rs.status = (e.status === 403)
             ? 'Admin session required - Set Credentials and accept responsibility (Start Admin Session) before running actions that change machines.'
@@ -357,13 +366,19 @@
     var status = el('div', 'muted'); status.style.fontSize = '11.5px'; body.appendChild(status);
     var grid = Janet.components.ResultsGrid({ title: 'Host info', keyMode: { rk: true }, popOut: false, columns: [{ key: 'Property', label: 'PROPERTY', width: 190 }, { key: 'Value', label: 'VALUE' }] });
     var gh = el('div'); gh.style.cssText = 'height:340px;display:flex'; gh.appendChild(grid.el); body.appendChild(gh);
+    // Cancel the previous host's in-flight query before starting the next, and gate
+    // callbacks on a load token, so switching the picker mid-query can't stream the
+    // old host's rows into the new host's grid (audit#18).
+    var current = null, loadGen = 0;
     function load(hn) {
+      loadGen++; var myGen = loadGen;
+      if (current) { try { RunController.dispose(current.key); } catch (e) {} current = null; }
       grid.clear(); status.textContent = 'Querying ' + hn + '...';
-      runHostInfo(hn, {
-        status: function (t) { if (!grid.rows().length) status.textContent = t; },
-        row: function (r) { grid.upsert(r); },
-        error: function (e) { status.textContent = (e && e.text) || 'host info failed'; },
-        done: function () { status.textContent = grid.rows().length ? (hn + ' - ' + grid.rows().length + ' field(s)') : 'No host info (set credentials and start an admin session?).'; }
+      current = runHostInfo(hn, {
+        status: function (t) { if (myGen !== loadGen) return; if (!grid.rows().length) status.textContent = t; },
+        row: function (r) { if (myGen !== loadGen) return; grid.upsert(r); },
+        error: function (e) { if (myGen !== loadGen) return; status.textContent = (e && e.text) || 'host info failed'; },
+        done: function () { if (myGen !== loadGen) return; status.textContent = grid.rows().length ? (hn + ' - ' + grid.rows().length + ' field(s)') : 'No host info (set credentials and start an admin session?).'; }
       });
     }
     if (sel) sel.onchange = function () { load(sel.value); };
