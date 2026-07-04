@@ -137,6 +137,40 @@ function Write-KevCatalog {
     }
 }
 
+# Cross-machine advisory lock for the shared catalog on SMB (audit#8). A named
+# mutex is per-machine and won't serialize two DIFFERENT boxes on the share, so we
+# use an exclusive lock FILE (CreateNew + FileShare.None). A lock older than the
+# timeout is assumed stale (holder died) and broken. Runs $Body while held, then
+# releases. Constrained-Language-safe (only .NET File.Open + basic cmdlets).
+function Invoke-WithKevLock {
+    param([string]$CatalogPath, [scriptblock]$Body, [int]$TimeoutMs = 15000)
+    $lock = "$CatalogPath.lock"
+    $dir = Split-Path -Parent $CatalogPath
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $fs = $null
+    while ($null -eq $fs) {
+        try { $fs = [System.IO.File]::Open($lock, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
+        catch {
+            if ($sw.ElapsedMilliseconds -gt $TimeoutMs) {
+                $broke = $false
+                try {
+                    $age = (Get-Date) - (Get-Item -LiteralPath $lock -ErrorAction Stop).LastWriteTime
+                    if ($age.TotalMilliseconds -gt $TimeoutMs) { Remove-Item -LiteralPath $lock -Force -ErrorAction Stop; $broke = $true }
+                } catch {}
+                if (-not $broke) { throw "KEV catalog is locked by another operation (waited $([int]$sw.ElapsedMilliseconds)ms)." }
+                $sw.Restart()
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    try { & $Body }
+    finally {
+        try { $fs.Close(); $fs.Dispose() } catch {}
+        Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Sort a CVE id array numerically (year, then sequence).
 function Sort-KevCves {
     param([string[]]$List)
@@ -302,11 +336,23 @@ function Invoke-JanetToolAction {
             [void]$rows.Add($row); & $send (@{ type='row' } + $row)
         }
         if ($added.Count -gt 0) {
-            $final = Sort-KevCves @($newSet)
+            # Lock + RE-READ the on-disk catalog + merge our additions before writing
+            # (audit#8): a concurrent operator on another machine may have added a
+            # different CVE since we snapshotted, and a blind full-file overwrite would
+            # silently drop it (a lost known-exploited CVE = a future false-negative).
+            $finalCount = 0
             try {
-                Write-KevCatalog -List $final -Path $cat.Path
-                & $send @{ type='log'; level='ok'; text="Saved $($added.Count) new CVE(s) to JanetLocal\KevCatalog.txt. KEV catalog is now $($final.Count) CVE(s)." }
-                & $send @{ type='status'; text="Added $($added.Count); skipped $dup duplicate, $invalid invalid. Catalog now $($final.Count)." }
+                Invoke-WithKevLock -CatalogPath $cat.Path -Body {
+                    $fresh = Read-KevCatalog
+                    $merged = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($c in $fresh.Set) { [void]$merged.Add($c) }
+                    foreach ($c in $added)     { [void]$merged.Add($c) }
+                    $script:kevFinal = Sort-KevCves @($merged)
+                    Write-KevCatalog -List $script:kevFinal -Path $cat.Path
+                }
+                $finalCount = @($script:kevFinal).Count
+                & $send @{ type='log'; level='ok'; text="Saved $($added.Count) new CVE(s) to JanetLocal\KevCatalog.txt (merged under lock). KEV catalog is now $finalCount CVE(s)." }
+                & $send @{ type='status'; text="Added $($added.Count); skipped $dup duplicate, $invalid invalid. Catalog now $finalCount." }
             } catch {
                 & $send @{ type='error'; text="Save FAILED - catalog NOT changed: $($_.Exception.Message)" }
                 return @{ rows=@($rows); summary=@{ added=0; duplicate=$dup; invalid=$invalid; saveError=$true } }
