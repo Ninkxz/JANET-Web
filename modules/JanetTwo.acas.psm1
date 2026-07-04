@@ -966,10 +966,17 @@ function Get-AcasProfileMatchTable {
         # carries an Exclude list so look-alikes don't mis-route to the wrong fix:
         # LibreOffice/OpenOffice/WPS -> NOT Microsoft 365; Edge WebView2/EdgeTransport
         # -> NOT Edge browser; Chrome Remote Desktop -> NOT Chrome.
-        @{ Keywords=@('Microsoft Office','Microsoft 365','Office 365','Microsoft Excel','Microsoft Word','Microsoft PowerPoint','Microsoft Outlook','Microsoft Access','Microsoft Publisher'); Exclude=@('LibreOffice','OpenOffice','WPS Office'); Profiles=@('Microsoft 365 - Force Update','Microsoft 365 - Force Update (SYSTEM task)','Microsoft 365 - Update (User Visible)','Microsoft 365 - Software Center') }
+        # audit#7: 'Access Database Engine' / 'Database Engine' excluded - the standalone
+        # ACE MSI is NOT Click-to-Run Office, so OfficeC2RClient /update never touches it
+        # (it would otherwise report a false 'fresh' on any host that also has M365).
+        @{ Keywords=@('Microsoft Office','Microsoft 365','Office 365','Microsoft Excel','Microsoft Word','Microsoft PowerPoint','Microsoft Outlook','Microsoft Access','Microsoft Publisher'); Exclude=@('LibreOffice','OpenOffice','WPS Office','Access Database Engine','Database Engine'); Profiles=@('Microsoft 365 - Force Update','Microsoft 365 - Force Update (SYSTEM task)','Microsoft 365 - Update (User Visible)','Microsoft 365 - Software Center') }
         @{ Keywords=@('Google Chrome');     Exclude=@('Remote Desktop'); Profiles=@('Google Chrome - Update','Google Chrome - Software Center') }
         @{ Keywords=@('Microsoft Edge');    Exclude=@('WebView','EdgeTransport','EdgeUpdate'); Profiles=@('Microsoft Edge - Update','Microsoft Edge - Software Center') }
-        @{ Keywords=@('Windows Defender','Microsoft Defender','Endpoint Protection'); Profiles=@('Windows Defender - Update Definitions') }
+        # audit#7: 'Endpoint Protection' also appears in third-party AV plugin names
+        # (Symantec/McAfee/Trellix/etc.) that Update-MpSignature cannot update; exclude
+        # them so those findings aren't mis-routed to Defender and falsely marked fresh.
+        # Microsoft System Center Endpoint Protection (SCEP, Defender-family) still matches.
+        @{ Keywords=@('Windows Defender','Microsoft Defender','Endpoint Protection'); Exclude=@('Symantec','McAfee','Trellix','Trend Micro','Sophos','Kaspersky','CrowdStrike','ESET','Bitdefender','Cortex','SentinelOne'); Profiles=@('Windows Defender - Update Definitions') }
         @{ Keywords=@('Apache Log4j','Log4j');                                         Profiles=@('Apache Log4j - Replace Vulnerable Jars') }
         @{ Keywords=@('Tenable Nessus Agent','Nessus Agent','Tenable Nessus');         Profiles=@('Tenable Nessus Agent - Package Deploy') }
         @{ Keywords=@('Oracle Java','Oracle JRE','Java SE Multiple Vulnerabilities'); Profiles=@('Oracle Java - Software Center') }
