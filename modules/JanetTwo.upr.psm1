@@ -889,13 +889,11 @@ $UprWorkerBlock = {
                                 ## === Microsoft 365 handler (SaRA-style package script + setup.exe /configure) ===
                                 if ($name -match 'Microsoft 365|Office.*365|O365|Office.*ProPlus') {
                                     $steps = @(); $c2rPath = "C:\Program Files\Common Files\Microsoft Shared\ClickToRun"
-                                    $localCmd = "C:\Temp\Uninstall-M365.cmd"
-                                    if (Test-Path $localCmd -EA SilentlyContinue) {
-                                        $proc = Start-Process cmd.exe -ArgumentList "/c `"$localCmd`"" -Wait -PassThru -NoNewWindow
-                                        Get-ChildItem "C:\Temp\Uninstall-*.cmd" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
-                                        if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { return "OK (M365 package script exit $($proc.ExitCode))" }
-                                        $steps += "Package script non-zero exit -- trying built-in"
-                                    }
+                                    # audit#11: the old code executed C:\Temp\Uninstall-M365.cmd if present.
+                                    # C:\Temp is a fixed, often world-writable path, so an unprivileged
+                                    # local user could plant that script and have it run under the admin
+                                    # WinRM credential (LPE). Removed - drive removal only through the
+                                    # trusted built-in Office C2R remover (setup.exe /configure) below.
                                     $setupExe = Join-Path $c2rPath "setup.exe"
                                     if (Test-Path $setupExe) {
                                         New-Item -Path C:\Temp -ItemType Directory -Force -EA SilentlyContinue | Out-Null
@@ -915,7 +913,7 @@ $UprWorkerBlock = {
                                 }
                                 ## === Adobe Acrobat handler with RunAsPPL save/remove/restore guard ===
                                 if ($name -match 'Adobe Acrobat') {
-                                    $steps = @(); $removed = $false; $pplRestoreNeeded = $false; $pplOriginalValue = $null
+                                    $steps = @(); $removed = $false; $pplRestoreNeeded = $false; $pplOriginalValue = $null; $pplRestoreFailed = $false
                                     $lsaKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
                                     try {
                                         try {
@@ -953,10 +951,19 @@ $UprWorkerBlock = {
                                         }
                                     } finally {
                                         if ($pplRestoreNeeded) {
-                                            try { New-ItemProperty -Path $lsaKey -Name "RunAsPPL" -Value $pplOriginalValue -PropertyType DWord -Force -EA Stop | Out-Null }
-                                            catch { $steps += "WARNING: RunAsPPL restore FAILED" }
+                                            # Retry once, then hard-fail if still not restored (audit#12):
+                                            # leaving RunAsPPL/LSA-protection OFF weakens the host against
+                                            # credential dumping and must not be reported as a clean success.
+                                            $restored = $false
+                                            foreach ($attempt in 1..2) {
+                                                try { New-ItemProperty -Path $lsaKey -Name "RunAsPPL" -Value $pplOriginalValue -PropertyType DWord -Force -EA Stop | Out-Null; $restored = $true; break } catch {}
+                                            }
+                                            if (-not $restored) { $pplRestoreFailed = $true; $steps += "RunAsPPL restore FAILED (LSA protection left OFF - re-enable manually)" }
                                         }
                                     }
+                                    # A failed RunAsPPL restore is a security regression - surface it as
+                                    # FAIL even when the MSI removal itself succeeded.
+                                    if ($pplRestoreFailed) { return "FAIL (Adobe removed but RunAsPPL/LSA protection NOT restored -- $($steps -join ' | '))" }
                                     if ($removed) { return "OK (Adobe removed via MSI -- $($adobeGuids.Count) GUID(s))" }
                                     return "FAIL (Adobe -- $($steps -join ' | '))"
                                 }
