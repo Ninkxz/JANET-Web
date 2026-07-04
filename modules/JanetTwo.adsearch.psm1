@@ -750,8 +750,14 @@ $script:AdSearchEngine = {
                 if ($sam -eq "") { continue }
                 $samToDisplay[$sam] = "$($mu.Properties['displayname'][0])"
                 $samToDN[$sam]      = "$($mu.Properties['distinguishedname'][0])"
-                $sEsc = $sam -replace "&","&amp;" -replace "'","&apos;" -replace "<","&lt;" -replace ">","&gt;"
-                $samEsc += $sEsc
+                # audit#15: escape for XML ( & < > ) but NOT the apostrophe. A
+                # sAMAccountName may legally contain ' ; escaping it to &apos; only
+                # deferred the problem - the XML parser de-escapes it back to ' BEFORE
+                # XPath runs, closing the single-quoted starts-with() literal and making
+                # Get-WinEvent throw on every DC. The apostrophe is handled below by
+                # building an XPath concat() expression instead of a bare literal.
+                $sXml = $sam -replace "&","&amp;" -replace "<","&lt;" -replace ">","&gt;"
+                $samEsc += $sXml
             }
             if ($samEsc.Count -eq 0) {
                 return @(@{ _Error = "Matched user record(s) had empty sAMAccountName." })
@@ -771,7 +777,21 @@ $script:AdSearchEngine = {
             }
 
             $daysBackMs = [int64]$daysBack * 86400000
-            $startsWith = ($samEsc | ForEach-Object { "starts-with(Data, '$_')" }) -join " or "
+            # Build an XPath 1.0 string expression that is safe even when the value
+            # contains a single quote (XPath has no in-literal quote escape; use
+            # concat('a', "'", 'b')). No apostrophe -> a plain 'literal'.
+            $xpathLiteral = {
+                param($v)
+                if ($v -notmatch "'") { return "'$v'" }
+                $parts = $v -split "'"
+                $pieces = New-Object System.Collections.ArrayList
+                for ($i = 0; $i -lt $parts.Count; $i++) {
+                    if ($parts[$i] -ne '') { [void]$pieces.Add("'$($parts[$i])'") }
+                    if ($i -lt $parts.Count - 1) { [void]$pieces.Add('"' + "'" + '"') }  # the apostrophe as a double-quoted piece
+                }
+                return 'concat(' + ($pieces -join ', ') + ')'
+            }
+            $startsWith = ($samEsc | ForEach-Object { "starts-with(Data, $(& $xpathLiteral $_))" }) -join " or "
             $xmlFilter = @"
 <QueryList>
   <Query Id="0" Path="Security">
