@@ -244,6 +244,9 @@ function Start-JanetTwoServer {
     # ACAS drives part of its UI through fixed action ids that are intentionally
     # not in the manifest; every other action id must match the tool's manifest.
     $acasByIdActions = @('patch-selected','schedule-reboot','verify-post-reboot','preflight-services','group-findings','list-profiles','findings-for-host','reboot-selected','verify-selected')
+    # Of the by-id set, these change machine state (WinRM patch push / shutdown /r)
+    # and MUST pass the same admin-session gate as manifest destructive actions.
+    $acasByIdDestructive = @('patch-selected','reboot-selected','schedule-reboot')
 
     # --- start listener (loopback only) ----------------------------------------
     $listener = New-Object System.Net.HttpListener
@@ -811,7 +814,11 @@ function Start-JanetTwoServer {
                     # always allowed, so the AD-search bypass and read-only diagnostics
                     # still work without an admin session. This backstops the browser gate.
                     $actObj = $null; if ($mani -and $mani.actions) { $actObj = $mani.actions | Where-Object { $_.id -eq $actId } | Select-Object -First 1 }
-                    if ($actObj -and $actObj.destructive -and -not ($state.AckGiven -and $null -ne $state.Cred)) {
+                    # Destructive if the manifest says so, OR if this is an ACAS by-id
+                    # state-changing action (absent from the manifest, so $actObj is null
+                    # and the manifest test alone would default-allow it - audit#1).
+                    $isDestructive = ($actObj -and $actObj.destructive) -or ($toolId -eq 'acas' -and $acasByIdDestructive -contains $actId)
+                    if ($isDestructive -and -not ($state.AckGiven -and $null -ne $state.Cred)) {
                         & $writeJson $resp @{ error = 'Admin session required: set ADW credentials and accept responsibility (Start Admin Session) before running actions that change machines.' } 403; continue
                     }
 
