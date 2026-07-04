@@ -933,15 +933,20 @@ $UprWorkerBlock = {
                                             $adobeProcs = @('Acrobat','AcroCEF','AcroRd32','AdobeARM','AdobeCollabSync','armsvc')
                                             foreach ($p in $adobeProcs) { Get-Process $p -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue }
                                         } catch {}
+                                        ## Scope removal to the SELECTED candidate ONLY (audit#3). 'Adobe
+                                        ## Acrobat' is a substring of Reader DC, Acrobat Pro and their
+                                        ## 32/64-bit siblings, so a family-wide DisplayName re-enumeration
+                                        ## here removed products the operator never checked. The candidate's
+                                        ## own registry key (PSChildName) / uninstall strings carry its GUID.
                                         $adobeGuids = @()
-                                        $regPaths2 = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
-                                        foreach ($rp in $regPaths2) {
-                                            Get-ItemProperty $rp -EA SilentlyContinue | Where-Object { $_.DisplayName -match 'Adobe Acrobat' } | ForEach-Object {
-                                                if ($_.UninstallString -match '(\{[^\}]+\})') { $adobeGuids += $Matches[1] }
-                                                if ($_.PSChildName -match '^\{') { $adobeGuids += $_.PSChildName }
-                                            }
+                                        if ($childName -match '^\{[^\}]+\}$') { $adobeGuids += $childName }
+                                        foreach ($hive in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
+                                            $item = Get-ItemProperty (Join-Path $hive $childName) -EA SilentlyContinue
+                                            if ($item -and $item.UninstallString -match '(\{[^\}]+\})') { $adobeGuids += $Matches[1] }
                                         }
+                                        if ($unStr -match '(\{[^\}]+\})') { $adobeGuids += $Matches[1] }
                                         $adobeGuids = @($adobeGuids | Select-Object -Unique)
+                                        if ($adobeGuids.Count -eq 0) { return "FAIL (Adobe -- no MSI GUID resolvable for the selected install '$name' [$childName]; nothing removed)" }
                                         foreach ($guid in $adobeGuids) {
                                             $proc = Start-Process msiexec -ArgumentList "/x $guid /qn /norestart" -Wait -PassThru -NoNewWindow
                                             if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { $removed = $true }
