@@ -877,8 +877,23 @@ function Update-ReportsSlaLedger {
         if ($f.PSObject.Properties['FirstSeen']) { $f.FirstSeen = $fs }
         else { $f | Add-Member -NotePropertyName FirstSeen -NotePropertyValue $fs -Force }
     }
+    # Prune keys not seen in a long time (audit#6): bounds the file AND lets a finding
+    # that was genuinely remediated (dropped out of scan) start a fresh clock if it
+    # re-appears later, instead of inheriting its old firstSeen and reading OVERDUE.
+    # Retention = longest realistic SLA window + margin. Anything whose lastSeen is
+    # older than this is considered closed-and-forgotten.
+    # ponytail: fixed 365-day retention; make it a config value if SLA windows change.
+    $pruned = 0
+    $cutoff = (Get-Date).Date.AddDays(-365)
+    foreach ($k in @($map.Keys)) {
+        $ls = [string]$map[$k].lastSeen
+        [datetime]$lsDate = [datetime]::MinValue
+        if ([DateTime]::TryParse($ls, [ref]$lsDate)) {
+            if ($lsDate.Date -lt $cutoff) { [void]$map.Remove($k); $pruned++ }
+        }
+    }
     $save = Save-ReportsSlaLedger -Map $map
-    return @{ Carried = $carried; Started = $started; Total = $seen; Written = $save.Written; Path = $save.Path; Error = $save.Error }
+    return @{ Carried = $carried; Started = $started; Total = $seen; Pruned = $pruned; Written = $save.Written; Path = $save.Path; Error = $save.Error }
 }
 
 function Read-CsvRowsSafe {
@@ -3485,6 +3500,9 @@ function New-ReportsRollupOp {
 function ConvertTo-ReportsCsvCell {
     param([string]$Value)
     $s = if ($null -eq $Value) { '' } else { [string]$Value }
+    # Formula-injection guard (audit#23): AD-derived Name/OU and log tool names can
+    # begin with = + - @; prefix a single quote so they are not evaluated in Excel.
+    if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
     if ($s -match '[",\r\n]') { return '"' + ($s -replace '"', '""') + '"' }
     return $s
 }
@@ -4796,7 +4814,16 @@ function Invoke-JanetToolAction {
             $cLedgerCarried = 0
 
             $today = (Get-Date).Date
-            $csvQ = { param($v) $s = [string]$v; if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s } }
+            # Neutralize spreadsheet formula injection (audit#5): a cell beginning with
+            # = + - @ tab CR is evaluated as a formula by Excel/Sheets; prefix a single
+            # quote so scanner free-text (VulnName/IAVA/CVE) renders as literal text -
+            # same guard the sibling exporters carry.
+            $csvQ = {
+                param($v)
+                $s = [string]$v
+                if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
+                if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s }
+            }
             $sb = New-Object System.Text.StringBuilder
             [void]$sb.AppendLine('Host,Plugin,VulnName,Severity,KEV,IAVA,CVE,FirstSeen,AgeDays,DueInDays,Deadline,Bucket')
 
