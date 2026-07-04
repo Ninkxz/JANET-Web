@@ -1705,7 +1705,16 @@ $script:WptRebootScheduleBlock = {
                     if (-not [string]::IsNullOrWhiteSpace($loggedIn)) {
                         New-Item -Path C:\Temp -ItemType Directory -Force -EA SilentlyContinue | Out-Null
                         $tag = [guid]::NewGuid().ToString('N'); $vbsPath = "C:\Temp\WPT_RebMsg_$tag.vbs"
-                        ('Set o=CreateObject("Wscript.Shell")' + "`r`n" + 'o.Popup "' + ($b -replace '"','""') + '", 0, "Scheduled Reboot Notice", 48') | Out-File $vbsPath -Encoding ASCII -Force
+                        # Harden the popup body (audit#22, same fold as WptMessageBlock): strip
+                        # control chars, cap length, double quotes (drop all if an odd run
+                        # survives), and fold CR/LF into a VBS concat so a multi-line warning
+                        # can't produce an unterminated literal that silently suppresses the popup.
+                        $bRaw = ([string]$b) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+                        if ($bRaw.Length -gt 1000) { $bRaw = $bRaw.Substring(0, 1000) }
+                        $bDbl = $bRaw -replace '"','""'
+                        if (($bDbl -replace '""','').Contains('"')) { $bDbl = $bRaw -replace '"','' }
+                        $bEsc = $bDbl -replace "\r?\n", '" & vbCrLf & "'
+                        ('Set o=CreateObject("Wscript.Shell")' + "`r`n" + 'o.Popup "' + $bEsc + '", 0, "Scheduled Reboot Notice", 48') | Out-File $vbsPath -Encoding ASCII -Force
                         $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbsPath`""
                         $principal = New-ScheduledTaskPrincipal -UserId $loggedIn -LogonType Interactive -RunLevel Limited
                         Register-ScheduledTask -TaskName "WPT_RebMsg_$tag" -InputObject (New-ScheduledTask -Action $action -Principal $principal) -Force -EA Stop | Out-Null
@@ -2784,7 +2793,16 @@ $script:WptRegApplyBlock = {
                         if (-not [string]::IsNullOrWhiteSpace($loggedIn)) {
                             New-Item -Path C:\Temp -ItemType Directory -Force -EA SilentlyContinue | Out-Null
                             $tag = [guid]::NewGuid().ToString('N'); $vbsPath = "C:\Temp\WPT_RkMsg_$tag.vbs"
-                            ('Set o=CreateObject("Wscript.Shell")' + "`r`n" + 'o.Popup "' + ($b -replace '"','""') + '", 0, "' + ($t -replace '"','""') + '", 64') | Out-File $vbsPath -Encoding ASCII -Force
+                            # Harden body + title (audit#22, same fold as WptMessageBlock).
+                            $bRaw = ([string]$b) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+                            $tRaw = ([string]$t) -replace "[\x00-\x09\x0B-\x1F]", ' '
+                            if ($bRaw.Length -gt 1000) { $bRaw = $bRaw.Substring(0, 1000) }
+                            if ($tRaw.Length -gt 200)  { $tRaw = $tRaw.Substring(0, 200) }
+                            $bDbl = $bRaw -replace '"','""'; $tDbl = $tRaw -replace '"','""'
+                            if (($bDbl -replace '""','').Contains('"')) { $bDbl = $bRaw -replace '"','' }
+                            if (($tDbl -replace '""','').Contains('"')) { $tDbl = $tRaw -replace '"','' }
+                            $bEsc = $bDbl -replace "\r?\n", '" & vbCrLf & "'
+                            ('Set o=CreateObject("Wscript.Shell")' + "`r`n" + 'o.Popup "' + $bEsc + '", 0, "' + $tDbl + '", 64') | Out-File $vbsPath -Encoding ASCII -Force
                             $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbsPath`""
                             $principal = New-ScheduledTaskPrincipal -UserId $loggedIn -LogonType Interactive -RunLevel Limited
                             Register-ScheduledTask -TaskName "WPT_RkMsg_$tag" -InputObject (New-ScheduledTask -Action $action -Principal $principal) -Force -EA Stop | Out-Null
