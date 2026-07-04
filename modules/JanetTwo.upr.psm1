@@ -1574,13 +1574,19 @@ function Invoke-JanetToolAction {
                         elseif ($null -ne $prof) { 'Review' }
                         else { 'No catalog match' }
 
+            # audit#13: on the text/PDF path a multi-plugin section attributes EVERY
+            # section host to EVERY finding (HostAttribution='section-approximate'), so
+            # this Hosts count is a section-level upper bound, not exact. Surface that so
+            # the number (and any export of it) isn't mistaken for exact attribution.
+            $approx = ([string]$f.HostAttribution -eq 'section-approximate')
             $row = @{
                 _rk="$($f.Plugin)|$($f.PluginName)"
                 Plugin     = [string]$f.Plugin
                 Category   = [string]$f.Category
                 PluginName = [string]$f.PluginName
                 Severity   = [string]$f.Severity
-                Hosts      = $hostCount
+                Hosts      = $(if ($approx) { "~$hostCount" } else { "$hostCount" })
+                Exact      = $(if ($approx) { 'section-approx' } else { 'exact' })
                 Decision   = $decision
             }
             [void]$rows.Add($row)
@@ -1609,6 +1615,10 @@ function Invoke-JanetToolAction {
             $emitted = 0
             foreach ($h in @($f.Hosts)) {
                 if (-not (Test-UprHostClassMatch $h $hostClass)) { continue }
+                # audit#13: on the text/PDF path this host->OS-plugin mapping is
+                # section-approximate for multi-plugin sections (every section host is
+                # listed under every OS plugin). Mark it so the rebuild-team export
+                # isn't read as exact per-host OS attribution.
                 $row = @{
                     _rk        = "$($f.Plugin)|$($f.PluginName)|$($h.IPAddress)|$($h.NetBIOSName)|$($h.DNSName)"
                     Plugin     = [string]$f.Plugin
@@ -1619,6 +1629,7 @@ function Invoke-JanetToolAction {
                     DNS        = [string]$h.DNSName
                     'OS CPE'   = [string]$h.OSCpe
                     MAC        = [string]$h.MAC
+                    Exact      = $(if ([string]$f.HostAttribution -eq 'section-approximate') { 'section-approx' } else { 'exact' })
                 }
                 [void]$rows.Add($row)
                 & $send (@{ type='row' } + $row)

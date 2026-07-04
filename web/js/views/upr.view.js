@@ -311,6 +311,7 @@
             { key: 'PluginName', label: 'PLUGIN NAME' },
             { key: 'Severity', label: 'SEVERITY', width: 90, colorRule: sevCls },
             { key: 'Hosts', label: 'HOSTS', width: 70 },
+            { key: 'Exact', label: 'ATTRIB', width: 110, title: 'Host attribution: "exact" (per-host from CSV) or "section-approx" (text/PDF multi-plugin section - every section host attributed to each finding; scan to confirm)' },
             { key: 'Decision', label: 'CATALOG MATCH', width: 170, colorRule: findingDecisionCls }
           ],
           rowClass: function (r) { return String(r.PluginName) === String(selectedFinding.name) ? 'row-warn' : ''; },
@@ -1043,7 +1044,8 @@
             { key: 'NetBIOS', label: 'NETBIOS', width: 130 },
             { key: 'DNS', label: 'DNS', width: 170 },
             { key: 'OS CPE', label: 'OS CPE', width: 180 },
-            { key: 'MAC', label: 'MAC', width: 130 }
+            { key: 'MAC', label: 'MAC', width: 130 },
+            { key: 'Exact', label: 'ATTRIB', width: 110, title: 'Host attribution: "exact" (per-host from CSV) or "section-approx" (text/PDF multi-plugin section; scan to confirm)' }
           ]
         });
         var holder = el('div'); holder.style.cssText = 'flex:1;min-height:0;display:flex'; holder.appendChild(grid.el);
