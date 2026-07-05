@@ -389,6 +389,15 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'thirdparty-catalog'
+                label       = 'Third-Party Catalog (from scan)'
+                description  = 'The flip side of KBs Needed: on a real Tenable scan only ~1% of findings name a KB - the other ~99% are third-party / version-upgrade vulns (Chrome, Firefox, Adobe, Java, 7-Zip, Notepad++, VLC, Wireshark, PuTTY, .NET, ...). This rolls those NON-KB findings up by PRODUCT so the biggest vuln-reduction levers stand out at a glance: distinct affected host count, worst severity, KEV, a representative fixed/target version, the mapped JANET remediation route (same Categorize-Finding + Remediation Router mapping the Planner uses, so routes stay consistent), and finding count. Ranked KEV-first, then most hosts, then worst severity. Read-only - it names the products to upgrade; execution runs through the mapped tools'' own gated engines. Pairs with KBs Needed to cover 100% of open findings.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Product','Hosts','Severity','KEV','FixedVersion','Route','Findings')
+                inputs       = @()
+            },
+            @{
                 id          = 'campaign-create'
                 label       = 'Create Remediation Campaign'
                 description  = 'Snapshot the currently loaded OPEN findings into a persisted remediation campaign (JanetLocal\campaigns\<id>.json): the finding keys (Hostname|PluginID), the affected host set, the distinct mapped JANET remediations, and the severity/KEV mix. This ties finding -> fix -> (later) re-verify so a wave can be tracked to closure. READ-ONLY: creates the tracking record only; the actual remediation runs through the gated engines. Re-import the next scan and use the campaign to prove closure.'
@@ -581,6 +590,62 @@ function Categorize-Finding {
     if ($combined -match 'registry|regedit|reg key|group policy|gpo|local policy') { return 'Registry Fix' }
     if ($combined -match 'not a(n)?\s+(microsoft|windows)|third.party|vendor|contact.*vendor|no (patch|fix|update) available|eol|end.of.life|unsupported|adobe|java|firefox|vmware|cisco|oracle|apple') { return 'NOT OUR PATCH' }
     return 'Other'
+}
+
+# Third-party PRODUCT keyword list for the 'thirdparty-catalog' action. The
+# existing Categorize-Finding + $script:RemediationRouteMap already name and route
+# the routable buckets (Chrome/Edge/Office); this finer list only adds the PRODUCT
+# names Categorize-Finding lumps into 'NOT OUR PATCH'/'Other' (Adobe, Java,
+# Firefox, 7-Zip, Notepad++, VLC, ...). The catalog action derives its ROUTE from
+# the same bucket mapping, so a product's route stays consistent with the Router /
+# Planner. ORDER MATTERS - first match wins, most specific first.
+$script:ThirdPartyProductRules = @(
+    @{ Rx = 'mozilla firefox|firefox esr|\bfirefox\b';                     Name = 'Mozilla Firefox' }
+    @{ Rx = 'mozilla thunderbird|\bthunderbird\b';                         Name = 'Mozilla Thunderbird' }
+    @{ Rx = 'google chrome';                                               Name = 'Google Chrome' }
+    @{ Rx = '\bchromium\b';                                                Name = 'Chromium' }
+    @{ Rx = 'microsoft edge|\bmsedge\b';                                   Name = 'Microsoft Edge' }
+    @{ Rx = 'adobe acrobat|acrobat reader|adobe reader';                   Name = 'Adobe Acrobat/Reader' }
+    @{ Rx = 'adobe flash|flash player';                                    Name = 'Adobe Flash Player' }
+    @{ Rx = 'adobe air';                                                   Name = 'Adobe AIR' }
+    @{ Rx = 'adobe shockwave';                                             Name = 'Adobe Shockwave' }
+    @{ Rx = '\badobe\b';                                                   Name = 'Adobe (other)' }
+    @{ Rx = '\bopenjdk\b';                                                 Name = 'OpenJDK' }
+    @{ Rx = 'oracle java|java runtime|java se|java\(tm\)|\bjre\b|\bjdk\b|\bjava\b'; Name = 'Oracle Java' }
+    @{ Rx = '7-zip|\b7zip\b';                                              Name = '7-Zip' }
+    @{ Rx = 'notepad\+\+';                                                 Name = 'Notepad++' }
+    @{ Rx = 'vlc media player|\bvlc\b';                                    Name = 'VLC Media Player' }
+    @{ Rx = '\bwireshark\b';                                               Name = 'Wireshark' }
+    @{ Rx = '\bputty\b';                                                   Name = 'PuTTY' }
+    @{ Rx = '\bfilezilla\b';                                               Name = 'FileZilla' }
+    @{ Rx = '\bwinrar\b';                                                  Name = 'WinRAR' }
+    @{ Rx = 'apache tomcat|\btomcat\b';                                    Name = 'Apache Tomcat' }
+    @{ Rx = 'apache log4j|\blog4j\b';                                      Name = 'Apache Log4j' }
+    @{ Rx = 'apache http|\bhttpd\b|apache server';                        Name = 'Apache HTTP Server' }
+    @{ Rx = '\bopenssl\b';                                                 Name = 'OpenSSL' }
+    @{ Rx = 'node\.js|\bnodejs\b';                                         Name = 'Node.js' }
+    @{ Rx = '\bpython\b';                                                  Name = 'Python' }
+    @{ Rx = '\.net core|\.net framework|microsoft \.net|\.net\b';         Name = 'Microsoft .NET' }
+    @{ Rx = '\bvmware\b';                                                  Name = 'VMware' }
+    @{ Rx = '\bzoom\b';                                                    Name = 'Zoom' }
+    @{ Rx = 'microsoft onedrive|\bonedrive\b';                            Name = 'Microsoft OneDrive' }
+    @{ Rx = 'microsoft teams|\bteams\b';                                   Name = 'Microsoft Teams' }
+    @{ Rx = '\blibreoffice\b';                                             Name = 'LibreOffice' }
+    @{ Rx = 'microsoft visual c\+\+|visual studio';                       Name = 'Microsoft Visual Studio/C++' }
+    @{ Rx = 'microsoft office|microsoft 365|\boffice\b|\bword\b|\bexcel\b|\boutlook\b|powerpoint'; Name = 'Microsoft Office' }
+    @{ Rx = 'git for windows';                                            Name = 'Git for Windows' }
+)
+
+# Return the third-party PRODUCT name a finding names (from VulnName + Solution
+# text), or $null when no known product is recognized. First rule wins.
+function Get-ReportsThirdPartyProduct {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $t = ([string]$Text).ToLower()
+    foreach ($rule in $script:ThirdPartyProductRules) {
+        if ($t -match $rule.Rx) { return $rule.Name }
+    }
+    return $null
 }
 
 function Parse-Severity {
@@ -4560,6 +4625,110 @@ function Invoke-JanetToolAction {
                 total=$ordered.Count; kevKbs=$kevKbs; hosts=$perHost.Count
                 openFindings=$openFindings; findingsWithKb=$withKb; findingsNoKb=$noKb
                 kbList=$kbList; perHostCsv=$sb.ToString().TrimEnd()
+            } }
+        }
+
+        # -------------------------------------------------------------------
+        'thirdparty-catalog' {
+            # The ~99% of findings that do NOT name a KB are third-party /
+            # version-upgrade product vulns (Chrome, Firefox, Adobe, Java, 7-Zip,
+            # ...). kb-needed covers the KB ones; this rolls the REST up by PRODUCT so
+            # the operator sees the biggest vuln-reduction levers. The Route column
+            # reuses the SAME Categorize-Finding + $script:RemediationRouteMap mapping
+            # the Router / Planner use, so a product's route stays consistent with
+            # them. READ-ONLY: no remote calls, names products only.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse or load a report first.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            & $send @{ type='status'; text='Cataloging third-party (non-KB) products from the loaded findings...' }
+            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $prodMap = @{}                 # product -> aggregate
+            $allHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $thirdPartyFindings = 0; $unclassified = 0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched') { continue }
+                $text = "$($f.VulnName) $($f.Solution)"
+                # KB findings belong to kb-needed - skip anything that names a KB.
+                if (@(Get-ReportsKbsFromText $text).Count -gt 0) { continue }
+                $thirdPartyFindings++
+                $product = Get-ReportsThirdPartyProduct $text
+                if ([string]::IsNullOrWhiteSpace($product)) { $unclassified++; continue }
+                # Route via the SAME bucket mapping the Router / Planner use (Defender
+                # + unquoted-service-path promotion, else the finding's Category).
+                $vn = ($f.VulnName -as [string]).ToLower()
+                $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
+                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' }
+                          elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' }
+                          else { [string]$f.Category }
+                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                $route = if ($script:RemediationRouteMap.ContainsKey($bucket)) { $script:RemediationRouteMap[$bucket] } else { $null }
+                $hn = [string]$f.Hostname
+                $sev = [string]$f.Severity
+                $isKev = [bool]$f.InKEV
+                if (-not $prodMap.ContainsKey($product)) {
+                    $entry = @{ Product = $product; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false; MaxVer = $null; MaxVerText = '' }
+                    $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $entry.RouteCounts = @{}      # route label -> finding count (route = plurality)
+                    $prodMap[$product] = $entry
+                }
+                $p = $prodMap[$product]
+                $p.Findings = [int]$p.Findings + 1
+                if ($hn) { [void]$p.Hosts.Add($hn); [void]$allHosts.Add($hn) }
+                if ($isKev) { $p.Kev = $true }
+                $rank = if ($sevRank.ContainsKey($sev)) { $sevRank[$sev] } else { 0 }
+                if ($rank -gt $p.MaxSev) { $p.MaxSev = $rank; $p.SevName = $sev }
+                # Tally the route per finding; the product's Route is the plurality
+                # route (so a handful of mis-bucketed findings can't hijack the row -
+                # the bulk of a product's findings decides its route).
+                $label = if ($route) { if ($route.Profile) { "$($route.ToolId): $($route.Profile)" } else { "$($route.ToolId): $($route.Action)" } } else { 'manual / none' }
+                if (-not $p.RouteCounts.ContainsKey($label)) { $p.RouteCounts[$label] = 0 }
+                $p.RouteCounts[$label] = [int]$p.RouteCounts[$label] + 1
+                # Representative FIXED/target version: the highest version token in the
+                # finding text (Tenable "Upgrade to X" lines put the target as highest).
+                $vers = @(Get-VersionsFromText $text)
+                if ($vers.Count -gt 0) {
+                    $cand = [string]$vers[0]
+                    $candV = Convert-VersionForSort $cand
+                    if ($null -eq $p.MaxVer -or $candV -gt $p.MaxVer) { $p.MaxVer = $candV; $p.MaxVerText = $cand }
+                }
+            }
+            # Rank: KEV first, then most hosts, then worst severity (supersedence-style).
+            $ordered = @($prodMap.Values | Sort-Object -Property `
+                @{ Expression = { [bool]$_.Kev }; Descending = $true }, `
+                @{ Expression = { $_.Hosts.Count }; Descending = $true }, `
+                @{ Expression = { $_.MaxSev }; Descending = $true }, `
+                @{ Expression = { $_.Product } })
+            $rows = New-Object System.Collections.ArrayList
+            $kevProducts = 0; $routable = 0; $manual = 0
+            foreach ($p in $ordered) {
+                if ($p.Kev) { $kevProducts++ }
+                # Plurality route: most-common route across the product's findings; on a
+                # tie a real route beats 'manual / none'.
+                $bestLabel = 'manual / none'; $bestCount = -1
+                foreach ($lk in $p.RouteCounts.Keys) {
+                    $c = [int]$p.RouteCounts[$lk]
+                    if ($c -gt $bestCount -or ($c -eq $bestCount -and $bestLabel -eq 'manual / none' -and $lk -ne 'manual / none')) {
+                        $bestCount = $c; $bestLabel = $lk
+                    }
+                }
+                $isRoutable = ($bestLabel -ne 'manual / none')
+                if ($isRoutable) { $routable++ } else { $manual++ }
+                $row = @{
+                    _rk=$p.Product; Product=$p.Product; Hosts=$p.Hosts.Count
+                    Severity=$(if ($p.SevName) { $p.SevName } else { 'n/a' })
+                    KEV=$(if ($p.Kev) { 'KEV' } else { '' })
+                    FixedVersion=$(if ($p.MaxVerText) { $p.MaxVerText } else { '-' })
+                    Route=$bestLabel
+                    Findings=$p.Findings
+                }
+                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+            }
+            & $send @{ type='status'; text="Third-party catalog: $($ordered.Count) product(s) ($kevProducts KEV) across $($allHosts.Count) host(s); $routable routable via a JANET tool, $manual manual/none. $thirdPartyFindings non-KB finding(s) total ($unclassified not tied to a known product - the KB ones are in KBs Needed)." }
+            return @{ rows=@($rows); summary=@{
+                total=$ordered.Count; kevProducts=$kevProducts; hosts=$allHosts.Count
+                routable=$routable; manual=$manual; thirdPartyFindings=$thirdPartyFindings
+                unclassified=$unclassified
             } }
         }
 

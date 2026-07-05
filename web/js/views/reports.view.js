@@ -1001,6 +1001,56 @@
         };
       }
 
+      // ---- Third-Party Catalog (non-KB product rollup) ----------------------------
+      function buildThirdPartyCatalog(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('THIRD-PARTY CATALOG (FROM SCAN)', true));
+        panel.appendChild(hint('The flip side of KBs Needed: on a real scan only ~1% of findings name a KB — the rest are third-party / version-upgrade vulns (Chrome, Firefox, Adobe, Java, 7-Zip, Notepad++, VLC, Wireshark, PuTTY, .NET …). This rolls those NON-KB findings up by PRODUCT so the biggest vuln-reduction levers stand out: distinct affected hosts, worst severity, KEV, a representative fixed/target version, the finding count, and the mapped JANET remediation route (same Categorize-Finding + Router mapping the Planner uses). Ranked KEV-first, then most hosts. Read-only — pairs with KBs Needed to cover every open finding.'));
+
+        var row = btnRow();
+        var runBtn = ui.button('Build Catalog', { variant: 'cyan', size: 'sm', title: 'Roll the loaded non-KB findings up by third-party product.' });
+        row.appendChild(runBtn);
+        panel.appendChild(row);
+
+        var cards = C.StatCards({ cards: [
+          { key: 'total', label: 'DISTINCT PRODUCTS', color: 'accent' },
+          { key: 'kevProducts', label: 'KEV PRODUCTS', color: 'bad' },
+          { key: 'hosts', label: 'HOSTS', color: 'cyan' },
+          { key: 'manual', label: 'MANUAL', color: 'gold' }
+        ] });
+        cards.el.style.margin = '8px 0'; panel.appendChild(cards.el);
+
+        var grid = C.ResultsGrid({
+          title: 'Third-party products', emptyText: 'No products yet — load findings (ACAS Import), then Build Catalog.', keyMode: { rk: true }, popOut: true,
+          sort: { key: 'Hosts', dir: -1 },
+          columns: [
+            { key: 'Product', label: 'PRODUCT', width: 180 },
+            { key: 'Hosts', label: 'HOSTS', width: 80, sortVal: function (r) { return +r.Hosts || 0; }, colorRule: gt0cls('st-warn') },
+            { key: 'Severity', label: 'SEVERITY', width: 90, colorRule: sevCls },
+            { key: 'KEV', label: 'KEV', width: 60, sortVal: function (r) { return r.KEV ? 1 : 0; }, colorRule: function (v) { return v ? 'st-bad' : 'cell-dim'; } },
+            { key: 'FixedVersion', label: 'FIXED VER', width: 110, render: function (r) { var v = String(r.FixedVersion == null ? '' : r.FixedVersion); return { text: v, cls: (v && v !== '-') ? '' : 'cell-dim' }; } },
+            { key: 'Route', label: 'ROUTE', width: 220, render: function (r) { var v = String(r.Route == null ? '' : r.Route); return { text: v, cls: /manual/i.test(v) ? 'cell-dim' : 'st-ok', title: v }; } },
+            { key: 'Findings', label: 'FINDINGS', width: 90, sortVal: function (r) { return +r.Findings || 0; } }
+          ],
+          rowClass: function (r) { return r.KEV ? 'row-bad' : ''; }
+        });
+        var gh = gridHolder(grid, 200); gh.style.flex = '1'; panel.appendChild(gh);
+        var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        runBtn.onclick = function () {
+          log.banner('Third-Party Catalog (from scan)');
+          grid.clear(); cards.reset();
+          runIntoGrid('thirdparty-catalog', {}, {
+            grid: grid, prog: prog, keyOf: function (ev) { return ev.Product != null ? String(ev.Product) : null; },
+            onFinal: function (res) {
+              var s = res && res.summary || {};
+              cards.setAll({ total: s.total || 0, kevProducts: s.kevProducts || 0, hosts: s.hosts || 0, manual: s.manual || 0 });
+              log.banner((s.total || 0) + ' third-party product(s) (' + (s.kevProducts || 0) + ' KEV) across ' + (s.hosts || 0) + ' host(s); ' + (s.routable || 0) + ' routable, ' + (s.manual || 0) + ' manual — from ' + (s.thirdPartyFindings || 0) + ' non-KB finding(s).');
+            }
+          });
+        };
+      }
+
       // ---- Remediation Campaigns (persisted closed-loop tracking) -----------------
       function buildCampaigns(panel) {
         panelFlex(panel);
@@ -1943,6 +1993,7 @@
           { id: 'router', label: 'Remediation Router', build: buildRouter },
           { id: 'planner', label: 'Remediation Planner', build: buildPlanner },
           { id: 'kbneeded', label: 'KBs Needed', build: buildKbNeeded },
+          { id: 'thirdparty', label: 'Third-Party Catalog', build: buildThirdPartyCatalog },
           { id: 'campaigns', label: 'Campaigns', build: buildCampaigns },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },
