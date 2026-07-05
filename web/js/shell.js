@@ -935,6 +935,75 @@
     return wrap;
   }
 
+  // Scheduled Waves: arm-and-walk-away off-hours scheduler. Lists armed/fired/
+  // cancelled schedules and lets the operator arm a tool+action at a future time.
+  // A DESTRUCTIVE wave requires a live admin session both to arm AND to fire.
+  function buildScheduler() {
+    var wrap = el('div', 'j-snapshot');
+    var title = el('div', 'j-snap-title', 'SCHEDULED WAVES'); title.style.marginBottom = '8px';
+    wrap.appendChild(title);
+    wrap.appendChild(el('div', 'muted', 'Arm a tool action to fire at a set time — the server runs it even if you close the browser. A destructive wave needs a live admin session to arm and to fire (fail-safe: if the session is gone at fire time it is blocked, not run).')).style.cssText = 'font-size:11px;margin-bottom:8px';
+
+    var listEl = el('div', 'j-sched-list');
+    wrap.appendChild(listEl);
+
+    function fmtWhen(utc) { try { var d = new Date(utc); return d.toLocaleString(); } catch (e) { return utc; } }
+    function statusCls(s) { s = String(s); if (s === 'armed') return 'st-warn'; if (s === 'fired') return 'st-ok'; if (s === 'blocked' || s === 'error') return 'st-bad'; return 'st-dim'; }
+
+    function renderList(schedules) {
+      listEl.innerHTML = '';
+      if (!schedules || !schedules.length) { listEl.appendChild(el('div', 'muted', 'No scheduled waves.')); return; }
+      schedules.forEach(function (s) {
+        var rowEl = el('div', 'j-sched-row');
+        var lbl = el('span', 'j-sched-lbl', s.label || (s.toolId + '/' + s.actionId));
+        if (s.destructive) { var dp = el('span', 'j-pill', 'DESTRUCTIVE'); dp.style.cssText += ';color:var(--sev-crit);border-color:var(--sev-crit);margin-left:6px'; lbl.appendChild(dp); }
+        rowEl.appendChild(lbl);
+        rowEl.appendChild(el('span', 'j-sched-when', fmtWhen(s.fireAtUtc) + (s.recurrence && s.recurrence !== 'none' ? (' · ' + s.recurrence) : '')));
+        rowEl.appendChild(el('span', 'j-sched-status ' + statusCls(s.status), String(s.status).toUpperCase()));
+        if (s.status === 'armed') {
+          var cancel = el('button', 'j-sched-cancel', 'Cancel'); cancel.type = 'button';
+          cancel.onclick = function () { api('DELETE', '/schedule/' + s.id).then(refresh).catch(function () {}); };
+          rowEl.appendChild(cancel);
+        } else if (s.note) { rowEl.appendChild(el('span', 'muted', s.note)).style.fontSize = '10.5px'; }
+        listEl.appendChild(rowEl);
+      });
+    }
+    function refresh() { api('GET', '/schedule').then(function (d) { renderList((d && d.schedules) || []); }).catch(function () { listEl.innerHTML = ''; listEl.appendChild(el('div', 'muted', 'Scheduler unavailable.')); }); }
+
+    // arm form
+    var form = el('div', 'j-sched-form');
+    var toolSel = el('select', 'j-select');
+    (TOOLS || []).forEach(function (t) { toolSel.appendChild(new Option(t.name, t.id)); });
+    var actSel = el('select', 'j-select');
+    function fillActions() {
+      actSel.innerHTML = '';
+      var t = (TOOLS || []).filter(function (x) { return x.id === toolSel.value; })[0];
+      var acts = (t && t.actions) || [];
+      acts.forEach(function (a) { var o = new Option((a.label || a.id) + (a.destructive ? '  (destructive)' : ''), a.id); actSel.appendChild(o); });
+      if (!acts.length) actSel.appendChild(new Option('(no actions)', ''));
+    }
+    toolSel.onchange = fillActions; fillActions();
+    var whenInput = el('input', 'j-input'); whenInput.type = 'datetime-local';
+    var recSel = el('select', 'j-select');
+    ['none', 'daily', 'weekly'].forEach(function (r) { recSel.appendChild(new Option(r, r)); });
+    var armBtn = Janet.ui.button('Arm wave', { size: 'sm', variant: 'gold' });
+    var armMsg = el('span', 'muted'); armMsg.style.fontSize = '11px';
+    armBtn.onclick = function () {
+      if (!toolSel.value || !actSel.value) { armMsg.textContent = 'Pick a tool and action.'; return; }
+      if (!whenInput.value) { armMsg.textContent = 'Pick a fire time.'; return; }
+      armMsg.textContent = 'Arming…';
+      api('POST', '/schedule', { toolId: toolSel.value, actionId: actSel.value, fireAt: whenInput.value, recurrence: recSel.value, label: (toolSel.options[toolSel.selectedIndex].text + ' · ' + actSel.options[actSel.selectedIndex].text) })
+        .then(function (r) { armMsg.textContent = r && r.id ? ('Armed for ' + fmtWhen(r.fireAtUtc) + (r.destructive ? ' (destructive)' : '')) : 'Armed.'; refresh(); })
+        .catch(function (e) { armMsg.textContent = (e && e.message) ? e.message : 'Arm failed (destructive waves need an admin session).'; });
+    };
+    form.appendChild(el('span', 'j-eyebrow', 'ARM')); form.appendChild(toolSel); form.appendChild(actSel);
+    form.appendChild(whenInput); form.appendChild(recSel); form.appendChild(armBtn); form.appendChild(armMsg);
+    wrap.appendChild(form);
+
+    refresh();
+    return wrap;
+  }
+
   function renderHub() {
     var hub = dom.hub; hub.innerHTML = '';
     var inner = el('div', 'j-hub-inner');
@@ -942,6 +1011,7 @@
     lede.innerHTML = 'Select a tool. Each tool is a faithful re-front of its desktop counterpart; the originals in <code>Tools\\</code> are untouched.';
     inner.appendChild(lede);
     var board = buildMissionBoard(); if (board) inner.appendChild(board);
+    var sched = buildScheduler(); if (sched) inner.appendChild(sched);
     var snap = buildSnapshot(); if (snap) inner.appendChild(snap);
     // one launchpad tile per tool, in catalog order (no scroll until it overflows)
     var scroll = el('div', 'j-hub-scroll');
