@@ -104,7 +104,9 @@
       var results = card('RESULTS');
       results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
       var grid = C.ResultsGrid({
-        title: 'Secure Boot results', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'Secure Boot results',
+        emptyText: 'No results yet — pick a host set, then Enable Secure Boot.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'COMPUTER', width: 130 },
           { key: 'Status', label: 'STATUS', width: 90, render: function (r) { return { text: r.Status == null ? '' : String(r.Status), cls: statusCellCls(r.Status) }; } },

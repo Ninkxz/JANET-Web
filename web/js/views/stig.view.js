@@ -163,7 +163,9 @@
       var resHdr = el('div', 'j-section-h', 'RESULTS  (double-click a row for per-rule detail)'); resHdr.style.marginBottom = '6px';
       resultsCard.appendChild(resHdr);
       var grid = C.ResultsGrid({
-        title: 'STIG compliance results', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'STIG compliance results',
+        emptyText: 'No results yet — add computers, then run STIG Compliance Scan.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         onRowClick: function (r) { openHostDetail(r); },
         columns: [
           { key: 'Host', label: 'HOST', width: 160 },

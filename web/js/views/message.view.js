@@ -160,7 +160,9 @@
         ctx.util.downloadBlob('JRMT_Results_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
       };
       var grid = C.ResultsGrid({
-        title: 'Remote message', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'Remote message',
+        emptyText: 'No results yet — enter hosts + a message, then Send.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'HOST', width: 150 },
           { key: 'Pingable', label: 'REACHABLE', width: 90, render: function (r) {

@@ -159,7 +159,9 @@
       var resHdr = el('div', 'j-section-h', 'RESULTS'); resHdr.style.marginBottom = '6px';
       resultsCard.appendChild(resHdr);
       var grid = C.ResultsGrid({
-        title: 'C2C readiness results', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'C2C readiness results',
+        emptyText: 'No results yet — add computers, then run C2C Readiness Scan.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'HOST', width: 170 },
           { key: 'Ping', label: 'PING', width: 90, render: function (r) { return { text: r.Ping == null ? '' : String(r.Ping), cls: pingCellCls(r.Ping) }; } },

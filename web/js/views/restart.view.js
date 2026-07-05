@@ -437,7 +437,7 @@
         // click-to-open drawer across the bottom (Dock=Bottom in the desktop tool).
         var gridCard = card('DISPATCH RESULTS'); gridCard.style.cssText += ';flex:1;min-width:0;min-height:0;display:flex;flex-direction:column';
         var grid = C.ResultsGrid({
-          title: 'Restart dispatch results', keyMode: { hostCol: 'Host' }, popOut: true,
+          title: 'Restart dispatch results', emptyText: 'No dispatch yet — paste hosts, set a restart time, then Dispatch Restart.', keyMode: { hostCol: 'Host' }, popOut: true,
           columns: [
             { key: 'Host', label: 'HOST', width: 150 },
             { key: 'Status', label: 'STATUS', width: 130, render: function (r) { return { text: r.Status == null ? '' : String(r.Status), cls: dispatchStatusCls(r.Status) }; } },
@@ -515,7 +515,7 @@
 
         var gridCard = card('REBOOT VERIFICATION'); gridCard.style.cssText += ';flex:1;min-width:0;min-height:0;display:flex;flex-direction:column';
         var grid = C.ResultsGrid({
-          title: 'Reboot verification', keyMode: { hostCol: 'Host' }, popOut: true,
+          title: 'Reboot verification', emptyText: 'No verification yet — dispatch a wave or run Verify Reboots.', keyMode: { hostCol: 'Host' }, popOut: true,
           columns: [
             { key: 'Host', label: 'HOST', width: 160 },
             { key: 'State', label: 'STATE', width: 220, render: function (r) { return { text: r.State == null ? '' : String(r.State), cls: rebootStateCls(r.State) }; } },

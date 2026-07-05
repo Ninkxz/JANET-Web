@@ -142,7 +142,7 @@
         var results = ui.namedCard('RESULTS', 'Rows in red are on the KEV list (known-exploited AND present on this machine). Double-click any CVE for lookup links.');
         results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
         var grid = C.ResultsGrid({
-          title: 'KEV cross-reference', keyMode: { rk: true }, popOut: true,
+          title: 'KEV cross-reference', emptyText: 'No cross-reference yet — paste or import a machine CVE export, then Cross-Reference.', keyMode: { rk: true }, popOut: true,
           onRowClick: function (r) { openLookup(r.CVE); },
           columns: [
             { key: 'CVE', label: 'CVE', width: 150, render: function (r) { return { text: String(r.CVE || ''), cls: 'st-info', title: 'Double-click for lookup links' }; } },
@@ -239,7 +239,7 @@
         var results = ui.namedCard('KEV CATALOG', 'Every CVE on the KEV list. Double-click any CVE for lookup links.');
         results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
         var grid = C.ResultsGrid({
-          title: 'KEV catalog', keyMode: { rk: true }, popOut: true, selectable: false,
+          title: 'KEV catalog', emptyText: 'Catalog not loaded — click List KEV, or Add to KEV to create it.', keyMode: { rk: true }, popOut: true, selectable: false,
           onRowClick: function (r) { openLookup(r.CVE); },
           columns: [
             { key: 'CVE', label: 'CVE', width: 170, render: function (r) { return { text: String(r.CVE || ''), cls: 'st-info', title: 'Double-click for lookup links' }; } },

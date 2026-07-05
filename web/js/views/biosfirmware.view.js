@@ -89,7 +89,9 @@
       var results = card('RESULTS');
       results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
       var grid = C.ResultsGrid({
-        title: 'BIOS firmware results', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'BIOS firmware results',
+        emptyText: 'No results yet — pick a host set, then Scan BIOS Firmware.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'COMPUTER', width: 130 },
           { key: 'Manufacturer', label: 'MAKE', width: 90 },

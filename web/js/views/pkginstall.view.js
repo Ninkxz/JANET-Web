@@ -190,7 +190,9 @@
       var resultsCard = card('DEPLOYMENT RESULTS', 'One row per host - mutates Queued -> Probing -> Copying -> Deploying -> Success/Failed. Double-click a row for full stdout.');
       resultsCard.style.cssText += ';flex:1 1 50%;min-height:160px;display:flex;flex-direction:column';
       var grid = C.ResultsGrid({
-        title: 'Deployment results', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'Deployment results',
+        emptyText: 'No results yet — pick a package + hosts, then Deploy.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'HOST', width: 180 },
           { key: 'Status', label: 'STATUS', width: 110, render: function (r) { return { text: r.Status == null ? '' : String(r.Status), cls: statusCellCls(r.Status) }; } },

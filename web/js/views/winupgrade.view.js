@@ -406,7 +406,9 @@
       var resHdr = el('div', 'j-section-h', 'RESULTS'); resHdr.style.marginBottom = '6px';
       resultsCard.appendChild(resHdr);
       var grid = C.ResultsGrid({
-        title: 'Windows Upgrade results', keyMode: { hostCol: 'Host' }, popOut: true,
+        title: 'Windows Upgrade results',
+        emptyText: 'No results yet — pick hosts and an operation, then RUN.',
+        keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'COMPUTER', width: 170 },
           { key: 'Ping', label: 'PING', width: 90, render: function (r) { return { text: r.Ping == null ? '' : String(r.Ping), cls: pingCellCls(r.Ping) }; } },

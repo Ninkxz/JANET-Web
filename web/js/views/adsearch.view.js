@@ -306,6 +306,7 @@
         gridHolder.innerHTML = '';
         grid = C.ResultsGrid({
           title: modeById(modeId).tab,
+          emptyText: 'No results yet — enter your criteria and click SEARCH.',
           columns: spec.columns,
           keyMode: spec.keyOf,                     // SAME function passed to ctx.run as keyOf
           rowClass: spec.rowClass || function () { return ''; },
