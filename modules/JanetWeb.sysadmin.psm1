@@ -495,7 +495,7 @@ function Invoke-JanetToolAction {
 
     if ($ActionId -eq 'certexpiry-sweep') {
         $expiring = @($rows | Where-Object { $_.DaysLeft -is [int] -or ([string]$_.DaysLeft -match '^-?\d+$') })
-        $expired  = @($expiring | Where-Object { ([int]("0" + ([string]$_.DaysLeft -replace '[^-0-9]',''))) -lt 0 })
+        $expired  = @($expiring | Where-Object { ([int]$_.DaysLeft) -lt 0 })
         $summary['expiringCerts'] = $expiring.Count
         $summary['expiredCerts'] = $expired.Count
         & $send @{ type = 'log'; level = 'ok'; text = "Done. $($expiring.Count) expiring cert(s) ($($expired.Count) already expired) across $($targets.Count) host(s); $errored host(s) errored." }

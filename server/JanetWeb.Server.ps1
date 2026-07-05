@@ -289,7 +289,14 @@ function Start-JanetWebServer {
     try {
         $schedPoller = {
             param($Port, $Token, $SchedDir)
-            function Save-Sched { param($Obj, $Path) try { [System.IO.File]::WriteAllText($Path, ($Obj | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false))) } catch {} }
+            function Save-Sched {
+                param($Obj, $Path)
+                try {
+                    $tmp = "$Path.tmp"
+                    [System.IO.File]::WriteAllText($tmp, ($Obj | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+                    Move-Item -LiteralPath $tmp -Destination $Path -Force
+                } catch {}
+            }
             while ($true) {
                 Start-Sleep -Seconds 15
                 if (-not (Test-Path -LiteralPath $SchedDir)) { continue }
@@ -328,8 +335,16 @@ function Start-JanetWebServer {
                     $o.firedUtc = ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
                     if ($code -ge 200 -and $code -lt 300) {
                         $o.note = "fired ok (HTTP $code)"
-                        if (([string]$o.recurrence) -eq 'daily')  { $o.fireAtUtc = $fireDt.ToUniversalTime().AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ'); $o.status = 'armed' }
-                        elseif (([string]$o.recurrence) -eq 'weekly') { $o.fireAtUtc = $fireDt.ToUniversalTime().AddDays(7).ToString('yyyy-MM-ddTHH:mm:ssZ'); $o.status = 'armed' }
+                        if (([string]$o.recurrence) -eq 'daily' -or ([string]$o.recurrence) -eq 'weekly') {
+                            # Advance to the NEXT FUTURE occurrence rather than a single increment,
+                            # so a server/session outage spanning multiple periods can't cause a
+                            # rapid-refire loop (the poller would otherwise keep seeing a past
+                            # fireAtUtc every ~15s until it caught up to now).
+                            $incDays = if (([string]$o.recurrence) -eq 'daily') { 1 } else { 7 }
+                            $next = $fireDt.ToUniversalTime()
+                            do { $next = $next.AddDays($incDays) } while ($next -le [DateTime]::UtcNow)
+                            $o.fireAtUtc = $next.ToString('yyyy-MM-ddTHH:mm:ssZ'); $o.status = 'armed'
+                        }
                         else { $o.status = 'fired' }
                     } elseif ($code -eq 403) {
                         $o.status = 'blocked'; $o.note = 'admin session not live at fire time - re-arm after Start Admin Session'
@@ -629,7 +644,9 @@ function Start-JanetWebServer {
                             if ($sraw -and $sraw.Length -gt 0 -and [int]$sraw[0] -eq 0xFEFF) { $sraw = $sraw.Substring(1) }
                             $sObj = ConvertFrom-Json $sraw
                             $sObj.status = 'cancelled'
-                            [System.IO.File]::WriteAllText($sfile, (($sObj | ConvertTo-Json -Depth 6)), (New-Object System.Text.UTF8Encoding($false)))
+                            $dtmp = "$sfile.tmp"
+                            [System.IO.File]::WriteAllText($dtmp, (($sObj | ConvertTo-Json -Depth 6)), (New-Object System.Text.UTF8Encoding($false)))
+                            Move-Item -LiteralPath $dtmp -Destination $sfile -Force -ErrorAction Stop
                         } catch { & $writeJson $resp @{ ok=$false; error=$_.Exception.Message } 500; continue }
                         & $writeJson $resp @{ ok=$true; id=$sid; status='cancelled' }
                         continue

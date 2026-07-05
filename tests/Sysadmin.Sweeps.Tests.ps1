@@ -112,3 +112,44 @@ Describe 'SysadminSweepBlock worker (shimmed - no real WinRM)' {
         $r.Rows[0].Error | Should Match 'Offline'
     }
 }
+
+Describe 'Invoke-JanetToolAction certexpiry-sweep (regression: expired-cert tally must not throw)' {
+
+    # Invoke-JanetToolAction fans hosts out to a real RunspacePool (CreateDefault
+    # InitialSessionState); each pool worker Import-Module's the .psm1 FRESH into
+    # its own runspace, so shimming Test-SysadminReachable/New-PSSession/
+    # Invoke-Command in THIS process's module instance (as Invoke-ShimmedSweep
+    # does above) never reaches the pool worker - empirically confirmed while
+    # building this test. Instead we swap the module-scope worker scriptblock
+    # ($script:SysadminSweepBlock) itself for a fake that returns canned per-host
+    # results directly (no module-function dependency, so it runs correctly in
+    # any bare pool runspace). This exercises the REAL, unmodified
+    # Invoke-JanetToolAction aggregation code - the exact code the certexpiry-sweep
+    # expired/expiring tally (and the bug it had) lives in - end to end through the
+    # action wrapper, not just the per-host block.
+    It 'tallies expiredCerts/expiringCerts without throwing when a host reports an already-expired cert' {
+        $fakeBlock = {
+            param($Computer, $Cred, $Auth, $AttemptOffline, $SweepId, $Days, $ModulePath)
+            if ($Computer -eq 'EXPIRED-HOST') {
+                return @{ Host = $Computer; Online = $true; Error = ''; Rows = @(@{ Host = $Computer; Online = $true; Subject = 'CN=expired'; Issuer = 'CN=CA'; Expires = (Get-Date).AddDays(-3).ToString('yyyy-MM-dd'); DaysLeft = -3; Thumbprint = 'EEEE'; Error = '' }); Report = '' }
+            } else {
+                return @{ Host = $Computer; Online = $true; Error = ''; Rows = @(@{ Host = $Computer; Online = $true; Subject = 'CN=soon'; Issuer = 'CN=CA'; Expires = (Get-Date).AddDays(10).ToString('yyyy-MM-dd'); DaysLeft = 10; Thumbprint = 'FFFF'; Error = '' }); Report = '' }
+            }
+        }
+        $r = & $m {
+            param($fakeBlock)
+            Set-Variable -Name __origBlock -Scope script -Value $script:SysadminSweepBlock
+            $script:SysadminSweepBlock = $fakeBlock
+            try {
+                Invoke-JanetToolAction -ActionId 'certexpiry-sweep' -Params @{ targets = "EXPIRED-HOST`nSOON-HOST"; days = 90 } -Emit { param($e) }
+            } finally {
+                $script:SysadminSweepBlock = $script:__origBlock
+                Remove-Variable -Name __origBlock -Scope script -ErrorAction SilentlyContinue
+            }
+        } $fakeBlock
+
+        @($r.rows).Count | Should Be 2
+        [int]$r.summary.expiredCerts | Should Be 1
+        [int]$r.summary.expiringCerts | Should Be 2
+    }
+}

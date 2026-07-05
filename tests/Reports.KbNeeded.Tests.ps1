@@ -46,3 +46,24 @@ Describe 'kb-needed: KB extraction + supersedence rollup' {
         $result.summary.perHostCsv | Should Match 'hA,KB5040442'
     }
 }
+
+Describe 'kb-needed: CSV formula-injection guard on the per-host export' {
+
+    # Regression for the P3 audit finding: a hostname beginning with = + - @ (or
+    # otherwise Excel-formula-shaped) must be neutralized in perHostCsv the same
+    # way the other CSV exporters in this module guard their cells
+    # (ConvertTo-ReportsCsvCell), not written raw.
+    $injResult = & $script:Mod {
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='=cmd|calc'; PluginID='1'; VulnName='Win cumulative'; Severity='Critical'; CVE='CVE-1'; Category='KB Patch'; Status='Open'; Solution='Apply KB5040442.'; InKEV=$false; KevCves=''; IAVA='' }
+        )
+        Invoke-JanetToolAction -ActionId 'kb-needed' -Params @{} -Emit { param($e) }
+    }
+
+    It 'neutralizes a hostname starting with = so no CSV line begins with a raw formula trigger' {
+        $lines = @($injResult.summary.perHostCsv -split "`r?`n" | Where-Object { $_ -match 'KB5040442' })
+        $lines.Count | Should Be 1
+        $lines[0] | Should Not Match '^='
+        $lines[0] | Should Match "^'="
+    }
+}

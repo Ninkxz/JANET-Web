@@ -4626,7 +4626,7 @@ function Invoke-JanetToolAction {
             $sb = New-Object System.Text.StringBuilder
             [void]$sb.AppendLine('Host,KB')
             foreach ($hn in (@($perHost.Keys) | Sort-Object)) {
-                foreach ($kb in (@($perHost[$hn]) | Sort-Object)) { [void]$sb.AppendLine("$hn,$kb") }
+                foreach ($kb in (@($perHost[$hn]) | Sort-Object)) { [void]$sb.AppendLine("$(ConvertTo-ReportsCsvCell $hn),$(ConvertTo-ReportsCsvCell $kb)") }
             }
             $kevKbs = @($ordered | Where-Object { $_.Kev }).Count
             & $send @{ type='status'; text="KBs needed: $($ordered.Count) distinct KB(s) ($kevKbs KEV) across $($perHost.Count) host(s); $withKb finding(s) name a KB, $noKb have no KB in the scan text (use the Remediation Planner for those)." }
