@@ -440,6 +440,8 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .j-prog .j-prog-fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .2s ease}
 .j-prog .j-prog-fill.done{background:var(--ok)}
 .j-prog .j-prog-phase{font-size:11px;color:var(--muted);white-space:nowrap}
+.j-prog .j-prog-eta{font-family:var(--mono);font-size:11px;color:var(--text-dim);white-space:nowrap;font-variant-numeric:tabular-nums}
+.j-prog .j-prog-eta.done{color:var(--ok)}
 
 /* ============================================================================
    COMPONENT: StatCards
