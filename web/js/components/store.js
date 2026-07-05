@@ -35,6 +35,13 @@
   // (below) then supersedes it (a fresh browser / new port has an empty mirror).
   var CACHE = lsLoad();
 
+  // audit#27: keys written locally BEFORE the boot hydrate resolves. The hydrate
+  // must not wholesale-replace CACHE and drop a group saved during that window (and
+  // then push the group-less map back, deleting it server-side too). We record such
+  // writes and re-apply them on top of the hydrated map. Cleared once ready settles.
+  var dirty = {}, hydrated = false;
+  function markDirty(name, removed) { if (!hydrated) dirty[name] = { removed: !!removed }; }
+
   function serverPush(obj) {
     var body = JSON.stringify(obj);
     return fetch(EP, {
@@ -45,10 +52,12 @@
   }
 
   Janet.store = {
-    names: function () { return Object.keys(CACHE).sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; }); },
+    // audit#26: localeCompare returns 0 on equal-lowercased names (the old ?-1:1
+    // never returned 0, an inconsistent comparator -> unstable dropdown order).
+    names: function () { return Object.keys(CACHE).sort(function (a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); }); },
     get: function (name) { return CACHE[name] || ''; },
-    set: function (name, text) { CACHE[String(name)] = String(text == null ? '' : text); lsSave(CACHE); serverPush(CACHE)['catch'](function () {}); },
-    remove: function (name) { delete CACHE[name]; lsSave(CACHE); serverPush(CACHE)['catch'](function () {}); },
+    set: function (name, text) { CACHE[String(name)] = String(text == null ? '' : text); markDirty(String(name), false); lsSave(CACHE); serverPush(CACHE)['catch'](function () {}); },
+    remove: function (name) { delete CACHE[name]; markDirty(String(name), true); lsSave(CACHE); serverPush(CACHE)['catch'](function () {}); },
     has: function (name) { return Object.prototype.hasOwnProperty.call(CACHE, name); }
   };
 
@@ -58,8 +67,21 @@
   // cache so the UI never hard-breaks (offline seed / first launch).
   Janet.store.ready = fetch(EP, { headers: { 'X-Janet-Token': token() } })
     .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(function (obj) { if (obj && typeof obj === 'object') { CACHE = obj; lsSave(CACHE); } })
-    ['catch'](function () {});
+    .then(function (obj) {
+      if (obj && typeof obj === 'object') {
+        // Re-apply any writes made during the fetch window on top of the server map,
+        // then push if we changed anything so the merged set is durable (audit#27).
+        var pushBack = false;
+        Object.keys(dirty).forEach(function (k) {
+          if (dirty[k].removed) { if (k in obj) { delete obj[k]; pushBack = true; } }
+          else { obj[k] = CACHE[k]; pushBack = true; }
+        });
+        CACHE = obj; lsSave(CACHE);
+        if (pushBack) serverPush(CACHE)['catch'](function () {});
+      }
+    })
+    ['catch'](function () {})
+    .then(function () { hydrated = true; dirty = {}; });
 
   // transient cross-tool handoff (in-memory, this page session only)
   var pending = null;
