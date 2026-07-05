@@ -20,6 +20,31 @@
   Janet.components = Janet.components || {};
   var el = Janet.ui.el;
 
+  // Themed replacements for window.prompt/confirm/alert so the group save/delete/
+  // canary flows stay inside the dark theme + keyboard flow (audit UX). Each returns
+  // a Promise; the text prompt resolves the trimmed value or null on cancel.
+  function themedPrompt(title, message, defaultVal) {
+    var wrap = el('div'); wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;min-width:320px';
+    if (message) { var m = el('div', null, String(message)); m.style.cssText = 'font-size:12px;color:var(--muted)'; wrap.appendChild(m); }
+    var inp = el('input'); inp.type = 'text'; inp.className = 'j-input'; inp.value = defaultVal == null ? '' : String(defaultVal);
+    inp.style.cssText = 'width:100%;padding:5px 8px';
+    wrap.appendChild(inp);
+    var p = Janet.components.ConfirmDialog({ title: title, body: wrap, okText: 'OK', cancelText: 'Cancel' });
+    setTimeout(function () { try { inp.focus(); inp.select(); } catch (e) {} }, 0);
+    // Enter submits, Esc cancels (matches the rest of the keyboard flow).
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { var ok = wrap.parentNode && wrap.parentNode.querySelector('.j-modal-actions .j-btn-go, .j-modal-actions button:last-child'); if (ok) ok.click(); }
+    });
+    return p.then(function (ok) { return ok ? inp.value.trim() : null; });
+  }
+  function themedConfirm(title, message, opts) {
+    opts = opts || {};
+    return Janet.components.ConfirmDialog({ title: title, body: String(message), danger: !!opts.danger, okText: opts.okText || 'OK', cancelText: opts.cancelText || 'Cancel' });
+  }
+  function themedAlert(title, message) {
+    return Janet.components.ConfirmDialog({ title: title, body: String(message), okText: 'OK', cancelText: null });
+  }
+
   function TargetManager(opts) {
     opts = opts || {};
     var model = opts.model || Janet.util.targetModel('');
@@ -109,34 +134,42 @@
         var added = appendText(Janet.store.get(n));
         if (opts.onImport) opts.onImport(added, 'group:' + n);
       };
-      // ponytail: window.prompt/confirm for the name - stdlib, fine for a loopback
-      // admin tool; swap for a themed text-input modal if it ever needs validation.
+      // Themed modals (not native prompt/confirm/alert) keep the dark theme + keyboard flow.
       var saveBtn = Janet.ui.ghostButton('Save group', { size: 'sm', title: 'Save the current list as a named, reusable group.' });
       saveBtn.onclick = function () {
         var hosts = effectiveHosts(); if (!hosts.length) return;
-        var name = window.prompt('Save ' + hosts.length + ' host(s) as group name:', ''); if (name == null) return;
-        name = name.trim(); if (!name) return;
-        if (Janet.store.has(name) && !window.confirm('Group "' + name + '" exists. Overwrite?')) return;
-        Janet.store.set(name, hosts.join('\n')); refreshGroups();
+        themedPrompt('Save Group', 'Save ' + hosts.length + ' host(s) as group name:', '').then(function (name) {
+          if (!name) return;
+          var doSave = function () { Janet.store.set(name, hosts.join('\n')); refreshGroups(); };
+          if (Janet.store.has(name)) {
+            themedConfirm('Overwrite group?', 'Group "' + name + '" already exists. Overwrite it?', { danger: true, okText: 'Overwrite' }).then(function (ok) { if (ok) doSave(); });
+          } else { doSave(); }
+        });
       };
       var delBtn = Janet.ui.ghostButton('Del', { size: 'sm', title: 'Delete a saved group.' });
       delBtn.onclick = function () {
-        var names = Janet.store.names(); if (!names.length) { window.alert('No saved groups.'); return; }
-        var name = window.prompt('Delete which group?\n\n' + names.join(', '), ''); if (name == null) return;
-        name = name.trim();
-        if (name && Janet.store.has(name) && window.confirm('Delete group "' + name + '"?')) { Janet.store.remove(name); refreshGroups(); }
+        var names = Janet.store.names(); if (!names.length) { themedAlert('No groups', 'There are no saved groups.'); return; }
+        themedPrompt('Delete Group', 'Delete which group?\n\nSaved: ' + names.join(', '), '').then(function (name) {
+          if (!name || !Janet.store.has(name)) { if (name) themedAlert('Not found', 'No saved group named "' + name + '".'); return; }
+          themedConfirm('Delete group?', 'Delete group "' + name + '"? This cannot be undone.', { danger: true, okText: 'Delete' }).then(function (ok) { if (ok) { Janet.store.remove(name); refreshGroups(); } });
+        });
       };
       // canary / ring rollout: keep first N here, save the rest as a group to run next
       var canaryBtn = Janet.ui.ghostButton('Canary', { size: 'sm', title: 'Stage a rollout: keep the first N hosts here, save the rest as a group.' });
       canaryBtn.onclick = function () {
-        var hosts = effectiveHosts(); if (hosts.length < 2) { window.alert('Need at least 2 hosts to split a canary.'); return; }
-        var nStr = window.prompt('Canary size - keep the first N here, save the rest as a group:', String(Math.min(5, hosts.length - 1))); if (nStr == null) return;
-        var n = parseInt(nStr, 10); if (!(n > 0 && n < hosts.length)) { window.alert('Enter a number between 1 and ' + (hosts.length - 1) + '.'); return; }
-        var gname = window.prompt('Save the remaining ' + (hosts.length - n) + ' host(s) as group:', 'rest'); if (gname == null) return;
-        gname = gname.trim() || 'rest';
-        Janet.store.set(gname, hosts.slice(n).join('\n'));
-        model.set(hosts.slice(0, n).join('\n')); box.value = model.raw;
-        refreshGroups();
+        var hosts = effectiveHosts(); if (hosts.length < 2) { themedAlert('Need more hosts', 'Need at least 2 hosts to split a canary.'); return; }
+        themedPrompt('Canary Rollout', 'Canary size - keep the first N here, save the rest as a group:', String(Math.min(5, hosts.length - 1))).then(function (nStr) {
+          if (nStr == null) return;
+          var n = parseInt(nStr, 10);
+          if (!(n > 0 && n < hosts.length)) { themedAlert('Invalid size', 'Enter a number between 1 and ' + (hosts.length - 1) + '.'); return; }
+          themedPrompt('Canary Rollout', 'Save the remaining ' + (hosts.length - n) + ' host(s) as group:', 'rest').then(function (gname) {
+            if (gname == null) return;
+            gname = gname || 'rest';
+            Janet.store.set(gname, hosts.slice(n).join('\n'));
+            model.set(hosts.slice(0, n).join('\n')); box.value = model.raw;
+            refreshGroups();
+          });
+        });
       };
       lib.appendChild(groupSel); lib.appendChild(saveBtn); lib.appendChild(delBtn); lib.appendChild(canaryBtn);
       root.appendChild(lib);
