@@ -54,4 +54,57 @@ Describe 'thirdparty-catalog: non-KB product rollup' {
         [int]$result.summary.routable | Should Be 2   # Chrome (acas) + Adobe (upr)
         [int]$result.summary.manual   | Should Be 1   # 7-Zip (no route)
     }
+
+    # ---- Remediate handoff surface (per-product host LIST + structured route) --------
+    It 'surfaces the full affected host LIST per product (not just the count)' {
+        $chrome = @($result.rows | Where-Object { $_.Product -eq 'Google Chrome' })[0]
+        $hosts  = @([string]$chrome.HostsList -split "`n" | Where-Object { $_ })
+        $hosts.Count      | Should Be 3
+        ($hosts -contains 'hA') | Should Be $true
+        ($hosts -contains 'hB') | Should Be $true
+        ($hosts -contains 'hC') | Should Be $true
+    }
+
+    It 'carries a resolvable structured route (tool/action) for a routed product' {
+        $chrome = @($result.rows | Where-Object { $_.Product -eq 'Google Chrome' })[0]
+        $chrome.Routable      | Should Be $true
+        $chrome.RouteTool     | Should Be 'acas'
+        $chrome.RouteActionId  | Should Be 'run-vulnerability'
+        $chrome.RouteProfile  | Should Be 'Google Chrome - Update'
+        $adobe = @($result.rows | Where-Object { $_.Product -eq 'Adobe Acrobat/Reader' })[0]
+        $adobe.Routable       | Should Be $true
+        $adobe.RouteTool      | Should Be 'upr'
+    }
+
+    It 'marks a routeless product NOT remediable (frontend disables it)' {
+        $sevenzip = @($result.rows | Where-Object { $_.Product -eq '7-Zip' })[0]
+        $sevenzip.Routable  | Should Be $false
+        $sevenzip.RouteTool | Should BeNullOrEmpty
+    }
+}
+
+Describe 'thirdparty-catalog: Apache Log4j is not remediable (no auto-route)' {
+    $log4j = & $script:Mod {
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='hL1'; PluginID='90'; VulnName='Apache Log4j 1.x Multiple Vulnerabilities'; Severity='Critical'; CVE='CVE-2021-44228'; Category='Apache'; Status='Open'; Solution='Upgrade Apache Log4j to a supported version.'; InKEV=$true; KevCves='CVE-2021-44228'; IAVA='' }
+            [pscustomobject]@{ Hostname='hL2'; PluginID='91'; VulnName='Apache Log4j 1.x Multiple Vulnerabilities'; Severity='High';     CVE='';               Category='Apache'; Status='Open'; Solution='Upgrade Apache Log4j to a supported version.'; InKEV=$false; KevCves=''; IAVA='' }
+        )
+        Invoke-JanetToolAction -ActionId 'thirdparty-catalog' -Params @{} -Emit { param($e) }
+    }
+
+    It 'names the product but exposes no route (Routable=false, empty RouteTool)' {
+        $row = @($log4j.rows | Where-Object { $_.Product -eq 'Apache Log4j' })[0]
+        $row              | Should Not BeNullOrEmpty
+        $row.Routable     | Should Be $false
+        $row.RouteTool    | Should BeNullOrEmpty
+        $row.Route        | Should Match 'manual'
+        [int]$log4j.summary.routable | Should Be 0
+        [int]$log4j.summary.manual   | Should Be 1
+    }
+
+    It 'still surfaces the affected host list for the routeless product' {
+        $row   = @($log4j.rows | Where-Object { $_.Product -eq 'Apache Log4j' })[0]
+        $hosts = @([string]$row.HostsList -split "`n" | Where-Object { $_ })
+        $hosts.Count | Should Be 2
+    }
 }

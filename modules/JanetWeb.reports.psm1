@@ -4885,6 +4885,7 @@ function Invoke-JanetToolAction {
                     $entry = @{ Product = $product; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false; MaxVer = $null; MaxVerText = '' }
                     $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
                     $entry.RouteCounts = @{}      # route label -> finding count (route = plurality)
+                    $entry.RouteObjs   = @{}      # route label -> structured route ($null for manual/none)
                     $prodMap[$product] = $entry
                 }
                 $p = $prodMap[$product]
@@ -4899,6 +4900,11 @@ function Invoke-JanetToolAction {
                 $label = if ($route) { if ($route.Profile) { "$($route.ToolId): $($route.Profile)" } else { "$($route.ToolId): $($route.Action)" } } else { 'manual / none' }
                 if (-not $p.RouteCounts.ContainsKey($label)) { $p.RouteCounts[$label] = 0 }
                 $p.RouteCounts[$label] = [int]$p.RouteCounts[$label] + 1
+                # Keep the STRUCTURED route (tool/action/profile) beside its label so the
+                # plurality winner below can surface concrete ids for the handoff - taken
+                # from the SAME $script:RemediationRouteMap the Router/Planner resolve, so
+                # the catalog can never drift from a parallel map.
+                if (-not $p.RouteObjs.ContainsKey($label)) { $p.RouteObjs[$label] = $route }
                 # Representative FIXED/target version: the highest version token in the
                 # finding text (Tenable "Upgrade to X" lines put the target as highest).
                 $vers = @(Get-VersionsFromText $text)
@@ -4929,6 +4935,12 @@ function Invoke-JanetToolAction {
                 }
                 $isRoutable = ($bestLabel -ne 'manual / none')
                 if ($isRoutable) { $routable++ } else { $manual++ }
+                # Structured route for the winning label + the FULL affected host list, so
+                # the view's "Remediate Selected" handoff can prefill targets and open the
+                # mapped tool without a second round-trip. HostsList is a newline string
+                # (mirrors the remediation-route row's Hosts) - the count stays in Hosts.
+                $bestRoute = if ($p.RouteObjs.ContainsKey($bestLabel)) { $p.RouteObjs[$bestLabel] } else { $null }
+                $hostList  = @($p.Hosts | Sort-Object)
                 $row = @{
                     _rk=$p.Product; Product=$p.Product; Hosts=$p.Hosts.Count
                     Severity=$(if ($p.SevName) { $p.SevName } else { 'n/a' })
@@ -4936,6 +4948,13 @@ function Invoke-JanetToolAction {
                     FixedVersion=$(if ($p.MaxVerText) { $p.MaxVerText } else { '-' })
                     Route=$bestLabel
                     Findings=$p.Findings
+                    # Non-column handoff fields (read per-row by reports.view.js):
+                    Routable=[bool]$bestRoute
+                    RouteTool=$(if ($bestRoute) { [string]$bestRoute.ToolId } else { '' })
+                    RouteActionId=$(if ($bestRoute) { [string]$bestRoute.ActionId } else { '' })
+                    RouteAction=$(if ($bestRoute) { [string]$bestRoute.Action } else { '' })
+                    RouteProfile=$(if ($bestRoute -and $bestRoute.Profile) { [string]$bestRoute.Profile } else { '' })
+                    HostsList=($hostList -join "`n")
                 }
                 [void]$rows.Add($row); & $send (@{ type='row' } + $row)
             }

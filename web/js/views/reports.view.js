@@ -1010,6 +1010,15 @@
         var row = btnRow();
         var runBtn = ui.button('Build Catalog', { variant: 'cyan', size: 'sm', title: 'Roll the loaded non-KB findings up by third-party product.' });
         row.appendChild(runBtn);
+        // "Remediate Selected" HANDOFF: enabled only when exactly one product row is
+        // ticked AND that product carries a resolvable route. It NEVER runs a
+        // destructive action - it loads that product's affected hosts into the shared
+        // target list (wpt) or the clipboard/handoff (acas/upr), then opens the mapped
+        // tool so the operator runs the EXISTING gated action there (same ack +
+        // credential + DNS/self guards). Mirrors the Remediation Router's sendRoute.
+        var remBtn = ui.button('Remediate Selected', { variant: 'gold', size: 'sm', title: 'Tick one product row with a route, then hand its affected hosts to the mapped tool.' });
+        remBtn.disabled = true;
+        row.appendChild(remBtn);
         panel.appendChild(row);
 
         var cards = C.StatCards({ cards: [
@@ -1021,7 +1030,7 @@
         cards.el.style.margin = '8px 0'; panel.appendChild(cards.el);
 
         var grid = C.ResultsGrid({
-          title: 'Third-party products', emptyText: 'No products yet — load findings (ACAS Import), then Build Catalog.', keyMode: { rk: true }, popOut: true,
+          title: 'Third-party products', emptyText: 'No products yet — load findings (ACAS Import), then Build Catalog.', keyMode: { rk: true }, popOut: true, selectable: true,
           sort: { key: 'Hosts', dir: -1 },
           columns: [
             { key: 'Product', label: 'PRODUCT', width: 180 },
@@ -1037,15 +1046,77 @@
         var gh = gridHolder(grid, 200); gh.style.flex = '1'; panel.appendChild(gh);
         var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
 
+        // Tools that consume the SHARED target list (ctx.targets) - only WPT reads it;
+        // acas/upr scan their OWN imported host set, so they get the hosts on the
+        // clipboard + a transient handoff to paste/import (same split as the Router).
+        var TP_TARGETS_AWARE = { wpt: true };
+        // A product is remediable only if the engine resolved a concrete route
+        // (Routable + a RouteTool id). Routeless products (manual / none, e.g. Apache
+        // Log4j) are NOT remediable - the button disables with a tooltip for them.
+        function isRemediable(r) { return !!(r && r.Routable && String(r.RouteTool || '')); }
+
+        // Re-evaluate the Remediate button after any grid interaction (checkbox / select
+        // all). Enabled only when EXACTLY one row is ticked and it is remediable.
+        function refreshRemBtn() {
+          var sel = grid.getChecked();
+          if (sel.length === 0) { remBtn.disabled = true; remBtn.title = 'Tick one product row with a route to remediate.'; return; }
+          if (sel.length > 1) { remBtn.disabled = true; remBtn.title = 'Tick exactly one product row to remediate.'; return; }
+          var r = sel[0];
+          if (!isRemediable(r)) { remBtn.disabled = true; remBtn.title = 'No auto-remediation route — stage an installer or handle manually.'; return; }
+          remBtn.disabled = false;
+          remBtn.title = 'Load the ' + (r.Hosts || 0) + ' affected host(s) for ' + r.Product + ' into ' + r.RouteTool + ' and open it — review and run the gated action there.';
+        }
+        // No onSelect hook on ResultsGrid; a delegated click (checkboxes + Select-All all
+        // live inside grid.el) covers every selection change. Defer a tick so the grid's
+        // own handler mutates its checked-set first.
+        grid.el.addEventListener('click', function () { setTimeout(refreshRemBtn, 0); });
+
+        // The HANDOFF itself: prefill targets + navigate. It ENDS here - it never calls
+        // ctx.run on a destructive action; the operator runs the gated action in the
+        // destination tool. Byte-for-byte the Router's sendRoute behaviour.
+        function remediateSelected() {
+          var sel = grid.getChecked();
+          if (sel.length !== 1) return;
+          var r = sel[0];
+          if (!isRemediable(r)) return;
+          var toolId = String(r.RouteTool || ''); if (!toolId) return;
+          var hosts = String(r.HostsList == null ? '' : r.HostsList).split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+          if (!hosts.length) { ctx.confirm({ title: 'No hosts', body: 'This product has no affected hosts — re-run Build Catalog.', okText: 'OK', cancelText: null }); return; }
+          var prof = String(r.RouteProfile == null ? '' : r.RouteProfile);
+          var pick = prof ? (prof + ' profile') : (String(r.RouteAction || '') + ' action');
+          var readsTargets = !!TP_TARGETS_AWARE[toolId];
+          var doIt = function () {
+            if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'thirdparty: ' + r.Product); } catch (e) {} }
+            if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(hosts.join('\n')).catch(function () {}); }
+            if (readsTargets) {
+              ctx.targets.set(hosts.join('\n'));
+              log.append({ text: 'Loaded ' + hosts.length + ' host(s) for ' + r.Product + ' into ' + toolId + ' (shared target list + clipboard). Review and run the gated ' + pick + ' (admin session required).', level: 'ok' });
+            } else {
+              log.append({ text: 'Loaded ' + hosts.length + ' host(s) for ' + r.Product + '; copied to clipboard for ' + toolId + '. Paste/import them, then review and run the gated ' + pick + ' (admin session required). ' + toolId + ' scans its own host set, not the shared target list.', level: 'ok' });
+            }
+            if (typeof ctx.openTool === 'function') ctx.openTool(toolId);
+          };
+          if (readsTargets && ctx.targets && ctx.targets.count() > 0) {
+            ctx.confirm({
+              title: 'Replace shared targets?',
+              body: 'The shared target list already has <b>' + ctx.targets.count() + '</b> host(s). Replace it with the <b>' + esc(hosts.length) + '</b> host(s) affected by <b>' + esc(r.Product) + '</b>?',
+              list: ['Loads: ' + hosts.slice(0, 6).join(', ') + (hosts.length > 6 ? ' … (+' + (hosts.length - 6) + ' more)' : ''), 'Then opens: ' + toolId],
+              okText: 'Replace & Remediate', cancelText: 'Cancel'
+            }).then(function (ok) { if (ok) doIt(); });
+          } else { doIt(); }
+        }
+        remBtn.onclick = remediateSelected;
+
         runBtn.onclick = function () {
           log.banner('Third-Party Catalog (from scan)');
-          grid.clear(); cards.reset();
+          grid.clear(); cards.reset(); refreshRemBtn();
           runIntoGrid('thirdparty-catalog', {}, {
             grid: grid, prog: prog, keyOf: function (ev) { return ev.Product != null ? String(ev.Product) : null; },
             onFinal: function (res) {
               var s = res && res.summary || {};
               cards.setAll({ total: s.total || 0, kevProducts: s.kevProducts || 0, hosts: s.hosts || 0, manual: s.manual || 0 });
               log.banner((s.total || 0) + ' third-party product(s) (' + (s.kevProducts || 0) + ' KEV) across ' + (s.hosts || 0) + ' host(s); ' + (s.routable || 0) + ' routable, ' + (s.manual || 0) + ' manual — from ' + (s.thirdPartyFindings || 0) + ' non-KB finding(s).');
+              refreshRemBtn();
             }
           });
         };
