@@ -66,8 +66,54 @@
 
   Janet.palette = { setProvider: function (fn) { provider = fn || function () { return []; }; }, open: open, close: close };
 
-  // global hotkey
+  // ---- Keyboard shortcut cheatsheet (press ?) --------------------------------
+  // The app is keyboard-driven but the shortcuts were invisible; ? makes them
+  // discoverable. Lists the REAL shortcuts only (no phantom keys). Esc/click-out closes.
+  var SHORTCUTS = [
+    { keys: ['Ctrl', 'K'], desc: 'Open the command palette — jump to any tool or tab' },
+    { keys: ['?'], desc: 'Show this shortcut cheatsheet' },
+    { keys: ['Esc'], desc: 'Close the palette, a dialog, or this cheatsheet' },
+    { keys: ['↑', '↓'], desc: 'Move the selection (in the command palette)' },
+    { keys: ['Enter'], desc: 'Open the selected item / confirm a dialog' }
+  ];
+  var cheatEl = null;
+  function closeCheat() { if (!cheatEl) return; document.removeEventListener('keydown', cheatEl._onKey, true); cheatEl.remove(); cheatEl = null; }
+  function openCheat() {
+    if (cheatEl) { closeCheat(); return; }
+    if (openEl) close();
+    var overlay = el('div', 'j-modal');
+    var box = el('div', 'j-modal-card'); box.style.cssText = 'min-width:340px;max-width:440px';
+    box.appendChild(el('div', 'j-modal-title', 'Keyboard Shortcuts'));
+    var body = el('div', 'j-modal-body');
+    var tbl = el('div'); tbl.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0';
+    SHORTCUTS.forEach(function (s) {
+      var rowEl = el('div'); rowEl.style.cssText = 'display:flex;align-items:center;gap:10px';
+      var keyWrap = el('div'); keyWrap.style.cssText = 'display:flex;gap:4px;flex:none;min-width:96px';
+      s.keys.forEach(function (k) { var kbd = el('kbd', 'j-kbd', k); keyWrap.appendChild(kbd); });
+      rowEl.appendChild(keyWrap);
+      var d = el('span', null, s.desc); d.style.cssText = 'font-size:12px;color:var(--text-dim,#c8c8d0)';
+      rowEl.appendChild(d);
+      tbl.appendChild(rowEl);
+    });
+    body.appendChild(tbl);
+    box.appendChild(body);
+    overlay.appendChild(box);
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) closeCheat(); });
+    document.body.appendChild(overlay); cheatEl = overlay;
+    function onKey(e) { if (e.key === 'Escape' || e.key === '?') { e.preventDefault(); closeCheat(); } }
+    document.addEventListener('keydown', onKey, true); cheatEl._onKey = onKey;
+  }
+  Janet.cheatsheet = { open: openCheat, close: closeCheat };
+
+  // global hotkeys
+  function isTyping(e) {
+    var t = e.target; if (!t) return false;
+    var tag = (t.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+  }
   document.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (openEl) close(); else open(); }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (openEl) close(); else open(); return; }
+    // ? opens the cheatsheet, but never while typing into a field.
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTyping(e)) { e.preventDefault(); openCheat(); }
   });
 })();

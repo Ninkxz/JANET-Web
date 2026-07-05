@@ -511,6 +511,10 @@
     top.appendChild(crumb);
     top.appendChild(el('div', 'j-top-spacer'));
     dom.credbar = el('div', 'j-credbar'); top.appendChild(dom.credbar);
+    var helpBtn = el('button', 'j-help-btn'); helpBtn.type = 'button'; helpBtn.textContent = '?';
+    helpBtn.title = 'Keyboard shortcuts (or press ?)';
+    helpBtn.onclick = function () { if (Janet.cheatsheet) Janet.cheatsheet.open(); };
+    top.appendChild(helpBtn);
     top.appendChild(makeThemeToggle());
     dom.clock = el('div'); dom.clock.id = 'j-clock'; top.appendChild(dom.clock);
     main.appendChild(top);
