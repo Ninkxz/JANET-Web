@@ -380,6 +380,26 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'campaign-create'
+                label       = 'Create Remediation Campaign'
+                description  = 'Snapshot the currently loaded OPEN findings into a persisted remediation campaign (JanetLocal\campaigns\<id>.json): the finding keys (Hostname|PluginID), the affected host set, the distinct mapped JANET remediations, and the severity/KEV mix. This ties finding -> fix -> (later) re-verify so a wave can be tracked to closure. READ-ONLY: creates the tracking record only; the actual remediation runs through the gated engines. Re-import the next scan and use the campaign to prove closure.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Field','Value')
+                inputs       = @(
+                    @{ name='name'; label='Campaign name'; type='text'; required=$false; default='' }
+                )
+            },
+            @{
+                id          = 'campaign-list'
+                label       = 'Remediation Campaigns'
+                description  = 'List every saved remediation campaign (JanetLocal\campaigns\*.json), newest first: name, when/who created, status, open-finding count at creation, KEV count, and affected host count. Read-only.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Name','Created','Status','OpenFindings','KEV','Hosts')
+                inputs       = @()
+            },
+            @{
                 id          = 'command-brief'
                 label       = 'Executive Command Brief'
                 description  = 'One self-contained dark-theme HTML commander brief that rolls up the other reports: SLA aging buckets (ledger-backed, works at idle), open KEV (known-exploited) posture, the last Squadron Rollup this session, the newest WPT fleet-compliance snapshots trend (read straight from JanetLocal\snapshots - no wpt import), the Remediation Router routable-vs-manual split, and scan-closure numbers when a Patch Cross-Ref compare has run this session. Each section degrades to a "run X first" note when its source is empty. Build LAST after the sections it consumes.'
@@ -861,6 +881,54 @@ function Save-ReportsSlaLedger {
         if ($tmp) { try { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } } catch {} }
     }
     return $res
+}
+
+# =============================================================================
+#  Remediation campaigns  -  JanetLocal\campaigns\<id>.json
+#  A persisted closed-loop object: a snapshot of a set of OPEN findings + their
+#  affected host set + the mapped JANET remediations, so a wave can be tracked
+#  finding -> fix -> (later) re-verify. Read-only creation from the loaded
+#  findings; the actual remediation still runs through the gated engines.
+# =============================================================================
+function Get-ReportsCampaignDir { Join-Path $PSScriptRoot '..\JanetLocal\campaigns' }
+
+# Persist one campaign object (atomic temp+move, UTF-8 BOM). Returns @{Written;Path;Error}.
+function Save-ReportsCampaign {
+    param([hashtable]$Campaign)
+    $res = @{ Written = $false; Path = ''; Error = '' }
+    $tmp = $null
+    try {
+        $dir = Get-ReportsCampaignDir
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+        $p = Join-Path $dir ("$($Campaign.id).json")
+        $json = $Campaign | ConvertTo-Json -Depth 6
+        $tmp = "$p.tmp"
+        [System.IO.File]::WriteAllText($tmp, $json, [System.Text.UTF8Encoding]::new($true))
+        Move-Item -LiteralPath $tmp -Destination $p -Force -ErrorAction Stop
+        $res.Written = $true; $res.Path = $p
+    } catch {
+        $res.Error = $_.Exception.Message
+        if ($tmp) { try { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } } catch {} }
+    }
+    return $res
+}
+
+# Read every saved campaign (newest first). Returns @{ Campaigns=@(...); Source; Ok }.
+function Get-ReportsCampaigns {
+    $out = New-Object System.Collections.ArrayList
+    try {
+        $dir = Get-ReportsCampaignDir
+        if (-not (Test-Path -LiteralPath $dir)) { return @{ Campaigns = @(); Source = 'none (no JanetLocal\campaigns yet)'; Ok = $true } }
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction Stop)) {
+            try {
+                $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+                if ($raw -and $raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+                if (-not [string]::IsNullOrWhiteSpace($raw)) { [void]$out.Add(($raw | ConvertFrom-Json -ErrorAction Stop)) }
+            } catch {}
+        }
+        $sorted = @($out | Sort-Object -Property @{ Expression = { [string]$_.createdUtc }; Descending = $true })
+        return @{ Campaigns = $sorted; Source = $dir; Ok = $true }
+    } catch { return @{ Campaigns = @(); Source = "read error: $($_.Exception.Message)"; Ok = $false } }
 }
 
 # Upsert the ledger from the current in-session findings and persist it. For every
@@ -4361,6 +4429,86 @@ function Invoke-JanetToolAction {
             if ($ordered.Count -gt 800) { & $send @{ type='log'; level='info'; text="Showing first 800 of $($ordered.Count) hosts in the grid." } }
             & $send @{ type='status'; text="Remediation plan: $($ordered.Count) host(s), $hostsWithRoutes with a one-click route, over $totalOpen open finding(s)." }
             return @{ rows=@($rows); summary=@{ total=$ordered.Count; hostsWithRoutes=$hostsWithRoutes; openFindings=$totalOpen } }
+        }
+
+        # -------------------------------------------------------------------
+        'campaign-create' {
+            # Snapshot the loaded OPEN findings into a persisted campaign. READ-ONLY.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse or load a report first.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            $name = ([string]$Params['name']).Trim()
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = "Campaign $((Get-Date).ToString('yyyy-MM-dd HHmm'))" }
+            $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $routes = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $crit=0;$high=0;$med=0;$low=0;$kev=0;$open=0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched') { continue }
+                $open++
+                $hn = [string]$f.Hostname
+                if ($hn) { [void]$hosts.Add($hn) }
+                [void]$keys.Add("$hn|$($f.PluginID)")
+                switch ([string]$f.Severity) { 'Critical' { $crit++ } 'High' { $high++ } 'Medium' { $med++ } 'Low' { $low++ } }
+                if ([bool]$f.InKEV) { $kev++ }
+                $vn = ($f.VulnName -as [string]).ToLower(); $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
+                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' } elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' } else { [string]$f.Category }
+                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                if ($script:RemediationRouteMap.ContainsKey($bucket)) {
+                    $r = $script:RemediationRouteMap[$bucket]
+                    [void]$routes.Add($(if ($r.Profile) { "$($r.ToolId): $($r.Profile)" } else { "$($r.ToolId): $($r.Action)" }))
+                }
+            }
+            $id = [guid]::NewGuid().ToString('N')
+            $campaign = @{
+                id = $id; name = $name
+                createdUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                createdBy = (Get-ReportsCleanUser)
+                status = 'open'
+                openFindings = $open; kev = $kev
+                severity = @{ critical=$crit; high=$high; medium=$med; low=$low }
+                hosts = @($hosts | Sort-Object)
+                routes = @($routes | Sort-Object)
+                findingKeys = @($keys)
+            }
+            $save = Save-ReportsCampaign -Campaign $campaign
+            if (-not $save.Written) {
+                & $send @{ type='error'; text="Campaign NOT saved: $($save.Error)" }
+                return @{ rows=@(); summary=@{ total=0; saveError=$true } }
+            }
+            $rows = New-Object System.Collections.ArrayList
+            foreach ($kv in @(
+                @{ Field='Name'; Value=$name }, @{ Field='Campaign ID'; Value=$id },
+                @{ Field='Open findings'; Value=[string]$open }, @{ Field='KEV findings'; Value=[string]$kev },
+                @{ Field='Severity (C/H/M/L)'; Value="$crit/$high/$med/$low" },
+                @{ Field='Affected hosts'; Value=[string]$hosts.Count },
+                @{ Field='Mapped remediations'; Value=(@($routes | Sort-Object) -join ' · ') },
+                @{ Field='Saved to'; Value=$save.Path }
+            )) { [void]$rows.Add($kv); & $send (@{ type='row' } + $kv) }
+            & $send @{ type='audit'; action='TouchHost'; target="Create campaign '$name'"; result='Success'; itemCount=$open; detail="$open open finding(s), $($hosts.Count) host(s), $kev KEV; id=$id" }
+            & $send @{ type='status'; text="Campaign '$name' saved: $open open finding(s) over $($hosts.Count) host(s), $kev KEV. Re-import the next scan to prove closure." }
+            return @{ rows=@($rows); summary=@{ total=$rows.Count; id=$id; openFindings=$open; kev=$kev; hosts=$hosts.Count } }
+        }
+
+        # -------------------------------------------------------------------
+        'campaign-list' {
+            $c = Get-ReportsCampaigns
+            if (-not $c.Ok) { & $send @{ type='log'; level='warn'; text="Campaign store unreadable ($($c.Source))." } }
+            $rows = New-Object System.Collections.ArrayList
+            foreach ($cam in $c.Campaigns) {
+                $created = ''
+                try { $d=[datetime]::MinValue; if ([datetime]::TryParse([string]$cam.createdUtc, [ref]$d)) { $created = $d.ToLocalTime().ToString('yyyy-MM-dd HH:mm') } } catch {}
+                $hostCount = 0; if ($cam.PSObject.Properties['hosts'] -and $cam.hosts) { $hostCount = @($cam.hosts).Count }
+                $row = @{
+                    _rk=[string]$cam.id
+                    Name=[string]$cam.name; Created=$created; Status=[string]$cam.status
+                    OpenFindings=[string]$cam.openFindings; KEV=[string]$cam.kev; Hosts=[string]$hostCount
+                }
+                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+            }
+            & $send @{ type='status'; text="$($rows.Count) saved campaign(s) - source: $($c.Source)." }
+            return @{ rows=@($rows); summary=@{ total=$rows.Count; source=$c.Source } }
         }
 
         # -------------------------------------------------------------------
