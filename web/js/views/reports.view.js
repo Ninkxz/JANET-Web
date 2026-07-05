@@ -967,8 +967,20 @@
         filterRow.appendChild(compareBtn); filterRow.appendChild(applyBtn); filterRow.appendChild(clearBtn);
         panel.appendChild(filterRow);
 
+        // Close-the-loop headline: how the AFTER scan moved vs the BEFORE baseline.
+        // % CLOSED = remediated / (remediated + still-open) of the baseline findings.
+        var deltaCards = C.StatCards({ cards: [
+          { key: 'remediated', label: 'REMEDIATED (FIXED)', color: 'ok' },
+          { key: 'stillOpen', label: 'STILL OPEN', color: 'gold' },
+          { key: 'newFindings', label: 'NEW', color: 'bad' },
+          { key: 'closedPct', label: '% BASELINE CLOSED', color: 'accent' }
+        ] });
+        deltaCards.el.style.marginBottom = '8px';
+        panel.appendChild(deltaCards.el);
+
         var grid = C.ResultsGrid({
           title: 'Scan compare', keyMode: { rk: true }, popOut: true,
+          emptyText: 'No comparison yet — load a Baseline + Comparison scan, then Compare Scans.',
           columns: [
             { key: 'Hostname', label: 'HOSTNAME', width: 130 },
             { key: 'PluginID', label: 'PLUGIN', width: 80 },
@@ -1005,10 +1017,17 @@
         };
         compareBtn.onclick = function () {
           log.banner('ACAS Scan Compare');
-          grid.clear(); prog.reset();
+          grid.clear(); prog.reset(); deltaCards.reset();
           runIntoGrid('acas-run-compare', { deltaFilter: deltaSel.value, hostFilter: hostFilter.value || '', severityFilter: sevFilter.value }, {
             grid: grid, prog: prog, keyOf: cmpKey,
-            onFinal: function (res) { var s = res && res.summary || {}; log.banner('Compare: ' + (s.remediated || 0) + ' remediated, ' + (s.stillOpen || 0) + ' still open, ' + (s.newFindings || 0) + ' new (delta ' + (s.deltaTotal || 0) + ')'); }
+            onFinal: function (res) {
+              var s = res && res.summary || {};
+              var fixed = s.remediated || 0, open = s.stillOpen || 0, added = s.newFindings || 0;
+              var baseTotal = fixed + open;
+              var pct = baseTotal > 0 ? Math.round(fixed / baseTotal * 100) : 0;
+              deltaCards.setAll({ remediated: fixed, stillOpen: open, newFindings: added, closedPct: pct + '%' });
+              log.banner('Compare: ' + fixed + ' remediated, ' + open + ' still open, ' + added + ' new — ' + pct + '% of baseline closed (delta ' + (s.deltaTotal || 0) + ')');
+            }
           });
         };
         applyBtn.onclick = function () {
@@ -1025,7 +1044,7 @@
         };
         clearBtn.onclick = function () {
           log.banner('Clear Compare State');
-          grid.clear(); baseLbl.textContent = 'no baseline'; baseLbl.className = 'muted'; compLbl.textContent = 'no comparison'; compLbl.className = 'muted';
+          grid.clear(); deltaCards.reset(); baseLbl.textContent = 'no baseline'; baseLbl.className = 'muted'; compLbl.textContent = 'no comparison'; compLbl.className = 'muted';
           var h = ctx.run('acas-clear-state', {});
           track(h.subscribe({ row: function (r) { log.append({ text: (r.Store || '') + ': ' + (r.Cleared != null ? r.Cleared : ''), level: 'dim' }); }, log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); } }));
         };
