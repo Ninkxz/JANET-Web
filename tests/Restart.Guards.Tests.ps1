@@ -3,7 +3,7 @@
 #  IP-target DNS-guard skip (audit#9) and dispatcher self-exclusion (audit#10).
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.restart.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.restart.psm1') -Force -PassThru
 
 Describe 'IP-target DNS-mismatch guard skip (audit#9)' {
     # The dispatch code computes the expected COMPUTERNAME passed into the remote

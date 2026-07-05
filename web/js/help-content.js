@@ -110,7 +110,7 @@
   window.JANET2_GUIDE = {
   "wpt": {
     "overview": {
-      "what": "The Workstation Patching Tool (WPT) is the centerpiece of JANET TWO\u2014a single-window fleet patch and remediation utility for Windows sysadmins. It scans, patches, uninstalls, repairs, and reboots hosts in parallel across a shared target list, with tabs for bulk operations (Bulk Scan & Patch), granular app/software management (Software Manager, Software Center, Unsupported Software), security updates (KB Scanner, Log4j Finder), app deployment (App Updater, Beta), disk/registry fixes (Cleanup, Reg Key Fixes), diagnostics and healing (Health & Healers), WinRM bootstrap, reboot scheduling, messaging, and telemetry reporting.",
+      "what": "The Workstation Patching Tool (WPT) is the centerpiece of JANET Web\u2014a single-window fleet patch and remediation utility for Windows sysadmins. It scans, patches, uninstalls, repairs, and reboots hosts in parallel across a shared target list, with tabs for bulk operations (Bulk Scan & Patch), granular app/software management (Software Manager, Software Center, Unsupported Software), security updates (KB Scanner, Log4j Finder), app deployment (App Updater, Beta), disk/registry fixes (Cleanup, Reg Key Fixes), diagnostics and healing (Health & Healers), WinRM bootstrap, reboot scheduling, messaging, and telemetry reporting.",
       "steps": [
         "Set Credentials (top-right, ADW account) to start an admin session for destructive operations; read-only scans do not require credentials.",
         "Build the shared target host list on the Targets tab: paste hostnames (line/comma/space separated), or import a TXT/CSV, or use the ACAS CSV importer.",
@@ -516,7 +516,7 @@
   },
   "acas": {
     "overview": {
-      "what": "ACAS Nemesis vulnerability remediation tool for JANET TWO. Import Tenable/ACAS-Nessus CSV exports, auto-analyze findings into selectable remediation cards (one per vulnerability, grouped by category), then patch or verify across affected hosts in parallel. Includes KB installer, raw-finding drill-down, and a profile catalog reference.",
+      "what": "ACAS Nemesis vulnerability remediation tool for JANET Web. Import Tenable/ACAS-Nessus CSV exports, auto-analyze findings into selectable remediation cards (one per vulnerability, grouped by category), then patch or verify across affected hosts in parallel. Includes KB installer, raw-finding drill-down, and a profile catalog reference.",
       "steps": [
         "Go to the IMPORT tab and click 'IMPORT ACAS CSV' to upload a Tenable/ACAS-Nessus export.",
         "Switch to the UPDATER tab and click 'Analyze / Refresh Cards' to turn the import into one card per vulnerability (grouped Patchable/Experimental/Reboot/Unpatchable/NotUpdatable).",
@@ -619,7 +619,7 @@
         "flag": "read-only"
       },
       "backbone": {
-        "what": "Reference catalog: every App Update remediation profile, its mechanism (DISM / installer / update client / service restart / registry write / uninstall), and whether it auto-runs from the JANET TWO web host (yes) or needs controller-side staging (no). Use this to understand the remediation profiles matched to your cards.",
+        "what": "Reference catalog: every App Update remediation profile, its mechanism (DISM / installer / update client / service restart / registry write / uninstall), and whether it auto-runs from the JANET Web web host (yes) or needs controller-side staging (no). Use this to understand the remediation profiles matched to your cards.",
         "steps": [
           "Click 'Load / Refresh Catalog' to fetch the current list of available profiles from the ACAS engine.",
           "Read the grid: Profile (name), Kind (category), Auto-Runnable (yes/no), and Mechanism (how it works).",
@@ -628,7 +628,7 @@
         ],
         "patch": "This tab changes nothing. It calls list-profiles internally (reads the available remediation profiles from the engine) and populates the grid in-app. Success = grid fills with Profile / Kind / Auto-Runnable / Mechanism rows. Verification: cross-check a profile from an UPDATER card against the catalog to confirm its mechanism and auto-run status.",
         "notes": [
-          "Auto-Runnable = yes means the profile can be triggered directly from JANET TWO without additional staging. No means it needs controller-side package files or external manual setup (e.g. Log4j jars, staged .msu files).",
+          "Auto-Runnable = yes means the profile can be triggered directly from JANET Web without additional staging. No means it needs controller-side package files or external manual setup (e.g. Log4j jars, staged .msu files).",
           "The Mechanism column explains the technical approach (DISM /Add-Package, msiexec /x /qn, PowerShell update cmdlet, etc.) - use it to understand what each profile does before patching.",
           "This catalog is rebuilt each time you click 'Load / Refresh Catalog', so changes in the engine (new profiles, retired profiles) are reflected immediately."
         ],
@@ -638,7 +638,7 @@
   },
   "reports": {
     "overview": {
-      "what": "JANET TWO Reports Tool - a <b>stateful, persistent reporting workspace</b> for ACAS/Nessus scan analysis, cross-reference, and vulnerability briefing. Each action builds on the previous one in the same session (parse -> triage -> dashboard -> CORA -> remediation plan), eliminating the need to re-upload data.",
+      "what": "JANET Web Reports Tool - a <b>stateful, persistent reporting workspace</b> for ACAS/Nessus scan analysis, cross-reference, and vulnerability briefing. Each action builds on the previous one in the same session (parse -> triage -> dashboard -> CORA -> remediation plan), eliminating the need to re-upload data.",
       "steps": [
         "Open the Reports tool (toolId 'reports').",
         "Choose a tab from the left rail: Start for guidance, ACAS Import to load findings, Remediation Plan to view app-by-app patch strategy, Patch Cross-Ref to compare before/after scans, Weekly Export to analyze metrics, Dirty 30 Triage to assess riskiest hosts, CORA Vulns for a commander brief, Future Target IPs to resolve hostnames, or Dashboard for a per-host summary.",
@@ -770,7 +770,7 @@
           "Optionally enter 'Network size' (total devices on network) to compute '% of fleet' for each top vuln; leave 0 to hide it.",
           "Click Build Summary to compute metrics (Open Findings, Unique Hosts, VPH, Critical/High/Medium/Low/Info counts, Network %).",
           "Review the grid (Metric / Value).",
-          "Click Open HTML Brief (or Render HTML in JANET TWO v1.x) to generate the full commander brief inline\u2014headline tiles, severity/category tables, and top-15 vuln cards (each with host count, plugin, category, and solution).",
+          "Click Open HTML Brief (or Render HTML in JANET Web v1.x) to generate the full commander brief inline\u2014headline tiles, severity/category tables, and top-15 vuln cards (each with host count, plugin, category, and solution).",
           "Click the Open brief button on the result to view it in a new window (sandboxed), or Download HTML to save it as a file."
         ],
         "patch": "Read-only synthesis and briefing. The CORA analysis reads the in-session findings and generates a formatted brief; it does not change targets. Output (HTML) is for leadership review and record-keeping.",
@@ -1033,7 +1033,7 @@
       "patch": "Mechanism: PSADT mode runs Deploy-Application.ps1 (folder structure); MSI mode runs msiexec /i <msi> <args> /L*v on each checked .msi. Success = exit code 0 (or 3010 for MSI reboot-needed). Failed/Rejected rows indicate install failure; Deferred means the package was unavailable or preconditions failed. Verify: spot-check a target machine (Control Panel > Programs, or Get-Package on PowerShell) to confirm the app name, version, or install date. Export the results grid for audit.",
       "notes": [
         "PSADT and MSI modes are mutually exclusive (toggle via the PSADT Package / MSI Bundle buttons).",
-        "Custom package path overrides the dropdown when non-empty \u2014 it can be a local path readable by JANET TWO, or a UNC share.",
+        "Custom package path overrides the dropdown when non-empty \u2014 it can be a local path readable by JANET Web, or a UNC share.",
         "Retry Failed reloads failed/rejected hosts and clears the current grid; run Deploy again.",
         "Admin session (Set Credentials) is required for installation.",
         "Deferred does not mean failure \u2014 it means the operation was skipped per policy/precondition; review the Detail column."

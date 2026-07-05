@@ -5,7 +5,7 @@
 #  that Patched findings are excluded. Read-only; no host contact.
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.reports.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.reports.psm1') -Force -PassThru
 
 Describe 'remediation-plan per-host work queue (Phase 3)' {
 

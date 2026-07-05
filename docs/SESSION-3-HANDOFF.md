@@ -1,4 +1,4 @@
-# J.A.N.E.T. TWO - Session 3 Handoff (review pass COMPLETE, suite is 11 tools)
+# JANET Web - Session 3 Handoff (review pass COMPLETE, suite is 11 tools)
 
 State as of 2026-06-19. The session that pushed the backlog, reskinned the launcher as a
 launchpad, ran the full tool-by-tool review (deepening every scaffolded TODO), and removed
@@ -9,7 +9,7 @@ the STIG tool. Read this + the `project-janet-two` auto-memory to continue. Prio
 
 - **Suite is 11 tools** (STIG was REMOVED this session, owner decision): wpt, acas, pkginstall,
   winupgrade, upr, secureboot, restart, message, adsearch, dhcp[beta], reports[stateful].
-  Engines `modules/JanetTwo.<id>.psm1` + bespoke views `web/js/views/<id>.view.js`.
+  Engines `modules/JanetWeb.<id>.psm1` + bespoke views `web/js/views/<id>.view.js`.
 - **Launcher hub** is now a flat **launchpad of corner-bracket icon tiles** (38px icon, category
   eyebrow, name, 3-line summary, hover-lift, gold focus, not-ported dimmed). In `web/js/shell.js`
   `renderHub` (`.j-launchpad`) + `web/css/janet.css`. Replaced the horizontal category-tab page.
@@ -51,11 +51,11 @@ the STIG tool. Read this + the `project-janet-two` auto-memory to continue. Prio
 2. **All runs via `ctx.run` -> RunController**; views never fetch/poll. Multi-row-per-host grids
    pass `keyOf` to `ctx.run` AND a matching `keyMode` to ResultsGrid.
 3. **Engines**: `.ps1`/`.psm1` are UTF-8 **with BOM + ASCII-only**; PS 5.1 must parse. Run the
-   parse+BOM+ASCII gate after EVERY engine edit. (Server `.ps1` count too, e.g. JanetTwo.Logging.ps1.)
+   parse+BOM+ASCII gate after EVERY engine edit. (Server `.ps1` count too, e.g. JanetWeb.Logging.ps1.)
 4. **Do NOT modify** `X:\J.A.N.E.T` or `X:\J.A.N.E.T ONE`. Shared SMB drive - coordinate destructive ops.
 5. **Push** with a one-time `git -c http.extraHeader="Authorization: Basic <base64 user:token>"
    push origin main`; keep creds OUT of `.git/config`. User is `bth0mp`. Owner pastes the token.
-6. **Launch** via `Launch JANET TWO.cmd` (blue conhost so the smartcard Get-Credential picker surfaces).
+6. **Launch** via `Launch JANET Web.cmd` (blue conhost so the smartcard Get-Credential picker surfaces).
 
 ## LESSONS (carry forward)
 

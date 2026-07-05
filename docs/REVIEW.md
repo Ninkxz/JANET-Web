@@ -1,4 +1,4 @@
-# JANET + JANET ONE - Review Notes (basis for JANET TWO)
+# JANET + JANET ONE - Review Notes (basis for JANET Web)
 
 The "what makes them tick" review. Per-tool UI specs: `docs\ui-specs\`. Build guide: `docs\HANDOFF.md`.
 
@@ -6,9 +6,9 @@ The "what makes them tick" review. Per-tool UI specs: `docs\ui-specs\`. Build gu
 
 # Part A - The desktop JANET hub / launcher
 
-# JANET TWO -- Suite-Level HUB/Launcher Spec (mirrors JANET desktop `JANET.ps1` v3.7.5)
+# JANET Web -- Suite-Level HUB/Launcher Spec (mirrors JANET desktop `JANET.ps1` v3.7.5)
 
-Source studied: `X:\J.A.N.E.T\JANET.ps1` (launcher, v3.7.5, ~2206 lines) and `X:\J.A.N.E.T\JANET_Config.json` (tool registry). This spec captures the **suite-level experience** ("how you run everything") so JANET TWO can reproduce it.
+Source studied: `X:\J.A.N.E.T\JANET.ps1` (launcher, v3.7.5, ~2206 lines) and `X:\J.A.N.E.T\JANET_Config.json` (tool registry). This spec captures the **suite-level experience** ("how you run everything") so JANET Web can reproduce it.
 
 ---
 
@@ -54,7 +54,7 @@ Role split: **Purple owns structure** (brackets, primary buttons, icons). **Gold
 | `cBorder` / `cBorderStrong` | 38,34,52 / 52,46,72 | borders |
 | `cStripeAmb` / `cStripeBlk` | 140,100,220 / 8,8,12 | diagonal hatch on stripe buttons |
 
-**Fonts:** Display/data = `Cascadia Mono` (Bold 18/13/10 for display, 9/8 for eyebrows, 10/9/8 plain for mono data). Body/UI = `Segoe UI Variable Display` (10 regular/bold, 9 caption, 8 tiny). Tool-card name = Segoe UI Variable Display 11.5 Bold. Icons = `Segoe MDL2 Assets` (14/20/11). For web (JANET TWO): map Cascadia Mono -> a mono webfont (e.g. Cascadia Code/JetBrains Mono), Segoe UI Variable -> system UI stack, MDL2 glyphs -> an icon set.
+**Fonts:** Display/data = `Cascadia Mono` (Bold 18/13/10 for display, 9/8 for eyebrows, 10/9/8 plain for mono data). Body/UI = `Segoe UI Variable Display` (10 regular/bold, 9 caption, 8 tiny). Tool-card name = Segoe UI Variable Display 11.5 Bold. Icons = `Segoe MDL2 Assets` (14/20/11). For web (JANET Web): map Cascadia Mono -> a mono webfont (e.g. Cascadia Code/JetBrains Mono), Segoe UI Variable -> system UI stack, MDL2 glyphs -> an icon set.
 
 **Signature visual motifs to reproduce in CSS:**
 - **Corner-bracket cards** -- L-shaped 16px brackets in all four corners (purple when healthy, red when missing), 2px thick; optional `/ HEADER` eyebrow in gold with a dotted underline divider at y~40.
@@ -89,7 +89,7 @@ The landing screen is a **single vertical scrolling list of full-width tool card
 
 **Empty state:** if zero tools registered, a single orange corner-bracket "NO TOOLS REGISTERED" card explains to use Discover or Config.
 
-**For JANET TWO (web):** reproduce as a scrolling column of full-width cards with the bracket/eyebrow/glyph/dot/description/path/LAUNCH anatomy. LAUNCH = navigate to that tool's SPA page (instead of spawning a process). Preserve the live clock, operator/station line, RUN/active counter, and TOOLS/MISSING status bar.
+**For JANET Web (web):** reproduce as a scrolling column of full-width cards with the bracket/eyebrow/glyph/dot/description/path/LAUNCH anatomy. LAUNCH = navigate to that tool's SPA page (instead of spawning a process). Preserve the live clock, operator/station line, RUN/active counter, and TOOLS/MISSING status bar.
 
 ## 4. Tool registry -- schema, versioned filenames, resolution
 
@@ -125,7 +125,7 @@ The landing screen is a **single vertical scrolling list of full-width tool card
 - **Auto-discover** (`Discover-Scripts`): scans `Tools\` + root for unregistered `*.ps1` (dedup by exact name and by version-base), reads the first 30 lines of each to pull a description from `Purpose:` / `Description:` / `SYNOPSIS`, and offers them in a checklist to append to config.
 - **Archive** (`Get-ArchivedTools`): scans `Tools\Archive\*.ps1`, lists name/file/modified-date, and can launch any archived script directly by absolute path.
 
-**For JANET TWO:** keep the same registry shape (`Name`/`Description`/`Category` + a route/engine reference instead of a `.ps1` filename -- e.g. one `.psm1` engine per tool, matching the existing JANET ONE pattern). Preserve category-as-grouping, the long descriptions verbatim, and a config/registry editor.
+**For JANET Web:** keep the same registry shape (`Name`/`Description`/`Category` + a route/engine reference instead of a `.ps1` filename -- e.g. one `.psm1` engine per tool, matching the existing JANET ONE pattern). Preserve category-as-grouping, the long descriptions verbatim, and a config/registry editor.
 
 ## 5. Navigation & glyph mapping
 
@@ -152,9 +152,9 @@ The landing screen is a **single vertical scrolling list of full-width tool card
 
 **Admin/operator session:** identity is the Windows `$env:USERNAME` / `$env:COMPUTERNAME` shown in the header and stamped into every log line (no separate login). The "admin session" is effectively the shared-credential handoff that flows the operator's elevated/CAC creds down to every tool launched in that session.
 
-**For JANET TWO (web):** the credential handoff maps to a **server-side session** that holds the operator's creds once (set via a "Set Creds" action) and passes them to each tool's engine call -- same "set once, every tool inherits, scrubbed on logout" contract. Keep per-user/per-day server logging with the same action vocabulary and an in-app log viewer, the operator/station banner, the running/active indicator, and the Config + Discover + Archive utilities (Discover/Archive can map to "register a new engine" / "run a retired engine").
+**For JANET Web (web):** the credential handoff maps to a **server-side session** that holds the operator's creds once (set via a "Set Creds" action) and passes them to each tool's engine call -- same "set once, every tool inherits, scrubbed on logout" contract. Keep per-user/per-day server logging with the same action vocabulary and an in-app log viewer, the operator/station banner, the running/active indicator, and the Config + Discover + Archive utilities (Discover/Archive can map to "register a new engine" / "run a retired engine").
 
-## 7. JANET TWO parity checklist (per the JANET ONE parity rule)
+## 7. JANET Web parity checklist (per the JANET ONE parity rule)
 
 Reproduce, suite-level: the long suite name + `/`-delimited window titling; Purple+Gold-on-Black theme with corner-bracket cards, stripe primary buttons, pulse dots, grid-paper bg, header glow, gold version chip; the operator/station banner + live clock; the **scrolling full-width tool-card list** (NOT a grid) with eyebrow/index/glyph/dot/description/path/LAUNCH; the registry schema (`Name`/`Description`/`Category` + engine ref) with category grouping and version-aware resolution + self-heal; set-once shared-credential session inherited by every tool and scrubbed on exit; per-user/per-day logging + in-app log viewer; RUN/active tracking + Stop-all; and the Config editor / Discover / Archive utilities. Mirror feature-for-feature -- no partial port.
 
@@ -162,9 +162,9 @@ Reproduce, suite-level: the long suite name + `/`-delimited window titling; Purp
 
 # Part B - JANET ONE architecture: KEEP vs REBUILD
 
-# JANET ONE -- study for JANET TWO (KEEP the plumbing, REBUILD the per-tool UI)
+# JANET ONE -- study for JANET Web (KEEP the plumbing, REBUILD the per-tool UI)
 
-JANET ONE is a zero-dependency, pure-PowerShell local web re-front of the whole JANET desktop suite. The whole stack is worth reusing wholesale. What lost the desktop usability is one specific layer: the **manifest-driven generic renderer** in `web/js/app.js` that turns every tool/action into the same cookie-cutter "form on top, grid below, log at bottom." JANET TWO should keep the entire server/auth/logging/streaming backbone and the Emit/manifest contract, and replace only the generic SPA renderer with faithful, bespoke per-tool views.
+JANET ONE is a zero-dependency, pure-PowerShell local web re-front of the whole JANET desktop suite. The whole stack is worth reusing wholesale. What lost the desktop usability is one specific layer: the **manifest-driven generic renderer** in `web/js/app.js` that turns every tool/action into the same cookie-cutter "form on top, grid below, log at bottom." JANET Web should keep the entire server/auth/logging/streaming backbone and the Emit/manifest contract, and replace only the generic SPA renderer with faithful, bespoke per-tool views.
 
 Key files (all under `X:\J.A.N.E.T ONE\`):
 - `Start-JanetOne.ps1` -- launcher: mints per-launch token, conhost pin (so the smartcard picker renders), Unblock-File self-heal, loopback bind, opens browser to `http://127.0.0.1:<port>/?t=<token>`.
@@ -246,15 +246,15 @@ Each tool is `modules\JanetOne.<id>.psm1` exporting exactly two functions:
 # KEEP vs REBUILD (the candid call)
 
 ## KEEP wholesale (proven, reusable backbone)
-The entire non-UI stack is excellent and should be carried into JANET TWO unchanged or near-unchanged: zero-dependency pure-PowerShell HttpListener server, loopback bind, per-launch token with constant-time compare, the runspace-worker + `/events?since=` polling streaming model (incl. the status-before-events ordering, generation guards, reaper, stateful per-tool runspaces, graceful `__job` cancel), the central JANET CSV logging bridge (share/schema/spool/replay), the credential/session model (server-side smartcard picker, in-memory only, ack+cred destructive gate), file upload + server-side browse, and the **manifest + Emit event contract** (`status/progress/row/log/audit/run/final` + `__job`). The plug-in boundary (`Get-JanetToolManifest` / `Invoke-JanetToolAction`) is the right seam -- keep it; the engines don't change.
+The entire non-UI stack is excellent and should be carried into JANET Web unchanged or near-unchanged: zero-dependency pure-PowerShell HttpListener server, loopback bind, per-launch token with constant-time compare, the runspace-worker + `/events?since=` polling streaming model (incl. the status-before-events ordering, generation guards, reaper, stateful per-tool runspaces, graceful `__job` cancel), the central JANET CSV logging bridge (share/schema/spool/replay), the credential/session model (server-side smartcard picker, in-memory only, ack+cred destructive gate), file upload + server-side browse, and the **manifest + Emit event contract** (`status/progress/row/log/audit/run/final` + `__job`). The plug-in boundary (`Get-JanetToolManifest` / `Invoke-JanetToolAction`) is the right seam -- keep it; the engines don't change.
 
 ## REBUILD (what made the UI "too simple")
 Replace the **generic manifest-driven renderer** with faithful per-tool views. Specifically:
 1. **One cookie-cutter form+grid per action** -- kill the assumption that every action = a flat field form over a single table. Build bespoke layouts per tool that reproduce the desktop's panels, multi-pane workflows, and side-by-side controls.
 2. **Bespoke desktop tabs, not a generic rail** -- each tool gets its own real tabbed workspace mirroring its WinForms TabControl (WPT's Bulk Scan & Patch toolbar, Reports' 9 sections, STIG's Scan/Apply/Verify/CKLB/Reports, Restart's Targets/Schedule/Run-Results), with the tab's own toolbar of context buttons -- not auto-derived from `TAB_GROUPS` + `columns`.
-3. **Regex-colored generic grids** -- `genericCell` colors cells by guessing from the column name. Replace with per-tool grid components that know their columns, types, drill-downs, and row actions (the hand-written `WPT_*_SPEC`s prove the pattern; JANET TWO must make that the rule, not the exception).
-4. **The "activity-run feel"** -- the desktop tools feel like a live operation console (rich per-host detail, structured inspectors, contextual act-on-selection). Only ACAS Remediation and WPT Bulk-Scan got that here. Every tool in JANET TWO needs its bespoke run/results experience, not the shared form->grid->log shell.
+3. **Regex-colored generic grids** -- `genericCell` colors cells by guessing from the column name. Replace with per-tool grid components that know their columns, types, drill-downs, and row actions (the hand-written `WPT_*_SPEC`s prove the pattern; JANET Web must make that the rule, not the exception).
+4. **The "activity-run feel"** -- the desktop tools feel like a live operation console (rich per-host detail, structured inspectors, contextual act-on-selection). Only ACAS Remediation and WPT Bulk-Scan got that here. Every tool in JANET Web needs its bespoke run/results experience, not the shared form->grid->log shell.
 5. **Shared-Targets hoisting** flattens tools whose original had purpose-built target panels (Restart's Targets tab, DHCP's connect/scope panel, AD Search's mode radios). Rebuild those as the tool's own first-class target UI.
-6. **Manifest-as-UI** -- inputs/columns drive the whole UI, so a tool can only be as expressive as the generic input vocabulary. JANET TWO should let each tool own its view (the manifest can still describe actions for routing/audit), so nothing is clamped to the lowest-common-denominator form.
+6. **Manifest-as-UI** -- inputs/columns drive the whole UI, so a tool can only be as expressive as the generic input vocabulary. JANET Web should let each tool own its view (the manifest can still describe actions for routing/audit), so nothing is clamped to the lowest-common-denominator form.
 
-Net: JANET TWO = JANET ONE's server/auth/logging/streaming/contract **kept intact**, with the SPA's single generic renderer **swapped for a bespoke view per tool** that restores the desktop tabs, workflows, and console feel.
+Net: JANET Web = JANET ONE's server/auth/logging/streaming/contract **kept intact**, with the SPA's single generic renderer **swapped for a bespoke view per tool** that restores the desktop tabs, workflows, and console feel.

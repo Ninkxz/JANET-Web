@@ -6,7 +6,7 @@
 #  the manifest contract and the mode -> IsRebootIfNeeded decision.
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.wpt.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
 
 Describe 'WPT patch posture (mode)' {
 

@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.pkginstall.psm1  -  Remote Package Installer engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.pkginstall.psm1  -  Remote Package Installer engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\RemotePackageInstaller.ps1 (v2.5.4) engine reused, WinForms
 #  layer dropped. Deploys software packages (PSADT Deploy-Application.ps1) OR raw

@@ -1,4 +1,4 @@
-# JANET TWO - UI Rebuild Spec: Windows Upgrade Tool
+# JANET Web - UI Rebuild Spec: Windows Upgrade Tool
 
 > Engine is re-forked from `fork-source\Tools`; THIS is the faithful FRONTEND to reproduce (screens, run model, live activity view).
 
@@ -10,7 +10,7 @@ The Windows Upgrade Tool is a single-window WinForms admin console (JANET dark p
 
 # Windows Upgrade Tool - UI/UX Rebuild Spec (id: winupgrade)
 
-Source: `X:\J.A.N.E.T\Tools\WindowsUpgradeTool_0.1.0.ps1` (v0.1.0 "bench build"). This is the desktop WinForms front end to recreate faithfully for JANET TWO (pure-PowerShell web-local). The engine is re-forked separately; this spec captures the operator-facing window and the live run experience.
+Source: `X:\J.A.N.E.T\Tools\WindowsUpgradeTool_0.1.0.ps1` (v0.1.0 "bench build"). This is the desktop WinForms front end to recreate faithfully for JANET Web (pure-PowerShell web-local). The engine is re-forked separately; this spec captures the operator-facing window and the live run experience.
 
 ## 1. Window + navigation layout
 
@@ -86,7 +86,7 @@ Preserve: the Scenario->Guide hand-holding and the per-operation plain-language 
 
 ## 7. v0.2.0 additions - upgrade-failure diagnosis + memory-exhaustion fix
 
-Engine `JanetTwo.winupgrade.psm1` is now v0.2.0; desktop source is `WindowsUpgradeTool_0.2.0.ps1`. Two new operations and a Pin option were added; both UIs implement them identically.
+Engine `JanetWeb.winupgrade.psm1` is now v0.2.0; desktop source is `WindowsUpgradeTool_0.2.0.ps1`. Two new operations and a Pin option were added; both UIs implement them identically.
 
 - **Pin** gained a **"Also trigger a Windows Update scan after pinning"** checkbox (`runWu`). The Pin guide now also names the equivalent gpedit policy: Computer Configuration > Administrative Templates > Windows Components > Windows Update > Manage updates offered from Windows Update > **Select the Target Feature Update** (Enabled, Product + Version). After writing the policy, if ticked, the worker kicks the WU agent (`Start-ScheduledTask '\Microsoft\Windows\WindowsUpdate\' 'Scheduled Start'`, UsoClient `StartScan` fallback) - the "then run Windows Update" step. A trigger failure never fails the pin.
 - **Check Upgrade Errors** (`checkupgrade`, read-only, exposed via a **Check Errors** button next to Test Ping). Reads `C:\$WINDOWS.~BT\Sources\Panther\setuperr.log` over WinRM (shared FileStream so an in-flight upgrade does not lock it out) and classifies it: **MEMORY** (out-of-memory build failure - E_OUTOFMEMORY `0x8007000E` / out-of-memory text; amber), **ERRORS** (other setup error; amber), **CLEAN** (log present, no errors; green), **NO LOG** (no recent in-place upgrade attempt; grey), **FAILED** (read error). No confirm, no admin-session guard, **no audit row**.

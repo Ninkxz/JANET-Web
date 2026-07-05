@@ -4,7 +4,7 @@
 #  the point of remediation.
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.acas.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Force -PassThru
 
 Describe 'ACAS KEV badging helpers' {
 

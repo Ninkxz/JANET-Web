@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-#  JanetTwo.stig.psm1  ->  STIG Checker (read-only STIG compliance scanner)
+#  JanetWeb.stig.psm1  ->  STIG Checker (read-only STIG compliance scanner)
 #
-#  Net-new JANET TWO tool (no desktop twin), pattern-cloned from JanetTwo.c2c.psm1.
+#  Net-new JANET Web tool (no desktop twin), pattern-cloned from JanetWeb.c2c.psm1.
 #  Fans out ONE consolidated read-only WinRM probe per host and scores a set of
 #  Windows 10/11 member-server-safe STIG REGISTRY/POLICY checks defined in the
 #  editable JanetLocal\stig-baseline.json. It CHANGES NOTHING (reads registry

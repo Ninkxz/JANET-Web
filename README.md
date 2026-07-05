@@ -1,9 +1,9 @@
-# J.A.N.E.T. TWO
+# JANET Web
 
 A pure-PowerShell, **zero-outside-dependency**, web-local re-front of the whole JANET
 sysadmin tool suite -- the successor to **JANET ONE**.
 
-## Why JANET TWO exists
+## Why JANET Web exists
 
 JANET ONE proved the architecture (a `System.Net.HttpListener` server + static
 HTML/CSS/JS + one engine module per tool, no external software -- the key requirement
@@ -14,7 +14,7 @@ JANET tools** -- their bespoke tabbed screens, the way you run things, and espec
 live **activity-run** experience (activity log + colour-coded results grid + progress +
 per-host rows).
 
-**JANET TWO keeps the proven backend/plumbing but rebuilds the frontend so each tool
+**JANET Web keeps the proven backend/plumbing but rebuilds the frontend so each tool
 gets a FAITHFUL, bespoke per-tool view that mirrors its desktop WinForms tool** -- the
 screens, tabs, run controls, and the live activity/results view -- tool by tool. No
 generic renderer.
@@ -41,13 +41,13 @@ generic renderer.
 ## Layout
 
 ```
-J.A.N.E.T TWO\
+JANET Web\
   fork-source\            Copied-in JANET tools (the fork basis + UI reference)
     JANET.ps1             The desktop hub/launcher (suite-level UX reference)
     JANET_Config.json     Desktop tool registry
     Tools\                The 12 desktop WinForms tools (.ps1)
   docs\
-    HANDOFF.md            >> The build guide (how to build JANET TWO). START HERE.
+    HANDOFF.md            >> The build guide (how to build JANET Web). START HERE.
     REVIEW.md             What makes JANET and JANET ONE tick (review notes)
     ui-specs\             One faithful UI-rebuild spec per tool (<tool>.md)
   server\, web\, modules\   The built runtime: HttpListener server, static SPA, one engine module per tool

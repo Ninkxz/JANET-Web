@@ -1,6 +1,6 @@
-# JANET TWO - UI Spec: c2c (C2C Readiness)
+# JANET Web - UI Spec: c2c (C2C Readiness)
 
-> Net-new JANET TWO tool (no desktop twin). Read-only Comply-to-Connect quarantine
+> Net-new JANET Web tool (no desktop twin). Read-only Comply-to-Connect quarantine
 > predictor. This is a standard `stream-table` tool: paste targets, run one action,
 > watch per-host verdict rows stream in and the full per-check report fill the
 > activity log. Reuse the shared stream-table view (same as wpt / winupgrade /

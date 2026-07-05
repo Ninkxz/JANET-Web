@@ -1,4 +1,4 @@
-# J.A.N.E.T. TWO - Session 5 Handoff (desktop-parity restoration + ponytail cut + launcher icons)
+# JANET Web - Session 5 Handoff (desktop-parity restoration + ponytail cut + launcher icons)
 
 State as of 2026-06-20. This session ran a full desktop->TWO **parity audit** (all 11
 tools vs their desktop originals), restored every high/medium-value gap it found,
@@ -81,7 +81,7 @@ gaps now closed):
 4. Do NOT modify `X:\J.A.N.E.T` or `X:\J.A.N.E.T ONE`. Shared SMB drive - coordinate destructive ops.
 5. Push with a one-time `git -c http.extraHeader="Authorization: Basic <base64 bth0mp:token>"
    push origin main`; keep creds OUT of `.git/config`. Owner pastes the token per session.
-6. Launch via `Launch JANET TWO.cmd`.
+6. Launch via `Launch JANET Web.cmd`.
 
 ## LESSONS (new this session)
 

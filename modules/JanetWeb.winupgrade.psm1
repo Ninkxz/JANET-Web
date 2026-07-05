@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.winupgrade.psm1  -  Windows Upgrade tool engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.winupgrade.psm1  -  Windows Upgrade tool engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from dev\WindowsUpgradeTool_0.1.0.ps1 (engine reused, WinForms layer
 #  dropped). Drives Windows feature-update work across many hosts over WinRM,
@@ -121,7 +121,7 @@ function Get-JanetToolManifest {
                 columns      = @('Host','Ping','Status','Detail')
                 inputs       = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='cabPath'; label='CAB/MSU path (on this admin box / a share)'; type='text'; required=$false; help='Full local or UNC path to the .cab/.msu readable by the machine running JANET TWO. OR use Browse below to pick/upload one. Copied to C:\Temp on each target, then installed with DISM. A UNC \\server\share path must be readable by the target machine accounts (the in-session pull is a second hop); otherwise it falls back to copying via the admin uplink.' },
+                    @{ name='cabPath'; label='CAB/MSU path (on this admin box / a share)'; type='text'; required=$false; help='Full local or UNC path to the .cab/.msu readable by the machine running JANET Web. OR use Browse below to pick/upload one. Copied to C:\Temp on each target, then installed with DISM. A UNC \\server\share path must be readable by the target machine accounts (the in-session pull is a second hop); otherwise it falls back to copying via the admin uplink.' },
                     @{ name='cabUpload'; label='...or Browse / drag a .cab/.msu to upload'; type='file'; required=$false; filter='Update packages (*.cab;*.msu)|*.cab;*.msu|All files (*.*)|*.*'; help='Pick a package in your browser; it uploads to a server temp path that the engine then copies to each target. For very large packages, prefer the path field above pointed at a share (1 GB upload cap).' },
                     @{ name='reboot'; label='Reboot target ~10s after a successful install'; type='bool'; required=$false; default=$true },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
@@ -526,7 +526,7 @@ $script:WinUpgradeWorker = {
                                     try {
                                         $psi = New-Object System.Diagnostics.ProcessStartInfo
                                         $psi.FileName               = 'shutdown.exe'
-                                        $psi.Arguments              = '/r /t 10 /f /c "JANET TWO Windows Upgrade: feature update installed"'
+                                        $psi.Arguments              = '/r /t 10 /f /c "JANET Web Windows Upgrade: feature update installed"'
                                         $psi.UseShellExecute        = $false
                                         $psi.RedirectStandardOutput = $true
                                         $psi.RedirectStandardError  = $true
@@ -657,7 +657,7 @@ $script:WinUpgradeWorker = {
                             try {
                                 $psi = New-Object System.Diagnostics.ProcessStartInfo
                                 $psi.FileName               = 'shutdown.exe'
-                                $psi.Arguments              = '/r /t 10 /f /c "JANET TWO Windows Upgrade: page file resized"'
+                                $psi.Arguments              = '/r /t 10 /f /c "JANET Web Windows Upgrade: page file resized"'
                                 $psi.UseShellExecute        = $false
                                 $psi.RedirectStandardOutput = $true
                                 $psi.RedirectStandardError  = $true

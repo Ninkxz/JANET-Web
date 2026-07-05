@@ -1,4 +1,4 @@
-# JANET TWO - UI Rebuild Spec: message
+# JANET Web - UI Rebuild Spec: message
 
 > Engine is re-forked from `fork-source\Tools`; THIS is the faithful FRONTEND to reproduce (screens, run model, live activity view).
 
@@ -79,7 +79,7 @@ Button Disabled; loop hosts inline invoking `$SendScriptBlock` directly with `Do
 - **Activity log** `RichTextBox` (read-only, OutputBg `#06060A`, default purple text, mono, borderless): `Log-Activity` prefixes a dim grey `[HH:mm:ss]` then the message in a **semantic colour** (gold banner / cyan mode / green delivered / red failed / dim diag / amber cancelled / accent dispatch). Auto-scrolls. Right-click menu: **Clear** (amber), **Copy All** (accent).
 - **Log toolbar**: Clear Log, Copy All, Save Log... (SaveFileDialog -> UTF8 `.log`, default `JRMT_ActivityLog_<ts>.log`).
 
-**There is no on-screen grid.** Per-host rows live in `$script:SendResults` (ArrayList) and become the XLSX. For JANET TWO, preserve the streaming colour log + climbing tiles + progress + send->cancel toggle; an on-screen results table mirroring the XLSX columns with green/red row tinting is an acceptable enhancement but the log is canonical.
+**There is no on-screen grid.** Per-host rows live in `$script:SendResults` (ArrayList) and become the XLSX. For JANET Web, preserve the streaming colour log + climbing tiles + progress + send->cancel toggle; an on-screen results table mirroring the XLSX columns with green/red row tinting is an acceptable enhancement but the log is canonical.
 
 ## 4. Targets / Credentials / Shared State
 - **Targets** are a single free-text box (paste/import), parsed/deduped by `Get-Targets`; the live count drives the green/grey label.

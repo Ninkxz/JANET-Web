@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-#  JanetTwo.c2c.psm1  ->  C2C Readiness (Comply-to-Connect quarantine predictor)
+#  JanetWeb.c2c.psm1  ->  C2C Readiness (Comply-to-Connect quarantine predictor)
 #
-#  Net-new JANET TWO tool (no desktop twin). Fans out ONE consolidated read-only
+#  Net-new JANET Web tool (no desktop twin). Fans out ONE consolidated read-only
 #  WinRM probe across the targets and PREDICTS whether each host would be
 #  QUARANTINED under AFI/MPTO Comply-to-Connect rule 3.B.2.B. It CHANGES NOTHING
 #  and never needs an admin session (read-only, like the WPT ping / bulk-scan and

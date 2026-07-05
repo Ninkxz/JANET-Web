@@ -1,7 +1,7 @@
-# JANET TWO + SECRET - Session Handoff (2026-06-28/29)
+# JANET Web + SECRET - Session Handoff (2026-06-28/29)
 
 This documents a full working session on the two web-local JANET forks:
-- **JANET TWO** - `X:\J.A.N.E.T TWO` (NIPR / AFNET; has SCCM/MECM). Git branch `main`, Gitea remote.
+- **JANET Web** - `X:\JANET Web` (NIPR / AFNET; has SCCM/MECM). Git branch `main`, Gitea remote.
 - **JANET SECRET** - `X:\shh-JANET` (SIPR / SECRET; NO SCCM/MECM/WSUS). Git branch `master`, **local-only (no remote)**.
 
 Everything below is **committed locally** and **runtime-untested** - it needs validation on a real on-network (SIPR/AFNET) host before operational use. All code passed: PS 5.1 AST parse + UTF-8 BOM + ASCII-only body + `node --check`, and adversarial Opus review.
@@ -36,7 +36,7 @@ From a 60-capability re-audit of the PSAB PIRS console (everything previously ad
 **SECRET (`X:\shh-JANET`, branch master, local-only):**
 - `bc46416` theme  -  `2d89db9` PIRS r2  -  `283b151` theme-correctness (W1)  -  `12a4b6f` tools hardening (W2)
 
-**TWO (`X:\J.A.N.E.T TWO`, branch main):**
+**TWO (`X:\JANET Web`, branch main):**
 - `858c07e` theme  -  `c7a97a3` PIRS r2  -  `c4ca946` theme-correctness (W1)  -  `e3f69fe` tools hardening (W2)
 
 Tool versions bumped: TWO wpt 6.5.28 / SEC wpt 6.5.27; TWO restart 1.5.0-beta6 / SEC restart 1.5.0-beta5.
@@ -47,7 +47,7 @@ Tool versions bumped: TWO wpt 6.5.28 / SEC wpt 6.5.27; TWO restart 1.5.0-beta6 /
 
 - **Runtime-untested.** All changes are static-verified + reviewed; the remote-exec paths (WinRM, CIM, reboot/firmware/uninstall) need on-network validation.
 - **Git sync:** SECRET has NO remote (local commits only). TWO has a Gitea remote (`100.119.34.30:3000/bth0mp/J.A.N.E.T-TWO`) but **push needs your token** - not pushed.
-- **TWO has 3 pre-existing FOREIGN uncommitted files** left untouched on purpose (verified 2-day-old, not from this session): `modules/JanetTwo.beta.psm1`, `web/js/views/beta.view.js`, `web/js/help-content.js`. Review/commit them on their own merits.
+- **TWO has 3 pre-existing FOREIGN uncommitted files** left untouched on purpose (verified 2-day-old, not from this session): `modules/JanetWeb.beta.psm1`, `web/js/views/beta.view.js`, `web/js/help-content.js`. Review/commit them on their own merits.
 
 ---
 

@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-#  JanetTwo.biosfirmware.psm1  ->  BIOS Firmware (compliance scan)
+#  JanetWeb.biosfirmware.psm1  ->  BIOS Firmware (compliance scan)
 #
-#  Net-new JANET TWO tool (no desktop twin). Fans out a read-only WinRM scan of
+#  Net-new JANET Web tool (no desktop twin). Fans out a read-only WinRM scan of
 #  Win32_BIOS + Win32_ComputerSystem across targets, looks each model up in a
 #  per-model target-firmware baseline, and scores Current / Outdated / Unknown.
 #  Idea lifted from the DoW Baseline Configuration Manager's BIOS report.

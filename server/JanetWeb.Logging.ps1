@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  JanetTwo.Logging.ps1  -  centralized-logging bridge for J.A.N.E.T. TWO
+#  JanetWeb.Logging.ps1  -  centralized-logging bridge for JANET Web
 #
 #  Logs EXACTLY like the desktop tools (the shared JANET LOGGING BLOCK):
 #    * Same share root          : \\dm-tn-01\sh-usafe-automation$\JANET\Logs
@@ -8,18 +8,18 @@
 #    * Same headers + ValidateSets (TouchHost/VulnPatched, Success/Failure/Skipped)
 #    * Same local spool + replay : <JANET root>\JanetLocal\... captured when the
 #                                  share is down, replayed to the share next launch.
-#  So an action done through JANET TWO lands in the same folder its desktop twin
+#  So an action done through JANET Web lands in the same folder its desktop twin
 #  would write to (acas -> ACAS_Nemesis, wpt -> WPT, ...). Context-based (no
 #  ambient session) so it dot-sources safely into the server AND worker runspaces.
 # =============================================================================
 
 # The production share the desktop tools log to (NOT a JANET-TWO subfolder).
-$script:JanetTwoShareRoot = '\\dm-tn-01\sh-usafe-automation$\JANET\Logs'
+$script:JanetWebShareRoot = '\\dm-tn-01\sh-usafe-automation$\JANET\Logs'
 
-# JANET TWO tool id -> the desktop tool's JANET log folder name, so rows merge
+# JANET Web tool id -> the desktop tool's JANET log folder name, so rows merge
 # with the desktop tools' audit trail per tool. (Names from each tool's
 # Start-JanetSession -Tool '<name>'.)
-$script:JanetTwoToolMap = @{
+$script:JanetWebToolMap = @{
     acas       = 'ACAS_Nemesis'
     wpt        = 'WPT'
     reports    = 'Reports'
@@ -40,7 +40,7 @@ $script:JanetTwoToolMap = @{
     # underscore names (same rationale as winupgrade above). NOTE: this
     # convention is NOT retroactive - the three earlier native-only tools
     # (kev, c2c, biosfirmware) intentionally have no map entry, so
-    # Resolve-JanetTwoToolName falls through to their raw lowercase id
+    # Resolve-JanetWebToolName falls through to their raw lowercase id
     # (Logs\kev, Logs\c2c, Logs\biosfirmware). Their rows already live under
     # those ids; adding entries here would split existing logs, so they stay.
     history    = 'Patch_History'
@@ -48,22 +48,22 @@ $script:JanetTwoToolMap = @{
     patchlib   = 'Patch_Content'
 }
 
-function Resolve-JanetTwoToolName {
+function Resolve-JanetWebToolName {
     param([string]$ToolId)
-    if ($ToolId -and $script:JanetTwoToolMap.ContainsKey($ToolId)) { return $script:JanetTwoToolMap[$ToolId] }
+    if ($ToolId -and $script:JanetWebToolMap.ContainsKey($ToolId)) { return $script:JanetWebToolMap[$ToolId] }
     if ([string]::IsNullOrWhiteSpace($ToolId)) { return 'JANET-TWO' }
     return ($ToolId -replace '[\\/:*?"<>|]', '_')
 }
 
-function Get-JanetTwoUserFolderName {
+function Get-JanetWebUserFolderName {
     # Nemesis format "{user} - {COMPUTER}_{user}" - identical to the desktop tools'
-    # Get-JanetUserFolderName so JANET TWO writes into the same per-operator folder.
+    # Get-JanetUserFolderName so JANET Web writes into the same per-operator folder.
     $u = $env:USERNAME;     if ([string]::IsNullOrWhiteSpace($u)) { $u = 'Unknown' }
     $c = $env:COMPUTERNAME; if ([string]::IsNullOrWhiteSpace($c)) { $c = 'UnknownPC' }
     return (("$u - ${c}_$u") -replace '[\\/:*?"<>|]', '_').Trim()
 }
 
-function Get-JanetTwoOperatorIdentity {
+function Get-JanetWebOperatorIdentity {
     # Desktop-parity operator identity (WPT Get-JanetOperatorIdentity / ACAS
     # Resolve-NemOperatorIdentity): AD displayName looked up via DirectorySearcher,
     # then [adsi] LDAP, then bare-username fallthrough. Each strategy is
@@ -119,7 +119,7 @@ function Get-JanetTwoOperatorIdentity {
     return @{ Edipi = $edipi; DisplayName = $displayName; Operator = $operator; NemesisFolder = $nemFolder }
 }
 
-function Test-JanetTwoTcpPort {
+function Test-JanetWebTcpPort {
     # One bounded TCP connect probe (shared by the share / host reachability gates).
     param([string]$ComputerName, [int]$Port = 445, [int]$TimeoutMs = 1500)
     if ([string]::IsNullOrWhiteSpace($ComputerName)) { return $false }
@@ -132,7 +132,7 @@ function Test-JanetTwoTcpPort {
     return $false
 }
 
-function Test-JanetTwoShare {
+function Test-JanetWebShare {
     # Quick reachability gate (probe the share server first so an unreachable share
     # doesn't hang on a 30s Test-Path), mirroring the desktop Test-JanetNetwork.
     param([string]$Root)
@@ -143,34 +143,34 @@ function Test-JanetTwoShare {
         # it, and an ICMP false-UP (445 filtered but ping open) would defeat this anti-
         # hang pre-probe and let Test-Path hang on SMB. 445 down -> unreachable; audit
         # logging spools local + replays, so nothing is lost.
-        if (-not (Test-JanetTwoTcpPort -ComputerName $server -Port 445)) { return $false }
+        if (-not (Test-JanetWebTcpPort -ComputerName $server -Port 445)) { return $false }
         return (Test-Path -LiteralPath $Root -ErrorAction SilentlyContinue)
     } catch { return $false }
 }
 
-function Test-JanetTwoHostReachable {
+function Test-JanetWebHostReachable {
     # AFNET-safe host reachability for the SMB log/archive share gates: probe SMB/445
     # over TCP only. NEVER ICMP (AFNET filters it, and an ICMP false-UP would defeat
     # the anti-hang pre-probe). 445 unreachable -> caller spools local + replays.
     param([string]$ComputerName)
-    return (Test-JanetTwoTcpPort -ComputerName $ComputerName -Port 445)
+    return (Test-JanetWebTcpPort -ComputerName $ComputerName -Port 445)
 }
 
 # Cached (~30s) ping gate for the per-row share writers: a dead share is detected
 # cheaply before each append attempt without paying a probe per row.
-$script:JanetTwoShareProbeAt = [datetime]::MinValue
-$script:JanetTwoShareProbeOk = $false
-function Test-JanetTwoShareCached {
+$script:JanetWebShareProbeAt = [datetime]::MinValue
+$script:JanetWebShareProbeOk = $false
+function Test-JanetWebShareCached {
     param([string]$Root)
     $now = Get-Date
-    if (($now - $script:JanetTwoShareProbeAt).TotalSeconds -lt 30) { return $script:JanetTwoShareProbeOk }
-    $ok = [bool](Test-JanetTwoShare -Root $Root)
-    $script:JanetTwoShareProbeAt = $now
-    $script:JanetTwoShareProbeOk = $ok
+    if (($now - $script:JanetWebShareProbeAt).TotalSeconds -lt 30) { return $script:JanetWebShareProbeOk }
+    $ok = [bool](Test-JanetWebShare -Root $Root)
+    $script:JanetWebShareProbeAt = $now
+    $script:JanetWebShareProbeOk = $ok
     return $ok
 }
 
-function Test-JanetTwoShareWritable {
+function Test-JanetWebShareWritable {
     # WRITE-probe the share (not just listability): Test-Path returns true when a
     # share is visible even if the ACL blocks writes, so drop a GUID sentinel to
     # confirm rw access, then sweep orphan sentinels from prior sessions whose
@@ -178,7 +178,7 @@ function Test-JanetTwoShareWritable {
     # Returns @{ Writable=$bool; Reason='' }.
     param([string]$Root)
     if ([string]::IsNullOrWhiteSpace($Root)) { return @{ Writable=$false; Reason='no share root' } }
-    if (-not (Test-JanetTwoShare -Root $Root)) { return @{ Writable=$false; Reason='share unreachable' } }
+    if (-not (Test-JanetWebShare -Root $Root)) { return @{ Writable=$false; Reason='share unreachable' } }
     try {
         if (-not (Test-Path -LiteralPath $Root -ErrorAction SilentlyContinue)) {
             try { New-Item -ItemType Directory -Path $Root -Force -ErrorAction Stop | Out-Null } catch { return @{ Writable=$false; Reason='cannot create log root' } }
@@ -198,11 +198,11 @@ function Test-JanetTwoShareWritable {
     } catch { return @{ Writable=$false; Reason=$_.Exception.Message } }
 }
 
-function New-JanetTwoLogContext {
+function New-JanetWebLogContext {
     <#  Per-session logging context (synchronized so it's shared across the
         action's worker runspaces). JanetRoot is the JANET install root (peer to
         Logs\ and Tools\) where the local JanetLocal spool lives, matching the
-        desktop tools; pass Split-Path -Parent of the JANET TWO folder. #>
+        desktop tools; pass Split-Path -Parent of the JANET Web folder. #>
     param(
         [string]$Operator  = '',
         [string]$Asi       = '',
@@ -211,12 +211,12 @@ function New-JanetTwoLogContext {
     )
     # Resolve "EDIPI - DisplayName" once per session, like the desktop tools. A
     # caller-passed bare $env:USERNAME (the old default) is upgraded too.
-    $ident = Get-JanetTwoOperatorIdentity
+    $ident = Get-JanetWebOperatorIdentity
     if ([string]::IsNullOrWhiteSpace($Operator) -or $Operator -eq $env:USERNAME) { $Operator = [string]$ident.Operator }
-    $netRoot   = $script:JanetTwoShareRoot
+    $netRoot   = $script:JanetWebShareRoot
     # WRITE-probe (not just reachability) so a visible-but-read-only share drops us
     # to local-only with an operator-facing reason, like the desktop tools.
-    $probe     = Test-JanetTwoShareWritable -Root $netRoot
+    $probe     = Test-JanetWebShareWritable -Root $netRoot
     $reachable = [bool]$probe.Writable
 
     # Local spool: <JANET root>\JanetLocal (exactly like the desktop tools). If we
@@ -234,7 +234,7 @@ function New-JanetTwoLogContext {
         Version    = $Version
         NetRoot    = $netRoot
         JanetLocal = $janetLocal
-        UserFolder = (Get-JanetTwoUserFolderName)
+        UserFolder = (Get-JanetWebUserFolderName)
         NemesisFolder = ([string]$ident.NemesisFolder)   # ACAS per-operator folder "<edipi> - <DisplayName>"
         SourceHost = $env:COMPUTERNAME
         Month      = ($now.ToString('yyyy-MM'))
@@ -256,11 +256,11 @@ function New-JanetTwoLogContext {
     })
 
     # Share is back -> flush any rows captured locally during a prior outage.
-    if ($reachable) { try { Invoke-JanetTwoReplay -Context $ctx } catch {} }
+    if ($reachable) { try { Invoke-JanetWebReplay -Context $ctx } catch {} }
     return $ctx
 }
 
-function Protect-JanetTwoCsvField {
+function Protect-JanetWebCsvField {
     # Formula-injection guard (leading = + - @ TAB gets an apostrophe prefix);
     # intentionally diverges from the desktop suite pending a suite-wide fix.
     param([string]$Value)
@@ -268,26 +268,26 @@ function Protect-JanetTwoCsvField {
     return $Value
 }
 
-function ConvertTo-JanetTwoCsvField {
+function ConvertTo-JanetWebCsvField {
     # Desktop convention (WPT ConvertTo-JanetCsvLine): comma/CR/LF -> space, then
     # trim - NOT RFC-4180 quoting - so ONE detail/usage rows are byte-convention-
     # identical to the desktop rows in the same shared CSVs.
     param([string]$Value)
     $s = if ($null -eq $Value) { '' } else { [string]$Value }
-    return (Protect-JanetTwoCsvField (($s -replace '[,\r\n]', ' ').Trim()))
+    return (Protect-JanetWebCsvField (($s -replace '[,\r\n]', ' ').Trim()))
 }
-function ConvertTo-JanetTwoCsvLine { param([object[]]$Fields) return (($Fields | ForEach-Object { ConvertTo-JanetTwoCsvField ([string]$_) }) -join ',') }
+function ConvertTo-JanetWebCsvLine { param([object[]]$Fields) return (($Fields | ForEach-Object { ConvertTo-JanetWebCsvField ([string]$_) }) -join ',') }
 
-function ConvertTo-JanetTwoMinField {
+function ConvertTo-JanetWebMinField {
     # Minimal SIM/Nemesis-style escape used by the Runs + TouchedHosts telemetry
-    # CSVs (strip CR/LF, comma -> semicolon, NO RFC-4180 quoting) so JANET TWO rows
+    # CSVs (strip CR/LF, comma -> semicolon, NO RFC-4180 quoting) so JANET Web rows
     # merge byte-compatibly into the same monthly/daily files the desktop tool writes.
     param([string]$Value)
     if ($null -eq $Value) { return '' }
-    return (Protect-JanetTwoCsvField (([string]$Value) -replace '[\r\n]+', ' ' -replace ',', ';'))
+    return (Protect-JanetWebCsvField (([string]$Value) -replace '[\r\n]+', ' ' -replace ',', ';'))
 }
 
-function Invoke-JanetTwoHeaderEnsure {
+function Invoke-JanetWebHeaderEnsure {
     # Returns the path the caller should append the row to. Ported from the
     # desktop Invoke-JanetHeaderEnsure five-case logic:
     #   1. file missing          -> mkdir + header, return original
@@ -350,7 +350,7 @@ function Invoke-JanetTwoHeaderEnsure {
     return $sister
 }
 
-function Add-JanetTwoCsvRow {
+function Add-JanetWebCsvRow {
     # Append one line: cheap cached ping-gate, then network with a short backoff;
     # on failure, mark the share down and spool the line locally so it's never
     # lost (replayed next run). Header-ensure may redirect to a sister CSV when a
@@ -359,12 +359,12 @@ function Add-JanetTwoCsvRow {
     [System.Threading.Monitor]::Enter($Context.Lock)
     try {
         if ($Context.OnShare) {
-            if (-not (Test-JanetTwoShareCached -Root $Context.NetRoot)) {
+            if (-not (Test-JanetWebShareCached -Root $Context.NetRoot)) {
                 $Context.OnShare = $false   # share went away mid-session -> spool locally
             } else {
                 for ($try = 0; $try -lt 2; $try++) {
                     try {
-                        $target = Invoke-JanetTwoHeaderEnsure -Path $NetworkPath -Header $Header
+                        $target = Invoke-JanetWebHeaderEnsure -Path $NetworkPath -Header $Header
                         Add-Content -LiteralPath $target -Value $Line -Encoding UTF8 -ErrorAction Stop
                         return
                     } catch { Start-Sleep -Milliseconds (60 * ($try + 1)) }
@@ -374,7 +374,7 @@ function Add-JanetTwoCsvRow {
         }
         # local spool
         try {
-            $target = Invoke-JanetTwoHeaderEnsure -Path $LocalPath -Header $Header
+            $target = Invoke-JanetWebHeaderEnsure -Path $LocalPath -Header $Header
             Add-Content -LiteralPath $target -Value $Line -Encoding UTF8 -ErrorAction Stop
         } catch {}
     } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
@@ -383,7 +383,7 @@ function Add-JanetTwoCsvRow {
 function Write-JanetAction {
     <#  ONE audit detail row -> Logs\<Tool>\<userFolder>\<YYYY-MM>_detail.csv, exactly
         like the desktop tools. -Action/-Result are the fixed suite vocabularies
-        (anything else throws at bind, by design). -Tool is the JANET TWO tool id;
+        (anything else throws at bind, by design). -Tool is the JANET Web tool id;
         it's mapped to the desktop tool's folder name. #>
     [CmdletBinding()]
     param(
@@ -398,7 +398,7 @@ function Write-JanetAction {
     )
     if (-not $Context) { return }
     try {
-        $toolName = Resolve-JanetTwoToolName -ToolId $Tool
+        $toolName = Resolve-JanetWebToolName -ToolId $Tool
         if ([string]::IsNullOrWhiteSpace($ToolVersion)) { $ToolVersion = [string]$Context.Version }
 
         # Session counters (same two-bucket model + rules as the desktop tools),
@@ -426,17 +426,17 @@ function Write-JanetAction {
         $localFile = Join-Path (Join-Path (Join-Path $Context.JanetLocal $toolName) $Context.UserFolder) $file
 
         $header = 'Timestamp,SessionId,Operator,ASI,Tool,ToolVersion,Action,Target,Result,ItemCount,Detail'
-        $line = ConvertTo-JanetTwoCsvLine @(
+        $line = ConvertTo-JanetWebCsvLine @(
             (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Context.SessionId, $Context.Operator, $Context.Asi,
             $toolName, $ToolVersion, $Action, $Target, $Result, $ItemCount, $Detail
         )
-        Add-JanetTwoCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
+        Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
     } catch {
         # Never let a logging failure interrupt the actual operation.
     }
 }
 
-function Write-JanetTwoRollup {
+function Write-JanetWebRollup {
     # SessionEnd usage rows -> Logs\<YYYY-MM>_usage.csv (fleet rollup at the root).
     # Writes ONE row per tool used this session (Tool column = the desktop folder name,
     # so a lead sees "WPT touched 40 / ACAS_Nemesis patched 12" not just one blob) PLUS
@@ -452,11 +452,11 @@ function Write-JanetTwoRollup {
 
         $addRow = {
             param($tool, $hosts, $vulns, $fails, $durMin, $notes)
-            $line = ConvertTo-JanetTwoCsvLine @(
+            $line = ConvertTo-JanetWebCsvLine @(
                 $ts, $Context.SessionId, $Context.Operator, $Context.Asi,
                 $tool, $Context.Version, 'SessionEnd', $hosts, $vulns, $fails, $durMin, $notes
             )
-            Add-JanetTwoCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
+            Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
         }
 
         # Snapshot PerTool under the lock so a late worker append can't mutate mid-enumerate.
@@ -483,16 +483,16 @@ function Write-JanetTwoRollup {
     } catch {}
 }
 
-function Add-JanetTwoTextLine {
+function Add-JanetWebTextLine {
     # Append a free-text line (the per-session .log narrative). Network-first with
-    # a short backoff, then local spool, same as Add-JanetTwoCsvRow but the file is
+    # a short backoff, then local spool, same as Add-JanetWebCsvRow but the file is
     # seeded with a multi-line header block on first create (not a CSV header) and
     # never header-rotated.
     param([string]$NetworkPath, [string]$LocalPath, [string[]]$HeaderBlock, [string]$Line, $Context)
     [System.Threading.Monitor]::Enter($Context.Lock)
     try {
         if ($Context.OnShare) {
-            if (-not (Test-JanetTwoShareCached -Root $Context.NetRoot)) {
+            if (-not (Test-JanetWebShareCached -Root $Context.NetRoot)) {
                 $Context.OnShare = $false
             } else {
                 for ($try = 0; $try -lt 2; $try++) {
@@ -516,7 +516,7 @@ function Add-JanetTwoTextLine {
     } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
 }
 
-function Write-JanetTwoRun {
+function Write-JanetWebRun {
     <#  One (or N, for a rolled-up card) per-run summary row -> the daily Runs CSV
         Logs\<Tool>\ACAS-Nemesis-Runs_<YYYY-MM-DD>.csv, faithful to the desktop
         Write-NemRunCsvLine/Write-NemRunSummary (17-col v1.5.0 schema, min CSV
@@ -542,7 +542,7 @@ function Write-JanetTwoRun {
     )
     if (-not $Context) { return }
     try {
-        $toolName = Resolve-JanetTwoToolName -ToolId $Tool
+        $toolName = Resolve-JanetWebToolName -ToolId $Tool
         $fileName = 'ACAS-Nemesis-Runs_' + (Get-Date -Format 'yyyy-MM-dd') + '.csv'
         $netFile   = Join-Path (Join-Path $Context.NetRoot    $toolName) $fileName
         $localFile = Join-Path (Join-Path $Context.JanetLocal $toolName) $fileName
@@ -554,18 +554,18 @@ function Write-JanetTwoRun {
         if ($members.Count -gt 0) {
             $size = $members.Count
             foreach ($m in $members) {
-                $rows += ,@($ts, (ConvertTo-JanetTwoMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
-                    $RowType, $Action, (ConvertTo-JanetTwoMinField $m), (ConvertTo-JanetTwoMinField $Profile), (ConvertTo-JanetTwoMinField $Mode),
-                    $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetTwoMinField $Notes), (ConvertTo-JanetTwoMinField $GroupKey), $size)
+                $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
+                    $RowType, $Action, (ConvertTo-JanetWebMinField $m), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
+                    $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetWebMinField $Notes), (ConvertTo-JanetWebMinField $GroupKey), $size)
             }
         } else {
-            $rows += ,@($ts, (ConvertTo-JanetTwoMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
-                $RowType, $Action, (ConvertTo-JanetTwoMinField $Scope), (ConvertTo-JanetTwoMinField $Profile), (ConvertTo-JanetTwoMinField $Mode),
-                $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetTwoMinField $Notes), (ConvertTo-JanetTwoMinField $GroupKey), 1)
+            $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
+                $RowType, $Action, (ConvertTo-JanetWebMinField $Scope), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
+                $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetWebMinField $Notes), (ConvertTo-JanetWebMinField $GroupKey), 1)
         }
         foreach ($r in $rows) {
             $line = ($r -join ',')
-            Add-JanetTwoCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
+            Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
         }
         # Session run counters (drive the closing-notes summary), under the lock.
         if ($RowType -eq 'Run') {
@@ -579,7 +579,7 @@ function Write-JanetTwoRun {
     } catch {}
 }
 
-function Write-JanetTwoTouchedHost {
+function Write-JanetWebTouchedHost {
     <#  One per-host attribution row -> Logs\<Tool>\<userFolder>\TouchedHosts_<YYYY-MM>.csv
         (faithful to desktop Write-NemTouchedHostCsv): a lead can pivot "which
         machines did operator X touch this month" without grepping. min CSV escape,
@@ -594,7 +594,7 @@ function Write-JanetTwoTouchedHost {
     )
     if (-not $Context) { return }
     try {
-        $toolName = Resolve-JanetTwoToolName -ToolId $Tool
+        $toolName = Resolve-JanetWebToolName -ToolId $Tool
         $month = (Get-Date).ToString('yyyy-MM')
         $fileName = "TouchedHosts_$month.csv"
         # ACAS uses the Nemesis per-operator folder "<edipi> - <DisplayName>" so its rows
@@ -605,22 +605,22 @@ function Write-JanetTwoTouchedHost {
         $localFile = Join-Path (Join-Path (Join-Path $Context.JanetLocal $toolName) $opFolder) $fileName
         $header = 'Timestamp,Operator,Edipi,SessionId,SourceHost,Action,TargetHost,Result,Detail'
         $line = @(
-            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), (ConvertTo-JanetTwoMinField $Context.Operator), $Context.Edipi,
-            $Context.SessionId, $Context.SourceHost, (ConvertTo-JanetTwoMinField $Action),
-            (ConvertTo-JanetTwoMinField $TargetHost), (ConvertTo-JanetTwoMinField $Result), (ConvertTo-JanetTwoMinField $Detail)
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi,
+            $Context.SessionId, $Context.SourceHost, (ConvertTo-JanetWebMinField $Action),
+            (ConvertTo-JanetWebMinField $TargetHost), (ConvertTo-JanetWebMinField $Result), (ConvertTo-JanetWebMinField $Detail)
         ) -join ','
-        Add-JanetTwoCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
+        Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
     } catch {}
 }
 
-function Get-JanetTwoSessionLogTarget {
+function Get-JanetWebSessionLogTarget {
     <#  Resolve the per-session .log path + display name for a tool, so the writer
-        (Write-JanetTwoSessionLog) and the UI transcript endpoint agree on ONE
+        (Write-JanetWebSessionLog) and the UI transcript endpoint agree on ONE
         location. ACAS keeps its historical "ACASNemesis_<user>_<stamp>.log" name +
         Nemesis per-operator folder; every other tool uses "<ToolName>_<user>_<stamp>.log"
         in the standard UserFolder. Returns @{ ToolName; FileName; DisplayName; OpFolder; Net; Local }. #>
     param([Parameter(Mandatory)] $Context, [string]$Tool = 'acas')
-    $toolName = Resolve-JanetTwoToolName -ToolId $Tool
+    $toolName = Resolve-JanetWebToolName -ToolId $Tool
     if ($Tool -eq 'acas') {
         $fileName    = "ACASNemesis_$($env:USERNAME)_$($Context.LogStamp).log"
         $displayName = 'ACAS Nemesis'
@@ -638,12 +638,12 @@ function Get-JanetTwoSessionLogTarget {
     }
 }
 
-function Write-JanetTwoSessionLog {
+function Write-JanetWebSessionLog {
     <#  Append one narrative line to the per-session transcript
         Logs\<Tool>\<userFolder>\<ToolName>_<user>_<stamp>.log, seeding a 3-line
         header on first write (faithful to desktop Open-NemAuditLog/Write-NemAudit).
         EVERY tool gets a transcript now (not just ACAS): the .log is the human-readable
-        "what did JANET TWO do this session" record the desktop tools each keep. ACAS
+        "what did JANET Web do this session" record the desktop tools each keep. ACAS
         keeps its historical filename + header + Nemesis per-operator folder so its rows
         merge with the desktop twin's files; every other tool uses "<ToolName>_..." and
         the standard "<user> - <COMPUTER>_<user>" folder its desktop twin writes to.
@@ -658,12 +658,12 @@ function Write-JanetTwoSessionLog {
     )
     if (-not $Context) { return }
     try {
-        $tgt = Get-JanetTwoSessionLogTarget -Context $Context -Tool $Tool
+        $tgt = Get-JanetWebSessionLogTarget -Context $Context -Tool $Tool
         $displayName = $tgt.DisplayName
         $netFile   = $tgt.Net
         $localFile = $tgt.Local
         $headerBlock = @(
-            "=== $displayName (J.A.N.E.T. TWO) v$($Context.Version) ===",
+            "=== $displayName (JANET Web) v$($Context.Version) ===",
             "Session $($Context.SessionId) started $($Context.StartedAt.ToString('yyyy-MM-dd HH:mm:ss'))",
             "Operator: $($Context.Operator)  (EDIPI: $($Context.Edipi))  on $($Context.SourceHost)"
         )
@@ -675,11 +675,11 @@ function Write-JanetTwoSessionLog {
         $scrub = { param($v) ([string]$v) -replace '[\r\n]+',' ' -replace '[\[\]]',' ' }
         $entry = "[$ts] [USER: $(& $scrub $Context.Operator)] [ACTION: $(& $scrub $Action)] [TARGET: $(& $scrub $Target)] [RESULT: $(& $scrub $Result)]"
         if ($Detail) { $entry += " [DETAIL: $(& $scrub $Detail)]" }
-        Add-JanetTwoTextLine -NetworkPath $netFile -LocalPath $localFile -HeaderBlock $headerBlock -Line $entry -Context $Context
+        Add-JanetWebTextLine -NetworkPath $netFile -LocalPath $localFile -HeaderBlock $headerBlock -Line $entry -Context $Context
     } catch {}
 }
 
-function Invoke-JanetTwoReplay {
+function Invoke-JanetWebReplay {
     # Flush rows captured to the local spool during a prior share outage up to the
     # share, then rename the local copies <name>.replayed_<stamp> as a paper trail
     # (mirrors the desktop replay-on-launch). Skips already-replayed files and
@@ -711,7 +711,7 @@ function Invoke-JanetTwoReplay {
                     if ($lines.Count -gt 0) {
                         $header = $lines[0]
                         # creates/repairs the dest header; may redirect to a sister CSV
-                        $dest = Invoke-JanetTwoHeaderEnsure -Path $netFile -Header $header
+                        $dest = Invoke-JanetWebHeaderEnsure -Path $netFile -Header $header
                         $data = @($lines | Select-Object -Skip 1 | Where-Object { $_ -ne '' })
                         if ($data.Count -gt 0) { Add-Content -LiteralPath $dest -Value $data -Encoding UTF8 -ErrorAction Stop }
                     }

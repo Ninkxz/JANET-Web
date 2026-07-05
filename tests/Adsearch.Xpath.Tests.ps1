@@ -4,7 +4,7 @@
 #  VALID XPath expression (via concat), not a string that closes early and throws.
 # =============================================================================
 
-# Mirror of the inline $xpathLiteral builder in JanetTwo.adsearch.psm1.
+# Mirror of the inline $xpathLiteral builder in JanetWeb.adsearch.psm1.
 function New-AdXPathLiteral {
     param([string]$v)
     if ($v -notmatch "'") { return "'$v'" }

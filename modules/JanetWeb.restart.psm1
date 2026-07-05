@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.restart.psm1  -  Remote Restart Scheduler engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.restart.psm1  -  Remote Restart Scheduler engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\RemoteRestartScheduler_1.5.0-beta4.ps1 (the "Convergence
 #  build" engine reused, WinForms layer dropped). Fans out shutdown.exe /r
@@ -821,7 +821,7 @@ $script:AbortWorker = {
 # (445), NOT ICMP echo: workstation GPOs routinely block inbound ICMP echo while
 # leaving WinRM open, so an ICMP gate would falsely drop reachable hosts from a
 # destructive reboot wave and never see a rebooted host return. Mirrors the
-# proven wpt Ping Sweep / bulk-scan probe (JanetTwo.wpt.psm1). $timeoutMs is the
+# proven wpt Ping Sweep / bulk-scan probe (JanetWeb.wpt.psm1). $timeoutMs is the
 # per-port connect timeout (kept short, 1000-1500ms, so the parallel gate stays
 # fast). Used by both the pre-flight gate and the reboot monitor; the returned
 # shape ({Host;Up;At}) is unchanged so the gate and reboot state machine are not.

@@ -1,4 +1,4 @@
-# JANET TWO - UI Rebuild Spec: upr
+# JANET Web - UI Rebuild Spec: upr
 
 > Engine is re-forked from `fork-source\Tools`; THIS is the faithful FRONTEND to reproduce (screens, run model, live activity view).
 
@@ -10,7 +10,7 @@ The Unsupported Product Remediator (UPR) is a single-window, dark-purple WinForm
 
 # Unsupported Product Remediator (upr) -- UI/UX Rebuild Spec
 
-Source: `X:\J.A.N.E.T\Tools\UnsupportedProductRemediator_1.1.2.ps1`. This spec describes the FRONTEND and run experience to reproduce in JANET TWO (pure-PowerShell web-local). Engine logic is re-forked separately; the entry points are named in section 5.
+Source: `X:\J.A.N.E.T\Tools\UnsupportedProductRemediator_1.1.2.ps1`. This spec describes the FRONTEND and run experience to reproduce in JANET Web (pure-PowerShell web-local). Engine logic is re-forked separately; the entry points are named in section 5.
 
 ## 1. Window + Navigation Layout
 
@@ -41,17 +41,17 @@ Header "SESSION HISTORY (last 200)" + dim "Audit log: <path>". Buttons **Clear G
 
 ## 3. The Run Model + Activity View (preserve faithfully)
 
-This is the heart of JANET TWO. Two stages, both on the shared RunspacePool.
+This is the heart of JANET Web. Two stages, both on the shared RunspacePool.
 
 **Launch -- Scan (`Scan Hosts`/`$btnUScan`):** Guards in order: no finding -> MessageBox "No Finding"; OS finding -> no-op; no `$global:Credentials` -> `Get-Credential -Message "Enter ADW admin credentials"`. Resolves the catalog profile (`DisplayNameRegex`, `VersionMaxExclusive`), computes `Get-UprFilteredHosts`. If zero hosts -> amber WARN log and abort. Otherwise disables buttons, clears `$dgvU`, calls `Initialize-RunspacePool`, and for each valid target (`Get-FindingTargetFromHost` + `Test-UprValidTarget`) creates a `[PowerShell]` bound to `$global:RSPool` and `BeginInvoke()`s a scriptblock: TCP-probe port 5985 (3s), then `Invoke-Command -Authentication Negotiate -SessionOption $WSManOpt` reading the three Uninstall registry hives, returning candidate installs matching the regex/version gate. Logs `==== SCAN: [plugin] name ====`, regex/host counts, and `Dispatched N scan job(s) (concurrency 8)...`. Results are drained synchronously via `EndInvoke()` in a foreach loop, each host's row added live. Summary log: `Scan complete: N candidate(s) -- X one-click (proven EOL), Y review-only; Z unreachable host(s)`. Enables Uninstall/Export if any candidates.
 
 **Launch -- Uninstall (`Uninstall Selected`/`$btnUDoIt`):** Collects checked rows; none -> MessageBox "Nothing to uninstall". Confirmation MessageBox (YesNo, Warning icon): `Uninstall N item(s) across M host(s)?\n\nDry-run: <bool>\nThis cannot be undone.` On Yes: log `==== UNINSTALL: ... (DryRun=<bool>) ====`, disable buttons, set each target row's Result to `Uninstalling...` (amber), `Initialize-RunspacePool`, `BeginInvoke()` a per-row worker scriptblock that (unless DryRun -> `Skipped (DryRun)`) `Invoke-Command`s the product-specific uninstall. `EndInvoke()` drains, writes each Result cell, tallies, mirrors to audit + History. Final log `==== DONE: X succeeded, Y failed, Z skipped ====`; re-enable buttons.
 
-**No progress bar, no cancel/abort** in the original -- the EndInvoke drain blocks the UI thread. **JANET TWO should keep the launch->confirm->per-host-stream semantics but make the drain async, adding a progress bar (done/total) and a cancel button** while preserving the live per-row Result transitions and the colour-coded streaming log.
+**No progress bar, no cancel/abort** in the original -- the EndInvoke drain blocks the UI thread. **JANET Web should keep the launch->confirm->per-host-stream semantics but make the drain async, adding a progress bar (done/total) and a cancel button** while preserving the live per-row Result transitions and the colour-coded streaming log.
 
 **Activity view -- two surfaces:**
 - **Results grid `$dgvU`** (Fill): columns in order **Sel** (checkbox, w4), **Host** (w18), **Display Name** (w28), **Version** (w9), **Type** (w6), **Publisher** (w14), **Result** (w21). Row semantics = one row per (host, matching install); hosts with no match still get a synthetic row. Row/cell states & colours: **Unreachable** -> Result "Unreachable" amber, row dimmed; **scan error** -> Result = error red; **(no matching install)** -> "NoCandidate" dim; **Tanium** -> checkbox off+ReadOnly, "Skipped (Tanium)" amber, row dimmed; **unproven match** -> checkbox off+ReadOnly, "Review (needs version/ACAS proof)" cyan; **proven EOL** -> checkbox PRE-CHECKED (only one-click-removable rows). During uninstall: `Uninstalling...` amber -> `OK (...)` green / `WARN (...)`/`FAIL...` red / `Skipped (DryRun)` dim. Selection highlight purple.
-- **Activity log `$rtbU`** (read-only RichTextBox, Cascadia Mono 9, green console text on Panel bg, FixedSingle). Global `Log($msg,$lvl)` appends `[HH:mm:ss] msg` and colours by level: OK=green, WARN=amber, ERR=red, INFO=console green; auto-scrolls. `==== ... ====` banners delimit sections. (`$script:rtbLog` is the shared log sink -- in JANET TWO this maps to an SSE/polling log pane.)
+- **Activity log `$rtbU`** (read-only RichTextBox, Cascadia Mono 9, green console text on Panel bg, FixedSingle). Global `Log($msg,$lvl)` appends `[HH:mm:ss] msg` and colours by level: OK=green, WARN=amber, ERR=red, INFO=console green; auto-scrolls. `==== ... ====` banners delimit sections. (`$script:rtbLog` is the shared log sink -- in JANET Web this maps to an SSE/polling log pane.)
 
 ## 4. Targets, Credentials, Cross-Tab State
 
@@ -76,4 +76,4 @@ This is the heart of JANET TWO. Two stages, both on the shared RunspacePool.
 
 **Preserve:** Plan-only default ON; proven-EOL pre-check vs. read-only Review/Tanium rows; the YesNo confirm restating scope + dry-run + "cannot be undone"; the `==== banner ====` log rhythm; per-row Result colour transitions; the blinking pulse dots; TARGETS/FILTER status counts; per-grid CSV export + OS clipboard copy with timestamped filenames; the guarded single-egress close.
 
-**Theme (blood/purple JANET):** near-black surfaces (BG 8,8,12; Panel 16,16,22; StatusBar 7,7,11). Primary accent PURPLE `(140,100,220)`, secondary GOLD `(218,180,82)`. Status: Success green `(92,198,120)`, Warning amber `(230,180,70)`, Danger red `(224,80,90)`, Cyan `(88,180,210)`. Text White `(238,232,248)` / Sec `(188,180,208)` / Dim `(128,120,150)`. Fonts: titles/headers/tabs/logs **Cascadia Mono** (mono), body **Segoe UI**. Grids: gold bold headers (28px), alternating row bg, purple selection, no row headers, no user add/delete. Buttons are flat, colour-keyed by intent (Accent=primary/scan, Danger=destructive/close, GoldDim=secondary/export). For JANET TWO map: purple buttons -> primary CTA, red -> destructive (with confirm), gold -> secondary; the RichTextBox log -> a streaming console pane; the DataGridViews -> themed HTML tables with the same column order, colour rules, and checkbox selection.
+**Theme (blood/purple JANET):** near-black surfaces (BG 8,8,12; Panel 16,16,22; StatusBar 7,7,11). Primary accent PURPLE `(140,100,220)`, secondary GOLD `(218,180,82)`. Status: Success green `(92,198,120)`, Warning amber `(230,180,70)`, Danger red `(224,80,90)`, Cyan `(88,180,210)`. Text White `(238,232,248)` / Sec `(188,180,208)` / Dim `(128,120,150)`. Fonts: titles/headers/tabs/logs **Cascadia Mono** (mono), body **Segoe UI**. Grids: gold bold headers (28px), alternating row bg, purple selection, no row headers, no user add/delete. Buttons are flat, colour-keyed by intent (Accent=primary/scan, Danger=destructive/close, GoldDim=secondary/export). For JANET Web map: purple buttons -> primary CTA, red -> destructive (with confirm), gold -> secondary; the RichTextBox log -> a streaming console pane; the DataGridViews -> themed HTML tables with the same column order, colour rules, and checkbox selection.

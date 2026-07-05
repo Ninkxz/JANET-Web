@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  JanetTwo.message.psm1  -  Remote Message tool engine for J.A.N.E.T. TWO
+#  JanetWeb.message.psm1  -  Remote Message tool engine for JANET Web
 #
 #  RE-FORKED from the desktop  Tools\RemoteMessageTool_1.3.3.ps1  (the
 #  $script:SendScriptBlock per-host worker + the runspace-pool send loop), with

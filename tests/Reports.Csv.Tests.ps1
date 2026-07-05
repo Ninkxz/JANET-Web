@@ -3,7 +3,7 @@
 #  (audit#5 / audit#23) and the SLA-ledger prune cutoff (audit#6).
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.reports.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.reports.psm1') -Force -PassThru
 
 Describe 'ConvertTo-ReportsCsvCell formula-injection guard (audit#23)' {
 

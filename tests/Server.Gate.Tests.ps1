@@ -36,7 +36,7 @@ function Invoke-JanetTestPost {
 
 Describe 'Server destructive-action gate (no ack, no credential)' {
 
-    $serverCmd = ". '$script:Root\server\JanetTwo.Server.ps1'; Start-JanetTwoServer -Root '$script:Root' -Port $script:Port -Token '$script:Token'"
+    $serverCmd = ". '$script:Root\server\JanetWeb.Server.ps1'; Start-JanetWebServer -Root '$script:Root' -Port $script:Port -Token '$script:Token'"
     $script:Proc = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$serverCmd) -PassThru -WindowStyle Hidden
 
     $script:Up = $false

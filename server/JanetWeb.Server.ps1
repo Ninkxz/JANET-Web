@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  JanetTwo.Server.ps1  -  the web server for J.A.N.E.T. TWO
+#  JanetWeb.Server.ps1  -  the web server for JANET Web
 #
 #  PURE POWERSHELL. No external modules, nothing to install. Uses only the
 #  built-in .NET System.Net.HttpListener that ships with Windows (works on
@@ -22,7 +22,7 @@
 #    POST   /api/job/<jobId>/cancel
 # =============================================================================
 
-function Start-JanetTwoServer {
+function Start-JanetWebServer {
     param(
         [Parameter(Mandatory)] [string]$Root,
         [int]$Port = 8089,
@@ -34,14 +34,14 @@ function Start-JanetTwoServer {
     $serverDir    = Join-Path $Root 'server'
     $webDir       = (Resolve-Path (Join-Path $Root 'web')).Path
     $modulesDir   = Join-Path $Root 'modules'
-    $logScript    = Join-Path $serverDir 'JanetTwo.Logging.ps1'
-    $authScript   = Join-Path $serverDir 'JanetTwo.Auth.ps1'
+    $logScript    = Join-Path $serverDir 'JanetWeb.Logging.ps1'
+    $authScript   = Join-Path $serverDir 'JanetWeb.Auth.ps1'
     $registryFile = Join-Path $serverDir 'tool-registry.json'
 
     # Browser-uploaded files land here (one guid subdir per upload). Wiped on each
     # launch so a session never reuses stale temp files. Engines receive the
     # server-side path exactly as if a dialog had returned it.
-    $uploadsDir = Join-Path $env:TEMP 'JanetTwo\uploads'
+    $uploadsDir = Join-Path $env:TEMP 'JanetWeb\uploads'
     try { if (Test-Path -LiteralPath $uploadsDir) { Remove-Item -LiteralPath $uploadsDir -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
     try { New-Item -ItemType Directory -Path $uploadsDir -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
 
@@ -75,7 +75,7 @@ function Start-JanetTwoServer {
         if (-not $localHasPkgs) {
             $shareHost = if ($JanetPackageShare -match '^\\\\([^\\]+)') { $Matches[1] } else { $null }
             $shareUp = $false
-            if ($shareHost) { try { $shareUp = [bool](Test-JanetTwoHostReachable $shareHost) } catch {} }
+            if ($shareHost) { try { $shareUp = [bool](Test-JanetWebHostReachable $shareHost) } catch {} }
             if ($shareUp -and (Test-Path -LiteralPath $JanetPackageShare)) { $packagesDir = $JanetPackageShare }
         }
     }
@@ -98,11 +98,11 @@ function Start-JanetTwoServer {
                 '  log4j-api-2.25.4.jar',
                 '  log4j-core-2.25.4.jar',
                 '',
-                'This folder is the DEFAULT Log4j source for JANET TWO - no need to set anything.',
+                'This folder is the DEFAULT Log4j source for JANET Web - no need to set anything.',
                 'Grab the two jars from the desktop staging share and drop them here:',
                 '  \\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles',
                 '',
-                'The JANET TWO host copies these jars into each target session (no remote',
+                'The JANET Web host copies these jars into each target session (no remote',
                 'double-hop) and replaces the vulnerable jars in the HID/Adobe lib paths.',
                 'To use a different source, set the path in the ACAS tool''s "Log4j Source".'
             )
@@ -117,14 +117,14 @@ function Start-JanetTwoServer {
     $registry = Get-Content -LiteralPath $registryFile -Raw -Encoding UTF8 | ConvertFrom-Json
     $manifests = @{}; $modulePaths = @{}
     foreach ($t in $registry.tools) {
-        $mp = Join-Path $modulesDir ("JanetTwo.{0}.psm1" -f $t.id)
+        $mp = Join-Path $modulesDir ("JanetWeb.{0}.psm1" -f $t.id)
         if (-not (Test-Path -LiteralPath $mp)) { continue }
         try {
             Import-Module $mp -Force -ErrorAction Stop
             $manifests[$t.id] = Get-JanetToolManifest
             $modulePaths[$t.id] = $mp
-            Remove-Module ("JanetTwo.{0}" -f $t.id) -Force -ErrorAction SilentlyContinue
-        } catch { Write-Warning "JANET TWO: module '$($t.id)' failed to load: $($_.Exception.Message)" }
+            Remove-Module ("JanetWeb.{0}" -f $t.id) -Force -ErrorAction SilentlyContinue
+        } catch { Write-Warning "JANET Web: module '$($t.id)' failed to load: $($_.Exception.Message)" }
     }
 
     $state = @{
@@ -132,7 +132,7 @@ function Start-JanetTwoServer {
         AckGiven    = $false   # responsibility acknowledgment (set via /api/session/start)
         Jobs        = [hashtable]::Synchronized(@{})
         JobSeq      = 0
-        LogCtx      = (New-JanetTwoLogContext -Operator $env:USERNAME -Asi $Asi -Version '1.0.0' -JanetRoot (Split-Path -Parent $Root))
+        LogCtx      = (New-JanetWebLogContext -Operator $env:USERNAME -Asi $Asi -Version '1.0.0' -JanetRoot (Split-Path -Parent $Root))
         LogScript   = $logScript
         ModulePaths = $modulePaths
         Manifests   = $manifests
@@ -274,7 +274,7 @@ function Start-JanetTwoServer {
         Write-Host "    - Run this from an ELEVATED PowerShell (the same way you run admin tools), OR" -ForegroundColor Yellow
         Write-Host "    - One-time URL reservation (needs admin once):" -ForegroundColor Yellow
         Write-Host "        netsh http add urlacl url=http://127.0.0.1:$Port/ user=$env:USERDOMAIN\$env:USERNAME" -ForegroundColor Cyan
-        Write-Host "    - Or try a different port:  ""Launch JANET TWO.cmd"" -Port 8090" -ForegroundColor Yellow
+        Write-Host "    - Or try a different port:  ""Launch JANET Web.cmd"" -Port 8090" -ForegroundColor Yellow
         return
     }
     Write-Host "  Listening. Ctrl+C to stop." -ForegroundColor DarkGray
@@ -440,9 +440,9 @@ function Start-JanetTwoServer {
 
                 # /api/cred
                 if ($path -eq '/api/cred') {
-                    if ($verb -eq 'GET')    { & $writeJson $resp (Get-JanetTwoCredentialStatus -Credential $state.Cred); continue }
-                    if ($verb -eq 'POST')   { $r = Prompt-JanetTwoCredential; if ($r.ok) { $state.Cred = $r.cred }; & $writeJson $resp @{ ok=$r.ok; message=$r.message; status=(Get-JanetTwoCredentialStatus -Credential $state.Cred) }; continue }
-                    if ($verb -eq 'DELETE') { $state.Cred = $null; & $writeJson $resp @{ ok=$true; status=(Get-JanetTwoCredentialStatus -Credential $null) }; continue }
+                    if ($verb -eq 'GET')    { & $writeJson $resp (Get-JanetWebCredentialStatus -Credential $state.Cred); continue }
+                    if ($verb -eq 'POST')   { $r = Prompt-JanetWebCredential; if ($r.ok) { $state.Cred = $r.cred }; & $writeJson $resp @{ ok=$r.ok; message=$r.message; status=(Get-JanetWebCredentialStatus -Credential $state.Cred) }; continue }
+                    if ($verb -eq 'DELETE') { $state.Cred = $null; & $writeJson $resp @{ ok=$true; status=(Get-JanetWebCredentialStatus -Credential $null) }; continue }
                 }
 
                 # POST /api/session/start -> record the responsibility acknowledgment.
@@ -808,9 +808,9 @@ function Start-JanetTwoServer {
                     # Re-ping-gate the share before the Runs CSV write: it can die
                     # mid-session and this append runs on the accept thread. Notes
                     # still reach the shutdown rollup via ClosingNotes if skipped.
-                    $shareOk = if ($state.LogCtx.OnShare) { Test-JanetTwoShare -Root ([string]$state.LogCtx.NetRoot) } else { $true }
+                    $shareOk = if ($state.LogCtx.OnShare) { Test-JanetWebShare -Root ([string]$state.LogCtx.NetRoot) } else { $true }
                     if ($shareOk) {
-                        try { Write-JanetTwoRun -Context $state.LogCtx -Tool 'acas' -RowType 'SessionNotes' -Action 'SessionEnd' -Notes $notes -HostsTotal $state.LogCtx.Hosts.Count -Success $state.LogCtx.RunSuccess -Failed $state.LogCtx.RunFailed } catch {}
+                        try { Write-JanetWebRun -Context $state.LogCtx -Tool 'acas' -RowType 'SessionNotes' -Action 'SessionEnd' -Notes $notes -HostsTotal $state.LogCtx.Hosts.Count -Success $state.LogCtx.RunSuccess -Failed $state.LogCtx.RunFailed } catch {}
                     }
                     & $writeJson $resp @{ ok=$true; hostsTouched=$state.LogCtx.Hosts.Count; vulnsPatched=$state.LogCtx.Vulns; runCount=$state.LogCtx.RunCount; failures=$state.LogCtx.Failures }
                     continue
@@ -826,13 +826,13 @@ function Start-JanetTwoServer {
                     # clobbering the default; only accept a successful parse.
                     $n = 200; $parsedN = 0; if ([int]::TryParse([string]$req.QueryString['n'], [ref]$parsedN)) { $n = $parsedN }
                     if ($n -lt 1) { $n = 1 } elseif ($n -gt 2000) { $n = 2000 }
-                    $toolName = Resolve-JanetTwoToolName -ToolId $toolId
+                    $toolName = Resolve-JanetWebToolName -ToolId $toolId
                     $root = if ($lc.OnShare) { $lc.NetRoot } else { $lc.JanetLocal }
                     $file = Join-Path (Join-Path (Join-Path $root $toolName) $lc.UserFolder) "$($lc.Month)_detail.csv"
                     $header = ''; $rows = @(); $exists = $false
                     # Ping-gate a share-hosted CSV first, and tail it instead of
                     # full-reading: this runs on the single-threaded accept loop.
-                    $tailOk = Test-JanetTwoShare -Root $file
+                    $tailOk = Test-JanetWebShare -Root $file
                     if ($tailOk -and (Test-Path -LiteralPath $file)) {
                         $exists = $true
                         try {
@@ -851,10 +851,10 @@ function Start-JanetTwoServer {
                     $toolId = [string]$req.QueryString['tool']; if ([string]::IsNullOrWhiteSpace($toolId)) { $toolId = 'acas' }
                     $n = 800; $parsedN = 0; if ([int]::TryParse([string]$req.QueryString['n'], [ref]$parsedN)) { $n = $parsedN }  # audit#21
                     if ($n -lt 1) { $n = 1 } elseif ($n -gt 5000) { $n = 5000 }
-                    $tgt  = Get-JanetTwoSessionLogTarget -Context $lc -Tool $toolId
+                    $tgt  = Get-JanetWebSessionLogTarget -Context $lc -Tool $toolId
                     $file = if ($lc.OnShare) { $tgt.Net } else { $tgt.Local }
                     $exists = $false; $lines = @()
-                    $tailOk = Test-JanetTwoShare -Root $file
+                    $tailOk = Test-JanetWebShare -Root $file
                     if ($tailOk -and (Test-Path -LiteralPath $file)) {
                         $exists = $true
                         try { $lines = @(Get-Content -LiteralPath $file -Tail $n -Encoding UTF8 -ErrorAction Stop) } catch {}
@@ -960,7 +960,7 @@ function Start-JanetTwoServer {
                     # a dead share must not hang the accept loop on the recursive enumeration.
                     $pkgRootOk = $true
                     if ($packagesDir -match '^\\\\([^\\]+)') {
-                        $pkgRootOk = (Test-JanetTwoHostReachable $Matches[1])
+                        $pkgRootOk = (Test-JanetWebHostReachable $Matches[1])
                     }
                     if ($pkgRootOk -and (Test-Path -LiteralPath $packagesDir)) {
                         foreach ($d in (Get-ChildItem -LiteralPath $packagesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
@@ -992,7 +992,7 @@ function Start-JanetTwoServer {
                     # can't hang the accept loop on Test-Path/enumeration.
                     $bpOk = $true
                     if ($bp -match '^\\\\([^\\]+)') {
-                        $bpOk = (Test-JanetTwoHostReachable $Matches[1])
+                        $bpOk = (Test-JanetWebHostReachable $Matches[1])
                     }
                     if ($bpOk -and $bp -and ($bp -like '*.msi') -and (Test-Path -LiteralPath $bp -PathType Leaf)) {
                         # Direct .msi file path: the file IS the bundle - one relative leaf.
@@ -1068,9 +1068,9 @@ function Start-JanetTwoServer {
                             # catch: archiving is skipped this pass and (since nothing
                             # was added to ArchivedCsvs) retried on the next action.
                             if ($archRoot -match '^\\\\([^\\]+)') {
-                                if (-not (Test-JanetTwoHostReachable $Matches[1])) { throw 'archive share unreachable' }
+                                if (-not (Test-JanetWebHostReachable $Matches[1])) { throw 'archive share unreachable' }
                             }
-                            $archDir = Join-Path (Join-Path (Join-Path $archRoot (Resolve-JanetTwoToolName -ToolId 'acas')) $lc.UserFolder) 'CsvArchive'
+                            $archDir = Join-Path (Join-Path (Join-Path $archRoot (Resolve-JanetWebToolName -ToolId 'acas')) $lc.UserFolder) 'CsvArchive'
                             foreach ($cp in ([string]$params['csvPaths'] -split "`r?`n")) {
                                 $src = $cp.Trim().Trim('"'); if (-not $src) { continue }
                                 if ($state.ArchivedCsvs.Contains($src)) { continue }
@@ -1078,7 +1078,7 @@ function Start-JanetTwoServer {
                                 # source must be ping-gated first so an unreachable share can't
                                 # block Test-Path/Copy-Item on the single-threaded accept loop.
                                 if ($src -match '^\\\\([^\\]+)') {
-                                    if (-not (Test-JanetTwoHostReachable $Matches[1])) { [void]$state.ArchivedCsvs.Add($src); continue }
+                                    if (-not (Test-JanetWebHostReachable $Matches[1])) { [void]$state.ArchivedCsvs.Add($src); continue }
                                 }
                                 if (-not (Test-Path -LiteralPath $src)) { continue }
                                 [void]$state.ArchivedCsvs.Add($src)
@@ -1134,7 +1134,7 @@ function Start-JanetTwoServer {
                                     }
                                     # Per-session .log transcript for EVERY tool (desktop parity:
                                     # each tool keeps a human-readable record of what it did).
-                                    try { Write-JanetTwoSessionLog -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Target ([string]$e.target) -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
+                                    try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Target ([string]$e.target) -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
                                     # Per-host attribution CSV (TouchedHosts_<month>.csv) for every
                                     # host-touching tool, so a lead can pivot "which machines did op X
                                     # touch this month". Skipped for non-host targets / non-host tools.
@@ -1142,7 +1142,7 @@ function Start-JanetTwoServer {
                                         $tgt = [string]$e.target
                                         if ($tgt -and $tgt -ne 'N/A' -and $tgt -ne '(custom command)') {
                                             $thHost = ($tgt -split '\\')[0]   # upr emits "host\product" -> keep the host
-                                            try { Write-JanetTwoTouchedHost -Context $logCtx -Tool $toolId -Action ([string]$e.action) -TargetHost $thHost -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
+                                            try { Write-JanetWebTouchedHost -Context $logCtx -Tool $toolId -Action ([string]$e.action) -TargetHost $thHost -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
                                         }
                                     }
                                 }
@@ -1150,7 +1150,7 @@ function Start-JanetTwoServer {
                                     # Per-run summary -> daily ACAS-Nemesis-Runs CSV (desktop Write-NemRunSummary).
                                     try {
                                         $members = @(); if ($e.groupMembers) { $members = @($e.groupMembers) }
-                                        Write-JanetTwoRun -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Scope ([string]$e.scope) `
+                                        Write-JanetWebRun -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Scope ([string]$e.scope) `
                                             -Profile ([string]$e.profile) -Mode ([string]$e.mode) -HostsTotal ([int]$e.hostsTotal) `
                                             -Success ([int]$e.success) -Failed ([int]$e.failed) -DurationSec ([int]$e.durationSec) `
                                             -GroupKey ([string]$e.groupKey) -GroupMembers $members
@@ -1160,11 +1160,11 @@ function Start-JanetTwoServer {
                             # Per-action transcript backstop: log the START and END of EVERY action
                             # invocation to this tool's .log, so even an action that emits no
                             # fine-grained audit still leaves a durable trace. This is what makes
-                            # "everything JANET TWO does is logged" literally true.
+                            # "everything JANET Web does is logged" literally true.
                             $actStart = Get-Date
                             $paramKeys = ''
                             try { $paramKeys = (@($prms.Keys | Where-Object { $_ -ne '__job' }) | Sort-Object) -join ', ' } catch {}
-                            try { Write-JanetTwoSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(start)' -Result 'Started' -Detail $paramKeys } catch {}
+                            try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(start)' -Result 'Started' -Detail $paramKeys } catch {}
                             $res = Invoke-JanetToolAction -ActionId $actionId -Params $prms -Credential $cred -Emit $emit
                             [void]$job.Events.Add(@{ type='final'; result=$res })
                             $job.Result = $res
@@ -1172,7 +1172,7 @@ function Start-JanetTwoServer {
                             elseif ($job.Status -eq 'cancelling') { $job.Status = 'cancelled' }      # abandon events all emitted - now terminal
                             try {
                                 $durs = [math]::Round(((Get-Date) - $actStart).TotalSeconds, 1)
-                                Write-JanetTwoSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result ([string]$job.Status) -Detail "duration=${durs}s"
+                                Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result ([string]$job.Status) -Detail "duration=${durs}s"
                             } catch {}
                         } catch {
                             $errMsg = $_.Exception.Message
@@ -1185,7 +1185,7 @@ function Start-JanetTwoServer {
                                 $wjaErr = @{ Context=$logCtx; Tool=$toolId; Action='TouchHost'; Target='N/A'; Result='Failure'; ItemCount=0; Detail="action '$actionId' failed: $errMsg"; ToolVersion=$toolVer }
                                 Write-JanetAction @wjaErr
                             } catch {}
-                            try { Write-JanetTwoSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result 'Error' -Detail $errMsg } catch {}
+                            try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result 'Error' -Detail $errMsg } catch {}
                         }
                         $job.FinishedAt = Get-Date   # eviction clock starts at FINISH, not start
                     }
@@ -1313,9 +1313,9 @@ function Start-JanetTwoServer {
             }
         }
     } finally {
-        try { Write-JanetTwoRollup -Context $state.LogCtx -ClosingNotes $state.ClosingNotes } catch {}
+        try { Write-JanetWebRollup -Context $state.LogCtx -ClosingNotes $state.ClosingNotes } catch {}
         foreach ($slot in $state.ToolRunspaces.Values) { try { $slot.RS.Close(); $slot.RS.Dispose() } catch {} }
         try { $listener.Stop(); $listener.Close() } catch {}
-        Write-Host "  JANET TWO stopped." -ForegroundColor DarkGray
+        Write-Host "  JANET Web stopped." -ForegroundColor DarkGray
     }
 }

@@ -250,7 +250,7 @@
         // dialog itself and imports as soon as a CSV is picked.
         var actionRow = el('div'); actionRow.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px';
         var fileInput = el('input'); fileInput.type = 'file'; fileInput.accept = '.csv,.txt,.tsv'; fileInput.multiple = true; fileInput.style.display = 'none';
-        var importBtn = ui.ctaButton('IMPORT ACAS CSV', { title: 'Choose one or more Tenable/ACAS-Nessus CSV exports, upload them to the JANET TWO host, and parse them together (desktop Multiselect).' });
+        var importBtn = ui.ctaButton('IMPORT ACAS CSV', { title: 'Choose one or more Tenable/ACAS-Nessus CSV exports, upload them to the JANET Web host, and parse them together (desktop Multiselect).' });
         importBtn.style.maxWidth = '260px';
         fileInput.addEventListener('change', function () { if (fileInput.files && fileInput.files.length) doImport(); });
         importBtn.onclick = function () { fileInput.value = ''; fileInput.click(); };  // reset so re-picking the same file still fires change
@@ -1039,7 +1039,7 @@
         panel.style.cssText = 'flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;padding:14px;box-sizing:border-box';
         var head = ui.card({});
         head.appendChild(secHdr('BACKBONE - REMEDIATION PROFILE CATALOG'));
-        head.appendChild(hint('Every App Update remediation profile, its mechanism, and whether it auto-runs from the JANET TWO web host (package / staged profiles need controller-side staging).'));
+        head.appendChild(hint('Every App Update remediation profile, its mechanism, and whether it auto-runs from the JANET Web web host (package / staged profiles need controller-side staging).'));
         var loadBtn = ui.button('Load / Refresh Catalog', { variant: 'cyan', size: 'sm' });
         loadBtn.onclick = loadBackbone;
         head.appendChild(loadBtn);

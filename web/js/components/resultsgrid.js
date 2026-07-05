@@ -294,7 +294,7 @@
     function popOut() {
       var w = window.open('', '_blank', 'width=900,height=600');
       if (!w) return;
-      var d = w.document; d.title = (opts.title || 'JANET TWO') + ' - results';
+      var d = w.document; d.title = (opts.title || 'JANET Web') + ' - results';
       // copy our stylesheet link so the grid keeps its look
       var link = d.createElement('link'); link.rel = 'stylesheet'; link.href = '/css/janet.css'; d.head.appendChild(link);
       d.body.style.cssText = 'margin:0;background:var(--bg);height:100vh;display:flex';

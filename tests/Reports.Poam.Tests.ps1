@@ -5,7 +5,7 @@
 #  formula-injection guard. No file I/O, no host, no ImportExcel.
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.reports.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.reports.psm1') -Force -PassThru
 
 Describe 'export-poam eMASS POA&M CSV (audit Phase 3)' {
 

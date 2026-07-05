@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-#  JanetTwo.kev.psm1  ->  KEV Cross-Check
+#  JanetWeb.kev.psm1  ->  KEV Cross-Check
 #
-#  Net-new JANET TWO tool (no desktop twin). Cross-references a machine's
+#  Net-new JANET Web tool (no desktop twin). Cross-references a machine's
 #  ACAS / ARAD CVE export against the CISA Known Exploited Vulnerabilities (KEV)
 #  catalog that ships INSIDE JANET (JanetLocal\KevCatalog.txt) so it travels with
 #  the take-to-work payload and works fully offline / air-gapped.
@@ -182,7 +182,7 @@ function Sort-KevCves {
 # --- IAVM map (private reader; same flat file the Reports tool ships) --------
 # Reads JanetLocal\IavmMap.csv (header CVE,IAVA,Title) into a CVE -> IAVA lookup so
 # xref rows can be badged with their IAVA / bulletin id. Deliberately a small private
-# copy (do NOT cross-import JanetTwo.reports.psm1 - each engine loads in its own
+# copy (do NOT cross-import JanetWeb.reports.psm1 - each engine loads in its own
 # runspace). A missing / empty / corrupt file yields an empty map; never throws.
 function Get-KevIavmMapPath { Join-Path $PSScriptRoot '..\JanetLocal\IavmMap.csv' }
 

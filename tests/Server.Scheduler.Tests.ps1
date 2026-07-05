@@ -28,7 +28,7 @@ function Invoke-SchedReq {
 
 Describe 'Off-hours scheduler (arm-and-walk-away)' {
 
-    $serverCmd = ". '$script:Root\server\JanetTwo.Server.ps1'; Start-JanetTwoServer -Root '$script:Root' -Port $script:Port -Token '$script:Token'"
+    $serverCmd = ". '$script:Root\server\JanetWeb.Server.ps1'; Start-JanetWebServer -Root '$script:Root' -Port $script:Port -Token '$script:Token'"
     $script:Proc = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$serverCmd) -PassThru -WindowStyle Hidden
     $script:Up = $false
     foreach ($i in 1..60) {

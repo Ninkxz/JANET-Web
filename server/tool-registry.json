@@ -1,5 +1,5 @@
 {
-  "suite": "J.A.N.E.T. TWO",
+  "suite": "JANET Web",
   "_iconNote": "icon = Segoe MDL2 Assets glyph codepoint (hex) - the original WPT icon set. The launcher converts it to the glyph and renders it in font-family 'Segoe MDL2 Assets'. A non-hex value (e.g. an emoji) is rendered verbatim.",
   "tools": [
     { "id": "wpt",        "name": "Workstation Patching",   "category": "Remediation",   "icon": "E895", "summary": "Scan, patch (MECM updates/apps), health-check, clean up, and reboot workstations in bulk. The core remediation engine." },

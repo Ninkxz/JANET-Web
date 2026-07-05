@@ -282,7 +282,7 @@
         // Install CAB inputs (path / Browse-upload / reboot) sit under the Install radio.
         if (k === 'installcab') {
           var cabWrap = el('div'); cabWrap.style.cssText = 'margin:2px 0 4px 24px;display:flex;flex-direction:column;gap:6px';
-          var cabPathInput = ui.input({ placeholder: 'C:\\path\\KB5054156.cab  or  \\\\share\\pkg.msu', title: 'Full local or UNC path to the .cab/.msu readable by the machine running JANET TWO. OR use Browse to upload one.' });
+          var cabPathInput = ui.input({ placeholder: 'C:\\path\\KB5054156.cab  or  \\\\share\\pkg.msu', title: 'Full local or UNC path to the .cab/.msu readable by the machine running JANET Web. OR use Browse to upload one.' });
           cabPathInput.style.width = '100%';
           cabPathInput.addEventListener('input', function () { uploadedCabPath = null; uploadedCabName = ''; updateCabHint(); });
           cabWrap.appendChild(ui.field('CAB / MSU path', cabPathInput));

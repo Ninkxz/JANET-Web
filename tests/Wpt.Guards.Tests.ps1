@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 #  Wpt.Guards.Tests.ps1 - Pester 3.4 tests for destructive-guard branches in
-#  JanetTwo.wpt.psm1 (audit#2 / audit#30). Invoke-Command is shadowed inside
+#  JanetWeb.wpt.psm1 (audit#2 / audit#30). Invoke-Command is shadowed inside
 #  the module scope so NO real WinRM call ever leaves this box; the tests
 #  drive the guard logic with a fake remote answer.
 #
@@ -10,7 +10,7 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 
 Describe 'WptAppActionBlock DNS-mismatch hard-abort (audit#2)' {
 
-    $m = Import-Module (Join-Path $script:Root 'modules\JanetTwo.wpt.psm1') -Force -PassThru
+    $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
 
     It 'aborts with no action when the answering box is not the dialed host' {
         $r = & $m {

@@ -1,14 +1,14 @@
 ﻿# =============================================================================
-#  JanetTwo.history.psm1  ->  Patch History / Audit Explorer + staleness board
+#  JanetWeb.history.psm1  ->  Patch History / Audit Explorer + staleness board
 #
-#  Net-new JANET TWO tool (no desktop twin). READ-ONLY: it makes the audit trail
+#  Net-new JANET Web tool (no desktop twin). READ-ONLY: it makes the audit trail
 #  the suite ALREADY writes queryable in-app. It touches NO hosts, opens NO WinRM
 #  session, and writes NOTHING - it only READS the flat-file audit CSVs the shared
-#  logging bridge (server\JanetTwo.Logging.ps1) produces. Because no host is
+#  logging bridge (server\JanetWeb.Logging.ps1) produces. Because no host is
 #  touched it emits NO audit rows (the TouchHost/VulnPatched ValidateSet does not
 #  apply); the server still keeps its automatic per-session log.
 #
-#  Data sources (paths + schemas MUST match server\JanetTwo.Logging.ps1):
+#  Data sources (paths + schemas MUST match server\JanetWeb.Logging.ps1):
 #    (a) per-tool monthly detail   Logs\<Tool>\<userFolder>\<YYYY-MM>_detail.csv
 #        header: Timestamp,SessionId,Operator,ASI,Tool,ToolVersion,Action,Target,Result,ItemCount,Detail
 #    (b) local spool copies        <JANET root>\JanetLocal\<Tool>\<userFolder>\... (share-down capture)
@@ -37,7 +37,7 @@
 #  PowerShell 5.1 only. ASCII-only body; UTF-8 WITH BOM.
 # =============================================================================
 
-# The production share the desktop + JANET TWO tools log to (same constant the
+# The production share the desktop + JANET Web tools log to (same constant the
 # logging bridge uses). Kept as a literal here because this module loads into its
 # own worker runspace and does not share the logging script's private scope.
 $script:HistShareRoot = '\\dm-tn-01\sh-usafe-automation$\JANET\Logs'
@@ -122,7 +122,7 @@ function Test-HistTcpPort {
 
 function Test-HistShare {
     # 445-gate the share server BEFORE Test-Path so an unreachable share does not
-    # hang on a 30s SMB timeout (mirrors the logging bridge Test-JanetTwoShare).
+    # hang on a 30s SMB timeout (mirrors the logging bridge Test-JanetWebShare).
     param([string]$Root)
     try {
         if ($Root -notmatch '^\\\\([^\\]+)') { return (Test-Path -LiteralPath $Root -ErrorAction SilentlyContinue) }
@@ -133,10 +133,10 @@ function Test-HistShare {
 }
 
 # The local spool root the logging bridge writes to when the share is down:
-# New-JanetTwoLogContext uses JanetRoot = Split-Path -Parent <JANET TWO folder>,
-# then <JanetRoot>\JanetLocal. $PSScriptRoot here is <JANET TWO>\modules.
+# New-JanetWebLogContext uses JanetRoot = Split-Path -Parent <JANET Web folder>,
+# then <JanetRoot>\JanetLocal. $PSScriptRoot here is <JANET Web>\modules.
 function Get-HistSpoolRoot {
-    $twoRoot   = Split-Path -Parent $PSScriptRoot          # ...\J.A.N.E.T TWO
+    $twoRoot   = Split-Path -Parent $PSScriptRoot          # ...\JANET Web
     $janetRoot = Split-Path -Parent $twoRoot               # ...\  (peer to Logs\ / Tools\)
     return (Join-Path $janetRoot 'JanetLocal')
 }
@@ -154,7 +154,7 @@ function Resolve-HistRoot {
 }
 
 # Count un-replayed local spool CSVs. The logging bridge replays spooled rows to
-# the share only at server-launch (New-JanetTwoLogContext); if the share blipped
+# the share only at server-launch (New-JanetWebLogContext); if the share blipped
 # earlier THIS session, freshly captured rows still sit in the local spool while
 # we read the (recovered) share. The spool is always local, so this recursive
 # walk cannot hang on SMB. Excludes already-replayed and rotated-legacy files.
@@ -499,7 +499,7 @@ function Invoke-JanetToolAction {
             if ($r.TS -gt $a.Last) { $a.Last = $r.TS }
         }
         # Usage: dedupe SessionEnd rows by SessionId so each session counts ONCE.
-        # JANET TWO writes one row per tool PLUS an aggregate 'JANET-TWO' row (all
+        # JANET Web writes one row per tool PLUS an aggregate 'JANET-TWO' row (all
         # sharing one SessionId); the same shared *_usage.csv also holds the desktop
         # suite's SessionEnd rows (Tool = 'WPT'/'ACAS_Nemesis'/...). The old filter
         # (Tool -eq 'JANET-TWO') dropped every desktop session, so an operator who

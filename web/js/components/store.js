@@ -18,7 +18,7 @@
 (function () {
   'use strict';
   var Janet = window.Janet = window.Janet || {};
-  var KEY = 'janet2_target_groups';
+  var KEY = 'janetweb_target_groups';
   var EP = '/api/target-groups';
 
   function lsLoad() { try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { return {}; } }
@@ -27,7 +27,7 @@
   // Same token resolution as shell.js (sessionStorage; ?t= only on first paint).
   function token() {
     try { var q = new URLSearchParams(location.search).get('t'); if (q) return q; } catch (e) {}
-    try { return sessionStorage.getItem('janet2_token') || ''; } catch (e) { return ''; }
+    try { return sessionStorage.getItem('janetweb_token') || ''; } catch (e) { return ''; }
   }
 
   // In-memory source of truth for the synchronous API. Seed from the localStorage

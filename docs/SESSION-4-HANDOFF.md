@@ -1,4 +1,4 @@
-# J.A.N.E.T. TWO - Session 4 Handoff (ponytail-audit applied + UI density/log-drawer pass)
+# JANET Web - Session 4 Handoff (ponytail-audit applied + UI density/log-drawer pass)
 
 State as of 2026-06-19. The session that ran a whole-repo over-engineering audit and
 applied it, then did a UI pass: fill the browser window + a click-to-open bottom
@@ -75,7 +75,7 @@ activity-log drawer across the suite. Read this + the `project-janet-two` and
 4. Do NOT modify `X:\J.A.N.E.T` or `X:\J.A.N.E.T ONE`. Shared SMB drive - coordinate destructive ops.
 5. Push with a one-time `git -c http.extraHeader="Authorization: Basic <base64 bth0mp:token>"
    push origin main`; keep creds OUT of `.git/config`. Owner pastes the token.
-6. Launch via `Launch JANET TWO.cmd`.
+6. Launch via `Launch JANET Web.cmd`.
 
 ## LESSONS (new this session)
 

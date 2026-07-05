@@ -1,4 +1,4 @@
-# JANET TWO - UI Rebuild Spec: wpt
+# JANET Web - UI Rebuild Spec: wpt
 
 > Engine is re-forked from `fork-source\Tools`; THIS is the faithful FRONTEND to reproduce (screens, run model, live activity view).
 
@@ -8,7 +8,7 @@ The Workstation Patching Tool (WPT) is a single-window WinForms admin console in
 
 ---
 
-# Workstation Patching Tool (WPT) -- UI/UX Rebuild Spec for JANET TWO
+# Workstation Patching Tool (WPT) -- UI/UX Rebuild Spec for JANET Web
 
 Source: `X:\J.A.N.E.T\Tools\WorkstationPatchingTool_6.5.22.ps1` (WinForms desktop, PowerShell 5.1). This spec describes the **frontend and run experience** to reproduce in the pure-PowerShell web-local re-front. The engine is re-forked separately; section 5 names the entry points it must serve.
 
@@ -41,7 +41,7 @@ A single top-level form, title `J.A.N.E.T. Workstation Patching Tool v<version>`
 16. **Usage** -- usage metrics grid.
 17. **Logs** -- global colorized activity log.
 
-**Session gating (critical UX):** every tab except Start has `AlwaysOpen=false`. The nav click handler, and the TabControl `SelectedIndexChanged`, check `$global:SessionStarted`; if false they pop a MessageBox ("Complete the setup and click START SESSION...") and snap back to Start. JANET TWO must replicate this lockout.
+**Session gating (critical UX):** every tab except Start has `AlwaysOpen=false`. The nav click handler, and the TabControl `SelectedIndexChanged`, check `$global:SessionStarted`; if false they pop a MessageBox ("Complete the setup and click START SESSION...") and snap back to Start. JANET Web must replicate this lockout.
 
 ## 2. Per-Tab Controls + Workflow
 
@@ -63,13 +63,13 @@ A single top-level form, title `J.A.N.E.T. Workstation Patching Tool v<version>`
 
 ## 3. THE RUN MODEL + ACTIVITY VIEW (preserve exactly)
 
-This is the heart of JANET TWO. Every bulk operation is the same machine; web-local must stream the same way (SSE/long-poll into per-host rows + a log pane).
+This is the heart of JANET Web. Every bulk operation is the same machine; web-local must stream the same way (SSE/long-poll into per-host rows + a log pane).
 
 **Launch + confirm.** Operator clicks a toolbar button (Bulk tab: **Scan All** green, **Patch Selected** amber, **Reboot Selected** red; plus **Patch All Needing**, **Ping Sweep** purple, **Repair WinRM** cyan, **App Manager**, **Host Details**, **Export CSV**; selection row: Select All / Deselect / Select With Updates). Guards fire ordered MessageBoxes: no targets -> "No Targets"; no credentials -> "No Credentials"; nothing selected -> "Nothing Selected". Then a YesNo confirmation scaled to risk -- patch uses the warning icon ("Patch N workstation(s)? Reboot will be suppressed."), reboot uses the stop icon ("REBOOT N workstation(s)? This is immediate and forced."), WinRM repair spells out the DCOM steps. Only "Yes" proceeds.
 
 **Dispatch.** Action button(s) disable. Each target row resets to a dim placeholder (`Scanning...`/`Patching...`/`Rebooting...`, forecolor `RGB(90,90,130)` or amber). `Initialize-RunspacePool` builds a pool sized `1..$global:ThreadCount` (MTA). Per host: `$ps=[PowerShell]::Create(); $ps.RunspacePool=$RSPool; $ps.AddScript($global:ScanBlock).AddArgument($comp).AddArgument($cred).AddArgument('Negotiate'); $handle=$ps.BeginInvoke()` -- stored in a `$script:ScanJobs[host]` hashtable. A `=== Bulk scan started: N ===` banner hits the log and `Write-AuditLog` records the start.
 
-**Stream-back (the timer drain).** A `System.Windows.Forms.Timer` (Interval 300-600ms) ticks: for each job whose `Handle.IsCompleted`, it `EndInvoke`+`Dispose`, removes the job, normalizes an array result to `[0]`, finds the grid row whose Host cell equals `$res.Host`, and **paints that row's cells + colors** (section 4). It calls `Track-Action` per host (feeds Reports), updates the progress label to `"Scanning: $done / $total"`, and logs a per-host line. When the jobs hashtable empties: `Timer.Stop()+Dispose()`, re-enable buttons, flip the label to green `"Scan complete: N workstation(s)"`, log `=== complete ===`. JANET TWO equivalent: a per-host worker pool whose completions push row-update events to the client, with a final "complete" event.
+**Stream-back (the timer drain).** A `System.Windows.Forms.Timer` (Interval 300-600ms) ticks: for each job whose `Handle.IsCompleted`, it `EndInvoke`+`Dispose`, removes the job, normalizes an array result to `[0]`, finds the grid row whose Host cell equals `$res.Host`, and **paints that row's cells + colors** (section 4). It calls `Track-Action` per host (feeds Reports), updates the progress label to `"Scanning: $done / $total"`, and logs a per-host line. When the jobs hashtable empties: `Timer.Stop()+Dispose()`, re-enable buttons, flip the label to green `"Scan complete: N workstation(s)"`, log `=== complete ===`. JANET Web equivalent: a per-host worker pool whose completions push row-update events to the client, with a final "complete" event.
 
 **Cancel / abort.** No global Cancel button on the Bulk tab -- re-entry is prevented by disabled buttons; some tabs (Cleanup) expose an explicit **Stop**. `FormClosing` is the master teardown: stop+dispose every `$script:*Timer`, `Stop()`+`Dispose()` every in-flight PowerShell in every `*Jobs` hashtable, then close+dispose the RunspacePool. The window X / Alt-F4 are intercepted and cancelled -- only the **Close Tool** button (after a Closing Notes dialog) actually closes, guaranteeing audit/usage rows are written.
 

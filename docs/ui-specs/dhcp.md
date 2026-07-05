@@ -1,4 +1,4 @@
-# JANET TWO - UI Rebuild Spec: dhcp
+# JANET Web - UI Rebuild Spec: dhcp
 
 > Engine is re-forked from `fork-source\Tools`; THIS is the faithful FRONTEND to reproduce (screens, run model, live activity view).
 

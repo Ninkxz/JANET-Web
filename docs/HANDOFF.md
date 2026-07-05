@@ -1,4 +1,4 @@
-# J.A.N.E.T. TWO -- Build Handoff
+# JANET Web -- Build Handoff
 
 > Pure-PowerShell, zero-outside-dependency, web-local re-front of the JANET suite.
 > **Mandate:** keep JANET ONE's proven backend/plumbing; rebuild the frontend so **each tool gets a FAITHFUL, bespoke per-tool view** that mirrors its desktop WinForms tool -- its screens, tabs, run controls, and above all the live **activity run** (activity log + colour-coded results grid + progress + per-host rows). **No generic renderer.**
@@ -21,11 +21,11 @@ Read in order:
 
 ## 0. The one-sentence thesis
 
-JANET ONE took the backends but not the usability: a single manifest-driven SPA made every tool a cookie-cutter form-over-grid. JANET TWO **reuses the plumbing verbatim** and **rebuilds the UI as one bespoke view per tool**, where every view is COMPOSED from a small library of shared, desktop-grade components -- so we get desktop fidelity *without* a lowest-common-denominator renderer.
+JANET ONE took the backends but not the usability: a single manifest-driven SPA made every tool a cookie-cutter form-over-grid. JANET Web **reuses the plumbing verbatim** and **rebuilds the UI as one bespoke view per tool**, where every view is COMPOSED from a small library of shared, desktop-grade components -- so we get desktop fidelity *without* a lowest-common-denominator renderer.
 
 ## 1. What we KEEP verbatim (the plumbing) vs REBUILD (the UI)
 
-**KEEP (lift `JanetOne.*` -> `JanetTwo.*`, rename only):**
+**KEEP (lift `JanetOne.*` -> `JanetWeb.*`, rename only):**
 - `System.Net.HttpListener` server, loopback-only bind (`http://127.0.0.1:<port>/`), single accept thread + 2 s heartbeat loop, per-launch GUID token (`?t=` -> `sessionStorage` + `history.replaceState`, `X-Janet-Token`, constant-time compare), static-asset path-traversal guard + security headers.
 - Background-runspace worker + **`/api/job/<id>/events?since=N` polling** streaming model: synchronized `$job.Events` ArrayList, **status snapshot taken BEFORE events snapshot**, `nextSince` cursor, one independent client poller per run with a **generation guard**, runs survive tab/tool switches.
 - **Reaper** (drains finished runspaces, frees stateful Busy slots, evicts 5 min after FinishedAt, never the job a request is about) + transactional `BeginInvoke` start.
@@ -46,7 +46,7 @@ Every tool is three artifacts wired by the unchanged contract:
 
 ```
 web/js/views/<id>.view.js   bespoke UI: real tabs, toolbars, grids (composes shared components)
-modules/JanetTwo.<id>.psm1  engine: RE-FORKED from fork-source/Tools/<DesktopTool>.ps1
+modules/JanetWeb.<id>.psm1  engine: RE-FORKED from fork-source/Tools/<DesktopTool>.ps1
 server/ + tool-registry.json the REUSED contract (no per-tool server code)
 ```
 
@@ -86,9 +86,9 @@ ctx.theme        // ThemeKit tokens + ControlFactory
 
 ## 4. The plugin contract (KEEP VERBATIM -- engines are reused, only the UI is rebuilt)
 
-`modules/JanetTwo.<id>.psm1` exports exactly two functions:
+`modules/JanetWeb.<id>.psm1` exports exactly two functions:
 
-1. **`Get-JanetToolManifest`** -> `@{ id; name; category; icon; summary; version?; statefulRunspace?; actions=@( @{ id; label; kind('stream-table'|'table'|'single'|'form'|'export'); destructive=$bool; description?; confirm?; inputs=@(@{name;type;required;default?;...}); columns=@('Col',...) } ) }`. Input `type` in `hostlist,text,textarea,int,bool,select,file,filelist,folder,savefile,hostpick,msi-checklist`. **In JANET TWO the manifest drives ROUTING + AUDIT + the confirm/destructive flags only -- the VIEW owns presentation.**
+1. **`Get-JanetToolManifest`** -> `@{ id; name; category; icon; summary; version?; statefulRunspace?; actions=@( @{ id; label; kind('stream-table'|'table'|'single'|'form'|'export'); destructive=$bool; description?; confirm?; inputs=@(@{name;type;required;default?;...}); columns=@('Col',...) } ) }`. Input `type` in `hostlist,text,textarea,int,bool,select,file,filelist,folder,savefile,hostpick,msi-checklist`. **In JANET Web the manifest drives ROUTING + AUDIT + the confirm/destructive flags only -- the VIEW owns presentation.**
 2. **`Invoke-JanetToolAction -ActionId -Params -Credential -Emit`** -> `@{ rows=@(...); summary=@{...} }`. Server injects `$Params['__job']` (synchronized job hashtable; engine polls `$job.Cancel`).
 
 **Emit event vocabulary (unchanged):**
@@ -138,7 +138,7 @@ A card-per-item run (ACAS), a host-detail inspector (WPT), a pop-out log (ACAS/p
 
 ## 8. Build order (small representative tool first, heavies last)
 
-0. **Plumbing lift + cross-cutting kit** -- rename `JanetOne.*` server/auth/logging -> `JanetTwo.*`, `Start-JanetTwo.ps1`, `tool-registry.json`, minimal `index.html`; build the full component library + view-registry + lazy loader; verify shell + stub view + mocked stream.
+0. **Plumbing lift + cross-cutting kit** -- rename `JanetOne.*` server/auth/logging -> `JanetWeb.*`, `Start-JanetWeb.ps1`, `tool-registry.json`, minimal `index.html`; build the full component library + view-registry + lazy loader; verify shell + stub view + mocked stream.
 1. **Remote Message (REFERENCE TOOL)** -- small, self-contained, exercises the whole shared pipeline (TargetManager, RunBar morph-to-Cancel, ConfirmDialog, RunController parallel stream, ActivityLog, StatCards, ProgressStrip, Ping-All). **This is the blueprint every later tool copies.**
 2. Secure Boot Enabler -- single-window card stack; ResultsGrid status-pill rows + custom progress bar + completion modal + Start-Job-queue run variant.
 3. DHCP Scope Options -- dual-workflow window, "use current session" toggle, detailed-diff confirm, synchronous batch replayed into ActivityLog.
@@ -175,11 +175,11 @@ A tool is done when: its view reproduces the desktop tool's **tabs/toolbars/run 
 Phase 0 stands up the plumbing + the shared kit with **no tool yet**, verified against a mocked job stream. Do it in order; run the parse+BOM+ASCII gate after every `.ps1`/`.psm1` edit. Commit small (per component / per tool) and push to `bth0mp/J.A.N.E.T-TWO` as you go.
 
 **0a. Lift the plumbing (rename only -- do NOT redesign):**
-- [ ] `X:\J.A.N.E.T ONE\server\JanetOne.Server.ps1` -> `server\JanetTwo.Server.ps1`; rename `JanetOne*` identifiers/log prefixes to `JanetTwo*`; keep every route + the token / reaper / runspace-streaming logic otherwise byte-identical.
-- [ ] `JanetOne.Auth.ps1` -> `server\JanetTwo.Auth.ps1`; `JanetOne.Logging.ps1` -> `server\JanetTwo.Logging.ps1` -- KEEP the same central-CSV share/schema so JANET TWO rows merge with the suite (do NOT fork the log location).
-- [ ] `Start-JanetOne.ps1` -> `Start-JanetTwo.ps1` (default port **8089** so it doesn't clash with JANET ONE's 8088); `Launch JANET ONE.cmd` -> `Launch JANET TWO.cmd` (keep the conhost pin + Unblock-File self-heal).
+- [ ] `X:\J.A.N.E.T ONE\server\JanetOne.Server.ps1` -> `server\JanetWeb.Server.ps1`; rename `JanetOne*` identifiers/log prefixes to `JanetWeb*`; keep every route + the token / reaper / runspace-streaming logic otherwise byte-identical.
+- [ ] `JanetOne.Auth.ps1` -> `server\JanetWeb.Auth.ps1`; `JanetOne.Logging.ps1` -> `server\JanetWeb.Logging.ps1` -- KEEP the same central-CSV share/schema so JANET Web rows merge with the suite (do NOT fork the log location).
+- [ ] `Start-JanetOne.ps1` -> `Start-JanetWeb.ps1` (default port **8089** so it doesn't clash with JANET ONE's 8088); `Launch JANET ONE.cmd` -> `Launch JANET Web.cmd` (keep the conhost pin + Unblock-File self-heal).
 - [ ] New `server\tool-registry.json`: all 12 tools, `ported:false` initially (flip per tool as built).
-- [ ] VERIFY: `Start-JanetTwo.ps1` boots, serves a stub `web\index.html`, `GET /api/tools` returns the registry, the `?t=` token gate works.
+- [ ] VERIFY: `Start-JanetWeb.ps1` boots, serves a stub `web\index.html`, `GET /api/tools` returns the registry, the `?t=` token gate works.
 
 **0b. Build the cross-cutting kit (the desktop-grade components):**
 - [ ] `web\css\janet.css` = **ThemeKit** (port the JANET tactical tokens -- the shared look).
@@ -188,7 +188,7 @@ Phase 0 stands up the plumbing + the shared kit with **no tool yet**, verified a
 - [ ] VERIFY with a STUB view + a **mocked job stream** (mock `window.fetch`: `POST /api/tool/.../action/...` -> `{jobId}`; `GET /api/job/<id>/events` -> a scripted `status`/`row`/`log`/`final` sequence) so every component renders a live run with no real engine.
 
 **0c. Build step 1 = Remote Message (THE REFERENCE TOOL):**
-- [ ] Re-fork `fork-source\Tools\RemoteMessageTool_1.3.3.ps1` -> `modules\JanetTwo.message.psm1` (cross-check `X:\J.A.N.E.T ONE\modules\JanetOne.message.psm1`); export the two contract functions; the desktop send-loop becomes a RunspacePool worker that `-Emit`s `row`/`log`/`progress`/`audit`.
+- [ ] Re-fork `fork-source\Tools\RemoteMessageTool_1.3.3.ps1` -> `modules\JanetWeb.message.psm1` (cross-check `X:\J.A.N.E.T ONE\modules\JanetOne.message.psm1`); export the two contract functions; the desktop send-loop becomes a RunspacePool worker that `-Emit`s `row`/`log`/`progress`/`audit`.
 - [ ] Build `web\js\views\message.view.js` per `docs\ui-specs\message.md`: three-column dashboard (TargetManager + composer + ActivityLog), RunBar CTA morph-to-Cancel, ConfirmDialog, StatCards (Sent/Failed/Total), Ping-All pre-flight.
 - [ ] Flip `message` -> `ported:true`; verify end-to-end on the mocked stream; flag remote-exec for on-AFNET validation. **Lock this view in as THE pattern**, then replicate for the other 11 in build-order.
 
@@ -198,10 +198,10 @@ Phase 0 stands up the plumbing + the shared kit with **no tool yet**, verified a
 
 ### Appendix A -- File map (target)
 ```
-J.A.N.E.T TWO\
-  Start-JanetTwo.ps1
-  server\  JanetTwo.Server.ps1  JanetTwo.Auth.ps1  JanetTwo.Logging.ps1  tool-registry.json
-  modules\ JanetTwo.<id>.psm1   (x12, RE-FORKED from fork-source\Tools)
+JANET Web\
+  Start-JanetWeb.ps1
+  server\  JanetWeb.Server.ps1  JanetWeb.Auth.ps1  JanetWeb.Logging.ps1  tool-registry.json
+  modules\ JanetWeb.<id>.psm1   (x12, RE-FORKED from fork-source\Tools)
   web\
     index.html
     css\  janet.css   (ThemeKit)
@@ -218,5 +218,5 @@ J.A.N.E.T TWO\
 - Plumbing to lift: `X:\J.A.N.E.T ONE\server\JanetOne.Server.ps1`, `JanetOne.Auth.ps1`, `JanetOne.Logging.ps1`.
 - Streaming/contract reference: `X:\J.A.N.E.T ONE\web\js\app.js` (the renderer to NOT copy; the streaming client to extract into RunController).
 - Engine cross-checks (bug-fixed, not the fork source): `X:\J.A.N.E.T ONE\modules\JanetOne.<id>.psm1`.
-- Fork source of truth: `X:\J.A.N.E.T TWO\fork-source\Tools\*.ps1` (desktop WinForms tools).
-- Per-tool faithful UI specs to author next: `X:\J.A.N.E.T TWO\docs\ui-specs\<tool>.md`.
+- Fork source of truth: `X:\JANET Web\fork-source\Tools\*.ps1` (desktop WinForms tools).
+- Per-tool faithful UI specs to author next: `X:\JANET Web\docs\ui-specs\<tool>.md`.

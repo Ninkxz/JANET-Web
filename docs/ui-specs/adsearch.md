@@ -1,10 +1,10 @@
-# JANET TWO - UI Rebuild Spec: adsearch
+# JANET Web - UI Rebuild Spec: adsearch
 
 > Engine is re-forked from `fork-source\Tools`; THIS is the faithful FRONTEND to reproduce (screens, run model, live activity view).
 
 ## Summary
 
-The J.A.N.E.T. AD Search Tool is a single-window WinForms admin app (1300x800, fixed, dark purple-on-black "tactical" theme) for read-only Active Directory lookups against the live domain via ADSI/ADSISearcher -- no RSAT required. Its layout is NOT a TabControl: a horizontal MODE radio-button bar (USERS, COMPUTERS, GROUPS, ORG BOXES, BY EMAIL, BY MANAGER, BULK COMPUTERS, BASE USERS EXPORT, BY LAST PC) acts as the navigation, swapping the visible input fields below it for the selected mode. The screen is split into a left RESULTS card (a ListView whose columns and per-row colour-coding change per mode) and a right EXTENDED INFO card (a read-only RichTextBox console showing summaries and the detail of a double-clicked row). Every search runs asynchronously on a dedicated STA runspace; a 200ms WinForms timer polls completion, and a custom status strip with blinking pulse-dots, a live clock, and a "LIVE" heartbeat conveys run state. Double-clicking a result row opens an "OBJECT DETAIL" popup window and mirrors the same detail into the EXTENDED INFO console. Reproducing this live single-shot async "search wave" experience -- status flips to SEARCHING, dot pulses olive, results stream into the grid colour-coded by status, summary fills the console, status flips to OK :: NNN RESULTS or SEARCH ERROR -- is the core thing JANET TWO must preserve.
+The J.A.N.E.T. AD Search Tool is a single-window WinForms admin app (1300x800, fixed, dark purple-on-black "tactical" theme) for read-only Active Directory lookups against the live domain via ADSI/ADSISearcher -- no RSAT required. Its layout is NOT a TabControl: a horizontal MODE radio-button bar (USERS, COMPUTERS, GROUPS, ORG BOXES, BY EMAIL, BY MANAGER, BULK COMPUTERS, BASE USERS EXPORT, BY LAST PC) acts as the navigation, swapping the visible input fields below it for the selected mode. The screen is split into a left RESULTS card (a ListView whose columns and per-row colour-coding change per mode) and a right EXTENDED INFO card (a read-only RichTextBox console showing summaries and the detail of a double-clicked row). Every search runs asynchronously on a dedicated STA runspace; a 200ms WinForms timer polls completion, and a custom status strip with blinking pulse-dots, a live clock, and a "LIVE" heartbeat conveys run state. Double-clicking a result row opens an "OBJECT DETAIL" popup window and mirrors the same detail into the EXTENDED INFO console. Reproducing this live single-shot async "search wave" experience -- status flips to SEARCHING, dot pulses olive, results stream into the grid colour-coded by status, summary fills the console, status flips to OK :: NNN RESULTS or SEARCH ERROR -- is the core thing JANET Web must preserve.
 
 ---
 
@@ -72,7 +72,7 @@ After load: `AutoResizeColumns("HeaderSize")`.
 
 **Status strip** (the run telemetry): left -> right: state-driven **pulse-dot** (Idle gray / Active olive-blink / Error red-blink), **status label** in `KEY :: VALUE` uppercase mono (`STATUS :: READY`, `SEARCHING :: USER :: please wait`, `STATUS :: OK :: 042 RESULTS`, `IMPORTED :: 200 HOSTNAMES`), a **live HH:mm:ss clock** (1s timer), and a right-anchored green **`LIVE`** label + always-blinking olive **heartbeat dot** proving the UI/timer pipeline is alive.
 
-> For JANET TWO: model each search as a single async job whose POST returns immediately; the browser polls (or SSE) until done, then renders the per-mode column set + row colour classes and the summary console in one shot. The pulse-dot/status/clock/LIVE telemetry and the `KEY :: VALUE` status phrasing must be reproduced.
+> For JANET Web: model each search as a single async job whose POST returns immediately; the browser polls (or SSE) until done, then renders the per-mode column set + row colour classes and the summary console in one shot. The pulse-dot/status/clock/LIVE telemetry and the `KEY :: VALUE` status phrasing must be reproduced.
 
 ## 4. Targets / Host-List / Credential / Shared State
 

@@ -1,6 +1,6 @@
 /* ============================================================================
    beta.view.js  -  Beta Lab (tool id: 'beta')
-   Staging ground for experimental JANET TWO features (one tab per section).
+   Staging ground for experimental JANET Web features (one tab per section).
    No sections are active right now: App Versions / Software Inventory graduated
    into Workstation Patching, and logged-on user / last boot / pending-reboot
    moved into the WPT Bulk Scan grid. When a new beta feature lands, restore the

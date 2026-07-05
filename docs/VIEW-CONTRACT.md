@@ -1,8 +1,8 @@
-# JANET TWO - View Authoring Contract
+# JANET Web - View Authoring Contract
 
 How to write a faithful per-tool view (`web/js/views/<id>.view.js`) that composes the
 shared kit. Read this + the tool's `docs/ui-specs/<id>.md` + its engine manifest
-(`modules/JanetTwo.<id>.psm1` -> `Get-JanetToolManifest`) + the three reference views
+(`modules/JanetWeb.<id>.psm1` -> `Get-JanetToolManifest`) + the three reference views
 (`web/js/views/message.view.js`, `secureboot.view.js`, `dhcp.view.js`) before building.
 Vanilla JS, no build step, no frameworks.
 

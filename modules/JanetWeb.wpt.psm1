@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.wpt.psm1  -  Workstation Patching tool engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.wpt.psm1  -  Workstation Patching tool engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\WorkstationPatchingTool_6.5.22.ps1 (engine reused, the
 #  WinForms layer dropped). Fans out MECM/WMI/WinRM remote-ops across many
@@ -12,7 +12,7 @@
 #  $global:RegKeyScanBlock / $global:RegKeyApplyBlock / $global:L4JFinderBlock,
 #  plus the KB / Software / Remote-Message / App-Update handlers.
 #
-#  Contract (identical to JanetTwo.message.psm1):
+#  Contract (identical to JanetWeb.message.psm1):
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
@@ -616,7 +616,7 @@ function Get-WptTrendData {
 # version proof) is DOWNGRADED to Review at scan time so a supported in-market build is never
 # auto-removed without human sign-off (the desktop relies on the ACAS plugin that flagged the
 # host for this; the live scan has no such per-host signal yet -> ACAS-CSV gate is a TODO).
-# Embedded (not file-loaded) so JANET TWO stays self-contained for the take-to-work mirror.
+# Embedded (not file-loaded) so JANET Web stays self-contained for the take-to-work mirror.
 function Get-WptUnsupportedCatalog {
     @(
         @{ Label='MSXML 3/4 (XML Core Services)';      DisplayNameRegex='^(Microsoft (XML Parser|Core Services|XML 4)|MSXML )'; VersionMaxExclusive='5.0'; Category='UnsupportedSoftware'; Action='Uninstall'; Proven=$false; Notes='MSXML 3/4 EOL (version-gated < 5.0; MSXML 6 left alone) - uninstall, no successor on the AFNET image.' }
@@ -1118,7 +1118,7 @@ function Get-WptAppUpdateProfiles {
             }
         }
         'Apache Log4j - Replace Vulnerable Jars' = @{
-            # Requires controller-side staged jars; the JANET TWO web host has no
+            # Requires controller-side staged jars; the JANET Web web host has no
             # staging substitution, so auto-patch treats this as a coverage gap
             # (NeedsStaging). Carried for manifest completeness / manual single runs.
             NeedsStaging = $true
@@ -3876,7 +3876,7 @@ function Get-WptLog4jVulnState {
 
 # -----------------------------------------------------------------------------
 #  Shared multi-host fan-out harvester. Mirrors the RunspacePool pattern in
-#  JanetTwo.message.psm1: one [powershell] per host added to a pool, a harvest
+#  JanetWeb.message.psm1: one [powershell] per host added to a pool, a harvest
 #  loop polling IsCompleted, EndInvoke, build a row, stream row+audit+progress.
 #  $Work is the worker scriptblock; $ArgFactory builds the argument array for a
 #  host; $RowOf maps a worker result to a grid row; $OkOf decides success;

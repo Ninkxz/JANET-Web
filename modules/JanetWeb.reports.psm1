@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.reports.psm1  -  Reports tool engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.reports.psm1  -  Reports tool engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\ReportsTool_2.14.5.ps1 (engine reused, WinForms layer
 #  dropped). Provides ACAS vulnerability import/parse, Dirty 30 AD cross-
@@ -477,17 +477,17 @@ $script:LastSquadronRollup     = $null
 # Maps each Categorize-Finding bucket to the concrete JANET remediation that clears
 # it. Source of the tool ids / action ids / profile names - keep in sync, do NOT
 # import (each engine loads in its own runspace):
-#   - acas: JanetTwo.acas.psm1 -> manifest action id 'run-vulnerability' (label
+#   - acas: JanetWeb.acas.psm1 -> manifest action id 'run-vulnerability' (label
 #     'Run Vulnerability Update'); profile strings are keys of
 #     $script:AcasUpdateProfiles (Google Chrome - Update, Microsoft Edge - Update,
 #     Microsoft 365 - Force Update, Windows Defender - Update Definitions, Windows
 #     Unquoted Service Path - Remediate).
-#   - wpt:  JanetTwo.wpt.psm1  -> manifest action id 'kb-install' (label 'Install
+#   - wpt:  JanetWeb.wpt.psm1  -> manifest action id 'kb-install' (label 'Install
 #     KBs'). KB routes go to WPT because WPT is the tool that reads the SHARED
 #     target list (ctx.targets) the view's Send-to-tool handoff loads; acas/upr
 #     scan their own imported host set, so the view hands them the hosts via the
 #     clipboard instead (see reports.view.js sendRoute).
-#   - upr:  JanetTwo.upr.psm1  -> tool id 'upr' (Unsupported Product Remediator),
+#   - upr:  JanetWeb.upr.psm1  -> tool id 'upr' (Unsupported Product Remediator),
 #     for EOL / unsupported / not-our-patch products.
 # Buckets with no safe one-click route (Apache / Other and anything unlisted) fall
 # through to 'manual review' (Routable=$false) at the action.
@@ -533,7 +533,7 @@ function ConvertTo-HtmlEscaped {
 
 # Human-facing author label: drop the .csa admin suffix so report bylines and
 # "Patched by" defaults read as the bare EDIPI (matches the cleaned Operator
-# string from Get-JanetTwoOperatorIdentity). Display only - never used for paths.
+# string from Get-JanetWebOperatorIdentity). Display only - never used for paths.
 function Get-ReportsCleanUser {
     $u = ($env:USERNAME -replace '(?i)\.csa$', '').Trim()
     if ([string]::IsNullOrWhiteSpace($u)) { $u = [string]$env:USERNAME }
@@ -600,7 +600,7 @@ function Parse-Severity {
 #  KEV auto-flag  -  cross-reference every finding's CVE cell against the CISA
 #  Known Exploited Vulnerabilities catalog that ships inside JANET
 #  (JanetLocal\KevCatalog.txt). Private in-module copy of the reader semantics
-#  used by JanetTwo.kev.psm1 (Read-KevCatalog) - deliberately NOT an import of
+#  used by JanetWeb.kev.psm1 (Read-KevCatalog) - deliberately NOT an import of
 #  that module (each engine loads in its own runspace; keep reports self-
 #  contained). The file is read ONCE per parse and the resulting HashSet is
 #  threaded into every New-AcasFinding call so a finding whose CVE cell contains
@@ -612,7 +612,7 @@ function Get-ReportsKevCatalogPath { Join-Path $PSScriptRoot '..\JanetLocal\KevC
 
 # Read the KEV catalog fresh. Format-agnostic (newline / comma / semicolon / tab
 # / space separated), de-duped case-insensitively, never throws. Returns a
-# HashSet + count + source string. Mirrors JanetTwo.kev.psm1 Read-KevCatalog.
+# HashSet + count + source string. Mirrors JanetWeb.kev.psm1 Read-KevCatalog.
 function Read-ReportsKevCatalog {
     $p   = Get-ReportsKevCatalogPath
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -659,7 +659,7 @@ function Get-ReportsKevOverlap {
 #  IAVM mapping  -  auto-tag every finding's CVE cell with its IAVA / bulletin id
 #  from a small flat file that ships inside JANET (JanetLocal\IavmMap.csv, header
 #  CVE,IAVA,Title). Same self-contained-reader pattern as the KEV auto-flag above
-#  (private in-module copy of the reader semantics used by JanetTwo.kev.psm1 -
+#  (private in-module copy of the reader semantics used by JanetWeb.kev.psm1 -
 #  deliberately NOT an import; each engine loads in its own runspace). The file is
 #  read ONCE per parse and the resulting map is threaded into every New-AcasFinding
 #  call so a finding whose CVE cell contains a mapped CVE is stamped IAVA=<id>. A
@@ -724,7 +724,7 @@ function Get-ReportsIavmForCves {
 
 # The ONLY writer of the IAVM map (used by iavm-add-map). Rewrites the whole file
 # from the supplied CVE -> @{IAVA;Title} map (de-duped, CVE-sorted) via temp-file +
-# atomic swap, exactly like JanetTwo.kev.psm1 Write-KevCatalog. UTF-8 no BOM, CVE,
+# atomic swap, exactly like JanetWeb.kev.psm1 Write-KevCatalog. UTF-8 no BOM, CVE,
 # IAVA, Title CSV-quoted.
 # ponytail: last-writer-wins on concurrent edits from two machines on the share -
 # acceptable for a rarely-edited reference list, matching Write-KevCatalog.
@@ -785,7 +785,7 @@ function New-AcasFinding {
 # =============================================================================
 #  Remediation SLA / finding-age baseline  -  editable JanetLocal\sla-baseline.json
 #  giving the days-to-remediate window per severity (KEV overrides). Same safe-
-#  default loader pattern as JanetTwo.c2c.psm1 Get-C2cBaseline: a missing / empty /
+#  default loader pattern as JanetWeb.c2c.psm1 Get-C2cBaseline: a missing / empty /
 #  corrupt file silently falls back to the embedded defaults so an SLA run never
 #  breaks. Read-only - the module never writes this file.
 # -----------------------------------------------------------------------------
@@ -1305,15 +1305,15 @@ function Compare-AcasScans {
 # Extends the scan compare (REMEDIATED / STILL OPEN) with a "prove it" join against
 # the audit trail JANET already writes: for each closed / still-open row, did an
 # operator touch that host through JANET between the two scans' dates? Models the
-# hardened readers in JanetTwo.history.psm1 (share-gate + local-spool fallback +
+# hardened readers in JanetWeb.history.psm1 (share-gate + local-spool fallback +
 # month enumeration + Timestamp window filter) with a private in-module copy so this
 # engine stays self-contained in its own runspace (suite convention: no cross-import).
 
 # The RUNTIME local spool the logging bridge writes to during a share outage. It is
 # at the JANET root (peer to Logs\), NOT the in-repo JanetLocal the KEV catalog reads:
-# New-JanetTwoLogContext uses JanetRoot = Split-Path -Parent <JANET TWO folder>, then
-# <JanetRoot>\JanetLocal. $PSScriptRoot = <JANET TWO>\modules. (Matches
-# JanetTwo.history.psm1 Get-HistSpoolRoot.)
+# New-JanetWebLogContext uses JanetRoot = Split-Path -Parent <JANET Web folder>, then
+# <JanetRoot>\JanetLocal. $PSScriptRoot = <JANET Web>\modules. (Matches
+# JanetWeb.history.psm1 Get-HistSpoolRoot.)
 function Get-ReportsAuditSpoolRoot {
     $twoRoot   = Split-Path -Parent $PSScriptRoot
     $janetRoot = Split-Path -Parent $twoRoot
@@ -1321,7 +1321,7 @@ function Get-ReportsAuditSpoolRoot {
 }
 
 # Resolve which audit root to read: the central share when 445-reachable AND listable,
-# else the local spool. Models JanetTwo.history.psm1 Resolve-HistRoot. Returns
+# else the local spool. Models JanetWeb.history.psm1 Resolve-HistRoot. Returns
 # @{ Root; OnShare; Reason; Exists }.
 function Resolve-ReportsAuditRoot {
     $share = Get-ReportsLogShareRoot
@@ -1351,7 +1351,7 @@ function Get-ReportsWindowMonths {
 
 # Normalized key for matching an ACAS hostname against an audit TargetHost. IPv4 is
 # kept whole; anything else collapses to the pre-dot short name upper-cased
-# (FQDN-tolerant). Mirrors JanetTwo.history.psm1 Get-HistShortName but IP-safe - a
+# (FQDN-tolerant). Mirrors JanetWeb.history.psm1 Get-HistShortName but IP-safe - a
 # bare IP must NOT collapse to its first octet.
 function Get-ReportsAuditHostKey {
     param([string]$Value)
@@ -2971,7 +2971,7 @@ $rowsBlock
     </tbody>
   </table>
   <div class="footer">
-    Self-contained snapshot. To refresh, re-run the AD lookup in JANET TWO Reports and re-export.
+    Self-contained snapshot. To refresh, re-run the AD lookup in JANET Web Reports and re-export.
   </div>
 </div>
 <script>
@@ -3590,7 +3590,7 @@ function Set-JanetNetworkDeviceCount {
 
 # =============================================================================
 #  Squadron-level rollup helpers  -  read-only aggregation of the central JANET
-#  log share (same path conventions as server\JanetTwo.Logging.ps1, which we do
+#  log share (same path conventions as server\JanetWeb.Logging.ps1, which we do
 #  NOT edit): the fleet usage rollup Logs\<YYYY-MM>_usage.csv (one SessionEnd row
 #  per tool + an aggregate JANET-TWO row per session, all operators/instances) and
 #  the per-tool detail CSVs Logs\<Tool>\<userFolder>\<YYYY-MM>_detail.csv. The
@@ -3598,8 +3598,8 @@ function Set-JanetNetworkDeviceCount {
 #  fails friendly instead of hanging. Nothing here writes to the share.
 # -----------------------------------------------------------------------------
 
-# The production log share root the desktop + JANET TWO tools log to (byte-for-byte
-# the same literal as $script:JanetTwoShareRoot in JanetTwo.Logging.ps1). Kept as a
+# The production log share root the desktop + JANET Web tools log to (byte-for-byte
+# the same literal as $script:JanetWebShareRoot in JanetWeb.Logging.ps1). Kept as a
 # helper so this module stays self-contained (each engine loads in its own runspace).
 function Get-ReportsLogShareRoot { return '\\dm-tn-01\sh-usafe-automation$\JANET\Logs' }
 
@@ -5939,7 +5939,7 @@ function Invoke-JanetToolAction {
                         if ($capped -or (& $cancelCheck)) { break }
                         # Read the live <m>_detail.csv AND any sister '<base>.r<unix>.csv'
                         # the logging writer redirected rows to when the live file was
-                        # locked (Invoke-JanetTwoHeaderEnsure). Exclude '*.legacy_*'
+                        # locked (Invoke-JanetWebHeaderEnsure). Exclude '*.legacy_*'
                         # rotations - stale schema (matches the replay convention).
                         $detailFiles = @()
                         try {

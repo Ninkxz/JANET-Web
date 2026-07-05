@@ -1,7 +1,7 @@
 /* ============================================================================
    xlsx.js  ->  Janet.util.buildXlsx / Janet.util.downloadXlsx
    A tiny, dependency-FREE OOXML .xlsx writer (pure JS, STORED-zip + inlineStr
-   cells), so JANET TWO matches the desktop tools' pure-.NET XLSX exports with
+   cells), so JANET Web matches the desktop tools' pure-.NET XLSX exports with
    no third-party software and no build step. Shared kit util - the Remote
    Message tool (Sent / Failed / All) is the first caller; ACAS/WPT/Reports reuse it.
 

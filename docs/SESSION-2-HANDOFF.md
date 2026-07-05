@@ -1,16 +1,16 @@
-# J.A.N.E.T. TWO - Session 2 Handoff (build complete, 12/12 imported)
+# JANET Web - Session 2 Handoff (build complete, 12/12 imported)
 
 State as of 2026-06-19. The build session that lifted the plumbing, built the shared kit,
 and imported all 12 tools. Read this + the `project-janet-two` auto-memory to continue.
 
 ## Where the project stands
 
-- **12 / 12 tools ported.** Engines (`modules/JanetTwo.<id>.psm1`) + bespoke views
+- **12 / 12 tools ported.** Engines (`modules/JanetWeb.<id>.psm1`) + bespoke views
   (`web/js/views/<id>.view.js`) for: wpt, acas, pkginstall, winupgrade, upr, secureboot,
   restart, message, adsearch, dhcp[beta], reports[stateful], stig[beta/stateful].
-- **Plumbing** lifted rename-only from JANET ONE: `server/JanetTwo.Server.ps1` / `.Auth.ps1` /
-  `.Logging.ps1` (SAME central-CSV share + tool->folder map), `Start-JanetTwo.ps1` (port 8089),
-  `Launch JANET TWO.cmd`. Token gate, runspace job streaming, reaper, stateful-runspace slots,
+- **Plumbing** lifted rename-only from JANET ONE: `server/JanetWeb.Server.ps1` / `.Auth.ps1` /
+  `.Logging.ps1` (SAME central-CSV share + tool->folder map), `Start-JanetWeb.ps1` (port 8089),
+  `Launch JANET Web.cmd`. Token gate, runspace job streaming, reaper, stateful-runspace slots,
   graceful `__job` cancel - all intact.
 - **Shared kit** (`web/`): `css/janet.css` (ThemeKit, desktop palette purple #8C64DC + gold
   #DAB452), `js/shell.js` (AppShell + launch gate + horizontal category-tab hub + router +
@@ -37,7 +37,7 @@ and imported all 12 tools. Read this + the `project-janet-two` auto-memory to co
 4. **All runs via `ctx.run` -> RunController**; views never fetch/poll. Multi-row-per-host grids
    MUST pass `keyOf` to `ctx.run` + a matching `keyMode` to ResultsGrid (handoff risk #5 - hit it
    live in DHCP: every row shared `Host`, collapsing scopes; fixed by keying on `ScopeId`).
-5. **Launch via `Launch JANET TWO.cmd`** (forces classic blue conhost so the smartcard
+5. **Launch via `Launch JANET Web.cmd`** (forces classic blue conhost so the smartcard
    Get-Credential picker surfaces; double-click of the .ps1 now self-heals into conhost too). The
    credential dialog is foregrounded so it cannot hide behind the browser.
 
@@ -63,13 +63,13 @@ and imported all 12 tools. Read this + the `project-janet-two` auto-memory to co
 
 ## How to run / verify
 
-- Operator: double-click `Launch JANET TWO.cmd` -> blue conhost -> browser opens to the tokenized
+- Operator: double-click `Launch JANET Web.cmd` -> blue conhost -> browser opens to the tokenized
   loopback URL. Set Credentials (ADW smartcard) for destructive tools; "Browse tools (read-only)"
   for read-only.
 - Dev mocked verification: `web/_devtest.html` mocks `window.fetch` with scripted job streams +
   skips the gate; served by the `janet-two-dev` python static entry in `X:\.claude\launch.json`
   (Claude Preview MCP). Drive via `preview_eval` DOM read-outs (preview_screenshot reverts to `/`).
-- Real-server smoke: start `Start-JanetTwoServer -Port <free>` on a spare port, navigate the
+- Real-server smoke: start `Start-JanetWebServer -Port <free>` on a spare port, navigate the
   preview to `http://127.0.0.1:<port>/?t=<token>`, "Browse tools", click each card -> mount check.
   (8089 may be held by the operator's running instance; use a different port to avoid the http.sys
   bind conflict.)

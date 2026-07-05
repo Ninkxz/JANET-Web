@@ -1,4 +1,4 @@
-# J.A.N.E.T. TWO - Session 6 Handoff (Command Sidebar + ponytail cleanup + launcher rename + WPT Beta tab)
+# JANET Web - Session 6 Handoff (Command Sidebar + ponytail cleanup + launcher rename + WPT Beta tab)
 
 State as of 2026-06-23. This session shipped the **Command Sidebar** shell, a
 **ponytail-audit cleanup**, a **launcher rename**, and a new **WPT Beta tab** of
@@ -14,8 +14,8 @@ report (paused) and produced a take-to-work zip. Read this + `docs/SESSION-5-HAN
 - **Git**: branch `main`, everything pushed to `bth0mp/J.A.N.E.T-TWO`, **HEAD `c490f62`**,
   tree clean, in sync. Session start was `c72f6d7`.
 - The desktop originals in `X:\J.A.N.E.T\Tools\` are untouched (read-only reference).
-- **Launcher entry point is now `Launch JANET TWO.cmd` -> `JanetTwo.Internal.ps1`**
-  (renamed from `Start-JanetTwo.ps1`).
+- **Launcher entry point is now `Launch JANET Web.cmd` -> `JanetWeb.Internal.ps1`**
+  (renamed from `Start-JanetWeb.ps1`).
 
 ## What this session did (commit by commit, all on origin/main)
 
@@ -35,7 +35,7 @@ report (paused) and produced a take-to-work zip. Read this + `docs/SESSION-5-HAN
   `uploadFile`), `JanetViews.has/get`, `RunController.get`, `ctx.cancel`, dead `rs.checked`;
   message `C_card{box}` -> `ui.card({title})`; acas 3x inline severity -> one `sevCell(key)`;
   wpt `findManifestAction` -> `Array.find`. (Skipped the two `secHdr` findings - net-negative.)
-- `4e5a23c` + `39cb399` **launcher rename**: `Start-JanetTwo.ps1` -> `JanetTwo.Internal.ps1`
+- `4e5a23c` + `39cb399` **launcher rename**: `Start-JanetWeb.ps1` -> `JanetWeb.Internal.ps1`
   (the inviting `Start-J...` name lured people into running the `.ps1` directly, where the
   Get-Credential smartcard picker may not surface). The `.cmd` is now the lone obvious entry;
   the self-heal relaunch guard also fires under **PowerShell 7 (PSEdition Core)** now.
@@ -59,7 +59,7 @@ report (paused) and produced a take-to-work zip. Read this + `docs/SESSION-5-HAN
   Beta fixes: Adobe Acrobat/Reader update (Software Center OR direct), SMB Signing require (reg),
   RDP require NLA (reg), ICMP Timestamp block (firewall). All local mechanisms, no internet.
   Verify is read-only; Apply is destructive (admin session) + an experimental confirm.
-- **Take-to-work zip:** `X:\JANET TWO Take to work\` holds runtime only (cmd + `JanetTwo.Internal.ps1`
+- **Take-to-work zip:** `X:\JANET Web Take to work\` holds runtime only (cmd + `JanetWeb.Internal.ps1`
   + server/ + modules/ + web/ minus `_devtest.html`/`_stub.view.js` + empty Packages/ + JanetLocal/);
   excludes `.git`/`fork-source`/`docs`/`.claude`/README. Zipped to
   `X:\Archive\JANETTWO_TakeToWork_<date>_<time>.zip`.
@@ -78,7 +78,7 @@ report (paused) and produced a take-to-work zip. Read this + `docs/SESSION-5-HAN
    credential manager and breaks the moment the pasted token lapses (that was the root cause of the
    recurring "need a new token"). If the cached PAT ever truly expires, GCM pops a one-time Windows
    login prompt; re-auth there once. See `reference_gitea` memory.
-6. Launch via `Launch JANET TWO.cmd` (it pins conhost + `-STA` so the credential picker surfaces).
+6. Launch via `Launch JANET Web.cmd` (it pins conhost + `-STA` so the credential picker surfaces).
    Tool icons = Segoe MDL2 hex codepoint in `tool-registry.json` (keep ASCII) + the `_devtest.html`
    catalog in sync.
 

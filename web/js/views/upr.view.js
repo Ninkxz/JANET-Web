@@ -109,7 +109,7 @@
 
       // hidden native file input + a themed "Load PDF / CSV" button
       var fileInput = el('input'); fileInput.type = 'file'; fileInput.accept = '.csv,.pdf'; fileInput.style.display = 'none';
-      var loadBtn = ui.button('Load PDF / CSV', { variant: 'cyan', size: 'sm', title: 'Pick a Tenable / ACAS Unsupported & SEoL report (.pdf or .csv). It is uploaded to the JANET TWO server, then ingested.' });
+      var loadBtn = ui.button('Load PDF / CSV', { variant: 'cyan', size: 'sm', title: 'Pick a Tenable / ACAS Unsupported & SEoL report (.pdf or .csv). It is uploaded to the JANET Web server, then ingested.' });
       var fileLabel = el('span', 'muted', 'No report loaded'); fileLabel.style.cssText = 'font-family:var(--mono);font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
       var pasteBtn = ui.ghostButton('Paste text', { size: 'sm', title: 'Paste the report text instead of uploading a file (open the PDF, Ctrl+A, Ctrl+C). No pdftotext needed.' });
       var fileWrap = el('div'); fileWrap.style.cssText = 'display:flex;align-items:center;gap:8px';
@@ -258,7 +258,7 @@
         uploading = true; reportFile = f; reportPath = null; reportText = null;
         loadBtn.disabled = true;
         fileLabel.textContent = 'Uploading ' + f.name + ' ...'; fileLabel.className = 'st-warn';
-        if (findApi) findApi.note('Uploading ' + f.name + ' to the JANET TWO server...', 'accent');
+        if (findApi) findApi.note('Uploading ' + f.name + ' to the JANET Web server...', 'accent');
         ctx.uploadFile(f).then(function (path) {
           reportPath = path; uploading = false; loadBtn.disabled = false;
           fileLabel.textContent = f.name; fileLabel.className = 'st-ok';
@@ -270,7 +270,7 @@
         }).catch(function (e) {
           uploading = false; loadBtn.disabled = false;
           fileLabel.textContent = 'Upload failed - retry'; fileLabel.className = 'st-bad';
-          ctx.confirm({ title: 'Upload failed', body: 'Could not upload "' + escHtml(f.name) + '": ' + escHtml(e && e.message || 'unknown error') + '<br><br>Check the JANET TWO console window and retry.', okText: 'OK', cancelText: null });
+          ctx.confirm({ title: 'Upload failed', body: 'Could not upload "' + escHtml(f.name) + '": ' + escHtml(e && e.message || 'unknown error') + '<br><br>Check the JANET Web console window and retry.', okText: 'OK', cancelText: null });
         });
       }
 

@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.adsearch.psm1  -  Active Directory Search engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.adsearch.psm1  -  Active Directory Search engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\ADSearchTool.ps1 (v3.3.3) - the multithreaded ADSI search
 #  engine is reused verbatim; the WinForms layer (theme, ListView, detail popup,

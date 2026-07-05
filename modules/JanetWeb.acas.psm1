@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.acas.psm1  -  ACAS Nemesis tool engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.acas.psm1  -  ACAS Nemesis tool engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\ACAS Nemesis Tool_1.10.10.ps1 (engine reused, WinForms
 #  layer dropped). Imports ACAS/Nessus CSV vulnerability exports, matches
@@ -9,7 +9,7 @@
 #  pool, schedules and verifies reboots, and pre-flights services - all over
 #  WinRM/PSSession. (The standalone KB installer was removed; KBs go through MECM.)
 #
-#  Contract (identical to JanetTwo.message.psm1):
+#  Contract (identical to JanetWeb.message.psm1):
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit -> { rows; summary }
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
@@ -490,12 +490,12 @@ $script:AcasUpdateProfiles = @{
         }
     }
     'Apache Log4j - Replace Vulnerable Jars' = @{
-        # NeedsStaging: the JANET TWO host stages the controller-side 2.25.4 jars
+        # NeedsStaging: the JANET Web host stages the controller-side 2.25.4 jars
         # into each target session (Copy-Item -ToSession) and rewrites $sourceShare
         # to that local temp before running - so this auto-runs when the jars are
         # present where the host can read them (default: the desktop staging share,
         # or an operator-set source path).
-        Desc   = 'Replace log4j-api/core jars with 2.25.4 across HID + Adobe lib paths (recursive). Auto-runs when the 2.25.4 jars are staged where the JANET TWO host can read them (host copies them into each session).'
+        Desc   = 'Replace log4j-api/core jars with 2.25.4 across HID + Adobe lib paths (recursive). Auto-runs when the 2.25.4 jars are staged where the JANET Web host can read them (host copies them into each session).'
         NeedsStaging = $true
         Script = {
             $sourceShare = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles'
@@ -638,10 +638,10 @@ $script:AcasUpdateProfiles = @{
     }
     'Tenable Nessus Agent - Package Deploy' = @{
         # PSADT package install needs the controller-side Packages\ staging tree,
-        # which the JANET TWO web host does not carry. IsPackage profiles are
+        # which the JANET Web web host does not carry. IsPackage profiles are
         # surfaced as a coverage gap by auto-patch (NeedsStaging) and return a
         # structured FAIL if dispatched directly. Verify still works in-session.
-        Desc          = 'PSADT package install (Tenable Nessus Agent). NOTE: needs controller-side Packages\ staging; not auto-runnable from the JANET TWO host.'
+        Desc          = 'PSADT package install (Tenable Nessus Agent). NOTE: needs controller-side Packages\ staging; not auto-runnable from the JANET Web host.'
         IsPackage     = $true
         PackageFolder = 'NIPR_Tenable Nessus Agent_11.1.3'
         Script        = $null
@@ -984,7 +984,7 @@ function Get-AcasProfileMatchTable {
 }
 
 # -----------------------------------------------------------------------------
-#  Is a matched profile actually runnable from the JANET TWO web host?
+#  Is a matched profile actually runnable from the JANET Web web host?
 #  Package deploys (IsPackage) and Log4j (NeedsStaging) require the controller-
 #  side Packages\ / staged-jar tree, which the web host does not carry. These
 #  are surfaced as coverage gaps by auto-patch rather than dispatched to fail.
@@ -1004,11 +1004,11 @@ function Test-AcasProfileAutoRunnable {
 }
 
 # -----------------------------------------------------------------------------
-#  Resolve the controller-side Log4j staged-jar source. Default is the JANET TWO
+#  Resolve the controller-side Log4j staged-jar source. Default is the JANET Web
 #  host's own Packages\Log4j\NewFiles (operators grab the 2.25.4 jars from the
 #  desktop staging share and drop them there); an operator override (UNC or local
 #  folder) wins. "Ready" means both the api and core 2.25.4 jars are present where
-#  the JANET TWO host can read them - the host then Copy-Item -ToSession's them
+#  the JANET Web host can read them - the host then Copy-Item -ToSession's them
 #  into each target session (no double-hop).
 # -----------------------------------------------------------------------------
 function Resolve-AcasLog4jSource {
@@ -1409,12 +1409,12 @@ $script:AcasUpdateWorker = {
         elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsStaging']) { $needsStaging = [bool]$prof.NeedsStaging }
     } catch {}
     if ($isPkgProfile -and -not $VerifyOnlyIn) {
-        return "FAIL: package-deploy profile not supported in JANET TWO host (no controller Packages\ staging tree)."
+        return "FAIL: package-deploy profile not supported in JANET Web host (no controller Packages\ staging tree)."
     }
     # NeedsStaging (Log4j) full-run requires a resolved controller-side jar source;
     # the host copies the jars into the session below (no remote double-hop).
     if ($needsStaging -and -not $VerifyOnlyIn -and [string]::IsNullOrWhiteSpace([string]$StageSource)) {
-        return "FAIL: Log4j staging source not available (drop log4j-api/core-2.25.4.jar where the JANET TWO host can read them, or set a staging path)."
+        return "FAIL: Log4j staging source not available (drop log4j-api/core-2.25.4.jar where the JANET Web host can read them, or set a staging path)."
     }
 
     # Inline TCP reachability probe (5985 then 445, 3s each).
@@ -2088,7 +2088,7 @@ $script:AcasKbInstallBlock = {
 
 # Read the CISA KEV catalog flat file (JanetLocal\KevCatalog.txt) into a case-
 # insensitive CVE set. acas.psm1 loads in its own runspace and can't import
-# JanetTwo.kev.psm1, so it reads the same flat file directly (same source the KEV
+# JanetWeb.kev.psm1, so it reads the same flat file directly (same source the KEV
 # tool + /api/dashboard use). Missing/empty file -> empty set (no KEV badging,
 # never an error). Used to badge which remediation groups carry a known-exploited CVE.
 function Read-AcasKevSet {

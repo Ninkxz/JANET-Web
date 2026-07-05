@@ -45,7 +45,7 @@
     return n;
   }
   // CSV formula-injection guard: desktop tools write unguarded Detail into shared CSVs
-  // (Logging.ps1 diverges from Protect-JanetTwoCsvField), so guard on export here.
+  // (Logging.ps1 diverges from Protect-JanetWebCsvField), so guard on export here.
   function csvGuard(v) {
     var s = String(v == null ? '' : v);
     return /^[=+\-@\t]/.test(s) ? ("'" + s) : s;

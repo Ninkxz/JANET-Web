@@ -11,11 +11,11 @@
 During this session, an external process kept **restoring source files to their pre-edit state** on disk — flip-flopping: whichever file I was *not* actively editing got reverted. Signature of **an editor with these files open auto-saving stale buffers**, a **file-watcher / running dev-server**, or a **sync process** (e.g. the "Take to work" mirror) writing over the working tree.
 
 **Before doing ANY work in the new session:**
-1. Close all JANET TWO files in every editor (especially the `.psm1` and `.view.js` below).
-2. Stop any file-watcher / running JANET TWO server / auto-sync / format-on-save.
+1. Close all JANET Web files in every editor (especially the `.psm1` and `.view.js` below).
+2. Stop any file-watcher / running JANET Web server / auto-sync / format-on-save.
 3. Then **re-verify each edit below is present** (greps given in §5) and re-apply any that reverted.
 
-The repo may currently be in a **broken half-applied state** (e.g. `restart.view.js` calls a `verify-boottime` engine action that `restart.psm1` may not contain). **Do not run JANET TWO until §5 verification is green.**
+The repo may currently be in a **broken half-applied state** (e.g. `restart.view.js` calls a `verify-boottime` engine action that `restart.psm1` may not contain). **Do not run JANET Web until §5 verification is green.**
 
 Full detail of this session is in the transcript:
 `C:\Users\bth0m\.claude\projects\X--J-A-N-E-T-TWO\e32e8e4c-5fa8-4d30-b8d8-c408faf623c0.jsonl`
@@ -24,7 +24,7 @@ Full detail of this session is in the transcript:
 
 ## 1. What this work is
 
-A tool-by-tool functional-parity audit (OG desktop JANET → JANET TWO web) found **16 confirmed gaps** (see `og-vs-two-parity-audit.md`). The user selected **10** to implement now:
+A tool-by-tool functional-parity audit (OG desktop JANET → JANET Web web) found **16 confirmed gaps** (see `og-vs-two-parity-audit.md`). The user selected **10** to implement now:
 
 - Quick wins **#2, #3, #4, #5** + #6, #7, #8 (the low-effort ones)
 - The one High item **#1** (Restart WinRM boot-time verify)
@@ -55,7 +55,7 @@ All implemented edits PASSED `node --check` / PS parser **when present** — the
 
 ## 3. EXACT EDITS for #1–#5 (re-apply any that reverted)
 
-### #2 ACAS KB regex — `modules/JanetTwo.acas.psm1` (action `kb-scan-findings`, ~line 2834)
+### #2 ACAS KB regex — `modules/JanetWeb.acas.psm1` (action `kb-scan-findings`, ~line 2834)
 
 Replace:
 ```powershell
@@ -84,14 +84,14 @@ with:
 Replace the fileInput/import-button block:
 ```js
         var fileInput = el('input'); fileInput.type = 'file'; fileInput.accept = '.csv,.txt,.tsv'; fileInput.style.display = 'none';
-        var importBtn = ui.ctaButton('IMPORT ACAS CSV', { title: 'Choose a Tenable/ACAS-Nessus CSV export, upload it to the JANET TWO host, and parse it.' });
+        var importBtn = ui.ctaButton('IMPORT ACAS CSV', { title: 'Choose a Tenable/ACAS-Nessus CSV export, upload it to the JANET Web host, and parse it.' });
         importBtn.style.maxWidth = '260px';
         fileInput.addEventListener('change', function () { if (fileInput.files && fileInput.files[0]) doImport(); });
 ```
 with:
 ```js
         var fileInput = el('input'); fileInput.type = 'file'; fileInput.accept = '.csv,.txt,.tsv'; fileInput.multiple = true; fileInput.style.display = 'none';
-        var importBtn = ui.ctaButton('IMPORT ACAS CSV', { title: 'Choose one or more Tenable/ACAS-Nessus CSV exports, upload them to the JANET TWO host, and parse them together (desktop Multiselect).' });
+        var importBtn = ui.ctaButton('IMPORT ACAS CSV', { title: 'Choose one or more Tenable/ACAS-Nessus CSV exports, upload them to the JANET Web host, and parse them together (desktop Multiselect).' });
         importBtn.style.maxWidth = '260px';
         fileInput.addEventListener('change', function () { if (fileInput.files && fileInput.files.length) doImport(); });
 ```
@@ -138,7 +138,7 @@ with:
 ```
 (Engine already emits `Publisher` and `Type` per row — display/export only.)
 
-### #5 Restart Dispatch-at — `modules/JanetTwo.restart.psm1` + `web/js/views/restart.view.js`
+### #5 Restart Dispatch-at — `modules/JanetWeb.restart.psm1` + `web/js/views/restart.view.js`
 
 **Engine — manifest `dispatch-restart` columns:**
 ```powershell
@@ -161,7 +161,7 @@ with:
 **View — dispatch grid: add `{ key: 'DispatchAt', label: 'DISPATCH AT', width: 150 },` before the RestartAt column.**
 **View — `exportDispatchCsv`: header array becomes `['Host', 'Status', 'DispatchAt', 'RestartAt', 'ConsentState', 'Result']`.**
 
-### #1 Restart WinRM boot-time verify — `modules/JanetTwo.restart.psm1` + `web/js/views/restart.view.js`
+### #1 Restart WinRM boot-time verify — `modules/JanetWeb.restart.psm1` + `web/js/views/restart.view.js`
 
 **Engine — add manifest action (after the `verify-reboots` entry, before `cancel-pending`):**
 ```powershell
@@ -333,7 +333,7 @@ $script:BootTimeWorker = {
 
 ## 4. PLAN for #6–#10 (Reports — NOT started)
 
-All in `web/js/views/reports.view.js` + `modules/JanetTwo.reports.psm1`. Engine facts already gathered:
+All in `web/js/views/reports.view.js` + `modules/JanetWeb.reports.psm1`. Engine facts already gathered:
 - Finding objects carry `.Status` and `.Solution` (psm1 ~385–392).
 - `acas-parse-file` row emit: psm1 ~2801 (`$row = @{ Host=…; Hostname=…; PluginID=…; VulnName=…; Severity=…; CVE=…; Category=… }`).
 - `Build-RemediationPlan` (psm1 677–787): bucket is keyed **per (host,app)**; OtherGroups carry a `Hosts` set. **Must read the `remediation-refresh` action handler** (grep `'remediation-refresh'`) to see how it aggregates to the per-App grid rows the view shows (App/TargetCount/TargetVersion/Critical/High) before adding host lists.
@@ -367,20 +367,20 @@ All in `web/js/views/reports.view.js` + `modules/JanetTwo.reports.psm1`. Engine 
 
 ```powershell
 # presence check (ripgrep via the Grep tool, or:)
-Select-String -LiteralPath "X:\J.A.N.E.T TWO\modules\JanetTwo.acas.psm1"     -Pattern 'KB rollups' -SimpleMatch
-Select-String -LiteralPath "X:\J.A.N.E.T TWO\web\js\views\acas.view.js"       -Pattern 'upload every selected' -SimpleMatch
-Select-String -LiteralPath "X:\J.A.N.E.T TWO\web\js\views\upr.view.js"        -Pattern "label: 'PUBLISHER'" -SimpleMatch
-Select-String -LiteralPath "X:\J.A.N.E.T TWO\modules\JanetTwo.restart.psm1"   -Pattern 'BootTimeWorker' -SimpleMatch
-Select-String -LiteralPath "X:\J.A.N.E.T TWO\web\js\views\restart.view.js"    -Pattern 'doVerifyBootTime' -SimpleMatch
+Select-String -LiteralPath "X:\JANET Web\modules\JanetWeb.acas.psm1"     -Pattern 'KB rollups' -SimpleMatch
+Select-String -LiteralPath "X:\JANET Web\web\js\views\acas.view.js"       -Pattern 'upload every selected' -SimpleMatch
+Select-String -LiteralPath "X:\JANET Web\web\js\views\upr.view.js"        -Pattern "label: 'PUBLISHER'" -SimpleMatch
+Select-String -LiteralPath "X:\JANET Web\modules\JanetWeb.restart.psm1"   -Pattern 'BootTimeWorker' -SimpleMatch
+Select-String -LiteralPath "X:\JANET Web\web\js\views\restart.view.js"    -Pattern 'doVerifyBootTime' -SimpleMatch
 
 # syntax
-node --check "X:\J.A.N.E.T TWO\web\js\views\acas.view.js"
-node --check "X:\J.A.N.E.T TWO\web\js\views\upr.view.js"
-node --check "X:\J.A.N.E.T TWO\web\js\views\restart.view.js"
-node --check "X:\J.A.N.E.T TWO\web\js\views\reports.view.js"
-$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("X:\J.A.N.E.T TWO\modules\JanetTwo.restart.psm1",[ref]$null,[ref]$e); $e.Count   # expect 0
-$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("X:\J.A.N.E.T TWO\modules\JanetTwo.acas.psm1",   [ref]$null,[ref]$e); $e.Count   # expect 0
-$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("X:\J.A.N.E.T TWO\modules\JanetTwo.reports.psm1",[ref]$null,[ref]$e); $e.Count   # expect 0
+node --check "X:\JANET Web\web\js\views\acas.view.js"
+node --check "X:\JANET Web\web\js\views\upr.view.js"
+node --check "X:\JANET Web\web\js\views\restart.view.js"
+node --check "X:\JANET Web\web\js\views\reports.view.js"
+$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("X:\JANET Web\modules\JanetWeb.restart.psm1",[ref]$null,[ref]$e); $e.Count   # expect 0
+$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("X:\JANET Web\modules\JanetWeb.acas.psm1",   [ref]$null,[ref]$e); $e.Count   # expect 0
+$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("X:\JANET Web\modules\JanetWeb.reports.psm1",[ref]$null,[ref]$e); $e.Count   # expect 0
 ```
 KB-regex sanity (all should map to `KB…`, 5-digit should be blank):
 `KB5034441`, `KB 5034441`, `Security Update 5034441`, `Apply Security Update 5034441`, `KB12345678` → KB…; `KB12345` → (none).

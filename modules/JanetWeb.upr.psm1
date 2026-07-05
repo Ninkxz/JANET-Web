@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.upr.psm1  -  Unsupported Product Remediator engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
+#  JanetWeb.upr.psm1  -  Unsupported Product Remediator engine for JANET Web
+#  (Re-forked for JANET Web from the proven JANET ONE engine; cross-checked vs the desktop tool + ui-spec.)
 #
 #  Ported from Tools\UnsupportedProductRemediator_1.1.0.ps1 (WinForms layer
 #  dropped). Consumes a Tenable / ACAS "Unsupported / SEoL Product Summary"
@@ -12,7 +12,7 @@
 #  RunspacePool harvest harness (Invoke-UprFanOut) is re-implemented locally --
 #  modules load in isolation so WPT helpers are NOT callable.
 #
-#  Contract (identical to JanetTwo.wpt.psm1 / JanetTwo.message.psm1):
+#  Contract (identical to JanetWeb.wpt.psm1 / JanetWeb.message.psm1):
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
@@ -119,7 +119,7 @@ function Get-JanetToolManifest {
 function Get-UprCatalogPath { Join-Path $PSScriptRoot '..\JanetLocal\UnsupportedProductCatalog.json' }
 
 function Get-UprCatalogFromFile {
-    # Operator-editable override: <JANET TWO root>\JanetLocal\UnsupportedProductCatalog.json
+    # Operator-editable override: <JANET Web root>\JanetLocal\UnsupportedProductCatalog.json
     # (mirrors the desktop tool's editable catalog). Returns $null on any problem so
     # the caller falls back to the embedded default - a bad/partial JSON never breaks a scan.
     try {

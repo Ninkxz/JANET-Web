@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  JanetTwo.dhcp.psm1  -  DHCP Scope Option tool engine for J.A.N.E.T. TWO
-#  (Re-forked for JANET TWO: the JANET ONE engine is the proven faithful fork of the
+#  JanetWeb.dhcp.psm1  -  DHCP Scope Option tool engine for JANET Web
+#  (Re-forked for JANET Web: the JANET ONE engine is the proven faithful fork of the
 #   desktop DHCPScopeOptionTool_1.1.5.ps1; action contract cross-checked vs the spec.)
 #
 #  Ported from Tools\DHCPScopeOptionTool_1.1.5.ps1 (engine reused, WinForms layer
@@ -10,7 +10,7 @@
 #  on a single scope, and bulk-appends / prepends / removes IPs across many
 #  scopes in one remote round-trip.
 #
-#  Contract (identical to JanetTwo.message.psm1):
+#  Contract (identical to JanetWeb.message.psm1):
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.

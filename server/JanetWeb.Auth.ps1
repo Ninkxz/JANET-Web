@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  JanetTwo.Auth.ps1  -  operator credential handling for J.A.N.E.T. TWO
+#  JanetWeb.Auth.ps1  -  operator credential handling for JANET Web
 #
 #  Same model the WinForms tools use: the operator clicks "Set Credentials",
 #  the SERVER-SIDE Get-Credential dialog pops on their interactive desktop, and
@@ -14,17 +14,17 @@
 #  tools. The browser only ever triggers it and reads back the username.
 # =============================================================================
 
-function Prompt-JanetTwoCredential {
+function Prompt-JanetWebCredential {
     <#  Pop the smartcard/credential picker and return a status object.
         The caller (server route) stores the returned credential in server state. #>
-    param([string]$Message = 'Select your ADW credential for J.A.N.E.T. TWO remote operations')
+    param([string]$Message = 'Select your ADW credential for JANET Web remote operations')
     # Get-Credential is a desktop dialog and runs synchronously on the single accept
     # thread - if the server was started without an interactive desktop (detached /
     # Session 0 / over WinRM) it can NEVER render and would hang the whole server.
-    # Bail with a clear message instead. (Launch JANET TWO from your own PowerShell
-    # console so the smartcard picker can appear; see Launch JANET TWO.cmd.)
+    # Bail with a clear message instead. (Launch JANET Web from your own PowerShell
+    # console so the smartcard picker can appear; see Launch JANET Web.cmd.)
     if (-not [Environment]::UserInteractive) {
-        return @{ ok = $false; cred = $null; user = ''; message = 'JANET TWO was started without an interactive desktop, so the smartcard picker cannot appear. Relaunch it from your own PowerShell console (or use "Launch JANET TWO.cmd") to set ADW credentials - or run read-only as your current Kerberos identity.' }
+        return @{ ok = $false; cred = $null; user = ''; message = 'JANET Web was started without an interactive desktop, so the smartcard picker cannot appear. Relaunch it from your own PowerShell console (or use "Launch JANET Web.cmd") to set ADW credentials - or run read-only as your current Kerberos identity.' }
     }
     # If this PowerShell is configured to prompt for credentials in the CONSOLE
     # (ShellIds\...\ConsolePrompting = True), Get-Credential renders as typed text
@@ -35,7 +35,7 @@ function Prompt-JanetTwoCredential {
     try {
         $cp = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell' -Name ConsolePrompting -ErrorAction SilentlyContinue).ConsolePrompting
         if ("$cp" -eq 'True') {
-            return @{ ok = $false; cred = $null; user = ''; message = 'The smartcard picker cannot appear: this PowerShell is set to prompt for credentials in the console (ConsolePrompting=True), which suppresses the GUI dialog. Restore it from an elevated PowerShell: Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell" ConsolePrompting False  - then relaunch JANET TWO. (Or run read-only as your current Kerberos identity.)' }
+            return @{ ok = $false; cred = $null; user = ''; message = 'The smartcard picker cannot appear: this PowerShell is set to prompt for credentials in the console (ConsolePrompting=True), which suppresses the GUI dialog. Restore it from an elevated PowerShell: Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell" ConsolePrompting False  - then relaunch JANET Web. (Or run read-only as your current Kerberos identity.)' }
         }
     } catch {}
     # Best-effort: raise a top-most, invisible owner window to the foreground right
@@ -112,7 +112,7 @@ function Prompt-JanetTwoCredential {
     }
 }
 
-function Get-JanetTwoCredentialStatus {
+function Get-JanetWebCredentialStatus {
     # Summarize the current credential for the status bar (no secret material).
     param($Credential)
     if ($Credential -is [System.Management.Automation.PSCredential]) {

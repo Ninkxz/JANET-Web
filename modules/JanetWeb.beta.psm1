@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-#  JanetTwo.beta.psm1  ->  Beta Lab (tool id: 'beta')
+#  JanetWeb.beta.psm1  ->  Beta Lab (tool id: 'beta')
 #
-#  Staging ground for experimental / in-development JANET TWO features. Each beta
+#  Staging ground for experimental / in-development JANET Web features. Each beta
 #  feature is its own action with its own tab in web/js/views/beta.view.js; once a
 #  feature is proven it graduates into its own real tool and is retired from here.
 #

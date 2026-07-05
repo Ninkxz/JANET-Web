@@ -25,7 +25,7 @@
    per-tool credential control (the shell header owns Set Credentials).
 
    Action ids / params / columns are taken verbatim from
-   modules/JanetTwo.wpt.psm1 -> Get-JanetToolManifest (29 actions).
+   modules/JanetWeb.wpt.psm1 -> Get-JanetToolManifest (29 actions).
    ========================================================================== */
 (function () {
   'use strict';
@@ -2066,7 +2066,7 @@
         };
         sumBtn.onclick = function () {
           var s = Telemetry.stats(), m = Telemetry.metrics();
-          var lines = ['J.A.N.E.T. TWO - WPT Session Summary', 'Generated:   ' + ctx.util.clockStr(), 'Operator:    ' + (ctx.session.state.user || '(read-only browse)'), 'Started:     ' + (m.started || '-'), 'Runs:        ' + m.runs, 'Hosts:       ' + m.hosts, '',
+          var lines = ['JANET Web - WPT Session Summary', 'Generated:   ' + ctx.util.clockStr(), 'Operator:    ' + (ctx.session.state.user || '(read-only browse)'), 'Started:     ' + (m.started || '-'), 'Runs:        ' + m.runs, 'Hosts:       ' + m.hosts, '',
             'Scanned:     ' + s.scanned, 'Updates:     ' + s.updates, 'Installed:   ' + s.installed, 'Uninstalled: ' + s.uninstalled, 'Reinstalled: ' + s.reinstalled, 'Repaired:    ' + s.repaired, 'Reboots:     ' + s.reboots];
           ctx.util.downloadBlob('WPT_SessionSummary_' + ctx.util.fileStamp() + '.txt', 'text/plain', lines.join('\r\n') + '\r\n');
         };

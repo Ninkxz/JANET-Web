@@ -1,8 +1,8 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Internal launcher for J.A.N.E.T. TWO. DO NOT run this directly - double-click
-    "Launch JANET TWO.cmd" instead. The .cmd pins the classic blue console (conhost,
+    Internal launcher for JANET Web. DO NOT run this directly - double-click
+    "Launch JANET Web.cmd" instead. The .cmd pins the classic blue console (conhost,
     -STA) that the server-side "Set Credentials" smartcard picker needs; launching
     this .ps1 from another host (PowerShell 7, an IDE terminal) can stop that picker
     from appearing. (If you do run it directly it will try to self-heal by relaunching
@@ -42,7 +42,7 @@ $ErrorActionPreference = 'Stop'
 # reliably surface under Windows Terminal's ConPTY host - it can open hidden or not
 # at all - and a bare DOUBLE-CLICK of this .ps1 (or "Run with PowerShell") opens a
 # plain, often black console that is easy to mistake for the wrong host. The
-# intended launcher "Launch JANET TWO.cmd" pins conhost and sets the sentinel below.
+# intended launcher "Launch JANET Web.cmd" pins conhost and sets the sentinel below.
 # This guard also self-heals a direct launch: if we are under Windows Terminal OR we
 # were spawned straight from Explorer (double-click / Run with PowerShell), relaunch
 # in a fresh conhost window and stop this instance. The JANETTWO_CONHOST sentinel
@@ -66,9 +66,9 @@ if ([Environment]::UserInteractive -and -not $env:JANETTWO_CONHOST -and ($env:WT
     }
     try {
         Start-Process conhost.exe -ArgumentList $fwd | Out-Null
-        Write-Host 'JANET TWO: relaunched in the classic console (conhost) so the credential picker appears. You can close this window.' -ForegroundColor Yellow
+        Write-Host 'JANET Web: relaunched in the classic console (conhost) so the credential picker appears. You can close this window.' -ForegroundColor Yellow
     } catch {
-        Write-Warning "Could not relaunch via conhost: $($_.Exception.Message). If 'Set Credentials' shows nothing, run 'Launch JANET TWO.cmd' instead."
+        Write-Warning "Could not relaunch via conhost: $($_.Exception.Message). If 'Set Credentials' shows nothing, run 'Launch JANET Web.cmd' instead."
     }
     return
 }
@@ -80,18 +80,18 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Without it, a copied/extracted deployment trips a security prompt per script and
 # loads in Constrained Language Mode (which breaks the .NET calls in some engines,
 # e.g. ACAS analyze -> "AuthorizationManager check failed"). The launcher .cmd also
-# does this before we start; this covers a direct `-File JanetTwo.Internal.ps1` launch.
+# does this before we start; this covers a direct `-File JanetWeb.Internal.ps1` launch.
 # Unblock-File is a built-in signed cmdlet, so it runs even under lockdown. Silent.
 try { Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch {}
 
-# No dependency check needed - JANET TWO uses only built-in .NET (HttpListener).
+# No dependency check needed - JANET Web uses only built-in .NET (HttpListener).
 
 # Interactive-session check: the Set Credentials smartcard picker + file pickers
 # are desktop dialogs that can only appear when this runs in YOUR interactive
 # console. If it was started detached / non-interactively, warn loudly (the server
 # still runs read-only as your Kerberos identity; credential set will be refused).
 if (-not [Environment]::UserInteractive) {
-    Write-Warning 'JANET TWO was started in a NON-INTERACTIVE session. "Set Credentials" (the ADW smartcard picker) and the file pickers will NOT work. Launch it from your own PowerShell console - or double-click "Launch JANET TWO.cmd" - for full functionality.'
+    Write-Warning 'JANET Web was started in a NON-INTERACTIVE session. "Set Credentials" (the ADW smartcard picker) and the file pickers will NOT work. Launch it from your own PowerShell console - or double-click "Launch JANET Web.cmd" - for full functionality.'
 }
 
 # --- session token (per launch) ------------------------------------------------
@@ -99,7 +99,7 @@ $token = [guid]::NewGuid().ToString('N')
 $url   = "http://127.0.0.1:$Port/?t=$token"
 
 Write-Host ""
-Write-Host "  J.A.N.E.T. TWO" -ForegroundColor Yellow
+Write-Host "  JANET Web" -ForegroundColor Yellow
 Write-Host "  pure PowerShell (no modules)  |  http://127.0.0.1:$Port  (loopback only)" -ForegroundColor DarkGray
 Write-Host "  Open: $url" -ForegroundColor Cyan
 Write-Host "  (Ctrl+C in this window stops the server.)" -ForegroundColor DarkGray
@@ -123,5 +123,5 @@ if (-not $NoBrowser) {
 }
 
 # --- start (blocks until Ctrl+C) -----------------------------------------------
-. (Join-Path $Root 'server\JanetTwo.Server.ps1')
-Start-JanetTwoServer -Root $Root -Port $Port -Token $token -Asi $Asi -PackagesRoot $PackagesRoot
+. (Join-Path $Root 'server\JanetWeb.Server.ps1')
+Start-JanetWebServer -Root $Root -Port $Port -Token $token -Asi $Asi -PackagesRoot $PackagesRoot

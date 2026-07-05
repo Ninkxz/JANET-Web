@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-#  JanetTwo.patchlib.psm1  ->  Patch Content (offline patch-content library)
+#  JanetWeb.patchlib.psm1  ->  Patch Content (offline patch-content library)
 #
-#  Net-new JANET TWO tool (no desktop twin). Read-only. Inventories the
+#  Net-new JANET Web tool (no desktop twin). Read-only. Inventories the
 #  remediation content already STAGED for offline / air-gapped use and cross-
 #  references it against the KBs an operator still needs, so on an isolated net
 #  they can see at a glance what can be pushed today vs. what is missing.
@@ -68,7 +68,7 @@ function Get-JanetToolManifest {
 # --- Content roots ----------------------------------------------------------
 # The work share where the desktop suite stages package content. This is only
 # the DEFAULT share leg: the server's full $packagesDir resolution also honors an
-# explicit -PackagesRoot override (server\JanetTwo.Server.ps1). When the server is
+# explicit -PackagesRoot override (server\JanetWeb.Server.ps1). When the server is
 # launched with -PackagesRoot it exports the resolved path as JANET2_PACKAGES_ROOT
 # (env), which Get-PatchlibRoots picks up below so the tool scans exactly the
 # folder the Remote Package Installer pushes from.

@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  JanetTwo.secureboot.psm1  -  Secure Boot Enabler engine for J.A.N.E.T. TWO
+#  JanetWeb.secureboot.psm1  -  Secure Boot Enabler engine for JANET Web
 #
 #  RE-FORKED from the desktop  Tools\SecureBootEnabler.ps1 (v1.5.0): the SYSTEM
 #  $script:Payload (OEM BIOS branches + brick-safety precheck), the dry-run and

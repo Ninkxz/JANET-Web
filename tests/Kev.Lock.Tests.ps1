@@ -4,7 +4,7 @@
 #  and the read-merge-write round trip against a temp catalog file.
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
-$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetTwo.kev.psm1') -Force -PassThru
+$script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.kev.psm1') -Force -PassThru
 $script:Tmp  = Join-Path ([System.IO.Path]::GetTempPath()) ("kevtest_" + [guid]::NewGuid().ToString('N'))
 [void][System.IO.Directory]::CreateDirectory($script:Tmp)
 $script:Cat  = Join-Path $script:Tmp 'KevCatalog.txt'

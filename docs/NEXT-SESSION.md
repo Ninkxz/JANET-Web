@@ -1,12 +1,12 @@
-# JANET TWO -- Next-session prompt
+# JANET Web -- Next-session prompt
 
 Paste the block below to start the next build session. (Launch the session from
-`X:\J.A.N.E.T TWO` so the `project-janet-two` auto-memory loads.)
+`X:\JANET Web` so the `project-janet-two` auto-memory loads.)
 
 ---
 
 ```
-JANET TWO build session. Project root: X:\J.A.N.E.T TWO (private Gitea repo
+JANET Web build session. Project root: X:\JANET Web (private Gitea repo
 bth0mp/J.A.N.E.T-TWO, branch main). The project-janet-two auto-memory has full context.
 
 Read first, in order: docs\HANDOFF.md (the build guide -- section 11 is the concrete
@@ -15,9 +15,9 @@ docs\ui-specs\message.md (the reference tool). Skim docs\REVIEW.md only if you n
 keep-vs-rebuild rationale.
 
 Goal this session: execute Phase 0, then Build step 1 (Remote Message) end-to-end.
-  0a. Lift JANET ONE's plumbing -> JanetTwo.* (rename only): server\JanetTwo.Server.ps1 /
-      .Auth.ps1 / .Logging.ps1 (keep the SAME central-CSV log location), Start-JanetTwo.ps1
-      (port 8089), Launch JANET TWO.cmd, and server\tool-registry.json (12 tools, all
+  0a. Lift JANET ONE's plumbing -> JanetWeb.* (rename only): server\JanetWeb.Server.ps1 /
+      .Auth.ps1 / .Logging.ps1 (keep the SAME central-CSV log location), Start-JanetWeb.ps1
+      (port 8089), Launch JANET Web.cmd, and server\tool-registry.json (12 tools, all
       ported:false). Reference plumbing in place at X:\J.A.N.E.T ONE\server\.
   0b. Build the shared frontend kit: web\css\janet.css (ThemeKit), web\js\shell.js
       (AppShell + router + view-registry + ctx + RunController extracted from JANET ONE
@@ -25,7 +25,7 @@ Goal this session: execute Phase 0, then Build step 1 (Remote Message) end-to-en
       ArmingDialog, ResultsGrid, ActivityLog, ProgressStatusStrip, StatCards, TabHost,
       ControlFactory). Verify with a mocked window.fetch job stream.
   1.  Re-fork the Remote Message engine from fork-source\Tools\RemoteMessageTool_1.3.3.ps1
-      -> modules\JanetTwo.message.psm1 (cross-check X:\J.A.N.E.T ONE\modules\
+      -> modules\JanetWeb.message.psm1 (cross-check X:\J.A.N.E.T ONE\modules\
       JanetOne.message.psm1). Build web\js\views\message.view.js per docs\ui-specs\
       message.md. Flip message to ported:true; verify end-to-end on the mocked stream.
       This view is the blueprint for the other 11 tools.

@@ -6,7 +6,7 @@
 #  it never widens the target set. Pure logic, no registry / no msiexec.
 # =============================================================================
 
-# Mirror of the scoping expression in JanetTwo.upr.psm1 Adobe handler:
+# Mirror of the scoping expression in JanetWeb.upr.psm1 Adobe handler:
 #   selected GUID comes from the candidate's own PSChildName and/or its
 #   UninstallString - NEVER from a broad DisplayName match.
 function Resolve-AdobeSelectedGuids {

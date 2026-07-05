@@ -1,5 +1,5 @@
 /* ============================================================================
-   J.A.N.E.T. TWO  -  shell.js
+   JANET Web  -  shell.js
    AppShell + router + view-registry + ctx + RunController.
 
    This is the ONLY code that fetches/polls the server. Per-tool views never
@@ -21,15 +21,15 @@
   Janet.components = Janet.components || {};
   var BOOT_NONCE = Date.now();   // per-session cache-bust for lazy-loaded view scripts
 
-  /* --- session token (minted by JanetTwo.Internal.ps1, passed as ?t=) ------- */
+  /* --- session token (minted by JanetWeb.Internal.ps1, passed as ?t=) ------- */
   var _qsTok = new URLSearchParams(location.search).get('t');
   var TOKEN = '';
   if (_qsTok) {
     TOKEN = _qsTok;
-    try { sessionStorage.setItem('janet2_token', TOKEN); } catch (e) {}
+    try { sessionStorage.setItem('janetweb_token', TOKEN); } catch (e) {}
     try { history.replaceState(null, '', location.pathname); } catch (e) {}
   } else {
-    try { TOKEN = sessionStorage.getItem('janet2_token') || ''; } catch (e) { TOKEN = ''; }
+    try { TOKEN = sessionStorage.getItem('janetweb_token') || ''; } catch (e) { TOKEN = ''; }
   }
 
   /* ========================================================================
@@ -143,7 +143,7 @@
     var s = e && e.status;
     if (s === 401 || s === 403) return 'server was restarted - reload the page to reconnect';
     if (s === 404) return 'run is no longer on the server (it finished, was evicted, or the server restarted)';
-    return 'server not responding - check the JANET TWO console window';
+    return 'server not responding - check the JANET Web console window';
   }
 
   /* ========================================================================
@@ -418,8 +418,8 @@
     user: '', mode: 'current Kerberos (CAC)', logRoot: '', onShare: false, localOnly: false,
     _listeners: []
   };
-  try { Session.ack = (sessionStorage.getItem('janet2_ack') === 'yes'); } catch (e) {}
-  try { Session.active = (sessionStorage.getItem('janet2_session') === '1'); } catch (e) {}
+  try { Session.ack = (sessionStorage.getItem('janetweb_ack') === 'yes'); } catch (e) {}
+  try { Session.active = (sessionStorage.getItem('janetweb_session') === '1'); } catch (e) {}
   function sessionChanged() { Session._listeners.forEach(function (f) { try { f(Session); } catch (e) {} }); updateStrip(); }
   var SessionApi = {
     get state() { return Session; },
@@ -449,7 +449,7 @@
   async function startSession(ack) {
     var r = await api('POST', '/session/start', { ack: !!ack });
     Session.ack = !!r.ack; Session.credSet = !!r.credSet; Session.active = !!r.active;
-    try { if (Session.ack) sessionStorage.setItem('janet2_ack', 'yes'); if (Session.active) sessionStorage.setItem('janet2_session', '1'); } catch (e) {}
+    try { if (Session.ack) sessionStorage.setItem('janetweb_ack', 'yes'); if (Session.active) sessionStorage.setItem('janetweb_session', '1'); } catch (e) {}
     sessionChanged();
     return r;
   }
@@ -464,7 +464,7 @@
   /* ========================================================================
      AppShell  -  builds the whole frame in JS (index.html stays minimal)
      ===================================================================== */
-  var TOOLS = [], SUITE = 'J.A.N.E.T. TWO';
+  var TOOLS = [], SUITE = 'JANET Web';
   var dom = {};   // cached element refs
 
   function buildShell(root) {
@@ -1342,14 +1342,14 @@
     };
     startAd.onclick = function () {
       Session.adOnly = true;
-      try { sessionStorage.setItem('janet2_adonly', '1'); } catch (e) {}
+      try { sessionStorage.setItem('janetweb_adonly', '1'); } catch (e) {}
       gate.remove(); refreshStatus(); updateStrip();
     };
     // read-only bypass straight into AD Search (no credential / admin session needed),
     // mirroring JANET ONE's gate. Other tools stay read-only until an admin session.
     startAdsearch.onclick = function () {
       Session.adOnly = true;
-      try { sessionStorage.setItem('janet2_adonly', '1'); } catch (e) {}
+      try { sessionStorage.setItem('janetweb_adonly', '1'); } catch (e) {}
       gate.remove(); refreshStatus(); updateStrip();
       var adTool = (TOOLS || []).filter(function (t) { return t.id === 'adsearch'; })[0];
       if (adTool) openTool(adTool);
@@ -1373,7 +1373,7 @@
     } catch (e) {
       TOOLS = [];
       var warn = el('div'); warn.style.padding = '24px'; warn.className = 'st-bad';
-      warn.textContent = 'Could not reach the JANET TWO server (' + e.message + '). Is the console window still open?';
+      warn.textContent = 'Could not reach the JANET Web server (' + e.message + '). Is the console window still open?';
       dom.hub.appendChild(warn);
     }
     renderHub();
