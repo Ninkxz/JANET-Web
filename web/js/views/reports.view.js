@@ -941,6 +941,56 @@
         };
       }
 
+      // ---- Remediation Campaigns (persisted closed-loop tracking) -----------------
+      function buildCampaigns(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('REMEDIATION CAMPAIGNS', true));
+        panel.appendChild(hint('Snapshot the currently loaded OPEN findings into a persisted campaign (JanetLocal\\campaigns) that ties finding → fix → re-verify: it records the finding keys, affected hosts, mapped remediations, and severity/KEV mix. Read-only tracking — run the actual remediation through the gated tools, then re-import the next scan (Patch Cross-Ref) to prove closure. Worst hosts first via the Planner.'));
+
+        var row = btnRow();
+        var nameInput = ui.input({ placeholder: 'Campaign name (optional)', title: 'A label for this campaign; blank = auto date-stamp.' }); nameInput.style.width = '260px';
+        var createBtn = ui.button('Create from loaded findings', { variant: 'go', size: 'sm', title: 'Snapshot the loaded OPEN findings into a new campaign.' });
+        var refreshBtn = ui.button('Refresh List', { variant: 'cyan', size: 'sm', title: 'Reload the saved campaigns.' });
+        row.appendChild(ui.label('Name')); row.appendChild(nameInput); row.appendChild(createBtn); row.appendChild(refreshBtn);
+        panel.appendChild(row);
+
+        var grid = C.ResultsGrid({
+          title: 'Saved campaigns', emptyText: 'No campaigns yet — load findings (ACAS Import), then Create from loaded findings.', keyMode: { rk: true }, popOut: true,
+          sort: { key: 'Created', dir: -1 },
+          columns: [
+            { key: 'Name', label: 'CAMPAIGN', width: 220 },
+            { key: 'Created', label: 'CREATED', width: 140 },
+            { key: 'Status', label: 'STATUS', width: 90, colorRule: function (v) { return /open/i.test(String(v)) ? 'st-warn' : 'st-ok'; } },
+            { key: 'OpenFindings', label: 'OPEN', width: 80, sortVal: function (r) { return +r.OpenFindings || 0; }, colorRule: gt0cls('st-warn') },
+            { key: 'KEV', label: 'KEV', width: 60, sortVal: function (r) { return +r.KEV || 0; }, colorRule: gt0cls('st-bad') },
+            { key: 'Hosts', label: 'HOSTS', width: 80, sortVal: function (r) { return +r.Hosts || 0; }, colorRule: gt0cls('st-info') }
+          ],
+          rowClass: function (r) { return (+r.KEV > 0) ? 'row-bad' : ''; }
+        });
+        var gh = gridHolder(grid, 200); gh.style.flex = '1'; panel.appendChild(gh);
+        var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        function refreshList() {
+          grid.clear();
+          runIntoGrid('campaign-list', {}, {
+            grid: grid, prog: prog, keyOf: function (ev) { return ev._rk != null ? String(ev._rk) : null; },
+            onFinal: function (res) { var s = res && res.summary || {}; log.append({ text: (s.total || 0) + ' saved campaign(s).', level: 'mode' }); }
+          });
+        }
+        createBtn.onclick = function () {
+          log.banner('Create Remediation Campaign');
+          var h = ctx.run('campaign-create', { name: (nameInput.value || '').trim() });
+          track(h.subscribe({
+            row: function (r) { log.append({ text: r.Field + ': ' + r.Value, level: 'ok' }); },
+            log: function (l) { log.append(l); },
+            error: function (e) { log.append({ text: e.text, level: 'err' }); },
+            final: function (res) { var s = res && res.summary || {}; if (s.id) { log.banner('Campaign saved (' + (s.openFindings || 0) + ' open, ' + (s.kev || 0) + ' KEV, ' + (s.hosts || 0) + ' host(s)).'); nameInput.value = ''; refreshList(); } }
+          }));
+        };
+        refreshBtn.onclick = refreshList;
+        refreshList();   // load on first mount
+      }
+
       // ---- Patch Cross-Ref (Compare) ----------------------------------------------
       function buildCompare(panel) {
         panelFlex(panel);
@@ -1805,6 +1855,7 @@
           { id: 'remediation', label: 'Remediation Plan', build: buildRemediation },
           { id: 'router', label: 'Remediation Router', build: buildRouter },
           { id: 'planner', label: 'Remediation Planner', build: buildPlanner },
+          { id: 'campaigns', label: 'Campaigns', build: buildCampaigns },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },
           { id: 'dirty30', label: 'Dirty 30 Triage', build: buildDirty30 },
