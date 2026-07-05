@@ -518,9 +518,14 @@ table.j-grid thead th .j-rsz{position:absolute;right:0;top:0;width:6px;height:10
 table.j-grid tbody td{padding:5px 9px;border-bottom:1px solid var(--line-faint);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.j-grid tbody tr{cursor:default}
 table.j-grid tbody tr:hover{background:var(--hover)}
-table.j-grid tbody tr.row-ok{background:rgba(92,198,120,.06)}
-table.j-grid tbody tr.row-bad{background:rgba(224,80,90,.07)}
-table.j-grid tbody tr.row-warn{background:rgba(230,180,70,.06)}
+/* Severity rows: a crisp 3px left SPINE (security-console treatment) carries the
+   signal, with a lighter full-row wash so it doesn't muddy the mono text. */
+table.j-grid tbody tr.row-ok{background:rgba(92,198,120,.04)}
+table.j-grid tbody tr.row-bad{background:rgba(224,80,90,.045)}
+table.j-grid tbody tr.row-warn{background:rgba(230,180,70,.04)}
+table.j-grid tbody tr.row-ok td:first-child{box-shadow:inset 3px 0 0 var(--ok,#5CC678)}
+table.j-grid tbody tr.row-bad td:first-child{box-shadow:inset 3px 0 0 var(--sev-crit,#E0505A)}
+table.j-grid tbody tr.row-warn td:first-child{box-shadow:inset 3px 0 0 var(--sev-high,#E6804D)}
 table.j-grid tbody tr.sel{background:var(--accent-wash)}
 table.j-grid .j-cb-col{width:28px;text-align:center}
 table.j-grid .j-cell-bar{display:block;height:3px;margin-top:3px;border-radius:2px;background:var(--accent)}
