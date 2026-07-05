@@ -965,10 +965,37 @@
             { key: 'KEV', label: 'KEV', width: 60, sortVal: function (r) { return +r.KEV || 0; }, colorRule: gt0cls('st-bad') },
             { key: 'Hosts', label: 'HOSTS', width: 80, sortVal: function (r) { return +r.Hosts || 0; }, colorRule: gt0cls('st-info') }
           ],
-          rowClass: function (r) { return (+r.KEV > 0) ? 'row-bad' : ''; }
+          rowClass: function (r) { return (+r.KEV > 0) ? 'row-bad' : ''; },
+          onRowClick: function (r) { selectedId = String(r._rk || ''); selName.textContent = selectedId ? ('selected: ' + String(r.Name)) : 'none selected'; verifyBtn.disabled = !selectedId; }
         });
         var gh = gridHolder(grid, 200); gh.style.flex = '1'; panel.appendChild(gh);
         var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        // Close-the-loop: verify a selected campaign against a freshly-loaded scan.
+        var selectedId = '';
+        var verifyRow = btnRow(); verifyRow.style.marginTop = '10px';
+        var verifyBtn = ui.button('Verify Selected (close loop)', { variant: 'gold', size: 'sm', title: 'Click a campaign row, load the NEW scan (ACAS Import), then verify: each snapshotted finding still open = still-open, gone = remediated. Marks VERIFIED-CLOSED at 100%.' });
+        verifyBtn.disabled = true;
+        var selName = el('span', 'muted', 'none selected'); selName.style.fontSize = '11px';
+        verifyRow.appendChild(ui.eyebrow('CLOSE THE LOOP')); verifyRow.appendChild(verifyBtn); verifyRow.appendChild(selName);
+        panel.appendChild(verifyRow);
+        verifyBtn.onclick = function () {
+          if (!selectedId) return;
+          log.banner('Verify Campaign (close the loop)');
+          var h = ctx.run('campaign-verify', { campaignId: selectedId });
+          track(h.subscribe({
+            log: function (l) { log.append(l); },
+            error: function (e) { log.append({ text: e.text, level: 'err' }); },
+            final: function (res) {
+              var s = res && res.summary || {};
+              if (s.notFound) { log.append({ text: 'Campaign not found — refresh the list.', level: 'err' }); return; }
+              var lvl = (s.status === 'verified-closed') ? 'ok' : 'mode';
+              log.banner('Verify: ' + (s.remediated || 0) + ' remediated, ' + (s.stillOpen || 0) + ' still-open of ' + (s.totalKeys || 0) + ' — ' + (s.closedPct || 0) + '% closed. Status: ' + (s.status || '') + '.');
+              log.append({ text: 'Load a NEW scan on ACAS Import before verifying, so "remediated" reflects the latest state.', level: 'dim' });
+              refreshList();
+            }
+          }));
+        };
 
         function refreshList() {
           grid.clear();

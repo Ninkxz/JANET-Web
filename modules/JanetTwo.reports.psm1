@@ -400,6 +400,17 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'campaign-verify'
+                label       = 'Verify Campaign (close the loop)'
+                description  = 'Close the loop on a saved campaign: load a FRESH scan (ACAS Import), then verify against the campaign''s snapshotted finding keys - each key still OPEN in the new scan is STILL-OPEN, each key gone is REMEDIATED. Records the result back onto the campaign JSON (verify block + closedPct) and flips status to VERIFIED-CLOSED when every finding is remediated. Read-only against hosts; proves remediation without waiting for the weekly re-import to be eyeballed.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Host','Plugin','VulnName','Severity','KEV','State')
+                inputs       = @(
+                    @{ name='campaignId'; label='Campaign ID'; type='text'; required=$true; default='' }
+                )
+            },
+            @{
                 id          = 'command-brief'
                 label       = 'Executive Command Brief'
                 description  = 'One self-contained dark-theme HTML commander brief that rolls up the other reports: SLA aging buckets (ledger-backed, works at idle), open KEV (known-exploited) posture, the last Squadron Rollup this session, the newest WPT fleet-compliance snapshots trend (read straight from JanetLocal\snapshots - no wpt import), the Remediation Router routable-vs-manual split, and scan-closure numbers when a Patch Cross-Ref compare has run this session. Each section degrades to a "run X first" note when its source is empty. Build LAST after the sections it consumes.'
@@ -892,9 +903,24 @@ function Save-ReportsSlaLedger {
 # =============================================================================
 function Get-ReportsCampaignDir { Join-Path $PSScriptRoot '..\JanetLocal\campaigns' }
 
-# Persist one campaign object (atomic temp+move, UTF-8 BOM). Returns @{Written;Path;Error}.
+# Read one campaign by id (PSCustomObject) or $null if absent/unreadable.
+function Get-ReportsCampaignById {
+    param([string]$Id)
+    if ([string]::IsNullOrWhiteSpace($Id)) { return $null }
+    try {
+        $p = Join-Path (Get-ReportsCampaignDir) ("$Id.json")
+        if (-not (Test-Path -LiteralPath $p)) { return $null }
+        $raw = Get-Content -LiteralPath $p -Raw -ErrorAction Stop
+        if ($raw -and $raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        return ($raw | ConvertFrom-Json -ErrorAction Stop)
+    } catch { return $null }
+}
+
+# Persist one campaign object (hashtable OR PSCustomObject; atomic temp+move, UTF-8
+# BOM). Uses $Campaign.id for the filename. Returns @{Written;Path;Error}.
 function Save-ReportsCampaign {
-    param([hashtable]$Campaign)
+    param($Campaign)
     $res = @{ Written = $false; Path = ''; Error = '' }
     $tmp = $null
     try {
@@ -4509,6 +4535,71 @@ function Invoke-JanetToolAction {
             }
             & $send @{ type='status'; text="$($rows.Count) saved campaign(s) - source: $($c.Source)." }
             return @{ rows=@($rows); summary=@{ total=$rows.Count; source=$c.Source } }
+        }
+
+        # -------------------------------------------------------------------
+        'campaign-verify' {
+            # Close the loop: diff a saved campaign's snapshotted finding keys against
+            # the CURRENTLY loaded (fresh) scan. A key still open now = STILL-OPEN; a
+            # key gone = REMEDIATED. Persist the verdict; flip to VERIFIED-CLOSED when
+            # all remediated. READ-ONLY (no host contact).
+            $cid = ([string]$Params['campaignId']).Trim()
+            $cam = Get-ReportsCampaignById -Id $cid
+            if ($null -eq $cam) {
+                & $send @{ type='error'; text="Campaign '$cid' not found in JanetLocal\campaigns." }
+                return @{ rows=@(); summary=@{ total=0; notFound=$true } }
+            }
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No fresh scan loaded. Import the NEW scan (ACAS Import) before verifying.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            # Set of keys still OPEN in the fresh scan, + a lookup for detail rows.
+            $openNow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $detail = @{}
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched') { continue }
+                $k = "$($f.Hostname)|$($f.PluginID)"
+                [void]$openNow.Add($k)
+                if (-not $detail.ContainsKey($k)) { $detail[$k] = $f }
+            }
+            $campKeys = @($cam.findingKeys)
+            $rows = New-Object System.Collections.ArrayList
+            $remediated = 0; $stillOpen = 0; $idx = 0
+            foreach ($k in $campKeys) {
+                $idx++
+                $isOpen = $openNow.Contains([string]$k)
+                if ($isOpen) {
+                    $stillOpen++
+                    $f = $detail[[string]$k]
+                    $parts = ([string]$k -split '\|', 2)
+                    $row = @{
+                        _rk=[string]$k
+                        Host=$(if ($f) { [string]$f.Hostname } else { $parts[0] })
+                        Plugin=$(if ($f) { [string]$f.PluginID } else { $(if ($parts.Count -gt 1) { $parts[1] } else { '' }) })
+                        VulnName=$(if ($f) { [string]$f.VulnName } else { '' })
+                        Severity=$(if ($f) { [string]$f.Severity } else { '' })
+                        KEV=$(if ($f -and [bool]$f.InKEV) { 'KEV' } else { '' })
+                        State='STILL-OPEN'
+                    }
+                    [void]$rows.Add($row)
+                    if ($stillOpen -le 800) { & $send (@{ type='row' } + $row) }
+                } else { $remediated++ }
+            }
+            $totalKeys = @($campKeys).Count
+            $closedPct = if ($totalKeys -gt 0) { [math]::Round(($remediated / $totalKeys) * 100, 1) } else { 0 }
+            $allClosed = ($stillOpen -eq 0 -and $totalKeys -gt 0)
+            $newStatus = if ($allClosed) { 'verified-closed' } elseif ($remediated -gt 0) { 'in-progress' } else { 'open' }
+
+            # Persist the verdict back onto the campaign object.
+            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; stillOpen=$stillOpen; total=$totalKeys; closedPct=$closedPct }
+            if ($cam.PSObject.Properties['verify']) { $cam.verify = $verify } else { $cam | Add-Member -NotePropertyName verify -NotePropertyValue $verify -Force }
+            if ($cam.PSObject.Properties['status']) { $cam.status = $newStatus } else { $cam | Add-Member -NotePropertyName status -NotePropertyValue $newStatus -Force }
+            $save = Save-ReportsCampaign -Campaign $cam
+            if (-not $save.Written) { & $send @{ type='log'; level='warn'; text="Verify computed but the campaign file could not be updated: $($save.Error)" } }
+
+            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated remediated, $stillOpen still-open of $totalKeys ($closedPct% closed); status=$newStatus" }
+            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated remediated, $stillOpen still-open of $totalKeys - $closedPct% closed. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
+            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; stillOpen=$stillOpen; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
         }
 
         # -------------------------------------------------------------------

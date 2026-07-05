@@ -46,9 +46,49 @@ Describe 'Remediation campaign store (campaign-create / campaign-list)' {
         $mine[0]['KEV'] | Should Be '1'
     }
 
-    # cleanup: delete just this test campaign's file
-    It 'cleans up the test campaign file' {
+    # ---- close-the-loop verify ------------------------------------------------
+    $verify = & $script:Mod {
+        param($uniqName)
+        $noop = { param($e) }
+        # Campaign of 2 open findings.
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='hA'; PluginID='1'; VulnName='Chrome'; Severity='Critical'; CVE='CVE-1'; Category='Chrome'; Status='Open'; Solution='x'; InKEV=$true;  KevCves='CVE-1'; IAVA='' }
+            [pscustomobject]@{ Hostname='hB'; PluginID='2'; VulnName='Apache'; Severity='High';     CVE='';      Category='Apache'; Status='Open'; Solution='';  InKEV=$false; KevCves=''; IAVA='' }
+        )
+        $cr = Invoke-JanetToolAction -ActionId 'campaign-create' -Params @{ name=($uniqName + '-VER') } -Emit $noop
+        $id = $cr.summary.id
+        # Fresh scan: hA|1 remediated (gone), hB|2 still open.
+        $script:AcasFindings = @([pscustomobject]@{ Hostname='hB'; PluginID='2'; VulnName='Apache'; Severity='High'; CVE=''; Category='Apache'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' })
+        $v1 = Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId=$id } -Emit $noop
+        # Fresh scan: both gone -> fully closed.
+        $script:AcasFindings = @([pscustomobject]@{ Hostname='hZ'; PluginID='9'; VulnName='Other'; Severity='Low'; CVE=''; Category='Other'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' })
+        $v2 = Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId=$id } -Emit $noop
+        $json = Get-ReportsCampaignById -Id $id
+        $file = Join-Path (Get-ReportsCampaignDir) ("$id.json")
+        [pscustomobject]@{ V1=$v1.summary; V2=$v2.summary; Json=$json; File=$file }
+    } $script:Uniq
+
+    It 'partial verify: 1 remediated / 1 still-open = 50% closed, in-progress' {
+        [int]$verify.V1.remediated | Should Be 1
+        [int]$verify.V1.stillOpen  | Should Be 1
+        $verify.V1.status          | Should Be 'in-progress'
+    }
+    It 'full verify: all remediated = 100% closed, verified-closed, persisted' {
+        [int]$verify.V2.remediated | Should Be 2
+        [int]$verify.V2.stillOpen  | Should Be 0
+        $verify.V2.status          | Should Be 'verified-closed'
+        $verify.Json.status        | Should Be 'verified-closed'
+        [int]$verify.Json.verify.remediated | Should Be 2
+    }
+    It 'campaign-verify returns notFound for an unknown id' {
+        $nf = & $script:Mod { $script:AcasFindings=@([pscustomobject]@{Hostname='x';PluginID='1';Status='Open';Severity='Low';VulnName='';CVE='';Category='Other';Solution='';InKEV=$false;KevCves='';IAVA=''}); (Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId='no-such-id' } -Emit { param($e) }).summary }
+        $nf.notFound | Should Be $true
+    }
+
+    # cleanup: delete both test campaign files
+    It 'cleans up the test campaign files' {
         if ($result.File -and (Test-Path $result.File)) { [System.IO.File]::Delete($result.File) }
+        if ($verify.File -and (Test-Path $verify.File)) { [System.IO.File]::Delete($verify.File) }
         (Test-Path $result.File) | Should Be $false
     }
 }
