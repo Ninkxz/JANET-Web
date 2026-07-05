@@ -407,6 +407,18 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'posture-digest'
+                label       = 'Posture Digest (nightly snapshot)'
+                description  = 'Render the current vuln posture to a self-contained HTML + a CSV on disk, so it can be armed on the off-hours Scheduler (reports/posture-digest) to drop a fresh snapshot on an audit share every night - no email/infra needed. Reuses the same rollups as the Dashboard/CORA (severity + host totals), SLA / Finding Aging, KBs Needed, Third-Party Catalog, and IAVM Board. Read-only; writes only the two digest files to outDir (created if missing).'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Name','Path','Kind','Bytes')
+                inputs       = @(
+                    @{ name='outDir'; label='Output folder (blank = JanetLocal\digests; can be a UNC share)'; type='text'; required=$false },
+                    @{ name='title';  label='Report title (optional)'; type='text'; required=$false }
+                )
+            },
+            @{
                 id          = 'campaign-create'
                 label       = 'Create Remediation Campaign'
                 description  = 'Snapshot the currently loaded OPEN findings into a persisted remediation campaign (JanetLocal\campaigns\<id>.json): the finding keys (Hostname|PluginID), the affected host set, the distinct mapped JANET remediations, and the severity/KEV mix. This ties finding -> fix -> (later) re-verify so a wave can be tracked to closure. READ-ONLY: creates the tracking record only; the actual remediation runs through the gated engines. Re-import the next scan and use the campaign to prove closure.'
@@ -3635,6 +3647,200 @@ $(Get-JanetReportCSS)
 }
 
 # =============================================================================
+#  Posture Digest ('posture-digest' action)  -  self-contained HTML + CSV
+#  snapshot for the off-hours Scheduler. Deliberately does NOT re-derive any
+#  aggregation: the action branch below calls Build-CoraSummary (severity /
+#  host / VPH - same function cora-build-summary / cora-render-html use) and
+#  re-invokes the sla-aging / kb-needed / thirdparty-catalog / iavm-board
+#  actions themselves (their row/status/log chatter swallowed by a no-op
+#  Emit), then hands the resulting rollups to these two renderers.
+# -----------------------------------------------------------------------------
+function Render-PostureDigestHtml {
+    param([Parameter(Mandatory)]$Digest)
+
+    $generated = $Digest.GeneratedLocal
+    $sc  = $Digest.SevCount
+    $sla = $Digest.Sla
+
+    $tile = { param($label, $val, $cls) "<div class=`"tile`"><div class=`"lbl`">$label</div><div class=`"val $cls`">$val</div></div>" }
+    $sevStrip = @(
+        (& $tile 'Critical' ([int]$sc.Critical) 'sev-crit'),
+        (& $tile 'High'     ([int]$sc.High)     'sev-high'),
+        (& $tile 'Medium'   ([int]$sc.Medium)   'sev-med'),
+        (& $tile 'Low'      ([int]$sc.Low)      'sev-low'),
+        (& $tile 'KEV'      ([int]$Digest.KevTotal) 'sev-kev')
+    ) -join "`n"
+
+    $slaChips = if ($sla -and $null -ne $sla.total) {
+        @"
+<div class="chips">
+  <span class="chip bad">$($sla.overdue) overdue</span>
+  <span class="chip warn">$($sla.dueSoon) due-soon</span>
+  <span class="chip ok">$($sla.onTrack) on-track</span>
+  <span class="chip info">$($sla.untracked) untracked</span>
+  <span class="chip dim">$($sla.hosts) host(s) in scope; $($sla.hostsOverdue) w/ an overdue finding</span>
+</div>
+<div class="src">Baseline: $(ConvertTo-HtmlEscaped ([string]$sla.baseline))</div>
+"@
+    } else { '<div class="nodata">No SLA data (nothing loaded).</div>' }
+
+    $kevRows = New-Object System.Text.StringBuilder
+    foreach ($k in $Digest.TopKevHosts) {
+        [void]$kevRows.Append("<tr><td>$(ConvertTo-HtmlEscaped $k.Host)</td><td class=`"num`">$($k.KevFindings)</td></tr>`n")
+    }
+    if ($Digest.TopKevHosts.Count -eq 0) { [void]$kevRows.Append('<tr><td colspan="2" class="dim">No open KEV (known-exploited) findings.</td></tr>') }
+
+    $prodRows = New-Object System.Text.StringBuilder
+    foreach ($p in $Digest.TopProducts) {
+        $cls = if ($p.KEV) { ' class="kev"' } else { '' }
+        [void]$prodRows.Append("<tr$cls><td>$(ConvertTo-HtmlEscaped $p.Product)</td><td class=`"num`">$($p.Hosts)</td><td>$(ConvertTo-HtmlEscaped $p.Severity)</td><td>$(ConvertTo-HtmlEscaped $p.KEV)</td><td>$(ConvertTo-HtmlEscaped $p.FixedVersion)</td><td>$(ConvertTo-HtmlEscaped $p.Route)</td><td class=`"num`">$($p.Findings)</td></tr>`n")
+    }
+    if ($Digest.TopProducts.Count -eq 0) { [void]$prodRows.Append('<tr><td colspan="7" class="dim">No third-party catalog data.</td></tr>') }
+
+    $kbRows = New-Object System.Text.StringBuilder
+    foreach ($k in $Digest.TopKb) {
+        $cls = if ($k.KEV) { ' class="kev"' } else { '' }
+        [void]$kbRows.Append("<tr$cls><td>$(ConvertTo-HtmlEscaped $k.KB)</td><td class=`"num`">$($k.Hosts)</td><td>$(ConvertTo-HtmlEscaped $k.Severity)</td><td>$(ConvertTo-HtmlEscaped $k.KEV)</td><td class=`"num`">$($k.Findings)</td><td class=`"mono`">$(ConvertTo-HtmlEscaped $k.SamplePlugins)</td></tr>`n")
+    }
+    if ($Digest.TopKb.Count -eq 0) { [void]$kbRows.Append('<tr><td colspan="6" class="dim">No KB-named findings in the loaded scan.</td></tr>') }
+
+    $iavmRows = New-Object System.Text.StringBuilder
+    foreach ($i in $Digest.TopIavm) {
+        $cls = if ($i.KEV) { ' class="kev"' } else { '' }
+        [void]$iavmRows.Append("<tr$cls><td>$(ConvertTo-HtmlEscaped $i.IAVA)</td><td class=`"num`">$($i.Hosts)</td><td>$(ConvertTo-HtmlEscaped $i.Severity)</td><td>$(ConvertTo-HtmlEscaped $i.KEV)</td><td class=`"num`">$($i.Findings)</td><td class=`"mono`">$(ConvertTo-HtmlEscaped $i.CVEs)</td></tr>`n")
+    }
+    if ($Digest.TopIavm.Count -eq 0) { [void]$iavmRows.Append('<tr><td colspan="6" class="dim">No findings carry an IAVA/IAVM bulletin mapping.</td></tr>') }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>$(ConvertTo-HtmlEscaped $Digest.Title) - $generated</title>
+<style>
+$(Get-JanetReportCSS)
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px; }
+  .topbar { height: 56px; background: linear-gradient(180deg, rgb(20,18,30), rgb(12,10,18)); border-bottom: 2px solid var(--gold); display: flex; align-items: center; padding: 0 20px; }
+  .topbar .title { font-size: 19px; font-weight: 600; color: var(--gold); }
+  .topbar .grow { flex: 1; }
+  .topbar .meta { color: var(--text-dim); font-size: 12px; text-align: right; }
+  .content { padding: 18px 28px; max-width: 1500px; margin: 0 auto; }
+  .summary-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+  .panel .summary-strip { grid-template-columns: repeat(5, 1fr); margin-bottom: 0; }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-top: 3px solid var(--accent); padding: 16px 18px; }
+  .tile .lbl { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .tile .val { font-size: 34px; font-weight: 800; color: var(--gold); margin-top: 6px; }
+  .tile .val.sev-crit { color: var(--danger); } .tile .val.sev-high { color: var(--orange); }
+  .tile .val.sev-med  { color: var(--warning); } .tile .val.sev-low  { color: var(--cyan); }
+  .tile .val.sev-kev  { color: var(--danger); }
+  .tile .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); padding: 14px 16px; border-radius: 3px; margin-bottom: 16px; }
+  .panel h3 { color: var(--cyan); font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 10px 0; }
+  table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.grid th { background: var(--panel-light); color: var(--gold); text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border); font-size: 12px; text-transform: uppercase; }
+  table.grid td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.mono, .mono { font-family: Consolas, monospace; font-size: 12px; }
+  td.dim, .dim { color: var(--text-dim); }
+  tr.kev td:first-child { color: var(--danger); font-weight: 700; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .chip { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 3px; border: 1px solid var(--border); background: var(--panel-light); }
+  .chip.bad { color: var(--danger); border-color: var(--danger); }
+  .chip.warn { color: var(--warning); border-color: var(--warning); }
+  .chip.ok { color: var(--success); border-color: var(--success); }
+  .chip.info { color: var(--cyan); border-color: var(--cyan); }
+  .chip.dim { color: var(--text-dim); }
+  .nodata { color: var(--warning); font-size: 13px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 3px; background: var(--input); }
+  .src { color: var(--text-faint); font-size: 11.5px; margin-top: 8px; }
+  .footer { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="title">J.A.N.E.T - $(ConvertTo-HtmlEscaped $Digest.Title)</div>
+  <div class="grow"></div>
+  <div class="meta">Generated $generated (UTC $($Digest.GeneratedUtc)) by $(ConvertTo-HtmlEscaped (Get-ReportsCleanUser))</div>
+</div>
+<div class="content">
+  <div class="summary-strip">
+    <div class="tile"><div class="lbl">Findings Loaded</div><div class="val">$($Digest.TotalLoaded)</div><div class="sub">raw scan rows</div></div>
+    <div class="tile"><div class="lbl">Open Findings</div><div class="val">$($Digest.OpenFindings)</div><div class="sub">not Patched / not NOT OUR PATCH</div></div>
+    <div class="tile"><div class="lbl">Hosts Affected</div><div class="val">$($Digest.UniqueHosts)</div><div class="sub">$($Digest.Vph) vulns/host (VPH)</div></div>
+  </div>
+  <div class="panel"><h3>Severity Breakdown</h3><div class="summary-strip">$sevStrip</div></div>
+  <div class="panel"><h3>SLA / Finding Aging Posture</h3>$slaChips</div>
+  <div class="panel"><h3>Top KEV Exposure (by host)</h3>
+    <table class="grid"><thead><tr><th>Host</th><th>Open KEV Findings</th></tr></thead><tbody>
+$($kevRows.ToString())</tbody></table>
+  </div>
+  <div class="panel"><h3>Top Third-Party Products</h3>
+    <table class="grid"><thead><tr><th>Product</th><th>Hosts</th><th>Severity</th><th>KEV</th><th>Fixed Version</th><th>Route</th><th>Findings</th></tr></thead><tbody>
+$($prodRows.ToString())</tbody></table>
+  </div>
+  <div class="panel"><h3>Top KBs Needed</h3>
+    <table class="grid"><thead><tr><th>KB</th><th>Hosts</th><th>Severity</th><th>KEV</th><th>Findings</th><th>Sample Plugins</th></tr></thead><tbody>
+$($kbRows.ToString())</tbody></table>
+  </div>
+  <div class="panel"><h3>IAVA / IAVM Bulletins</h3>
+    <table class="grid"><thead><tr><th>IAVA</th><th>Hosts</th><th>Severity</th><th>KEV</th><th>Findings</th><th>CVEs</th></tr></thead><tbody>
+$($iavmRows.ToString())</tbody></table>
+  </div>
+  <div class="footer">Posture digest - a nightly snapshot. Arm on the off-hours Scheduler (Reports / Posture Digest) to drop a fresh copy in this folder every night.</div>
+</div>
+</body>
+</html>
+"@
+    return $html
+}
+
+# Flat CSV companion to the HTML digest: Section,Metric,Value,Detail rows (one
+# section per metric group, then one row per top-list item). Every cell goes
+# through the shared ConvertTo-ReportsCsvCell (RFC-4180 quoting + the same
+# formula-injection guard the other exporters use).
+function Build-PostureDigestCsv {
+    param([Parameter(Mandatory)]$Digest)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('Section,Metric,Value,Detail')
+    $add = {
+        param($section, $metric, $value, $detail)
+        [void]$sb.AppendLine((@(
+            (ConvertTo-ReportsCsvCell $section), (ConvertTo-ReportsCsvCell $metric),
+            (ConvertTo-ReportsCsvCell $value), (ConvertTo-ReportsCsvCell $detail)
+        ) -join ','))
+    }
+    & $add 'Header' 'Title' $Digest.Title ''
+    & $add 'Header' 'GeneratedLocal' $Digest.GeneratedLocal ''
+    & $add 'Header' 'GeneratedUtc' $Digest.GeneratedUtc ''
+    & $add 'Header' 'FindingsLoaded' $Digest.TotalLoaded ''
+    & $add 'Header' 'OpenFindings' $Digest.OpenFindings ''
+    & $add 'Header' 'UniqueHosts' $Digest.UniqueHosts ''
+    & $add 'Header' 'VulnsPerHost' $Digest.Vph ''
+    $sc = $Digest.SevCount
+    & $add 'Severity' 'Critical' ([int]$sc.Critical) ''
+    & $add 'Severity' 'High' ([int]$sc.High) ''
+    & $add 'Severity' 'Medium' ([int]$sc.Medium) ''
+    & $add 'Severity' 'Low' ([int]$sc.Low) ''
+    & $add 'Severity' 'Info' ([int]$sc.Info) ''
+    & $add 'KEV' 'OpenKevFindings' $Digest.KevTotal ''
+    & $add 'KEV' 'HostsWithKev' $Digest.KevHostsCount ''
+    $sla = $Digest.Sla
+    if ($sla -and $null -ne $sla.total) {
+        & $add 'SLA' 'Overdue' $sla.overdue ''
+        & $add 'SLA' 'DueSoon' $sla.dueSoon ''
+        & $add 'SLA' 'OnTrack' $sla.onTrack ''
+        & $add 'SLA' 'Untracked' $sla.untracked ''
+        & $add 'SLA' 'HostsOverdue' $sla.hostsOverdue ''
+        & $add 'SLA' 'Baseline' '' $sla.baseline
+    }
+    foreach ($k in $Digest.TopKevHosts) { & $add 'TopKevHost' $k.Host $k.KevFindings '' }
+    foreach ($p in $Digest.TopProducts) { & $add 'TopProduct' $p.Product $p.Hosts "Sev=$($p.Severity); KEV=$($p.KEV); Fixed=$($p.FixedVersion); Route=$($p.Route); Findings=$($p.Findings)" }
+    foreach ($k in $Digest.TopKb)       { & $add 'TopKB' $k.KB $k.Hosts "Sev=$($k.Severity); KEV=$($k.KEV); Findings=$($k.Findings); Plugins=$($k.SamplePlugins)" }
+    foreach ($i in $Digest.TopIavm)     { & $add 'TopIAVA' $i.IAVA $i.Hosts "Sev=$($i.Severity); KEV=$($i.KEV); Findings=$($i.Findings); CVEs=$($i.CVEs)" }
+    return $sb.ToString().TrimEnd()
+}
+
+# =============================================================================
 #  Region: helper used by both the probe action and any inline ping needs
 # =============================================================================
 
@@ -6570,6 +6776,130 @@ function Invoke-JanetToolAction {
             & $send (@{ type='row' } + @{ Report=$row.Report; Sections=$row.Sections; Bytes=$row.Bytes })
             & $send @{ type='status'; text="Command brief rendered ($bytes bytes; $sectionsWithData/6 sections populated)." }
             return @{ rows=@($row); summary=@{ total=1; sections=$sectionsWithData; bytes=$bytes; html=$html } }
+        }
+
+        # -------------------------------------------------------------------
+        'posture-digest' {
+            # Self-contained nightly snapshot for the off-hours Scheduler
+            # (reports/posture-digest): renders a self-contained HTML + a
+            # tidy CSV to outDir (can be a UNC audit share) so a fresh posture
+            # snapshot lands on disk every night with no email/infra needed.
+            # REUSE, not reinvention: Build-CoraSummary gives the severity /
+            # host / VPH headline (same function cora-build-summary and
+            # cora-render-html call); sla-aging / kb-needed / thirdparty-catalog
+            # / iavm-board are re-invoked as actions (their row/status/log
+            # chatter is swallowed by a no-op Emit) so their rollups are never
+            # re-derived here - only the KEV-by-host tally below is new, and
+            # it is a ~10-line loop using the same openFilter semantics
+            # command-brief's KEV section already uses.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse or load a report first - nothing to snapshot.' }
+                return @{ rows=@(); summary=@{ ok=$false } }
+            }
+            & $send @{ type='status'; text='Building posture digest (severity / SLA / KBs / third-party / IAVM rollups)...' }
+
+            $outDir = ([string]$Params['outDir']).Trim()
+            if ([string]::IsNullOrWhiteSpace($outDir)) { $outDir = Join-Path $PSScriptRoot '..\JanetLocal\digests' }
+            $title = ([string]$Params['title']).Trim()
+            if ([string]::IsNullOrWhiteSpace($title)) { $title = 'Posture Digest' }
+
+            try {
+                if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }
+            } catch {
+                & $send @{ type='error'; text="Could not create/access output folder '$outDir': $($_.Exception.Message)" }
+                return @{ rows=@(); summary=@{ ok=$false; error=$_.Exception.Message } }
+            }
+
+            $cora = Build-CoraSummary
+            $noop = { param($e) }
+            $slaResult  = Invoke-JanetToolAction -ActionId 'sla-aging'          -Params @{} -Credential $Credential -Emit $noop
+            $kbResult   = Invoke-JanetToolAction -ActionId 'kb-needed'          -Params @{} -Credential $Credential -Emit $noop
+            $tpResult   = Invoke-JanetToolAction -ActionId 'thirdparty-catalog' -Params @{} -Credential $Credential -Emit $noop
+            $iavmResult = Invoke-JanetToolAction -ActionId 'iavm-board'         -Params @{} -Credential $Credential -Emit $noop
+
+            # KEV posture, grouped per host (open + actionable, same filter as
+            # command-brief's KEV section) for the "top exposure" list.
+            $kevHostMap = @{}
+            $kevTotal = 0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH') { continue }
+                if (-not [bool]$f.InKEV) { continue }
+                $kevTotal++
+                $hn = [string]$f.Hostname
+                if ([string]::IsNullOrWhiteSpace($hn)) { continue }
+                if (-not $kevHostMap.ContainsKey($hn)) { $kevHostMap[$hn] = 0 }
+                $kevHostMap[$hn] = [int]$kevHostMap[$hn] + 1
+            }
+            $topKevHosts = @($kevHostMap.Keys | Sort-Object -Property @{ Expression = { -$kevHostMap[$_] } }, @{ Expression = { $_ } } |
+                Select-Object -First 10 | ForEach-Object { @{ Host = $_; KevFindings = $kevHostMap[$_] } })
+
+            $digest = @{
+                Title          = $title
+                GeneratedLocal = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+                GeneratedUtc   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                TotalLoaded    = $script:AcasFindings.Count
+                OpenFindings   = $cora.ConsideredFindings
+                UniqueHosts    = $cora.UniqueHosts
+                Vph            = $cora.Vph
+                SevCount       = $cora.SevCount
+                KevTotal       = $kevTotal
+                KevHostsCount  = $kevHostMap.Count
+                Sla            = $slaResult.summary
+                TopKevHosts    = $topKevHosts
+                TopProducts    = @($tpResult.rows | Select-Object -First 10)
+                TopKb          = @($kbResult.rows | Select-Object -First 10)
+                TopIavm        = @($iavmResult.rows | Select-Object -First 10)
+            }
+
+            $html = Render-PostureDigestHtml -Digest $digest
+            $csv  = Build-PostureDigestCsv -Digest $digest
+
+            $stamp    = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
+            $htmlName = "PostureDigest_$stamp.html"
+            $csvName  = "PostureDigest_$stamp.csv"
+            $htmlPath = Join-Path $outDir $htmlName
+            $csvPath  = Join-Path $outDir $csvName
+
+            $rows = New-Object System.Collections.ArrayList
+            $ok = $true; $writeErr = $null
+            try {
+                [System.IO.File]::WriteAllText($htmlPath, $html, [System.Text.UTF8Encoding]::new($true))
+                $htmlBytes = [System.Text.Encoding]::UTF8.GetByteCount($html)
+                [void]$rows.Add(@{ Name=$htmlName; Path=$htmlPath; Kind='HTML'; Bytes=$htmlBytes })
+                & $send (@{ type='row' } + @{ Name=$htmlName; Path=$htmlPath; Kind='HTML'; Bytes=$htmlBytes })
+            } catch {
+                $ok = $false; $writeErr = $_.Exception.Message
+                & $send @{ type='error'; text="Failed to write HTML digest: $writeErr" }
+            }
+            if ($ok) {
+                try {
+                    [System.IO.File]::WriteAllText($csvPath, $csv, [System.Text.UTF8Encoding]::new($true))
+                    $csvBytes = [System.Text.Encoding]::UTF8.GetByteCount($csv)
+                    [void]$rows.Add(@{ Name=$csvName; Path=$csvPath; Kind='CSV'; Bytes=$csvBytes })
+                    & $send (@{ type='row' } + @{ Name=$csvName; Path=$csvPath; Kind='CSV'; Bytes=$csvBytes })
+                } catch {
+                    $ok = $false; $writeErr = $_.Exception.Message
+                    & $send @{ type='error'; text="Failed to write CSV digest: $writeErr" }
+                }
+            }
+
+            if ($ok) {
+                & $send @{ type='audit'; action='TouchHost'; target=$outDir; result='Success'; itemCount=2; detail="Posture digest written: $htmlName + $csvName ($($digest.OpenFindings) open findings, $($digest.UniqueHosts) hosts, $kevTotal KEV)" }
+                & $send @{ type='status'; text="Posture digest written: $htmlPath" }
+            } else {
+                & $send @{ type='audit'; action='TouchHost'; target=$outDir; result='Failure'; itemCount=0; detail="Posture digest write failed: $writeErr" }
+            }
+
+            return @{ rows=@($rows); summary=@{
+                ok = $ok
+                htmlPath = $(if ($ok) { $htmlPath } else { '' }); csvPath = $(if ($ok) { $csvPath } else { '' })
+                totalFindings = $digest.OpenFindings; loadedFindings = $digest.TotalLoaded; hosts = $digest.UniqueHosts
+                kev = $kevTotal
+                overdue = $(if ($slaResult.summary.overdue) { $slaResult.summary.overdue } else { 0 })
+                dueSoon = $(if ($slaResult.summary.dueSoon) { $slaResult.summary.dueSoon } else { 0 })
+                generatedUtc = $digest.GeneratedUtc
+                error = $writeErr
+            } }
         }
 
         default {

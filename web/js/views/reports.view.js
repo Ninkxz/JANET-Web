@@ -1101,6 +1101,59 @@
         };
       }
 
+      // ---- Posture Digest (self-contained nightly snapshot for the Scheduler) ----
+      function buildPostureDigest(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('POSTURE DIGEST (NIGHTLY SNAPSHOT)', true));
+        panel.appendChild(hint('Renders the current vuln posture — severity + host totals, SLA aging posture, top KEV exposure, top third-party products, top KBs needed, and IAVA bulletins — to a self-contained HTML file + a CSV on disk. No email/infra needed: point Output Folder at a UNC audit share and arm this action (Reports / Posture Digest) on the off-hours Scheduler to drop a fresh snapshot every night.'));
+
+        var row = btnRow();
+        var outInput = ui.input({ type: 'text', placeholder: 'JanetLocal\\digests (blank = default; can be \\\\server\\share\\Digests)', title: 'Folder the HTML + CSV are written to. Can be a UNC share so a nightly Scheduler run lands the snapshot where the shop can read it.' });
+        outInput.style.cssText = 'flex:1;min-width:260px';
+        var titleInput = ui.input({ type: 'text', placeholder: 'Report title (optional)', title: 'Optional title shown on the HTML digest.' });
+        titleInput.style.width = '200px';
+        var runBtn = ui.button('Generate now', { variant: 'gold', size: 'sm', title: 'Build the digest from the currently loaded findings and write it to Output Folder.' });
+        row.appendChild(ui.eyebrow('OUTPUT FOLDER')); row.appendChild(outInput); row.appendChild(titleInput); row.appendChild(runBtn);
+        panel.appendChild(row);
+        panel.appendChild(hint('Tip: this action can be armed on the Scheduler (Scheduled Waves) — pick the Reports tool, the Posture Digest action, and set Output Folder to a share the whole shop can read, so a fresh digest lands every night with nobody at the keyboard.'));
+
+        var cards = C.StatCards({ cards: [
+          { key: 'total', label: 'OPEN FINDINGS', color: 'accent' },
+          { key: 'kev', label: 'KEV', color: 'bad' },
+          { key: 'overdue', label: 'SLA OVERDUE', color: 'warn' }
+        ] });
+        cards.el.style.margin = '8px 0'; panel.appendChild(cards.el);
+
+        var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        var noteBox = el('div', 'muted'); noteBox.style.cssText = 'font-size:12px;margin-top:10px;white-space:pre-wrap;font-family:Consolas,monospace';
+        noteBox.textContent = 'Not generated yet.';
+        panel.appendChild(noteBox);
+        var spacer = el('div'); spacer.style.flex = '1'; panel.appendChild(spacer);
+
+        runBtn.onclick = function () {
+          log.banner('Posture Digest');
+          cards.reset(); prog.reset();
+          noteBox.className = 'muted'; noteBox.textContent = 'Generating...';
+          runIntoGrid('posture-digest', { outDir: (outInput.value || '').trim(), title: (titleInput.value || '').trim() }, {
+            prog: prog,
+            onFinal: function (res) {
+              var s = res && res.summary || {};
+              cards.setAll({ total: s.totalFindings || 0, kev: s.kev || 0, overdue: s.overdue || 0 });
+              if (s.ok) {
+                noteBox.className = 'st-ok';
+                noteBox.textContent = 'HTML: ' + s.htmlPath + '\nCSV:  ' + s.csvPath;
+                log.banner('Posture digest written: ' + (s.totalFindings || 0) + ' open finding(s), ' + (s.hosts || 0) + ' host(s), ' + (s.kev || 0) + ' KEV.');
+              } else {
+                noteBox.className = 'st-warn';
+                noteBox.textContent = s.error ? ('Not written: ' + s.error) : 'Nothing to snapshot — load ACAS findings first (ACAS Import tab).';
+                log.append({ text: 'Posture digest not written' + (s.error ? (': ' + s.error) : ' (no findings loaded).'), level: 'warn' });
+              }
+            }
+          });
+        };
+      }
+
       // ---- Remediation Campaigns (persisted closed-loop tracking) -----------------
       function buildCampaigns(panel) {
         panelFlex(panel);
@@ -2045,6 +2098,7 @@
           { id: 'kbneeded', label: 'KBs Needed', build: buildKbNeeded },
           { id: 'thirdparty', label: 'Third-Party Catalog', build: buildThirdPartyCatalog },
           { id: 'iavm', label: 'IAVM Board', build: buildIavmBoard },
+          { id: 'digest', label: 'Posture Digest', build: buildPostureDigest },
           { id: 'campaigns', label: 'Campaigns', build: buildCampaigns },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },
