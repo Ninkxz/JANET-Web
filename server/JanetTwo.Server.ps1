@@ -51,6 +51,12 @@ function Start-JanetTwoServer {
     # (JanetLocal/*); not seeded - starts absent, GET returns {} until the first save.
     $targetGroupsFile = Join-Path (Join-Path $Root 'JanetLocal') 'target-groups.json'
 
+    # Off-hours scheduler store: one JSON per armed wave (JanetLocal\schedule\<id>.json).
+    # A background poller (started after the listener binds) fires a due wave by POSTing
+    # to this same server's gated action route over loopback - so the wave runs through
+    # the identical admin-session ack+cred gate + engine guards, with no new bypass path.
+    $scheduleDir = Join-Path (Join-Path $Root 'JanetLocal') 'schedule'
+
     # Where the Remote Package Installer lists packages from (the dropdown source).
     # Resolution: explicit -PackagesRoot wins; else the local .\Packages when it
     # holds packages; else the work share (where the content lives at work) when
@@ -273,6 +279,76 @@ function Start-JanetTwoServer {
     }
     Write-Host "  Listening. Ctrl+C to stop." -ForegroundColor DarkGray
 
+    # --- Off-hours scheduler poller (own runspace) -----------------------------
+    # A separate thread so it can make a LOOPBACK POST to this server (the accept
+    # loop serves it on its own thread - no self-deadlock) to fire a due wave
+    # through the normal gated dispatch. It never touches engines directly and
+    # holds no credential; the wave uses the server's in-memory admin session at
+    # fire time (fail-safe: if that's gone, the gated route 403s and the schedule
+    # is marked blocked).
+    try {
+        $schedPoller = {
+            param($Port, $Token, $SchedDir)
+            function Save-Sched { param($Obj, $Path) try { [System.IO.File]::WriteAllText($Path, ($Obj | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false))) } catch {} }
+            while ($true) {
+                Start-Sleep -Seconds 15
+                if (-not (Test-Path -LiteralPath $SchedDir)) { continue }
+                $now = [DateTime]::UtcNow
+                foreach ($f in @(Get-ChildItem -LiteralPath $SchedDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+                    $o = $null
+                    try {
+                        $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+                        if ($raw -and $raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+                        if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+                        $o = ConvertFrom-Json $raw
+                    } catch { continue }
+                    if ([string]$o.status -ne 'armed') { continue }
+                    $fireDt = [DateTime]::MinValue
+                    if (-not [DateTime]::TryParse([string]$o.fireAtUtc, [ref]$fireDt)) { continue }
+                    if ($fireDt.ToUniversalTime() -gt $now) { continue }   # not due yet
+                    # Fire: loopback POST to the gated action route.
+                    $bodyObj = @{}
+                    if ($o.params) { foreach ($pp in $o.params.PSObject.Properties) { $bodyObj[$pp.Name] = $pp.Value } }
+                    $bodyJson = if ($bodyObj.Count -gt 0) { $bodyObj | ConvertTo-Json -Depth 6 -Compress } else { '{}' }
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+                    $code = 0; $respText = ''
+                    try {
+                        $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/tool/$($o.toolId)/action/$($o.actionId)")
+                        $req.Method = 'POST'; $req.Timeout = 30000; $req.ContentType = 'application/json'
+                        $req.Headers.Add('X-Janet-Token', $Token)
+                        $req.ContentLength = $bytes.Length
+                        $rs = $req.GetRequestStream(); $rs.Write($bytes, 0, $bytes.Length); $rs.Close()
+                        $resp = $req.GetResponse(); $code = [int]$resp.StatusCode
+                        $respText = (New-Object IO.StreamReader($resp.GetResponseStream())).ReadToEnd(); $resp.Close()
+                    } catch [System.Net.WebException] {
+                        if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode; try { $respText = (New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() } catch {} }
+                        else { $code = -1; $respText = $_.Exception.Message }
+                    } catch { $code = -1; $respText = $_.Exception.Message }
+
+                    $o.firedUtc = ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
+                    if ($code -ge 200 -and $code -lt 300) {
+                        $o.note = "fired ok (HTTP $code)"
+                        if (([string]$o.recurrence) -eq 'daily')  { $o.fireAtUtc = $fireDt.ToUniversalTime().AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ'); $o.status = 'armed' }
+                        elseif (([string]$o.recurrence) -eq 'weekly') { $o.fireAtUtc = $fireDt.ToUniversalTime().AddDays(7).ToString('yyyy-MM-ddTHH:mm:ssZ'); $o.status = 'armed' }
+                        else { $o.status = 'fired' }
+                    } elseif ($code -eq 403) {
+                        $o.status = 'blocked'; $o.note = 'admin session not live at fire time - re-arm after Start Admin Session'
+                    } else {
+                        $o.status = 'error'; $o.note = "fire failed (HTTP $code): $($respText.Substring(0, [Math]::Min(200, $respText.Length)))"
+                    }
+                    Save-Sched -Obj $o -Path $f.FullName
+                }
+            }
+        }
+        $schedPs = [System.Management.Automation.PowerShell]::Create()
+        $schedRs = [runspacefactory]::CreateRunspace(); $schedRs.Open()
+        $schedPs.Runspace = $schedRs
+        [void]$schedPs.AddScript($schedPoller).AddArgument($Port).AddArgument($Token).AddArgument($scheduleDir)
+        $schedAsync = $schedPs.BeginInvoke()
+        $state.SchedPoller = @{ Ps = $schedPs; Rs = $schedRs; Async = $schedAsync }
+        Write-Host "  Off-hours scheduler poller started (15 s tick)." -ForegroundColor DarkGray
+    } catch { try { Write-Host "  Scheduler poller failed to start: $($_.Exception.Message)" -ForegroundColor Yellow } catch {} }
+
     $pendingAccept = $null
     try {
         while ($listener.IsListening) {
@@ -456,6 +532,108 @@ function Start-JanetTwoServer {
                         & $writeJson $resp @{ ok=$false; error='internal error - see server console' } 500
                     }
                     continue
+                }
+
+                # ---- Off-hours scheduler (arm-and-walk-away) ----------------------
+                # GET  /api/schedule            -> list armed + recent schedules
+                # POST /api/schedule            -> arm a wave (armed to fire at fireAt)
+                # DELETE /api/schedule/<id>      -> cancel an armed schedule
+                # A schedule is a stored intent only; the background poller fires it by
+                # POSTing to /api/tool/<tool>/action/<action> over loopback, so the wave
+                # goes through the SAME destructive gate (ack+cred) + engine guards. A
+                # destructive wave therefore only fires if an admin session is still live
+                # on this server process at fire time (fail-safe if the box rebooted).
+                if ($path -eq '/api/schedule' -or $path -like '/api/schedule/*') {
+                    if (-not (Test-Path -LiteralPath $scheduleDir)) { try { New-Item -ItemType Directory -Path $scheduleDir -Force -ErrorAction SilentlyContinue | Out-Null } catch {} }
+
+                    if ($verb -eq 'GET' -and $path -eq '/api/schedule') {
+                        $items = New-Object System.Collections.ArrayList
+                        try {
+                            foreach ($f in @(Get-ChildItem -LiteralPath $scheduleDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+                                try {
+                                    $sraw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+                                    if ($sraw -and $sraw.Length -gt 0 -and [int]$sraw[0] -eq 0xFEFF) { $sraw = $sraw.Substring(1) }
+                                    if (-not [string]::IsNullOrWhiteSpace($sraw)) { [void]$items.Add((ConvertFrom-Json $sraw)) }
+                                } catch {}
+                            }
+                        } catch {}
+                        $sorted = @($items | Sort-Object -Property @{ Expression = { [string]$_.fireAtUtc } })
+                        & $writeJson $resp @{ ok=$true; schedules=@($sorted) }
+                        continue
+                    }
+
+                    if ($verb -eq 'POST' -and $path -eq '/api/schedule') {
+                        if ($req.ContentLength64 -gt 1048576) { & $writeJson $resp @{ error='schedule body too large' } 413; continue }
+                        $sbody = @{}
+                        if ($req.HasEntityBody) {
+                            $sraw = ''; try { $sraw = & $readBody $req 1048576 } catch { & $writeJson $resp @{ error=$_.Exception.Message } 413; continue }
+                            if ($sraw) { try { foreach ($pp in (ConvertFrom-Json $sraw).PSObject.Properties) { $sbody[$pp.Name] = $pp.Value } } catch { & $writeJson $resp @{ error='invalid JSON body' } 400; continue } }
+                        }
+                        $sTool = [string]$sbody['toolId']; $sAct = [string]$sbody['actionId']
+                        if (-not $sTool -or -not $sAct) { & $writeJson $resp @{ error='toolId and actionId are required' } 400; continue }
+                        $sMani = $state.Manifests[$sTool]
+                        if (-not $sMani) { & $writeJson $resp @{ error="unknown tool '$sTool'" } 404; continue }
+                        $sKnown = @(); if ($sMani.actions) { $sKnown = @($sMani.actions | ForEach-Object { $_.id }) }
+                        $sActObj = $null; if ($sMani.actions) { $sActObj = $sMani.actions | Where-Object { $_.id -eq $sAct } | Select-Object -First 1 }
+                        if (($sKnown -notcontains $sAct) -and -not ($sTool -eq 'acas' -and $acasByIdActions -contains $sAct)) {
+                            & $writeJson $resp @{ error="unknown action '$sAct' for tool '$sTool'" } 404; continue
+                        }
+                        $sDestructive = ($sActObj -and $sActObj.destructive) -or ($sTool -eq 'acas' -and $acasByIdDestructive -contains $sAct)
+                        # ARMING a destructive wave requires the admin session up front, so an
+                        # unattended wave can only be scheduled by an authenticated operator.
+                        if ($sDestructive -and -not ($state.AckGiven -and $null -ne $state.Cred)) {
+                            & $writeJson $resp @{ error='Admin session required to arm a destructive wave: set ADW credentials and Start Admin Session first.' } 403; continue
+                        }
+                        # Parse fireAt (accept ISO 8601, local or Z). Reject a past time (>2 min ago).
+                        $fireStr = [string]$sbody['fireAt']
+                        $fireDt = [DateTime]::MinValue
+                        if (-not [DateTime]::TryParse($fireStr, [ref]$fireDt)) { & $writeJson $resp @{ error="could not parse fireAt '$fireStr' (use ISO 8601)" } 400; continue }
+                        $fireUtc = $fireDt.ToUniversalTime()
+                        if ($fireUtc -lt ([DateTime]::UtcNow.AddMinutes(-2))) { & $writeJson $resp @{ error='fireAt is in the past' } 400; continue }
+                        $rec = ([string]$sbody['recurrence']).ToLower(); if ($rec -notin @('none','daily','weekly')) { $rec = 'none' }
+                        $sParams = @{}
+                        if ($sbody['params'] -and $sbody['params'] -is [System.Management.Automation.PSCustomObject]) { foreach ($pp in $sbody['params'].PSObject.Properties) { $sParams[$pp.Name] = $pp.Value } }
+                        $sid = [guid]::NewGuid().ToString('N')
+                        $sObj = [ordered]@{
+                            id = $sid
+                            createdUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                            createdBy = $state.LogCtx.Operator
+                            toolId = $sTool; actionId = $sAct
+                            label = $(if ($sbody['label']) { [string]$sbody['label'] } else { "$sTool / $sAct" })
+                            destructive = [bool]$sDestructive
+                            fireAtUtc = $fireUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                            recurrence = $rec
+                            status = 'armed'
+                            params = $sParams
+                            firedUtc = ''
+                            note = ''
+                        }
+                        try {
+                            $sfile = Join-Path $scheduleDir ("$sid.json")
+                            $stmp = "$sfile.tmp"
+                            [System.IO.File]::WriteAllText($stmp, (($sObj | ConvertTo-Json -Depth 6)), (New-Object System.Text.UTF8Encoding($false)))
+                            Move-Item -LiteralPath $stmp -Destination $sfile -Force -ErrorAction Stop
+                        } catch { & $writeJson $resp @{ ok=$false; error="could not save schedule: $($_.Exception.Message)" } 500; continue }
+                        & $writeJson $resp @{ ok=$true; id=$sid; fireAtUtc=$sObj.fireAtUtc; destructive=[bool]$sDestructive }
+                        continue
+                    }
+
+                    if ($verb -eq 'DELETE' -and $path -like '/api/schedule/*') {
+                        $sid = ($path -split '/')[-1]
+                        if ($sid -notmatch '^[0-9a-fA-F]{32}$') { & $writeJson $resp @{ error='bad schedule id' } 400; continue }
+                        $sfile = Join-Path $scheduleDir ("$sid.json")
+                        if (-not (Test-Path -LiteralPath $sfile)) { & $writeJson $resp @{ error='not found' } 404; continue }
+                        # Mark cancelled (keep a record) rather than hard-delete.
+                        try {
+                            $sraw = Get-Content -LiteralPath $sfile -Raw -ErrorAction Stop
+                            if ($sraw -and $sraw.Length -gt 0 -and [int]$sraw[0] -eq 0xFEFF) { $sraw = $sraw.Substring(1) }
+                            $sObj = ConvertFrom-Json $sraw
+                            $sObj.status = 'cancelled'
+                            [System.IO.File]::WriteAllText($sfile, (($sObj | ConvertTo-Json -Depth 6)), (New-Object System.Text.UTF8Encoding($false)))
+                        } catch { & $writeJson $resp @{ ok=$false; error=$_.Exception.Message } 500; continue }
+                        & $writeJson $resp @{ ok=$true; id=$sid; status='cancelled' }
+                        continue
+                    }
                 }
 
                 # GET /api/dashboard -> read-only Mission Board status strip for the hub.
