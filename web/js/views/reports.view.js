@@ -297,6 +297,7 @@
         var grid = opts.grid, prog = opts.prog, onFinal = opts.onFinal, keyOf = opts.keyOf;
         if (opts.clearGrid && grid) grid.clear();
         if (prog) prog.reset();
+        if (grid && grid.setLoading) grid.setLoading(true);   // spinner until first row / terminal
         var handle = ctx.run(actionId, params || {}, keyOf ? { keyOf: keyOf } : {});
         var u = handle.subscribe({
           status: function (t) { if (prog) prog.setPhase(t); log.append({ text: t, level: 'mode' }); },
@@ -304,8 +305,8 @@
           row: function (r) { if (grid) grid.upsert(r); },
           log: function (l) { log.append(l); },
           error: function (e) { log.append({ text: e.text, level: 'err' }); },
-          final: function (res) { if (onFinal) onFinal(res); },
-          active: function (a) { if (opts.onActive) opts.onActive(a); }
+          final: function (res) { if (grid && grid.setLoading) grid.setLoading(false); if (onFinal) onFinal(res); },
+          active: function (a) { if (!a && grid && grid.setLoading) grid.setLoading(false); if (opts.onActive) opts.onActive(a); }
         });
         track(u);
         return handle;
