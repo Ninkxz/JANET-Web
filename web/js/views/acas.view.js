@@ -558,6 +558,9 @@
         var sevPill = ui.pill(String(c.severity || 'n/a').toUpperCase());
         sevPill.style.cssText += ';background:transparent;border:1px solid ' + sevColor(c.severity) + ';color:' + sevColor(c.severity);
         badges.appendChild(sevPill);
+        // KEV-first badge at the point of remediation: this group carries a CISA
+        // known-exploited CVE (shorter BOD-mandated SLA) — remediate first.
+        if (c.inKev) { var kp = ui.pill('KEV'); kp.style.cssText += ';background:var(--sev-crit,#E0505A);color:#0a0a0e;font-weight:700;border:1px solid var(--sev-crit,#E0505A)'; kp.title = 'CISA Known-Exploited Vulnerability — remediate first'; badges.appendChild(kp); }
         var catPill = ui.pill(CAT_LABEL[c.category] || c.category);
         catPill.style.cssText += ';background:var(--panel-light);color:var(--muted)';
         badges.appendChild(catPill);

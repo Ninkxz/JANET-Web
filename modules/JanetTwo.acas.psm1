@@ -771,7 +771,7 @@ function Get-JanetToolManifest {
                 description  = 'Parse the ACAS CSV, group findings by plugin, and classify each: Patchable (a matched App Update profile exists), Experimental, Reboot, Unpatchable, or Not Updatable. Shows the matched profile and affected host count per vulnerability. Read-only - no remote calls, no credential. Run this first to preview what Auto-Patch will do.'
                 kind         = 'table'
                 destructive  = $false
-                columns      = @('Category','Plugin','Severity','Hosts','Matched Profile','Auto-Runnable','CVEs')
+                columns      = @('Category','Plugin','Severity','KEV','Hosts','Matched Profile','Auto-Runnable','CVEs')
                 inputs       = @(
                     @{ name='csvPaths'; label='ACAS CSV file'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$true }
                 )
@@ -2086,6 +2086,38 @@ $script:AcasKbInstallBlock = {
     return "$status <<MECM=$mecmInstalled>> <<MSU=$msuInstalled>> <<SKIP=$skipped>> <<KBS=$kbList>> $detail"
 }
 
+# Read the CISA KEV catalog flat file (JanetLocal\KevCatalog.txt) into a case-
+# insensitive CVE set. acas.psm1 loads in its own runspace and can't import
+# JanetTwo.kev.psm1, so it reads the same flat file directly (same source the KEV
+# tool + /api/dashboard use). Missing/empty file -> empty set (no KEV badging,
+# never an error). Used to badge which remediation groups carry a known-exploited CVE.
+function Read-AcasKevSet {
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    try {
+        $p = Join-Path $PSScriptRoot '..\JanetLocal\KevCatalog.txt'
+        if (-not (Test-Path -LiteralPath $p)) { return $set }
+        $raw = Get-Content -LiteralPath $p -Raw -ErrorAction Stop
+        if ($null -eq $raw) { return $set }
+        if ($raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+        foreach ($tok in ($raw -split '[\r\n,;\t ]+')) {
+            $c = ([string]$tok).Trim()
+            if ($c -match '^(?i:CVE-\d{4}-\d{4,})$') { [void]$set.Add($c) }
+        }
+    } catch {}
+    return ,$set   # comma stops PowerShell unrolling the HashSet to an array on assignment
+}
+
+# True if any CVE in the comma/space-separated cell is in the KEV set.
+function Test-AcasCvesInKev {
+    param([string]$CveCell, $KevSet)
+    if ($null -eq $KevSet -or $KevSet.Count -eq 0 -or [string]::IsNullOrWhiteSpace($CveCell)) { return $false }
+    foreach ($tok in ($CveCell -split '[,;\s]+')) {
+        $c = ([string]$tok).Trim()
+        if ($c -and $KevSet.Contains($c)) { return $true }
+    }
+    return $false
+}
+
 function Invoke-JanetToolAction {
     param(
         [string]$ActionId,
@@ -2233,6 +2265,8 @@ function Invoke-JanetToolAction {
             & $send @{ type='status'; text="Parsed $($parsed.RowCount) row(s); $($parsed.ServersSkipped) server row(s) skipped. Classifying..." }
 
             $groups = @(Get-AcasRemediationGroups -Findings $parsed.Findings)   # rolled up: one card per product/profile, latest version
+            $kevSet = Read-AcasKevSet   # KEV-first badging at the point of remediation (audit USEFUL)
+            $kevGroups = 0
             $rows = New-Object System.Collections.ArrayList
             $cardGroups = New-Object System.Collections.ArrayList   # compact, host-arrays omitted (re-derived server-side at patch time)
             $patchableHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -2248,14 +2282,18 @@ function Invoke-JanetToolAction {
                     $runnable = Test-AcasProfileAutoRunnable -ProfileName $prof -StagingReady $log4j.Ready
                 }
                 if ($runnable) { $autoRunnable++; foreach ($h in $g.Hosts) { [void]$patchableHosts.Add($h) } }
+                $cvesStr = $(if ($g.Cves.Count -gt 0) { ($g.Cves -join ', ') } else { '' })
+                $inKev = Test-AcasCvesInKev -CveCell $cvesStr -KevSet $kevSet
+                if ($inKev) { $kevGroups++ }
                 $row = @{
                     Category          = $g.Category
                     Plugin            = $g.DisplayName
                     Severity          = $(if ($g.Severity) { $g.Severity } else { 'n/a' })
+                    KEV               = $(if ($inKev) { 'KEV' } else { '' })
                     Hosts             = $g.HostCount
                     'Matched Profile' = $(if ($prof) { $prof } else { '(none)' })
                     'Auto-Runnable'   = $(if ($runnable) { 'yes' } elseif ($g.Category -eq 'Patchable' -or $g.Category -eq 'Experimental') { 'needs staging' } else { 'no' })
-                    CVEs              = $(if ($g.Cves.Count -gt 0) { ($g.Cves -join ', ') } else { '' })
+                    CVEs              = $cvesStr
                 }
                 [void]$rows.Add($row)
                 # Compact card descriptor for the unified Remediation UI (one card per
@@ -2279,6 +2317,7 @@ function Invoke-JanetToolAction {
                     members   = $g.MemberCount
                     memberNames = @($g.MemberNames | Select-Object -First 40)
                     cves      = @($g.Cves | Select-Object -First 8)
+                    inKev     = $inKev
                     solution  = $solPreview
                 })
                 & $send (@{ type='row' } + $row)
@@ -2289,11 +2328,12 @@ function Invoke-JanetToolAction {
             & $send @{ type='log'; level='info'; text="Auto-Patch would run $autoRunnable matched group(s) across $($patchableHosts.Count) host(s). Reboot/Unpatchable/staged groups are listed above as coverage gaps." }
             $uniqueHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($f in $parsed.Findings) { if ($f.Host) { [void]$uniqueHosts.Add([string]$f.Host) } }
+            if ($kevGroups -gt 0) { & $send @{ type='log'; level='warn'; text="KEV: $kevGroups group(s) carry a CISA known-exploited CVE - remediate these FIRST (shorter BOD-mandated SLA)." } }
             return @{ rows=@($rows); groups=@($cardGroups); summary=@{
                 total=$groups.Count; ok=$autoRunnable; failed=0;
                 patchable=$counts.Patchable; experimental=$counts.Experimental; reboot=$counts.Reboot;
                 unpatchable=$counts.Unpatchable; notUpdatable=$counts.NotUpdatable;
-                autoRunnableHosts=$patchableHosts.Count;
+                autoRunnableHosts=$patchableHosts.Count; kevGroups=$kevGroups;
                 findings=$parsed.Findings.Count; uniqueHosts=$uniqueHosts.Count;
                 serversSkipped=$parsed.ServersSkipped; importStamp=(& $stamp) } }
         }
