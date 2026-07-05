@@ -1051,6 +1051,56 @@
         };
       }
 
+      // ---- IAVM Board (DoD compliance rollup by bulletin) -------------------------
+      function buildIavmBoard(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('IAVM BOARD (COMPLIANCE ROLLUP)', true));
+        panel.appendChild(hint('DoD grades technical-vulnerability compliance by IAVA/IAVM bulletin, not by raw CVE. Each loaded finding is IAVA-tagged from the shipped CVE→bulletin map; this rolls the OPEN (not-yet-Patched) findings up BY BULLETIN so you see compliance the way the inspector does: distinct affected hosts, worst severity, KEV, open finding count, a sample of the bulletin\'s CVEs, and sample plugin ids. Ranked KEV-first, then most hosts, then worst severity. Findings that carry no IAVA are counted separately — not every plugin maps to a bulletin (extend JanetLocal\\IavmMap.csv to raise coverage). The parsed scan carries no per-bulletin compliance/due date, so this is a pure counts rollup (no overdue bucketing). Read-only.'));
+
+        var row = btnRow();
+        var runBtn = ui.button('Build Board', { variant: 'cyan', size: 'sm', title: 'Roll the loaded OPEN findings up by IAVA/IAVM bulletin.' });
+        row.appendChild(runBtn);
+        panel.appendChild(row);
+
+        var cards = C.StatCards({ cards: [
+          { key: 'total', label: 'IAVA BULLETINS', color: 'accent' },
+          { key: 'kevIavas', label: 'KEV IAVAS', color: 'bad' },
+          { key: 'hosts', label: 'HOSTS', color: 'cyan' },
+          { key: 'findingsNoIava', label: 'NO-IAVA FINDINGS', color: 'gold' }
+        ] });
+        cards.el.style.margin = '8px 0'; panel.appendChild(cards.el);
+
+        var grid = C.ResultsGrid({
+          title: 'IAVM bulletins', emptyText: 'No bulletins yet — load findings (ACAS Import), then Build Board.', keyMode: { rk: true }, popOut: true,
+          sort: { key: 'Hosts', dir: -1 },
+          columns: [
+            { key: 'IAVA', label: 'IAVA', width: 150 },
+            { key: 'Hosts', label: 'HOSTS', width: 80, sortVal: function (r) { return +r.Hosts || 0; }, colorRule: gt0cls('st-warn') },
+            { key: 'Severity', label: 'SEVERITY', width: 90, colorRule: sevCls },
+            { key: 'KEV', label: 'KEV', width: 60, sortVal: function (r) { return r.KEV ? 1 : 0; }, colorRule: function (v) { return v ? 'st-bad' : 'cell-dim'; } },
+            { key: 'Findings', label: 'FINDINGS', width: 90, sortVal: function (r) { return +r.Findings || 0; } },
+            { key: 'CVEs', label: 'CVES', width: 240, render: function (r) { var v = String(r.CVEs == null ? '' : r.CVEs); return { text: v, cls: v ? '' : 'cell-dim', title: v }; } },
+            { key: 'Plugins', label: 'SAMPLE PLUGINS', width: 240, render: function (r) { var v = String(r.Plugins == null ? '' : r.Plugins); return { text: v, cls: v ? '' : 'cell-dim', title: v }; } }
+          ],
+          rowClass: function (r) { return r.KEV ? 'row-bad' : ''; }
+        });
+        var gh = gridHolder(grid, 200); gh.style.flex = '1'; panel.appendChild(gh);
+        var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        runBtn.onclick = function () {
+          log.banner('IAVM Board (compliance rollup)');
+          grid.clear(); cards.reset();
+          runIntoGrid('iavm-board', {}, {
+            grid: grid, prog: prog, keyOf: function (ev) { return ev.IAVA != null ? String(ev.IAVA) : null; },
+            onFinal: function (res) {
+              var s = res && res.summary || {};
+              cards.setAll({ total: s.total || 0, kevIavas: s.kevIavas || 0, hosts: s.hosts || 0, findingsNoIava: s.findingsNoIava || 0 });
+              log.banner((s.total || 0) + ' IAVA bulletin(s) (' + (s.kevIavas || 0) + ' KEV) across ' + (s.hosts || 0) + ' host(s); ' + (s.findingsWithIava || 0) + ' open finding(s) map to a bulletin, ' + (s.findingsNoIava || 0) + ' carry no IAVA.');
+            }
+          });
+        };
+      }
+
       // ---- Remediation Campaigns (persisted closed-loop tracking) -----------------
       function buildCampaigns(panel) {
         panelFlex(panel);
@@ -1994,6 +2044,7 @@
           { id: 'planner', label: 'Remediation Planner', build: buildPlanner },
           { id: 'kbneeded', label: 'KBs Needed', build: buildKbNeeded },
           { id: 'thirdparty', label: 'Third-Party Catalog', build: buildThirdPartyCatalog },
+          { id: 'iavm', label: 'IAVM Board', build: buildIavmBoard },
           { id: 'campaigns', label: 'Campaigns', build: buildCampaigns },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },

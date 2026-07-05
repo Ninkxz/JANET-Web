@@ -398,6 +398,15 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'iavm-board'
+                label       = 'IAVM Board (compliance rollup)'
+                description  = 'DoD grades technical-vulnerability compliance by IAVA/IAVM bulletin, not by raw CVE. Each loaded finding is tagged with its IAVA id (from the shipped IavmMap CVE->bulletin map); this rolls the OPEN (not-yet-Patched) findings up BY BULLETIN so the operator sees compliance the way the inspector does: distinct affected hosts, worst severity, KEV, open finding count, a sample of the bulletin''s CVEs, and sample plugin ids. Ranked KEV-first, then most hosts, then worst severity. Findings that carry no IAVA are counted separately (not every plugin maps to a bulletin). The parsed scan carries no per-bulletin compliance/due date, so this is a pure counts/severity/KEV rollup (no overdue bucketing). Read-only.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('IAVA','Hosts','Severity','KEV','Findings','CVEs','Plugins')
+                inputs       = @()
+            },
+            @{
                 id          = 'campaign-create'
                 label       = 'Create Remediation Campaign'
                 description  = 'Snapshot the currently loaded OPEN findings into a persisted remediation campaign (JanetLocal\campaigns\<id>.json): the finding keys (Hostname|PluginID), the affected host set, the distinct mapped JANET remediations, and the severity/KEV mix. This ties finding -> fix -> (later) re-verify so a wave can be tracked to closure. READ-ONLY: creates the tracking record only; the actual remediation runs through the gated engines. Re-import the next scan and use the campaign to prove closure.'
@@ -4729,6 +4738,86 @@ function Invoke-JanetToolAction {
                 total=$ordered.Count; kevProducts=$kevProducts; hosts=$allHosts.Count
                 routable=$routable; manual=$manual; thirdPartyFindings=$thirdPartyFindings
                 unclassified=$unclassified
+            } }
+        }
+
+        # -------------------------------------------------------------------
+        'iavm-board' {
+            # DoD compliance rollup BY IAVA/IAVM bulletin (the unit the inspector
+            # grades), not by raw CVE. Each finding is IAVA-tagged at parse time from
+            # the shipped CVE->bulletin map; this groups the OPEN (not Patched) findings
+            # by that bulletin id and rolls up hosts / worst severity / KEV / open count
+            # / a CVE + plugin sample. Findings with a blank IAVA are NOT grouped - they
+            # are counted separately (many plugins map to no bulletin). The parsed scan
+            # carries NO per-bulletin compliance/due date (finding fields are Hostname,
+            # PluginID, VulnName, Severity, CVE, Category, Status, Solution, InKEV,
+            # KevCves, IAVA, FirstSeen, PatchedDate, PatchedBy - FirstSeen is a JANET
+            # ledger clock, not a bulletin due date), so this stays a pure counts rollup
+            # with no overdue bucketing. READ-ONLY: no remote calls, no writes.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse or load a report first.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            & $send @{ type='status'; text='Rolling the loaded findings up by IAVA/IAVM bulletin...' }
+            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $iavaMap = @{}                 # IAVA -> aggregate
+            $allHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $findingsWithIava = 0; $findingsNoIava = 0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched') { continue }
+                $iava = ([string]$f.IAVA).Trim()
+                if ([string]::IsNullOrWhiteSpace($iava)) { $findingsNoIava++; continue }
+                $findingsWithIava++
+                $hn = [string]$f.Hostname
+                $sev = [string]$f.Severity
+                $isKev = [bool]$f.InKEV
+                if (-not $iavaMap.ContainsKey($iava)) {
+                    $entry = @{ IAVA = $iava; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false }
+                    $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $entry.Cves = New-Object System.Collections.ArrayList
+                    $entry.CveSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $entry.Plugins = New-Object System.Collections.ArrayList
+                    $entry.PluginSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $iavaMap[$iava] = $entry
+                }
+                $e = $iavaMap[$iava]
+                $e.Findings = [int]$e.Findings + 1
+                if ($hn) { [void]$e.Hosts.Add($hn); [void]$allHosts.Add($hn) }
+                if ($isKev) { $e.Kev = $true }
+                $rank = if ($sevRank.ContainsKey($sev)) { $sevRank[$sev] } else { 0 }
+                if ($rank -gt $e.MaxSev) { $e.MaxSev = $rank; $e.SevName = $sev }
+                foreach ($mm in [regex]::Matches([string]$f.CVE, '(?i)CVE-\d{4}-\d{4,}')) {
+                    $cve = $mm.Value.ToUpper()
+                    if ($e.CveSeen.Add($cve)) { [void]$e.Cves.Add($cve) }
+                }
+                $plg = [string]$f.PluginID
+                if ($plg -and $e.PluginSeen.Add($plg)) { [void]$e.Plugins.Add($plg) }
+            }
+            # Rank: KEV first, then most hosts, then worst severity (same order as kb-needed).
+            $ordered = @($iavaMap.Values | Sort-Object -Property `
+                @{ Expression = { [bool]$_.Kev }; Descending = $true }, `
+                @{ Expression = { $_.Hosts.Count }; Descending = $true }, `
+                @{ Expression = { $_.MaxSev }; Descending = $true }, `
+                @{ Expression = { $_.IAVA } })
+            $rows = New-Object System.Collections.ArrayList
+            foreach ($e in $ordered) {
+                $sampleC = @($e.Cves | Select-Object -First 4)
+                $cveStr = if ($e.Cves.Count -gt 4) { ($sampleC -join ', ') + " (+$($e.Cves.Count - 4))" } else { ($sampleC -join ', ') }
+                $sampleP = @($e.Plugins | Select-Object -First 6)
+                $plgStr = if ($e.Plugins.Count -gt 6) { ($sampleP -join ', ') + " (+$($e.Plugins.Count - 6))" } else { ($sampleP -join ', ') }
+                $row = @{
+                    _rk=$e.IAVA; IAVA=$e.IAVA; Hosts=$e.Hosts.Count
+                    Severity=$(if ($e.SevName) { $e.SevName } else { 'n/a' })
+                    KEV=$(if ($e.Kev) { 'KEV' } else { '' })
+                    Findings=$e.Findings; CVEs=$cveStr; Plugins=$plgStr
+                }
+                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+            }
+            $kevIavas = @($ordered | Where-Object { $_.Kev }).Count
+            & $send @{ type='status'; text="IAVM board: $($ordered.Count) IAVA bulletin(s) ($kevIavas KEV) across $($allHosts.Count) host(s); $findingsWithIava open finding(s) map to a bulletin, $findingsNoIava carry no IAVA (no CVE->bulletin match - restore/extend JanetLocal\IavmMap.csv to raise coverage)." }
+            return @{ rows=@($rows); summary=@{
+                total=$ordered.Count; kevIavas=$kevIavas; hosts=$allHosts.Count
+                findingsWithIava=$findingsWithIava; findingsNoIava=$findingsNoIava
             } }
         }
 
