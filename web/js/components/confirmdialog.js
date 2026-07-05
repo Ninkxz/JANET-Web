@@ -48,9 +48,15 @@
     var title = el('div', 'j-modal-title' + (opts.danger ? ' danger' : ''), opts.title || 'Confirm');
     card.appendChild(title);
     var body = el('div', 'j-modal-body');
-    if (opts.body) {
+    // audit#25: this is the app's ONLY raw-HTML sink. A string `body` is rendered via
+    // innerHTML (legacy: ~40 callers pass esc()-interpolated HTML). Prefer a DOM node
+    // (built with el()/textContent) OR the explicit `bodyHtml` field so any raw-HTML
+    // usage is greppable. A NON-string, non-node `body` is coerced to text, not HTML.
+    if (opts.bodyHtml != null) { var ph = el('div'); ph.innerHTML = String(opts.bodyHtml); body.appendChild(ph); }
+    else if (opts.body != null) {
       if (typeof opts.body === 'string') { var p = el('div'); p.innerHTML = String(opts.body); body.appendChild(p); }
-      else body.appendChild(opts.body);
+      else if (opts.body instanceof Node) { body.appendChild(opts.body); }
+      else { body.textContent = String(opts.body); }
     }
     card.appendChild(body);
     if (opts.list && opts.list.length) {

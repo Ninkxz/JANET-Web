@@ -25,9 +25,10 @@
 
   var CVE_RE = /^CVE-\d{4}-\d{4,}$/i;
 
-  // Escape operator-typed text before it goes into a confirm dialog's HTML body
-  // (the CVE grid cells use textContent and are regex-clean, but raw paste is not).
-  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  // Escape operator-typed text before it goes into a confirm dialog's HTML body.
+  // audit#25: use the single shared escaper (which also escapes ' -> &#39;) instead
+  // of a divergent local copy that missed the apostrophe. One esc, one behavior.
+  var esc = Janet.util.esc;
 
   function sevCls(v) {
     var s = String(v == null ? '' : v).toLowerCase();

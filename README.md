@@ -53,17 +53,23 @@ J.A.N.E.T TWO\
   server\, web\, modules\   The built runtime: HttpListener server, static SPA, one engine module per tool
 ```
 
-## The 13 tools
+## The 18 tools
 
-Workstation Patching, ACAS Nemesis, Remote Package Installer, Windows Upgrade,
-Unsupported Product Remediator, Secure Boot Enabler, BIOS Firmware, Restart Scheduler,
-Remote Message, AD Search, DHCP Scope Options, Reports, KEV Cross-Check
-(plus a **Beta Lab** staging area for experimental, read-only fixes).
-STIG was dropped during the rebuild.
+- **Remediation** — Workstation Patching, ACAS Nemesis, Package Installer,
+  Windows Upgrade, Unsupported Remediator, Patch Content
+- **Hardening** — Secure Boot Enabler, BIOS Firmware, STIG Checker
+- **Lifecycle** — Restart Scheduler
+- **Operations** — Remote Message
+- **Directory** — AD Search
+- **Network** — DHCP Scope Options
+- **Reporting** — Reports, KEV Cross-Check, C2C Readiness, Patch History
+- **Beta** — Beta Lab (staging area for experimental, read-only fixes)
+
+(Source of truth: `server\tool-registry.json`.)
 
 ## Status
 
-Built. All 13 tools have bespoke per-tool views over the pure-PowerShell backend
+Built. All 18 tools have bespoke per-tool views over the pure-PowerShell backend
 (`server\` HttpListener, `web\` static SPA, one `modules\` engine per tool).
 `docs\HANDOFF.md`, `docs\REVIEW.md`, and the per-tool `docs\ui-specs\*.md` are the
 review + UI-spec basis it was built from. Remaining: on-AFNET live validation.
