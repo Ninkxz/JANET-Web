@@ -98,6 +98,14 @@ Posture** panel (severity meter + aging chips + KEV exposure), Squadron Rollup,
 and the Executive Command Brief. All read-only; all self-contained CSV/HTML
 output, no external calls.
 
+**Off-hours scheduler (arm-and-walk-away).** The hub's **Scheduled Waves** panel
+arms a tool action to fire at a future time (`POST /api/schedule`); a background
+poller on the persistent server fires the due wave by calling the server's own
+gated action route over loopback — so it runs through the identical admin-session
++ engine guards. No credential is stored on disk: a **destructive** wave requires a
+live admin session both to arm and to fire, and is **blocked (not run)** if the
+session is gone at fire time (fail-safe). Supports one-shot / daily / weekly.
+
 ## Status
 
 Built. All 18 tools have bespoke per-tool views over the pure-PowerShell backend
