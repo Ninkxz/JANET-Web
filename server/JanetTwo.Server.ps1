@@ -518,7 +518,30 @@ function Start-JanetTwoServer {
                         }
                     } catch {}
 
-                    # ---- SLA firstSeen ledger (ledger alone: size / severity / kev / oldest age) ----
+                    # ---- SLA firstSeen ledger (size / severity / kev / oldest age + aging buckets) ----
+                    # Aging buckets classify each open finding against its SLA window
+                    # (kev overrides severity; windows read from JanetLocal\sla-baseline.json
+                    # with the same embedded defaults reports.psm1 uses). dueIn = deadline -
+                    # age: overdue (<0), due-soon (<= 25% of the window, min 3d), else on-track.
+                    $slaWin = @{ kev = 7; critical = 21; high = 30; medium = 90; low = 180 }
+                    try {
+                        $blPath = Join-Path $jlDir 'sla-baseline.json'
+                        if (Test-Path -LiteralPath $blPath) {
+                            $blRaw = Get-Content -LiteralPath $blPath -Raw -ErrorAction Stop
+                            if ($blRaw -and $blRaw.Length -gt 0 -and [int]$blRaw[0] -eq 0xFEFF) { $blRaw = $blRaw.Substring(1) }
+                            if (-not [string]::IsNullOrWhiteSpace($blRaw)) {
+                                $blObj = $blRaw | ConvertFrom-Json -ErrorAction Stop
+                                foreach ($k in @('kev','critical','high','medium','low')) {
+                                    if ($blObj.PSObject.Properties[$k]) { $n = 0; if ([int]::TryParse([string]$blObj.$k, [ref]$n) -and $n -gt 0) { $slaWin[$k] = $n } }
+                                }
+                            }
+                        }
+                    } catch {}
+                    $slaDeadline = {
+                        param($sevKey, $isKev)
+                        if ($isKev) { return [int]$slaWin.kev }
+                        switch ($sevKey) { 'crit' { $slaWin.critical } 'high' { $slaWin.high } 'med' { $slaWin.medium } 'low' { $slaWin.low } default { $slaWin.medium } }
+                    }
                     $sla = @{ present = $false }
                     try {
                         if (Test-Path -LiteralPath $ledPath) {
@@ -530,23 +553,36 @@ function Start-JanetTwoServer {
                                 try { $obj = $raw | ConvertFrom-Json -ErrorAction Stop } catch { $obj = $null }
                                 if ($obj) {
                                     $count = 0; $kevc = 0; $sevCrit = 0; $sevHigh = 0; $sevMed = 0; $sevLow = 0; $sevOther = 0
+                                    $overdue = 0; $dueSoon = 0; $onTrack = 0; $kevOverdue = 0
+                                    $today = (Get-Date).Date
                                     $oldest = $null
                                     foreach ($prop in $obj.PSObject.Properties) {
                                         $v = $prop.Value; if ($null -eq $v) { continue }
                                         $count++
-                                        if ($v.PSObject.Properties['kev'] -and [bool]$v.kev) { $kevc++ }
+                                        $isKev = ($v.PSObject.Properties['kev'] -and [bool]$v.kev)
+                                        if ($isKev) { $kevc++ }
                                         $sev = if ($v.PSObject.Properties['severity']) { ([string]$v.severity).Trim().ToLower() } else { '' }
+                                        $sevKey = 'other'
                                         switch -regex ($sev) {
-                                            '^(4|crit)' { $sevCrit++; break }
-                                            '^(3|high)' { $sevHigh++; break }
-                                            '^(2|med)'  { $sevMed++;  break }
-                                            '^(1|low)'  { $sevLow++;  break }
+                                            '^(4|crit)' { $sevCrit++; $sevKey = 'crit'; break }
+                                            '^(3|high)' { $sevHigh++; $sevKey = 'high'; break }
+                                            '^(2|med)'  { $sevMed++;  $sevKey = 'med';  break }
+                                            '^(1|low)'  { $sevLow++;  $sevKey = 'low';  break }
                                             default     { $sevOther++ }
                                         }
                                         $fs = if ($v.PSObject.Properties['firstSeen']) { [string]$v.firstSeen } else { '' }
                                         if (-not [string]::IsNullOrWhiteSpace($fs)) {
                                             $d = [DateTime]::MinValue
-                                            if ([DateTime]::TryParse($fs, [ref]$d)) { if ($null -eq $oldest -or $d -lt $oldest) { $oldest = $d } }
+                                            if ([DateTime]::TryParse($fs, [ref]$d)) {
+                                                if ($null -eq $oldest -or $d -lt $oldest) { $oldest = $d }
+                                                $age = [int][math]::Floor(($today - $d.Date).TotalDays); if ($age -lt 0) { $age = 0 }
+                                                $ddl = [int](& $slaDeadline $sevKey $isKev)
+                                                $dueIn = $ddl - $age
+                                                $soonBand = [math]::Max(3, [int][math]::Ceiling($ddl * 0.25))
+                                                if ($dueIn -lt 0) { $overdue++; if ($isKev) { $kevOverdue++ } }
+                                                elseif ($dueIn -le $soonBand) { $dueSoon++ }
+                                                else { $onTrack++ }
+                                            }
                                         }
                                     }
                                     $oldestAge = $null; $oldestStr = ''
@@ -554,7 +590,7 @@ function Start-JanetTwoServer {
                                         $oldestAge = [int][math]::Floor(((Get-Date).Date - $oldest.Date).TotalDays); if ($oldestAge -lt 0) { $oldestAge = 0 }
                                         $oldestStr = $oldest.ToString('yyyy-MM-dd')
                                     }
-                                    $sla = @{ present = $true; count = $count; kev = $kevc; critical = $sevCrit; high = $sevHigh; medium = $sevMed; low = $sevLow; other = $sevOther; oldestFirstSeen = $oldestStr; oldestAgeDays = $oldestAge }
+                                    $sla = @{ present = $true; count = $count; kev = $kevc; critical = $sevCrit; high = $sevHigh; medium = $sevMed; low = $sevLow; other = $sevOther; oldestFirstSeen = $oldestStr; oldestAgeDays = $oldestAge; overdue = $overdue; dueSoon = $dueSoon; onTrack = $onTrack; kevOverdue = $kevOverdue }
                                 }
                             }
                         }
