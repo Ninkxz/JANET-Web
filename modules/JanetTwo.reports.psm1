@@ -371,6 +371,15 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'remediation-plan'
+                label       = 'Remediation Planner (per-host)'
+                description  = 'Inverts the Remediation Router into a PER-HOST work queue: one row per affected host listing the distinct JANET remediations that host needs (patch X, update Y, remove Z), its open-finding count, severity mix, KEV count, and how many findings are routable vs need manual review. Read-only planning ONLY - it tells the operator exactly what to run where; every destructive step is then executed by the operator through the mapped tool''s existing admin-session + confirm-word + DNS/self guards. No host is touched here and no new execution path is created. Sort by KEV/severity to work the worst hosts first.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Host','Findings','Sev','KEV','Routable','Manual','Plan')
+                inputs       = @()
+            },
+            @{
                 id          = 'command-brief'
                 label       = 'Executive Command Brief'
                 description  = 'One self-contained dark-theme HTML commander brief that rolls up the other reports: SLA aging buckets (ledger-backed, works at idle), open KEV (known-exploited) posture, the last Squadron Rollup this session, the newest WPT fleet-compliance snapshots trend (read straight from JanetLocal\snapshots - no wpt import), the Remediation Router routable-vs-manual split, and scan-closure numbers when a Patch Cross-Ref compare has run this session. Each section degrades to a "run X first" note when its source is empty. Build LAST after the sections it consumes.'
@@ -4268,6 +4277,90 @@ function Invoke-JanetToolAction {
                 routableBuckets=$routableBuckets; routableFindings=$routableFindings
                 manualFindings=$manualFindings; routablePct=$routablePct
             } }
+        }
+
+        # -------------------------------------------------------------------
+        'remediation-plan' {
+            # PER-HOST remediation work queue. Same bucketing as remediation-route,
+            # but grouped by HOST so an operator sees exactly what to run on each box.
+            # READ-ONLY: emits the plan only; execution happens in the mapped tools
+            # under their own admin-session + confirm + DNS/self guards (no new path).
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse an ACAS file first.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            & $send @{ type='status'; text='Building per-host remediation work queue...' }
+            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $hosts = @{}   # hostname -> aggregate
+            $totalOpen = 0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched') { continue }
+                $hn = [string]$f.Hostname
+                if ([string]::IsNullOrWhiteSpace($hn)) { continue }
+                $totalOpen++
+                $vn = ($f.VulnName -as [string]).ToLower()
+                $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
+                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' }
+                          elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' }
+                          else { [string]$f.Category }
+                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                if (-not $hosts.ContainsKey($hn)) {
+                    $hosts[$hn] = @{
+                        Host=$hn; Findings=0; Crit=0; High=0; Med=0; Low=0; Kev=0
+                        Routable=0; Manual=0
+                        Routes = New-Object System.Collections.ArrayList        # ordered distinct route labels
+                        RouteSeen = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
+                        ManualBuckets = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
+                    }
+                }
+                $h = $hosts[$hn]
+                $h.Findings++
+                switch ([string]$f.Severity) { 'Critical' { $h.Crit++ } 'High' { $h.High++ } 'Medium' { $h.Med++ } 'Low' { $h.Low++ } }
+                if ([bool]$f.InKEV) { $h.Kev++ }
+                $route = if ($script:RemediationRouteMap.ContainsKey($bucket)) { $script:RemediationRouteMap[$bucket] } else { $null }
+                if ($route) {
+                    $h.Routable++
+                    $label = if ($route.Profile) { "$($route.ToolId): $($route.Profile)" } else { "$($route.ToolId): $($route.Action)" }
+                    if ($h.RouteSeen.Add($label)) { [void]$h.Routes.Add($label) }
+                } else {
+                    $h.Manual++
+                    [void]$h.ManualBuckets.Add($bucket)
+                }
+            }
+
+            # Worst hosts first: KEV desc, then Critical desc, then total findings desc.
+            $ordered = @($hosts.Values | Sort-Object -Property `
+                @{ Expression = { $_.Kev }; Descending = $true }, `
+                @{ Expression = { $_.Crit }; Descending = $true }, `
+                @{ Expression = { $_.Findings }; Descending = $true }, `
+                @{ Expression = { $_.Host } })
+
+            $rows = New-Object System.Collections.ArrayList
+            $hostsWithRoutes = 0; $idx = 0
+            foreach ($h in $ordered) {
+                $idx++
+                if ($h.Routable -gt 0) { $hostsWithRoutes++ }
+                $planParts = @($h.Routes)
+                if ($h.ManualBuckets.Count -gt 0) { $planParts += "manual: " + ((@($h.ManualBuckets | Sort-Object)) -join ', ') }
+                $sevStr = "$($h.Crit)/$($h.High)/$($h.Med)/$($h.Low)"
+                $row = @{
+                    _rk      = $h.Host
+                    Host     = $h.Host
+                    Findings = $h.Findings
+                    Sev      = $sevStr
+                    KEV      = $h.Kev
+                    Routable = $h.Routable
+                    Manual   = $h.Manual
+                    Plan     = ($planParts -join ' · ')
+                }
+                [void]$rows.Add($row)
+                if ($idx -le 800) { & $send (@{ type='row' } + $row) }
+                if (($idx % 200) -eq 0) { & $send @{ type='progress'; done=$idx; total=$ordered.Count } }
+            }
+            & $send @{ type='progress'; done=$ordered.Count; total=$ordered.Count }
+            if ($ordered.Count -gt 800) { & $send @{ type='log'; level='info'; text="Showing first 800 of $($ordered.Count) hosts in the grid." } }
+            & $send @{ type='status'; text="Remediation plan: $($ordered.Count) host(s), $hostsWithRoutes with a one-click route, over $totalOpen open finding(s)." }
+            return @{ rows=@($rows); summary=@{ total=$ordered.Count; hostsWithRoutes=$hostsWithRoutes; openFindings=$totalOpen } }
         }
 
         # -------------------------------------------------------------------

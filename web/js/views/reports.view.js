@@ -869,6 +869,78 @@
         };
       }
 
+      // ---- Remediation Planner (per-host work queue) ------------------------------
+      function buildPlanner(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('REMEDIATION PLANNER (PER-HOST)', true));
+        panel.appendChild(hint('Inverts the Remediation Router into a PER-HOST work queue: one row per affected host with the distinct JANET remediations it needs (patch / update / remove), its open-finding count, severity mix (Crit/High/Med/Low), KEV count, and routable-vs-manual split. Worst hosts sort first (KEV, then Critical, then finding count). Read-only planning ONLY - execute each step in the mapped tool (WPT / ACAS / UPR), which keeps its own admin-session + confirm-word + DNS/self guards. Copy a host set to hand off.'));
+
+        var row = btnRow();
+        var planBtn = ui.button('Build Plan', { variant: 'cyan', size: 'sm', title: 'Build the per-host remediation work queue from the loaded open findings.' });
+        var kevOnly = ui.checkbox('KEV hosts only', { title: 'Filter the grid to hosts with at least one known-exploited (KEV) finding.', onChange: function () { applyKevFilter(); } });
+        row.appendChild(planBtn); row.appendChild(kevOnly);
+        panel.appendChild(row);
+
+        var grid = C.ResultsGrid({
+          title: 'Per-host remediation plan', keyMode: { rk: true }, popOut: true,
+          emptyText: 'No plan yet — load findings (ACAS Import) then Build Plan.',
+          sort: { key: 'KEV', dir: -1 },
+          columns: [
+            { key: 'Host', label: 'HOST', width: 220 },
+            { key: 'Findings', label: 'OPEN', width: 70, sortVal: function (r) { return +r.Findings || 0; }, colorRule: gt0cls('st-warn') },
+            { key: 'Sev', label: 'C/H/M/L', width: 90, title: 'Critical / High / Medium / Low open findings on this host' },
+            { key: 'KEV', label: 'KEV', width: 60, sortVal: function (r) { return +r.KEV || 0; }, colorRule: gt0cls('st-bad') },
+            { key: 'Routable', label: 'ROUTABLE', width: 90, sortVal: function (r) { return +r.Routable || 0; }, colorRule: gt0cls('st-ok') },
+            { key: 'Manual', label: 'MANUAL', width: 80, sortVal: function (r) { return +r.Manual || 0; }, colorRule: gt0cls('st-warn') },
+            { key: 'Plan', label: 'WORK QUEUE', width: 380, render: function (r) { var v = String(r.Plan == null ? '' : r.Plan); return { text: v, cls: v ? '' : 'cell-dim', title: v }; } }
+          ],
+          rowClass: function (r) { return (+r.KEV > 0) ? 'row-bad' : ''; }
+        });
+        var gh = gridHolder(grid, 220); gh.style.flex = '1'; panel.appendChild(gh);
+        var prog = C.ProgressStatusStrip({ showCount: true }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        // Copy / export the currently-shown host set (respects the KEV filter).
+        var actRow = btnRow(); actRow.style.marginTop = '10px';
+        var copyBtn = ui.ghostButton('Copy Hosts', { size: 'sm', title: 'Copy the hosts currently shown (one per line) to paste into a tool.' });
+        var exportBtn = ui.ghostButton('Export CSV', { size: 'sm', title: 'Download the per-host plan (shown rows) as CSV.' });
+        actRow.appendChild(ui.eyebrow('SHOWN HOSTS')); actRow.appendChild(copyBtn); actRow.appendChild(exportBtn);
+        panel.appendChild(actRow);
+
+        function kevChecked() { return !!(kevOnly._cb && kevOnly._cb.checked); }
+        function shownRows() {
+          var rows = grid.rows();
+          if (kevChecked()) rows = rows.filter(function (r) { return +r.KEV > 0; });
+          return rows;
+        }
+        function applyKevFilter() { grid.setFilter(kevChecked() ? function (r) { return +r.KEV > 0; } : null); }
+
+        copyBtn.onclick = function () {
+          var hosts = shownRows().map(function (r) { return String(r.Host); }).filter(Boolean);
+          if (!hosts.length) { ctx.confirm({ title: 'No hosts', body: 'Build the plan first.', okText: 'OK', cancelText: null }); return; }
+          if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(hosts.join('\n')).then(function () { log.append({ text: 'Copied ' + hosts.length + ' host(s).', level: 'accent' }); }).catch(function () {});
+        };
+        exportBtn.onclick = function () {
+          var rows = shownRows();
+          if (!rows.length) { ctx.confirm({ title: 'No rows', body: 'Build the plan first.', okText: 'OK', cancelText: null }); return; }
+          var csv = ctx.util.toCsv(['Host', 'OpenFindings', 'Sev_C_H_M_L', 'KEV', 'Routable', 'Manual', 'WorkQueue'],
+            rows.map(function (r) { return [r.Host, r.Findings, r.Sev, r.KEV, r.Routable, r.Manual, r.Plan]; }));
+          ctx.util.downloadBlob('ReportsTool_RemediationPlan_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        };
+
+        planBtn.onclick = function () {
+          log.banner('Remediation Planner (per-host)');
+          grid.clear(); prog.reset();
+          runIntoGrid('remediation-plan', {}, {
+            grid: grid, prog: prog, keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; },
+            onFinal: function (res) {
+              var s = res && res.summary || {};
+              log.banner('Plan: ' + (s.total || 0) + ' host(s), ' + (s.hostsWithRoutes || 0) + ' with a one-click route, over ' + (s.openFindings || 0) + ' open finding(s).');
+              applyKevFilter();
+            }
+          });
+        };
+      }
+
       // ---- Patch Cross-Ref (Compare) ----------------------------------------------
       function buildCompare(panel) {
         panelFlex(panel);
@@ -1713,6 +1785,7 @@
           { id: 'acas', label: 'ACAS Import', build: buildAcasImport },
           { id: 'remediation', label: 'Remediation Plan', build: buildRemediation },
           { id: 'router', label: 'Remediation Router', build: buildRouter },
+          { id: 'planner', label: 'Remediation Planner', build: buildPlanner },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },
           { id: 'dirty30', label: 'Dirty 30 Triage', build: buildDirty30 },
