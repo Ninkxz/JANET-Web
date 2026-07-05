@@ -38,10 +38,10 @@
   // engine severity ordering / colour - hand-written per the desktop Get-SeverityColor.
   function sevCls(v) {
     switch (String(v)) {
-      case 'Critical': return 'st-bad';
-      case 'High': return 'st-warn';     // desktop uses Orange; warn amber is the closest kit token
-      case 'Medium': return 'st-warn';
-      case 'Low': return 'st-info';
+      case 'Critical': return 'st-sev-crit';
+      case 'High': return 'st-sev-high';   // dedicated orange - distinct from Medium
+      case 'Medium': return 'st-sev-med';  // amber
+      case 'Low': return 'st-sev-low';
       case 'Info': return 'cell-dim';
       default: return '';
     }

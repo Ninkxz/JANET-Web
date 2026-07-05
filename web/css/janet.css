@@ -160,6 +160,14 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .st-dim{color:var(--muted)}
 .cell-dim{color:var(--muted)}
 
+/* 4-level severity cell colouring (audit improvement: restore the distinct
+   Critical/High/Med/Low signal - High and Medium were both collapsed to amber,
+   wasting the dedicated orange --sev-high token). One class per level. */
+.st-sev-crit{color:var(--sev-crit);font-weight:600}
+.st-sev-high{color:var(--sev-high);font-weight:600}
+.st-sev-med{color:var(--sev-med)}
+.st-sev-low{color:var(--sev-low)}
+
 .j-pill{display:inline-block;padding:1px 7px;border-radius:9px;font-family:var(--ui);font-size:11px;font-weight:600;border:1px solid currentColor}
 
 /* ============================================================================

@@ -51,7 +51,9 @@
   function sevCell(key) {
     return function (r) {
       var v = r[key];
-      return { text: v == null ? '' : String(v), cls: 'st-' + ({ 'sev-crit': 'bad', 'sev-high': 'warn', 'sev-med': 'warn', 'sev-low': 'dim' }[sevClass(v)] || 'dim') };
+      // Map to the dedicated 4-level severity classes so High (orange) and Medium
+      // (amber) are visually distinct, not both amber.
+      return { text: v == null ? '' : String(v), cls: 'st-' + (sevClass(v) || 'sev-low') };
     };
   }
   function sevColor(sev) {
