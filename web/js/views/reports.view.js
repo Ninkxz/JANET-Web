@@ -1499,13 +1499,16 @@
 
         var row = btnRow(); row.style.marginTop = '8px';
         var refreshBtn = ui.button('Refresh SLA', { variant: 'cyan', size: 'sm', title: 'Recompute finding aging + SLA buckets from the loaded findings.' });
+        var poamBtn = ui.button('Export eMASS POA&M', { variant: 'go', size: 'sm', title: 'Export the OPEN findings as an eMASS POA&M import-template CSV (one row per finding, DISA CAT + SLA-derived scheduled completion). Hand to the ISSM/ISSO.' });
         var bucketSel = ui.select({ options: ['All buckets', 'OVERDUE', 'DUE-SOON', 'ON-TRACK', 'NEW-UNTRACKED'], title: 'Show only findings in this SLA bucket.' });
         var baseLbl = el('span', 'muted'); baseLbl.style.fontSize = '11px'; baseLbl.style.marginLeft = 'auto'; baseLbl.textContent = 'baseline: not loaded';
-        row.appendChild(refreshBtn); row.appendChild(ui.eyebrow('BUCKET')); row.appendChild(bucketSel); row.appendChild(baseLbl);
+        row.appendChild(refreshBtn); row.appendChild(poamBtn); row.appendChild(ui.eyebrow('BUCKET')); row.appendChild(bucketSel); row.appendChild(baseLbl);
         panel.appendChild(row);
 
-        var artifact = ArtifactBar({ downloadLabel: 'Download POA&M CSV', htmlOnly: false });
+        var artifact = ArtifactBar({ downloadLabel: 'Download aging CSV', htmlOnly: false });
         panel.appendChild(artifact.el);
+        var poamArtifact = ArtifactBar({ downloadLabel: 'Download eMASS POA&M CSV', htmlOnly: false });
+        panel.appendChild(poamArtifact.el);
 
         var grid = C.ResultsGrid({
           title: 'SLA aging', keyMode: { rk: true }, popOut: true,
@@ -1540,6 +1543,21 @@
         bucketSel.addEventListener('change', applyBucketFilter);
 
         function slaKey(ev) { return (ev.Host != null && ev.Plugin != null) ? (ev.Host + '|' + ev.Plugin) : null; }
+
+        poamBtn.onclick = function () {
+          poamArtifact.reset();
+          log.banner('Export eMASS POA&M (CSV)');
+          var h = ctx.run('export-poam', {});
+          track(h.subscribe({
+            log: function (l) { log.append(l); },
+            error: function (e) { log.append({ text: e.text, level: 'err' }); },
+            final: function (res) {
+              var s = res && res.summary || {};
+              poamArtifact.set(s, 'ReportsTool_eMASS_POAM');
+              log.append({ text: (s.total || 0) + ' open finding(s) in the POA&M (' + (s.kev || 0) + ' KEV, ' + (s.overdue || 0) + ' past scheduled completion). Download the CSV and hand to the ISSM/ISSO.', level: (s.total ? 'ok' : 'warn') });
+            }
+          }));
+        };
 
         refreshBtn.onclick = function () {
           log.banner('SLA / Finding Aging');

@@ -286,6 +286,15 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'export-poam'
+                label       = 'Export eMASS POA&M (CSV)'
+                description  = 'Export the loaded OPEN findings as an RMF/eMASS POA&M workbook (CSV, one row per open finding) using the eMASS POA&M import-template columns. Severity maps to a DISA CAT level, the Scheduled Completion Date is derived from the SLA window + firstSeen (KEV overrides), Recommendations carries the scanner Steps-to-Remediate, and KEV/IAVM are noted in Comments. Read-only; download and hand to the ISSM/ISSO. No new dependencies (CSV, not XLSX).'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Host','Finding','Severity','CAT','Status','ScheduledCompletion','KEV')
+                inputs       = @()
+            },
+            @{
                 id          = 'acas-ping-hosts'
                 label       = 'ACAS Ping Hosts'
                 description  = 'Ping every distinct host in the loaded findings in parallel and record an online/offline map, so the import grid can be filtered to just the hosts reachable right now (and the offline ones exported for follow-up).'
@@ -4908,6 +4917,100 @@ function Invoke-JanetToolAction {
                 patchedSkipped=$cPatchedSkipped; notOursSkipped=$cNotOursSkipped; hosts=$perHost.Count; hostsOverdue=$hostsOverdue
                 baseline=$sla.Source; ledgerCarried=$cLedgerCarried; hint=$hint; perHost=$perHostRows; csv=$sb.ToString().TrimEnd()
             } }
+        }
+
+        # -------------------------------------------------------------------
+        'export-poam' {
+            # RMF/eMASS POA&M export (ported from the fork STIG desktop tool's
+            # Export-ScanToPoam, but CSV not XLSX - no ImportExcel dependency - and
+            # driven by the loaded ACAS findings). One row per OPEN finding, eMASS
+            # POA&M import-template columns. Scheduled Completion = firstSeen + SLA
+            # window (KEV overrides); severity -> DISA CAT. READ-ONLY.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='err'; text='No ACAS findings loaded. Parse or load a report first.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            $sla = Get-ReportsSlaBaseline; $cfg = $sla.Config
+            $ledger = Get-ReportsSlaLedger; $ledMap = $ledger.Map
+            $today = (Get-Date).Date
+            # DISA CAT mapping from ACAS severity (Critical=CAT I, High=CAT II, Med/Low=CAT III).
+            $catOf = { param($sev) switch ([string]$sev) { 'Critical' { 'CAT I' } 'High' { 'CAT II' } 'Medium' { 'CAT III' } 'Low' { 'CAT III' } 'Info' { 'CAT III' } default { 'CAT III' } } }
+            # Formula-injection-guarded CSV cell (audit#5 pattern).
+            $csvQ = {
+                param($v)
+                $s = [string]$v
+                if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
+                if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s }
+            }
+            $cols = @(
+                'Control Vulnerability Description','Security Control Number (NIST 800-53)','CCI','Office/Org',
+                'Security Checks','Resources Required','Scheduled Completion Date','Milestones with Completion Dates',
+                'Milestone Changes','Source Identifying Control Vulnerability','Status','Comments','Raw Severity',
+                'Mitigations','Severity','Relevance of Threat','Threat Description','Likelihood','Impact',
+                'Impact Description','Residual Risk Level','Recommendations',
+                'Resulting Residual Risk after Proposed Mitigations','Finding Details','Host','Finding Number'
+            )
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine((($cols | ForEach-Object { & $csvQ $_ }) -join ','))
+
+            $operator = ''   # Office/Org - left blank for the ISSM/ISSO to fill on submission
+            $rows = New-Object System.Collections.ArrayList
+            $perHostCounter = @{}
+            $nOpen = 0; $nKev = 0; $nOverdue = 0
+            # Open findings only, worst-severity first, then KEV, then host.
+            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $open = @($script:AcasFindings | Where-Object { $_.Status -ne 'Patched' -and $_.Status -ne 'NOT OUR PATCH' -and $_.Category -ne 'NOT OUR PATCH' })
+            $open = @($open | Sort-Object -Property `
+                @{ Expression = { if ($sevRank.ContainsKey([string]$_.Severity)) { $sevRank[[string]$_.Severity] } else { 0 } }; Descending = $true }, `
+                @{ Expression = { [bool]$_.InKEV }; Descending = $true }, `
+                @{ Expression = { [string]$_.Hostname } })
+            foreach ($f in $open) {
+                $nOpen++
+                $hn = [string]$f.Hostname
+                if (-not $perHostCounter.ContainsKey($hn)) { $perHostCounter[$hn] = 0 }
+                $perHostCounter[$hn]++
+                $isKev = [bool]$f.InKEV; if ($isKev) { $nKev++ }
+                $cat = & $catOf $f.Severity
+                # firstSeen: live, else ledger-backfilled.
+                $fs = [string]$f.FirstSeen
+                if ([string]::IsNullOrWhiteSpace($fs)) {
+                    $key = "$hn|$($f.PluginID)"
+                    if ($ledMap.ContainsKey($key)) { $fs = [string]$ledMap[$key].firstSeen }
+                }
+                $schedDate = ''
+                if (-not [string]::IsNullOrWhiteSpace($fs)) {
+                    $d = [DateTime]::MinValue
+                    if ([DateTime]::TryParse($fs, [ref]$d)) {
+                        $win = [int](Get-ReportsSlaDeadline -Config $cfg -Severity ([string]$f.Severity) -InKev $isKev)
+                        $deadline = $d.Date.AddDays($win)
+                        $schedDate = $deadline.ToString('yyyy-MM-dd')
+                        if ($deadline -lt $today) { $nOverdue++ }
+                    }
+                }
+                $iava = [string]$f.IAVA
+                $kevNote = if ($isKev) { 'CISA KEV known-exploited (expedited remediation).' } else { '' }
+                $iavaNote = if ($iava) { "IAVM: $iava." } else { '' }
+                $comments = (@($kevNote, $iavaNote) | Where-Object { $_ }) -join ' '
+                $vulnDesc = "$hn`: $([string]$f.VulnName)"
+                $cellVals = @(
+                    $vulnDesc, '', $iava, $operator,
+                    [string]$f.PluginID, '', $schedDate, '',
+                    '', 'ACAS/Tenable scan (J.A.N.E.T.)', 'Ongoing', $comments, $cat,
+                    '', $cat, '', [string]$f.VulnName, '', '',
+                    '', '', [string]$f.Solution,
+                    '', ("CVE(s): " + [string]$f.CVE), $hn, [string]$perHostCounter[$hn]
+                )
+                [void]$sb.AppendLine((($cellVals | ForEach-Object { & $csvQ $_ }) -join ','))
+                if ($nOpen -le 500) {
+                    $row = @{ Host=$hn; Finding=[string]$f.VulnName; Severity=[string]$f.Severity; CAT=$cat; Status='Ongoing'; ScheduledCompletion=$schedDate; KEV=$(if ($isKev) { 'KEV' } else { '' }) }
+                    [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                }
+            }
+            if ($nOpen -gt 500) { & $send @{ type='log'; level='info'; text="Showing first 500 of $nOpen POA&M rows in the grid; the downloaded CSV contains all $nOpen." } }
+            $csv = $sb.ToString().TrimEnd()
+            & $send @{ type='status'; text="POA&M built: $nOpen open finding(s), $nKev KEV, $nOverdue past scheduled completion. Use Download CSV." }
+            & $send @{ type='audit'; action='TouchHost'; target='Export eMASS POA&M (CSV)'; result='Success'; itemCount=$nOpen; detail="$nOpen POA&M row(s) exported ($nKev KEV, $nOverdue overdue)" }
+            return @{ rows=@($rows); summary=@{ total=$nOpen; kev=$nKev; overdue=$nOverdue; baseline=$sla.Source; csv=$csv } }
         }
 
         # -------------------------------------------------------------------
