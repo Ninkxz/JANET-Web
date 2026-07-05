@@ -180,6 +180,17 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .j-sevbar-label{font-family:var(--mono,Consolas,monospace);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .j-sevbar-sep{color:var(--muted,#6a6a75);margin:0 2px}
 
+/* Network Posture panel (Mission Board) */
+.j-posture{margin-top:12px;padding-top:10px;border-top:1px solid var(--line,#2a2a33)}
+.j-posture-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.j-posture-title{font-family:var(--mono,Consolas,monospace);font-size:11px;letter-spacing:.08em;color:var(--accent,#DAB452)}
+.j-posture-row{display:flex;align-items:center;gap:10px;margin:5px 0}
+.j-posture-lbl{font-size:11px;color:var(--muted,#8a8a95);width:78px;flex:none}
+.j-posture-chips{display:flex;gap:6px;flex-wrap:wrap}
+.j-posture-chip{font-family:var(--mono,Consolas,monospace);font-size:11px;padding:1px 8px;border-radius:9px;border:1px solid currentColor;font-variant-numeric:tabular-nums}
+/* let the severity meter stretch across the posture row instead of pinning to min-width */
+.j-posture-row .j-sevbar-wrap{flex:1;max-width:360px}
+
 .j-pill{display:inline-block;padding:1px 7px;border-radius:9px;font-family:var(--ui);font-size:11px;font-weight:600;border:1px solid currentColor}
 
 /* ============================================================================

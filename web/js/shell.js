@@ -897,6 +897,32 @@
       } else {
         row.appendChild(tile({ label: 'LAST SCAN', value: '--', sub: 'no history yet', state: 'cyan', toolId: 'history' }));
       }
+
+      // ---- Network Posture: severity mix + SLA aging of the open backlog ----
+      if (sla.present && sla.count > 0) {
+        var post = el('div', 'j-posture');
+        var phead = el('div', 'j-posture-head');
+        phead.appendChild(el('span', 'j-posture-title', 'NETWORK POSTURE'));
+        phead.appendChild(el('span', 'muted', sla.count + ' open finding(s) tracked'));
+        post.appendChild(phead);
+        // severity distribution meter (reuses the new sevBar primitive)
+        var meterRow = el('div', 'j-posture-row');
+        meterRow.appendChild(el('span', 'j-posture-lbl', 'By severity'));
+        meterRow.appendChild(sevBar({ crit: sla.critical, high: sla.high, med: sla.medium, low: sla.low }, { total: sla.count }));
+        post.appendChild(meterRow);
+        // SLA aging line
+        var ageRow = el('div', 'j-posture-row');
+        ageRow.appendChild(el('span', 'j-posture-lbl', 'SLA aging'));
+        var chips = el('div', 'j-posture-chips');
+        function chip(txt, cls) { var c = el('span', 'j-posture-chip ' + cls, txt); return c; }
+        chips.appendChild(chip((sla.overdue || 0) + ' overdue', (sla.overdue > 0 ? 'st-sev-crit' : 'st-dim')));
+        chips.appendChild(chip((sla.dueSoon || 0) + ' due-soon', (sla.dueSoon > 0 ? 'st-sev-high' : 'st-dim')));
+        chips.appendChild(chip((sla.onTrack || 0) + ' on-track', 'st-ok'));
+        if (sla.kevOverdue > 0) { chips.appendChild(chip(sla.kevOverdue + ' KEV OVERDUE', 'st-sev-crit')); }
+        ageRow.appendChild(chips);
+        post.appendChild(ageRow);
+        wrap.appendChild(post);
+      }
     }).catch(function () {
       row.innerHTML = '';
       row.appendChild(el('div', 'muted', 'Mission board unavailable (server not responding).'));
