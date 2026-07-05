@@ -612,11 +612,18 @@
         // -------- Patch Selected / Reboot Selected action bar (below grid) --------
         // These run their OWN actions on the CHECKED hosts of the scan grid.
         var actBar = el('div'); actBar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap';
-        var patchBtn = ui.button('Patch Selected', { variant: 'gold', title: 'Trigger MECM updates + pending apps on the checked hosts (reboot suppressed).' });
-        var patchAllBtn = ui.button('Patch All Needing', { variant: 'gold', title: 'Select hosts with work, then patch them in one click.' });
+        // Patch posture: non-invasive (default; reboots suppressed, patch while users
+        // work) vs forced (reboot-if-needed, customer-affecting; for quarantined hosts).
+        var patchModeSel = ui.select({ options: [
+          { value: 'noninvasive', label: 'Non-invasive (reboots suppressed)' },
+          { value: 'forced', label: 'FORCED (reboot if needed)' }
+        ], title: 'Non-invasive patches while users work and suppresses reboots. FORCED reboots the box when an install needs it — customer-affecting, for quarantined / no-user hosts.' });
+        var patchBtn = ui.button('Patch Selected', { variant: 'gold', title: 'Trigger MECM updates + pending apps on the checked hosts, using the selected posture.' });
+        var patchAllBtn = ui.button('Patch All Needing', { variant: 'gold', title: 'Select hosts with work, then patch them in one click (selected posture).' });
         var rebootBtn = ui.button('Reboot Selected', { variant: 'danger', title: 'Force an immediate reboot on the checked hosts.' });
         var pingBtn = ui.button('Ping Sweep', { variant: 'cyan', title: 'TCP reachability test (5985/445) across the target list.' });
         var winrmBtn = ui.button('Repair WinRM', { variant: 'cyan', title: 'Bootstrap WinRM over DCOM on the checked (offline) hosts.' });
+        actBar.appendChild(ui.eyebrow('POSTURE')); actBar.appendChild(patchModeSel);
         [patchBtn, patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { actBar.appendChild(b); });
         // place the action bar right after the results card's progress strip
         api.prog.el.parentNode.appendChild(actBar);
@@ -648,19 +655,25 @@
           var act = findManifestAction(actionId);
           var destructive = act && act.destructive;
           if (destructive && needCred()) return;
+          var patchMode = (actionId === 'bulk-patch') ? (patchModeSel.value || 'noninvasive') : null;
+          var patchForced = (patchMode === 'forced');
           if (destructive) {
-            var danger = (actionId === 'reboot');
+            var danger = (actionId === 'reboot') || patchForced;   // forced patching is customer-affecting -> danger confirm
             var body = (actionId === 'reboot')
               ? 'REBOOT <b>' + hosts.length + '</b> workstation(s)? This is immediate and forced (Restart-Computer -Force).'
               : (actionId === 'winrm-bootstrap')
                 ? 'Repair WinRM on <b>' + hosts.length + '</b> host(s)? Sets the service Automatic, starts it, runs winrm quickconfig over DCOM, re-probes 5985.'
-                : 'Patch <b>' + hosts.length + '</b> workstation(s)? Triggers MECM updates + pending app installs. Reboot will be suppressed.';
-            var ok = await ctx.confirm({ title: 'Confirm ' + label, danger: danger, body: body, list: hosts.slice(0, 6), okText: danger ? 'Reboot' : 'Proceed', cancelText: 'Cancel' });
+                : patchForced
+                  ? 'Patch <b>' + hosts.length + '</b> workstation(s) — <b>FORCED</b> posture. App installs will <b>REBOOT the box when an install needs it</b> (customer-affecting). Use for quarantined / no-user hosts only.'
+                  : 'Patch <b>' + hosts.length + '</b> workstation(s) — <b>non-invasive</b> posture. Triggers MECM updates + pending app installs; <b>reboots are suppressed</b> so patching runs while users work.';
+            var ok = await ctx.confirm({ title: 'Confirm ' + label + (patchMode ? (' · ' + (patchForced ? 'FORCED' : 'non-invasive')) : ''), danger: danger, body: body, list: hosts.slice(0, 6), okText: danger ? (patchForced ? 'Force patch' : 'Reboot') : 'Proceed', cancelText: 'Cancel' });
             if (!ok) { api.log.append({ text: label + ' cancelled by operator.', level: 'warn' }); return; }
           }
-          api.log.banner(label + ' - ' + hosts.length + ' host(s)');
+          api.log.banner(label + ' - ' + hosts.length + ' host(s)' + (patchMode ? (' [' + (patchForced ? 'FORCED' : 'non-invasive') + ']') : ''));
           [patchBtn, patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { b.disabled = true; });
-          sideRun = ctx.run(actionId, { targets: hosts.join('\n') });
+          var runParams = { targets: hosts.join('\n') };
+          if (patchMode) runParams.mode = patchMode;
+          sideRun = ctx.run(actionId, runParams);
           if (sideUnsub) { var i = unsubs.indexOf(sideUnsub); if (i >= 0) unsubs.splice(i, 1); sideUnsub(); }
           sideUnsub = track(sideRun.subscribe({
             status: function (t) { api.prog.setPhase(t); },

@@ -44,10 +44,11 @@ function Get-JanetToolManifest {
             },
             @{
                 id='bulk-patch'; label='Patch Selected'; kind='stream-table'; destructive=$true
-                description='Trigger MECM software updates and pending app installs on the checked/targeted hosts (reboot suppressed). Tip: on the Bulk Scan grid, "Select With Updates" checks the hosts that need work, or "Patch All Needing" selects + patches them in one click.'
+                description='Trigger MECM software updates and pending app installs on the checked/targeted hosts. Patch posture (mode): "noninvasive" (default) suppresses reboots so patching runs while users work; "forced" sets reboot-if-needed on app installs (customer-affecting) for quarantined / no-user hosts. Tip: on the Bulk Scan grid, "Select With Updates" checks the hosts that need work, or "Patch All Needing" selects + patches them in one click.'
                 columns=@('Host','Reachable','UpdatesTriggered','AppsTriggered','Error')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='mode'; label='Patch posture'; type='select'; options=@('noninvasive','forced'); default='noninvasive'; required=$false },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
             },
@@ -1576,9 +1577,14 @@ $script:WptScanBlock = {
 }
 
 # --- Bulk Patch (PatchBlock:5270) ---
+# $Mode picks the patch posture:
+#   'noninvasive' (default) - trigger installs but SUPPRESS reboots (IsRebootIfNeeded
+#      $false), so patching runs while people work; reboot is deferred to a window.
+#   'forced'                - IsRebootIfNeeded $true: the client reboots the box when an
+#      app install requires it. Customer-affecting; for quarantined/no-user hosts.
 $script:WptPatchBlock = {
-    param([string]$Computer, $Cred, [string]$Auth)
-    $r = @{ Host=$Computer; Reachable=$false; UpdatesTriggered=0; AppsTriggered=0; Error='' }
+    param([string]$Computer, $Cred, [string]$Auth, [string]$Mode = 'noninvasive')
+    $r = @{ Host=$Computer; Reachable=$false; UpdatesTriggered=0; AppsTriggered=0; Mode=$Mode; Error='' }
     $reachable = $false
     foreach ($port in 5985,445) {
         $tc = $null
@@ -1620,7 +1626,11 @@ $script:WptPatchBlock = {
         $r.UpdatesTriggered = [int]$upResult.Count
         if ($upResult.Rejected -gt 0) { $r.Error = "Update trigger rejected by client (ReturnValue=$($upResult.ReturnValue)); $($upResult.Rejected) update(s) NOT installed" }
 
-        $appResult = Invoke-Command -Session $sess -EA Stop -ScriptBlock {
+        $appResult = Invoke-Command -Session $sess -EA Stop -ArgumentList $Mode -ScriptBlock {
+            param([string]$mode)
+            # Forced mode lets the client reboot the box when an app install needs it;
+            # non-invasive suppresses it so work isn't interrupted (reboot deferred).
+            $rebootIfNeeded = ($mode -eq 'forced')
             $count = 0; $rejected = 0
             $apps = Get-CimInstance -Namespace ROOT\ccm\ClientSDK -Class CCM_Application -EA Stop |
                 Where-Object {
@@ -1633,7 +1643,7 @@ $script:WptPatchBlock = {
                     $param = @{
                         EnforcePreference=[UINT32]0; Id="$($app.Id)"
                         IsMachineTarget=[System.Convert]::ToBoolean($app.IsMachineTarget)
-                        IsRebootIfNeeded=$false; Priority='High'; Revision="$($app.Revision)"
+                        IsRebootIfNeeded=$rebootIfNeeded; Priority='High'; Revision="$($app.Revision)"
                     }
                     $rv = (Invoke-CimMethod -Namespace root/ccm/clientSDK -ClassName CCM_Application -MethodName Install -Arguments $param).ReturnValue
                     if ($null -eq $rv -or [int]$rv -eq 0) { $count++ } else { $rejected++ }
@@ -4489,11 +4499,15 @@ function Invoke-JanetToolAction {
         }
         'bulk-patch' {
             $threads = Get-WptThreadCount $Params 16
+            # Patch posture: non-invasive (default, reboots suppressed) vs forced
+            # (reboot-if-needed, customer-affecting - for quarantined hosts).
+            $patchMode = ([string]$Params['mode']).ToLower(); if ($patchMode -ne 'forced') { $patchMode = 'noninvasive' }
+            & $send @{ type='log'; level=$(if ($patchMode -eq 'forced') { 'warn' } else { 'info' }); text="Patch posture: $(if ($patchMode -eq 'forced') { 'FORCED (reboot-if-needed - customer-affecting)' } else { 'non-invasive (reboots suppressed)' })." }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptPatchBlock -AuditAction 'VulnPatched' `
-                -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, $patchMode) } `
                 -OkOf { param($r) [bool]$r.Reachable -and [string]::IsNullOrEmpty([string]$r.Error) } `
-                -AuditDetail { param($r) if ($r.Error) { $r.Error } else { "updates=$($r.UpdatesTriggered) apps=$($r.AppsTriggered)" } } `
+                -AuditDetail { param($r) if ($r.Error) { $r.Error } else { "mode=$($r.Mode) updates=$($r.UpdatesTriggered) apps=$($r.AppsTriggered)" } } `
                 -LogOf { param($r)
                     if ($r.Error) { @{ level='warn'; text="$($r.Host): $($r.Error)" } }
                     elseif (-not $r.Reachable) { @{ level='warn'; text="$($r.Host): unreachable - nothing triggered." } }
