@@ -1,0 +1,516 @@
+﻿# =============================================================================
+#  JanetWeb.sysadmin.psm1  ->  Sysadmin Sweeps (read-only fleet WinRM sweeps)
+#
+#  Net-new JANET Web tool (no desktop twin). READ-ONLY: three parallel per-host
+#  WinRM sweeps that surface the common AFNET findings you are already on the box
+#  for. Each sweep is a runspace-pool fan-out that mirrors the WPT bulk-scan
+#  pattern (TCP reachability probe -> New-PSSession -> ONE read-only Invoke-Command
+#  round-trip -> emit rows). It CHANGES NOTHING on any host: every remote read is
+#  Get-CimInstance / a registry Test-Path / a Cert:\ read / a local-group ADSI
+#  enumeration. No action is destructive.
+#
+#  Software-inventory / EOL was DELIBERATELY NOT built as a fourth sweep: the WPT
+#  Software Manager (CCM_Application picker + uninstall) and the UPR tool already
+#  own that surface, so a sysadmin inventory sweep would duplicate them.
+#
+#  Sweeps (all destructive=$false):
+#    localadmin-sweep    - members of the local Administrators group per host.
+#                          Row: Host, Online, Admins (; joined), AdminCount, Error
+#    certexpiry-sweep    - Cert:\LocalMachine\My certs expiring within N days
+#                          (default 90). ONE row per expiring cert (already-expired
+#                          included as negative DaysLeft). Row: Host, Online,
+#                          Subject, Issuer, Expires (yyyy-MM-dd), DaysLeft (int),
+#                          Thumbprint, Error. A host with none emits one note row.
+#    rebootpending-sweep - reboot-pending status from the three standard signals.
+#                          Row: Host, Online, RebootPending (bool), Reasons, Error
+#
+#  Pure, unit-testable logic lives in named helper functions (Get-SysadminDaysLeft,
+#  Join-SysadminReasons, Get-SysadminCleanMembers, Format-SysadminAdminList) so the
+#  Pester suite exercises them WITHOUT any WinRM. The per-host worker is a single
+#  module-scope scriptblock ($script:SysadminSweepBlock) whose reachability probe,
+#  session, and remote round-trip go through named/built-in commands so the tests
+#  can shim Test-SysadminReachable / New-PSSession / Invoke-Command and drive the
+#  row-building against synthetic data (mirrors tests\Wpt.Guards.Tests.ps1).
+#
+#  Contract (server convention):
+#    Get-JanetToolManifest                                       -> descriptors
+#    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
+#  PowerShell 5.1 only. ASCII-only body; UTF-8 WITH BOM.
+# =============================================================================
+
+# Own module path, captured at load, so a pool runspace can Import-Module it to get
+# the helper functions (the worker calls them). Guarded by Get-Command in the worker
+# so running the worker IN module scope (the Pester shim path) never re-imports.
+$script:SysadminModulePath = $PSCommandPath
+
+function Get-JanetToolManifest {
+    @{
+        id       = 'sysadmin'
+        name     = 'Sysadmin Sweeps'
+        version  = '1.0.0'
+        category = 'Reporting'
+        summary  = 'Read-only WinRM fleet sweeps for common AFNET findings you are already on the box for. Three parallel per-host sweeps: Local Administrators membership, certificate expiry (Cert:\LocalMachine\My within N days, already-expired included), and reboot-pending status (CBS + Windows Update + PendingFileRenameOperations). Fans one worker per host (TCP reachability probe -> session -> one read-only Invoke-Command), streams a per-host summary to the activity log, and changes nothing. Software inventory/EOL is intentionally not here - the WPT Software Manager + UPR own it.'
+        actions  = @(
+            @{
+                id          = 'localadmin-sweep'
+                label       = 'Local Admins Sweep'
+                description = 'Read-only: enumerate the members of the local Administrators group (resolved by well-known SID S-1-5-32-544, so it is locale-independent) on each host and emit one row per host: Host, Online, Admins (semicolon-joined member names), AdminCount, Error. Changes nothing.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Online','Admins','AdminCount','Error')
+                inputs      = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
+                )
+            }
+            @{
+                id          = 'certexpiry-sweep'
+                label       = 'Cert Expiry Sweep'
+                description = 'Read-only: read Cert:\LocalMachine\My on each host and report certificates expiring within N days (default 90). One row PER expiring cert - already-expired certs are included with a negative DaysLeft (computed on the server from NotAfter). A host with nothing expiring emits a single note row. Columns: Host, Online, Subject, Issuer, Expires (yyyy-MM-dd), DaysLeft, Thumbprint, Error. Changes nothing.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Online','Subject','Issuer','Expires','DaysLeft','Thumbprint','Error')
+                inputs      = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='days'; label='Expiring within (days)'; type='int'; required=$false; default=90 },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
+                )
+            }
+            @{
+                id          = 'rebootpending-sweep'
+                label       = 'Reboot Pending Sweep'
+                description = 'Read-only: report reboot-pending status per host from the three standard signals - Component Based Servicing (CBS\RebootPending), Windows Update (WindowsUpdate\Auto Update\RebootRequired), and PendingFileRenameOperations (Session Manager). One row per host: Host, Online, RebootPending (bool), Reasons (which signals fired), Error. Changes nothing.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Online','RebootPending','Reasons','Error')
+                inputs      = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
+                )
+            }
+        )
+    }
+}
+
+# --- Pure, unit-testable helpers -------------------------------------------
+
+# Whole days from $Now until $NotAfter (floor). Negative when already expired.
+function Get-SysadminDaysLeft {
+    param([datetime]$NotAfter, [datetime]$Now = (Get-Date))
+    return [int][math]::Floor((New-TimeSpan -Start $Now -End $NotAfter).TotalDays)
+}
+
+# Clean (trim, drop null/blank) + case-insensitive de-dup a member list.
+# Returns a plain [string[]] via ToArray() (never ,@()).
+function Get-SysadminCleanMembers {
+    param([string[]]$Members)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $ordered = New-Object System.Collections.ArrayList
+    foreach ($m in @($Members)) {
+        $s = ([string]$m).Trim()
+        if ($s -and $seen.Add($s)) { [void]$ordered.Add($s) }
+    }
+    return $ordered.ToArray()
+}
+
+# Semicolon-join the cleaned local Administrators members into a display string.
+function Format-SysadminAdminList {
+    param([string[]]$Members)
+    return ((Get-SysadminCleanMembers -Members $Members) -join '; ')
+}
+
+# Clean + join reboot-pending signal names into one display string ('' when none).
+function Join-SysadminReasons {
+    param([string[]]$Reasons)
+    $clean = New-Object System.Collections.ArrayList
+    foreach ($x in @($Reasons)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$x)) { [void]$clean.Add(([string]$x).Trim()) }
+    }
+    return ($clean -join '; ')
+}
+
+# --- Reachability (AFNET-safe: TCP only, NEVER ICMP) ------------------------
+# A named function (not inlined) so the Pester suite can shim it and drive the
+# worker's post-reachability path without a real socket.
+function Test-SysadminReachable {
+    param([string]$ComputerName, [int[]]$Ports = @(5985, 445), [int]$TimeoutMs = 1500)
+    if ([string]::IsNullOrWhiteSpace($ComputerName)) { return $false }
+    foreach ($port in $Ports) {
+        $tc = $null
+        try {
+            $tc = New-Object System.Net.Sockets.TcpClient
+            $iar = $tc.BeginConnect($ComputerName, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tc.Connected) { return $true }
+        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+    }
+    return $false
+}
+
+# --- Remote read-only probes (one per sweep) --------------------------------
+# Each runs in ONE Invoke-Command round-trip on the target and returns raw data;
+# the worker (server-side) computes verdicts / DaysLeft and builds display rows.
+function Get-SysadminRemoteBlock {
+    param([string]$SweepId)
+    switch ($SweepId) {
+        'localadmin-sweep' {
+            return {
+                # Resolve the local Administrators group by its well-known SID so the
+                # name is locale-independent, then enumerate members via the WinNT
+                # ADSI provider (local call - no double-hop). Read-only.
+                $sid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+                $localName = (($sid.Translate([System.Security.Principal.NTAccount]).Value) -split '\\')[-1]
+                $group = [ADSI]("WinNT://./$localName,group")
+                $names = New-Object System.Collections.ArrayList
+                foreach ($m in @($group.psbase.Invoke('Members'))) {
+                    try {
+                        $path = ([ADSI]$m).psbase.Path
+                        $p = ($path -replace '^WinNT://', '')
+                        $parts = @($p -split '/')
+                        if ($parts.Count -ge 2) { [void]$names.Add(('{0}\{1}' -f $parts[-2], $parts[-1])) }
+                        elseif ($parts.Count -ge 1) { [void]$names.Add([string]$parts[-1]) }
+                    } catch {}
+                }
+                return ,@($names.ToArray())
+            }
+        }
+        'certexpiry-sweep' {
+            return {
+                # Read the machine personal store; return raw fields (NotAfter as-is).
+                # DaysLeft + the within-N-days filter are computed on the server.
+                $out = New-Object System.Collections.ArrayList
+                foreach ($c in @(Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction Stop)) {
+                    [void]$out.Add([pscustomobject]@{
+                        Subject    = [string]$c.Subject
+                        Issuer     = [string]$c.Issuer
+                        NotAfter   = $c.NotAfter
+                        Thumbprint = [string]$c.Thumbprint
+                    })
+                }
+                return ,@($out.ToArray())
+            }
+        }
+        'rebootpending-sweep' {
+            return {
+                # The three standard reboot-pending signals. Read-only Test-Path /
+                # registry read; returns the list of signals that fired.
+                $reasons = New-Object System.Collections.ArrayList
+                if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' -ErrorAction SilentlyContinue) {
+                    [void]$reasons.Add('Component Based Servicing')
+                }
+                if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' -ErrorAction SilentlyContinue) {
+                    [void]$reasons.Add('Windows Update')
+                }
+                try {
+                    $sm = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+                    if ($sm -and $sm.PendingFileRenameOperations) {
+                        $vals = @($sm.PendingFileRenameOperations | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                        if ($vals.Count -gt 0) { [void]$reasons.Add('PendingFileRenameOperations') }
+                    }
+                } catch {}
+                return ,@($reasons.ToArray())
+            }
+        }
+        default { return $null }
+    }
+}
+
+# --- Per-host worker (runs in a pool runspace; also runnable in module scope) -
+# Returns @{ Host; Online; Error; Rows; Report }. Rows is ALWAYS >= 1 hashtable,
+# each carrying the sweep's display columns (the main loop adds a unique _rk and
+# emits them). Reachability, session, and the remote round-trip go through
+# Test-SysadminReachable / New-PSSession / Invoke-Command so the tests can shim
+# them and assert the emitted row shape with NO real WinRM.
+$script:SysadminSweepBlock = {
+    param(
+        [string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline,
+        [string]$SweepId, [int]$Days, [string]$ModulePath
+    )
+
+    # In a bare pool runspace the module functions are absent - import self once so
+    # the helpers/probes resolve. In module scope (tests) they already exist, so skip.
+    if (-not (Get-Command Get-SysadminDaysLeft -ErrorAction SilentlyContinue)) {
+        if ($ModulePath) { try { Import-Module $ModulePath -Force -ErrorAction Stop } catch {} }
+    }
+
+    $r = @{ Host = $Computer; Online = $false; Error = ''; Rows = @(); Report = '' }
+
+    # Build a fully-populated base row for this sweep (empty columns), so offline /
+    # error rows keep the grid's shape.
+    $baseRow = {
+        param([bool]$online, [string]$err)
+        switch ($SweepId) {
+            'localadmin-sweep'    { return @{ Host = $Computer; Online = $online; Admins = ''; AdminCount = 0; Error = $err } }
+            'certexpiry-sweep'    { return @{ Host = $Computer; Online = $online; Subject = ''; Issuer = ''; Expires = ''; DaysLeft = ''; Thumbprint = ''; Error = $err } }
+            'rebootpending-sweep' { return @{ Host = $Computer; Online = $online; RebootPending = $false; Reasons = ''; Error = $err } }
+            default               { return @{ Host = $Computer; Online = $online; Error = $err } }
+        }
+    }
+
+    # Reachability (TCP 5985/445). Offline + not forcing -> one offline row.
+    $reachable = Test-SysadminReachable -ComputerName $Computer
+    if (-not $reachable -and -not $AttemptOffline) {
+        $r.Error = 'Offline (no TCP on 5985/445)'
+        $r.Rows = @((& $baseRow $false 'Offline (no TCP on 5985/445)'))
+        $r.Report = "$Computer : OFFLINE - no TCP on 5985/445"
+        return $r
+    }
+    $r.Online = [bool]$reachable
+
+    $remote = Get-SysadminRemoteBlock -SweepId $SweepId
+    if (-not $remote) {
+        $r.Error = "Unknown sweep '$SweepId'"
+        $r.Rows = @((& $baseRow $r.Online "Unknown sweep '$SweepId'"))
+        return $r
+    }
+
+    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $splat = @{ ComputerName = $Computer; SessionOption = $wsOpt; ErrorAction = 'Stop' }
+    if ($Cred) { $splat['Credential'] = $Cred; $splat['Authentication'] = $Auth }
+    $sess = $null
+    try { $sess = New-PSSession @splat }
+    catch {
+        $r.Error = "Session: $($_.Exception.Message)"
+        $r.Rows = @((& $baseRow $r.Online $r.Error))
+        $r.Report = "$Computer : SESSION ERROR - $($_.Exception.Message)"
+        return $r
+    }
+
+    $raw = $null
+    try { $raw = Invoke-Command -Session $sess -ScriptBlock $remote -ErrorAction Stop }
+    catch {
+        $r.Error = "Probe: $($_.Exception.Message)"
+        $r.Rows = @((& $baseRow $r.Online $r.Error))
+        $r.Report = "$Computer : PROBE ERROR - $($_.Exception.Message)"
+        try { Remove-PSSession $sess -ErrorAction SilentlyContinue } catch {}
+        return $r
+    } finally { if ($sess) { try { Remove-PSSession $sess -ErrorAction SilentlyContinue } catch {} } }
+
+    # ---- Build display rows from the raw remote data (server-side) ----
+    $rows = New-Object System.Collections.ArrayList
+    switch ($SweepId) {
+
+        'localadmin-sweep' {
+            $members = @($raw)
+            $clean = @(Get-SysadminCleanMembers -Members $members)
+            $row = & $baseRow $r.Online ''
+            $row.Admins = (Format-SysadminAdminList -Members $members)
+            $row.AdminCount = [int]$clean.Count
+            [void]$rows.Add($row)
+            $r.Report = "$Computer : $($clean.Count) local admin(s) - $($row.Admins)"
+        }
+
+        'certexpiry-sweep' {
+            $certs = @($raw)
+            $expiring = New-Object System.Collections.ArrayList
+            foreach ($c in $certs) {
+                if (-not $c) { continue }
+                $na = $null
+                try { $na = [datetime]$c.NotAfter } catch { continue }
+                $dl = Get-SysadminDaysLeft -NotAfter $na
+                if ($dl -le $Days) {
+                    [void]$expiring.Add([pscustomobject]@{
+                        Subject    = [string]$c.Subject
+                        Issuer     = [string]$c.Issuer
+                        Expires    = $na.ToString('yyyy-MM-dd')
+                        DaysLeft   = [int]$dl
+                        Thumbprint = [string]$c.Thumbprint
+                    })
+                }
+            }
+            $sorted = @($expiring | Sort-Object -Property @{ Expression = { [int]$_.DaysLeft } })
+            if ($sorted.Count -eq 0) {
+                $row = & $baseRow $r.Online ''
+                $row.Subject = "(no certs expiring within $Days day(s))"
+                [void]$rows.Add($row)
+                $r.Report = "$Computer : no certs expiring within $Days day(s)"
+            } else {
+                foreach ($e in $sorted) {
+                    $row = & $baseRow $r.Online ''
+                    $row.Subject = [string]$e.Subject
+                    $row.Issuer = [string]$e.Issuer
+                    $row.Expires = [string]$e.Expires
+                    $row.DaysLeft = [int]$e.DaysLeft
+                    $row.Thumbprint = [string]$e.Thumbprint
+                    [void]$rows.Add($row)
+                }
+                $r.Report = "$Computer : $($sorted.Count) cert(s) expiring within $Days day(s)"
+            }
+        }
+
+        'rebootpending-sweep' {
+            $reasons = @($raw)
+            $pending = ($reasons.Count -gt 0)
+            $row = & $baseRow $r.Online ''
+            $row.RebootPending = [bool]$pending
+            $row.Reasons = (Join-SysadminReasons -Reasons $reasons)
+            [void]$rows.Add($row)
+            $r.Report = if ($pending) { "$Computer : REBOOT PENDING - $($row.Reasons)" } else { "$Computer : no reboot pending" }
+        }
+    }
+
+    $r.Rows = @($rows.ToArray())
+    return $r
+}
+
+function Invoke-JanetToolAction {
+    param(
+        [string]$ActionId,
+        [hashtable]$Params,
+        [System.Management.Automation.PSCredential]$Credential,
+        [scriptblock]$Emit
+    )
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $validActions = @('localadmin-sweep', 'certexpiry-sweep', 'rebootpending-sweep')
+    if ($validActions -notcontains $ActionId) {
+        & $send @{ type = 'error'; text = "Unknown action '$ActionId'." }
+        return @{ rows = @(); summary = @{} }
+    }
+
+    # Operator-cancel bridge (server injects $Params['__job']).
+    $cancelJob = $null
+    if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
+    $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    # Targets: accept only bare host / IPv4 tokens; drop UNC/URL/junk before any WinRM.
+    $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+    if ($targets.Count -eq 0) {
+        & $send @{ type = 'log'; level = 'warn'; text = 'No valid targets.' }
+        return @{ rows = @(); summary = @{ total = 0 } }
+    }
+
+    $attemptOffline = $false
+    if ($null -ne $Params['attemptOffline']) {
+        $av = $Params['attemptOffline']
+        $attemptOffline = if ($av -is [bool]) { [bool]$av } else { ("$av" -match '^(?i:true|1|yes|on)$') }
+    }
+    $threads = 16
+    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    $threads = [Math]::Max(1, [Math]::Min(32, $threads))
+    $days = 90
+    if ($ActionId -eq 'certexpiry-sweep' -and $Params['days']) { [int]::TryParse([string]$Params['days'], [ref]$days) | Out-Null }
+    if ($days -lt 0) { $days = 0 }
+
+    $perHostTimeout = 150  # a read-only sweep that runs this long = a wedged remote read
+    $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
+    $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
+
+    $sweepLabel = switch ($ActionId) {
+        'localadmin-sweep'    { 'Local Admins sweep' }
+        'certexpiry-sweep'    { "Cert Expiry sweep (<= $days day(s))" }
+        'rebootpending-sweep' { 'Reboot Pending sweep' }
+        default               { $ActionId }
+    }
+
+    & $send @{ type = 'status'; text = "$sweepLabel on $($targets.Count) host(s) with $threads thread(s)..." }
+    & $send @{ type = 'log'; level = 'info'; text = "[$(Get-Date -Format 'HH:mm:ss')] START $sweepLabel on $($targets.Count) host(s) ($authLabel), $threads thread(s)." }
+
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+    $pool.Open()
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($h in $targets) {
+        $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+        [void]$ps.AddScript($script:SysadminSweepBlock)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth)
+        [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($ActionId); [void]$ps.AddArgument($days)
+        [void]$ps.AddArgument($script:SysadminModulePath)
+        [void]$jobs.Add([pscustomobject]@{ Host = $h; PS = $ps; Async = $ps.BeginInvoke(); StartedAt = $null })
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    $rk = 0
+
+    # Emit every row a worker returned (>=1), each with a unique _rk, plus its report.
+    $emitResult = {
+        param($res)
+        $resRows = @($res.Rows)
+        if ($resRows.Count -eq 0) { $resRows = @(@{ Host = [string]$res.Host; Online = $false; Error = 'worker returned no rows' }) }
+        foreach ($row in $resRows) {
+            $rk++
+            $row['_rk'] = ('r{0}' -f $rk)
+            [void]$rows.Add($row)
+            & $send (@{ type = 'row' } + $row)
+        }
+        $rpt = ''
+        try { $rpt = [string]$res.Report } catch { $rpt = '' }
+        if ($rpt) {
+            $lvl = 'info'
+            if ($rpt -match 'ERROR|OFFLINE') { $lvl = 'warn' }
+            elseif ($rpt -match 'REBOOT PENDING|expiring') { $lvl = 'warn' }
+            & $send @{ type = 'log'; level = $lvl; text = "[$(Get-Date -Format 'HH:mm:ss')] $rpt" }
+        }
+    }
+
+    $done = 0
+    try {
+        while ($done -lt $jobs.Count) {
+            foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = @{ Host = $j.Host; Online = $false; Error = "worker error: $($_.Exception.Message)"; Rows = @(); Report = "$($j.Host) : WORKER ERROR - $($_.Exception.Message)" } }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = @{ Host = $j.Host; Online = $false; Error = 'worker returned no result'; Rows = @(); Report = "$($j.Host) : WORKER ERROR - no result" } }
+                    & $emitResult $res
+                    $done++; & $send @{ type = 'progress'; done = $done; total = $jobs.Count }
+                }
+            }
+            # Per-host watchdog: abandon a host that overran its own clock.
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $emitResult @{ Host = $j.Host; Online = $false; Error = "per-host timeout (${perHostTimeout}s)"; Rows = @(); Report = "$($j.Host) : TIMEOUT (${perHostTimeout}s) - possible remote read hang" }
+                        $done++; & $send @{ type = 'progress'; done = $done; total = $jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                if ($cancelCheck -and (& $cancelCheck)) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $emitResult @{ Host = $j.Host; Online = $false; Error = 'cancelled by operator'; Rows = @(); Report = "$($j.Host) : CANCELLED" }
+                            $done++
+                        }
+                    }
+                    & $send @{ type = 'log'; level = 'warn'; text = 'Run cancelled by operator; in-flight probes stopped.' }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+
+    # Tally from the emitted rows.
+    $online  = @($rows | Where-Object { $_.Online -eq $true } | ForEach-Object { [string]$_.Host } | Select-Object -Unique).Count
+    $errored = @($rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Error) } | ForEach-Object { [string]$_.Host } | Select-Object -Unique).Count
+    $summary = @{ total = $targets.Count; hostsOnline = $online; hostsWithError = $errored; rows = $rows.Count }
+
+    if ($ActionId -eq 'certexpiry-sweep') {
+        $expiring = @($rows | Where-Object { $_.DaysLeft -is [int] -or ([string]$_.DaysLeft -match '^-?\d+$') })
+        $expired  = @($expiring | Where-Object { ([int]("0" + ([string]$_.DaysLeft -replace '[^-0-9]',''))) -lt 0 })
+        $summary['expiringCerts'] = $expiring.Count
+        $summary['expiredCerts'] = $expired.Count
+        & $send @{ type = 'log'; level = 'ok'; text = "Done. $($expiring.Count) expiring cert(s) ($($expired.Count) already expired) across $($targets.Count) host(s); $errored host(s) errored." }
+    }
+    elseif ($ActionId -eq 'rebootpending-sweep') {
+        $pending = @($rows | Where-Object { $_.RebootPending -eq $true }).Count
+        $summary['rebootPending'] = $pending
+        & $send @{ type = 'log'; level = 'ok'; text = "Done. $pending host(s) reboot-pending of $($targets.Count); $errored host(s) errored." }
+    }
+    else {
+        & $send @{ type = 'log'; level = 'ok'; text = "Done. $online host(s) online of $($targets.Count); $errored host(s) errored." }
+    }
+
+    & $send @{ type = 'status'; text = "Done. $($rows.Count) row(s) across $($targets.Count) host(s)." }
+    return @{ rows = @($rows); summary = $summary }
+}
+
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Get-SysadminDaysLeft, Get-SysadminCleanMembers, Format-SysadminAdminList, Join-SysadminReasons, Test-SysadminReachable, Get-SysadminRemoteBlock
