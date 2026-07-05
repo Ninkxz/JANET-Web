@@ -76,9 +76,21 @@
     var tbody = el('tbody');
     table.appendChild(thead); thead.appendChild(headRow); table.appendChild(tbody);
     scroll.appendChild(table);
+    // Empty / loading placeholder shown over the (blank) tbody when no rows exist,
+    // so an empty grid is never ambiguous ("did the scan return zero, is it still
+    // running, or did nothing happen?"). Toggled by updateEmpty().
+    var emptyText = opts.emptyText || 'No results yet.';
+    var placeholder = el('div', 'j-grid-empty');
+    var phSpin = el('span', 'j-grid-spinner');
+    var phMsg = el('span', 'j-grid-empty-msg', emptyText);
+    placeholder.appendChild(phSpin); placeholder.appendChild(phMsg);
+    scroll.appendChild(placeholder);
     root.appendChild(scroll);
+    var loading = false;
 
     buildHeader();
+    // Show the empty placeholder immediately (before the first row streams in).
+    setTimeout(function () { if (order.length === 0) updateEmpty(); }, 0);
 
     function buildHeader() {
       headRow.innerHTML = '';
@@ -182,6 +194,22 @@
       if (!selectable) { selInfo.textContent = order.length ? (shown + order.length + ' row(s)') : ''; return; }
       selInfo.textContent = checked.size + ' selected / ' + shown + order.length + ' row(s)';
     }
+    function updateEmpty() {
+      // Show the placeholder only when there are no rows at all (loading spinner +
+      // "loading" text) OR when a filter hid everything ("no rows matched").
+      var hasRows = order.length > 0;
+      var filteredToNothing = hasRows && filterFn && visibleCount() === 0;
+      if (loading) {
+        placeholder.style.display = ''; placeholder.classList.add('loading');
+        phMsg.textContent = 'Loading…';
+        return;
+      }
+      placeholder.classList.remove('loading');
+      if (!hasRows) { placeholder.style.display = ''; phMsg.textContent = emptyText; }
+      else if (filteredToNothing) { placeholder.style.display = ''; phMsg.textContent = 'No rows match the current filter.'; }
+      else { placeholder.style.display = 'none'; }
+    }
+    function setLoading(on) { loading = !!on; updateEmpty(); }
 
     function upsert(row) {
       var k = keyOf(row);
@@ -190,9 +218,10 @@
       Object.assign(rows[k], row);
       // sorted view => full repaint keeps order correct (coalesced to once/frame); unsorted => in-place upsert
       if (sort.key && sort.dir) scheduleRepaint(); else paintRow(k);
-      updateSel();
+      if (loading) loading = false;   // first row cancels the loading state
+      updateSel(); updateEmpty();
     }
-    function clear() { rows = {}; order = []; trIndex = {}; checked.clear(); tbody.innerHTML = ''; updateSel(); }
+    function clear() { rows = {}; order = []; trIndex = {}; checked.clear(); tbody.innerHTML = ''; updateSel(); updateEmpty(); }
     function selectAll(on) {
       // Respect the active filter: a hidden (filtered-out) row must never be
       // selected - otherwise "Select all" + a destructive action (e.g. WPT
@@ -276,11 +305,11 @@
     }
 
     return {
-      el: root, upsert: upsert, clear: clear,
+      el: root, upsert: upsert, clear: clear, setLoading: setLoading,
       rows: function () { return order.map(function (k) { return rows[k]; }); },
       order: function () { return order.slice(); },
       getChecked: getChecked, selectAll: selectAll, selectWhere: selectWhere,
-      setFilter: function (fn) { filterFn = fn || null; order.forEach(function (k) { var tr = trIndex[k]; if (tr) tr.style.display = (filterFn && !filterFn(rows[k])) ? 'none' : ''; }); updateSel(); }
+      setFilter: function (fn) { filterFn = fn || null; order.forEach(function (k) { var tr = trIndex[k]; if (tr) tr.style.display = (filterFn && !filterFn(rows[k])) ? 'none' : ''; }); updateSel(); updateEmpty(); }
     };
   }
   Janet.components.ResultsGrid = ResultsGrid;

@@ -497,8 +497,14 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .j-grid-wrap{display:flex;flex-direction:column;height:100%;min-height:0;width:100%;min-width:0}
 .j-grid-toolbar{display:flex;align-items:center;gap:var(--s2);margin-bottom:6px;flex-wrap:wrap}
 .j-grid-sel{font-size:11px;color:var(--text-dim);margin-right:auto}
-.j-grid-scroll{flex:1;min-height:0;overflow:auto;border:1px solid var(--line-soft);border-radius:var(--r-chip);background:var(--panel)}
+.j-grid-scroll{flex:1;min-height:0;overflow:auto;border:1px solid var(--line-soft);border-radius:var(--r-chip);background:var(--panel);position:relative}
 table.j-grid{border-collapse:collapse;width:100%;font-size:12px}
+/* Empty / loading placeholder overlay (ResultsGrid). Centered under the header. */
+.j-grid-empty{position:absolute;left:0;right:0;top:36px;bottom:0;display:flex;align-items:center;justify-content:center;gap:9px;color:var(--muted);font-size:12px;pointer-events:none;text-align:center;padding:12px}
+.j-grid-empty .j-grid-spinner{display:none}
+.j-grid-empty.loading .j-grid-spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--gold,#DAB452);border-radius:50%;animation:j-spin .7s linear infinite}
+@keyframes j-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.j-grid-empty.loading .j-grid-spinner{animation:none}}
 table.j-grid thead th{
   position:sticky;top:0;z-index:1;background:var(--panel-light);color:var(--gold);
   font-family:var(--ui);font-weight:600;text-align:left;padding:6px 9px;border-bottom:1px solid var(--edge2);
