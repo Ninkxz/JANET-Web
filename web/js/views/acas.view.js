@@ -673,10 +673,12 @@
         var seen = {};
         CAT_ORDER.concat(Object.keys(byCat)).forEach(function (cat) {
           if (seen[cat] || !byCat[cat]) return; seen[cat] = true;
-          var hdr = el('div', 'j-eyebrow', (CAT_LABEL[cat] || cat) + '  (' + byCat[cat].length + ')');
+          var kevN = byCat[cat].filter(function (c) { return c.inKev; }).length;
+          var hdr = el('div', 'j-eyebrow', (CAT_LABEL[cat] || cat) + '  (' + byCat[cat].length + (kevN ? (', ' + kevN + ' KEV') : '') + ')');
           hdr.style.cssText += ';margin:4px 0 2px';
           updaterBody.appendChild(hdr);
-          byCat[cat].forEach(function (c) { updaterBody.appendChild(buildVulnCard(c)); });
+          // KEV-first within each category: known-exploited groups lead (audit "KEV first").
+          byCat[cat].slice().sort(function (a, b) { return (b.inKev ? 1 : 0) - (a.inKev ? 1 : 0); }).forEach(function (c) { updaterBody.appendChild(buildVulnCard(c)); });
         });
       }
 
