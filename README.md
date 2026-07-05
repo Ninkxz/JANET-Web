@@ -67,9 +67,45 @@ J.A.N.E.T TWO\
 
 (Source of truth: `server\tool-registry.json`.)
 
+## Closed-loop vulnerability remediation
+
+Beyond the per-tool actions, the **Reports** tool drives an end-to-end
+finding → fix → proof workflow off an imported ACAS/Tenable scan:
+
+1. **Import** — parse a `.nessus` / CSV / TSV scan into normalized findings,
+   auto-flagged against the in-tool CISA **KEV** catalog and IAVM map.
+2. **Plan** — the **Remediation Planner** turns findings into a per-host work
+   queue (patch X, update Y, remove Z), worst hosts first (KEV → Critical),
+   with each step mapped to the JANET tool that clears it. The **Remediation
+   Router** gives the per-bucket view.
+3. **Fix** — the operator executes each step through the mapped tool
+   (WPT / ACAS / UPR), which keeps its own admin-session ack + confirm-word +
+   DNS-mismatch / self-guards. Planning is read-only; **no remediation runs
+   without the gated flow**.
+4. **Track** — snapshot the open findings into a persisted **Campaign**
+   (`JanetLocal\campaigns\<id>.json`: finding keys, host set, mapped routes,
+   severity/KEV mix).
+5. **Prove** — after the wave, re-import the next scan and **Verify** the
+   campaign: each snapshotted finding still open = still-open, gone =
+   remediated; the campaign flips to **VERIFIED-CLOSED** at 100%. The
+   **Patch Cross-Ref** tab shows the before/after delta headline
+   (remediated / still-open / new / % closed).
+
+Supporting reports: **SLA / Aging** (per-severity remediation windows, KEV
+override, overdue/due-soon/on-track buckets), **eMASS POA&M** export (26-column
+import-template CSV, DISA CAT, SLA-derived completion dates), a hub **Network
+Posture** panel (severity meter + aging chips + KEV exposure), Squadron Rollup,
+and the Executive Command Brief. All read-only; all self-contained CSV/HTML
+output, no external calls.
+
 ## Status
 
 Built. All 18 tools have bespoke per-tool views over the pure-PowerShell backend
 (`server\` HttpListener, `web\` static SPA, one `modules\` engine per tool).
 `docs\HANDOFF.md`, `docs\REVIEW.md`, and the per-tool `docs\ui-specs\*.md` are the
 review + UI-spec basis it was built from. Remaining: on-AFNET live validation.
+
+A Pester test suite lives under `tests\` (run `Invoke-Pester -Path .\tests`);
+it covers the destructive-action gates, the remediation/campaign/POA&M engines,
+and the input-hardening guards. All web assets are vanilla JS/CSS with no build
+step and no external dependencies.
