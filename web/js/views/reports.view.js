@@ -941,6 +941,66 @@
         };
       }
 
+      // ---- KBs Needed (from scan) — precise patching -----------------------------
+      function buildKbNeeded(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('KBS NEEDED (FROM SCAN)', true));
+        panel.appendChild(hint('Extracts the exact KB ids the loaded Tenable/ACAS findings name (plugin + Solution text), so you can push precisely what the scan found. Rolled up by KB with supersedence in mind — one cumulative clears many hosts, so the KB affecting the most hosts leads (KEV first). Findings that name no KB (third-party / version-upgrade) are counted separately — use the Remediation Planner for those. Copy the KB list into Patch Content to check staged-content coverage, or download the per-host Host,KB list to feed the WPT KB Installer.'));
+
+        var row = btnRow();
+        var runBtn = ui.button('Extract KBs', { variant: 'cyan', size: 'sm', title: 'Extract the KBs the loaded findings name and roll them up.' });
+        var copyKbBtn = ui.ghostButton('Copy KB list', { size: 'sm', title: 'Copy the distinct KB ids (one per line) to paste into Patch Content -> Cross-Reference.' });
+        var dlHostBtn = ui.ghostButton('Download Host,KB CSV', { size: 'sm', title: 'Download a per-host Host,KB list to feed the WPT KB Installer.' });
+        row.appendChild(runBtn); row.appendChild(copyKbBtn); row.appendChild(dlHostBtn);
+        panel.appendChild(row);
+
+        var cards = C.StatCards({ cards: [
+          { key: 'total', label: 'DISTINCT KBS', color: 'accent' },
+          { key: 'kevKbs', label: 'KEV KBS', color: 'bad' },
+          { key: 'hosts', label: 'HOSTS COVERED', color: 'cyan' },
+          { key: 'findingsNoKb', label: 'NO-KB FINDINGS', color: 'gold' }
+        ] });
+        cards.el.style.margin = '8px 0'; panel.appendChild(cards.el);
+
+        var grid = C.ResultsGrid({
+          title: 'KBs needed', emptyText: 'No KBs yet — load findings (ACAS Import), then Extract KBs.', keyMode: { rk: true }, popOut: true,
+          sort: { key: 'Hosts', dir: -1 },
+          columns: [
+            { key: 'KB', label: 'KB', width: 120 },
+            { key: 'Hosts', label: 'HOSTS', width: 80, sortVal: function (r) { return +r.Hosts || 0; }, colorRule: gt0cls('st-warn') },
+            { key: 'Severity', label: 'SEVERITY', width: 90, colorRule: sevCls },
+            { key: 'KEV', label: 'KEV', width: 60, sortVal: function (r) { return r.KEV ? 1 : 0; }, colorRule: function (v) { return v ? 'st-bad' : 'cell-dim'; } },
+            { key: 'Findings', label: 'FINDINGS', width: 90, sortVal: function (r) { return +r.Findings || 0; } },
+            { key: 'SamplePlugins', label: 'SAMPLE PLUGINS', width: 280, render: function (r) { var v = String(r.SamplePlugins == null ? '' : r.SamplePlugins); return { text: v, cls: v ? '' : 'cell-dim', title: v }; } }
+          ],
+          rowClass: function (r) { return r.KEV ? 'row-bad' : ''; }
+        });
+        var gh = gridHolder(grid, 200); gh.style.flex = '1'; panel.appendChild(gh);
+        var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        var lastSummary = null;
+        runBtn.onclick = function () {
+          log.banner('KBs Needed (from scan)');
+          grid.clear(); cards.reset();
+          runIntoGrid('kb-needed', {}, {
+            grid: grid, prog: prog, keyOf: function (ev) { return ev.KB != null ? String(ev.KB) : null; },
+            onFinal: function (res) {
+              var s = res && res.summary || {}; lastSummary = s;
+              cards.setAll({ total: s.total || 0, kevKbs: s.kevKbs || 0, hosts: s.hosts || 0, findingsNoKb: s.findingsNoKb || 0 });
+              log.banner((s.total || 0) + ' distinct KB(s) (' + (s.kevKbs || 0) + ' KEV) across ' + (s.hosts || 0) + ' host(s); ' + (s.findingsWithKb || 0) + ' finding(s) name a KB, ' + (s.findingsNoKb || 0) + ' have none (use the Planner).');
+            }
+          });
+        };
+        copyKbBtn.onclick = function () {
+          if (!lastSummary || !lastSummary.kbList) { ctx.confirm({ title: 'No KBs', body: 'Run Extract KBs first.', okText: 'OK', cancelText: null }); return; }
+          if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(lastSummary.kbList).then(function () { log.append({ text: 'Copied ' + (lastSummary.total || 0) + ' KB id(s) — paste into Patch Content -> Cross-Reference.', level: 'accent' }); }).catch(function () {});
+        };
+        dlHostBtn.onclick = function () {
+          if (!lastSummary || !lastSummary.perHostCsv) { ctx.confirm({ title: 'No data', body: 'Run Extract KBs first.', okText: 'OK', cancelText: null }); return; }
+          ctx.util.downloadBlob('ReportsTool_KBsNeeded_HostKB_' + ctx.util.fileStamp() + '.csv', 'text/csv', lastSummary.perHostCsv);
+        };
+      }
+
       // ---- Remediation Campaigns (persisted closed-loop tracking) -----------------
       function buildCampaigns(panel) {
         panelFlex(panel);
@@ -1882,6 +1942,7 @@
           { id: 'remediation', label: 'Remediation Plan', build: buildRemediation },
           { id: 'router', label: 'Remediation Router', build: buildRouter },
           { id: 'planner', label: 'Remediation Planner', build: buildPlanner },
+          { id: 'kbneeded', label: 'KBs Needed', build: buildKbNeeded },
           { id: 'campaigns', label: 'Campaigns', build: buildCampaigns },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },

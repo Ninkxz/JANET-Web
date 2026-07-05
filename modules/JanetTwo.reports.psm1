@@ -380,6 +380,15 @@ function Get-JanetToolManifest {
                 inputs       = @()
             },
             @{
+                id          = 'kb-needed'
+                label       = 'KBs Needed (from scan)'
+                description  = 'Extract the exact KB ids the loaded Tenable/ACAS findings say to install (from the plugin name + Solution text), so you can push precisely what the scan found instead of a broad profile. Rolls up by KB with supersedence in mind - one cumulative KB clears many hosts, so the KB affecting the most hosts leads (KEV-carrying KBs first). Per-KB rows show affected host count, worst severity, KEV, and sample plugins. The full KB list (copy into Patch Content to check staged-content coverage) and a per-host Host,KB list (feed WPT KB Installer) ship in the summary. Read-only.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('KB','Hosts','Severity','KEV','Findings','SamplePlugins')
+                inputs       = @()
+            },
+            @{
                 id          = 'campaign-create'
                 label       = 'Create Remediation Campaign'
                 description  = 'Snapshot the currently loaded OPEN findings into a persisted remediation campaign (JanetLocal\campaigns\<id>.json): the finding keys (Hostname|PluginID), the affected host set, the distinct mapped JANET remediations, and the severity/KEV mix. This ties finding -> fix -> (later) re-verify so a wave can be tracked to closure. READ-ONLY: creates the tracking record only; the actual remediation runs through the gated engines. Re-import the next scan and use the campaign to prove closure.'
@@ -902,6 +911,22 @@ function Save-ReportsSlaLedger {
 #  findings; the actual remediation still runs through the gated engines.
 # =============================================================================
 function Get-ReportsCampaignDir { Join-Path $PSScriptRoot '..\JanetLocal\campaigns' }
+
+# Extract distinct KB ids (KB######[#]) from Tenable free-text (VulnName + Solution).
+# Same lenient token shape patchlib uses, so a KB pulled here matches staged content
+# there. Returns a de-duped uppercase string array.
+function Get-ReportsKbsFromText {
+    param([string]$Text)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $out = New-Object System.Collections.ArrayList
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+    foreach ($m in [regex]::Matches([string]$Text, '(?i)(?<![A-Za-z0-9])KB\d{6,7}(?!\d)')) {
+        $kb = $m.Value.ToUpper()
+        if ($seen.Add($kb)) { [void]$out.Add($kb) }
+    }
+    # Return the elements (enumerated); the caller wraps with @() to get a flat array.
+    return $out.ToArray()
+}
 
 # Read one campaign by id (PSCustomObject) or $null if absent/unreadable.
 function Get-ReportsCampaignById {
@@ -4455,6 +4480,87 @@ function Invoke-JanetToolAction {
             if ($ordered.Count -gt 800) { & $send @{ type='log'; level='info'; text="Showing first 800 of $($ordered.Count) hosts in the grid." } }
             & $send @{ type='status'; text="Remediation plan: $($ordered.Count) host(s), $hostsWithRoutes with a one-click route, over $totalOpen open finding(s)." }
             return @{ rows=@($rows); summary=@{ total=$ordered.Count; hostsWithRoutes=$hostsWithRoutes; openFindings=$totalOpen } }
+        }
+
+        # -------------------------------------------------------------------
+        'kb-needed' {
+            # Extract the exact KBs the loaded findings name, roll up by KB
+            # (supersedence: one cumulative clears many hosts), and produce a per-host
+            # Host,KB list for the WPT KB Installer + a copy list for Patch Content.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse or load a report first.' }
+                return @{ rows=@(); summary=@{ total=0 } }
+            }
+            & $send @{ type='status'; text='Extracting KB ids from the loaded findings...' }
+            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $kbMap = @{}                 # KB -> aggregate
+            $perHost = @{}               # host -> HashSet of KBs (for the WPT handoff)
+            $openFindings = 0; $withKb = 0; $noKb = 0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched') { continue }
+                $openFindings++
+                $kbs = @(Get-ReportsKbsFromText ("$($f.VulnName) $($f.Solution)"))
+                if ($kbs.Count -eq 0) { $noKb++; continue }
+                $withKb++
+                $hn = [string]$f.Hostname
+                $sev = [string]$f.Severity
+                $isKev = [bool]$f.InKEV
+                foreach ($kb in $kbs) {
+                    if (-not $kbMap.ContainsKey($kb)) {
+                        $entry = @{ KB = $kb; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false }
+                        $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                        $entry.Plugins = New-Object System.Collections.ArrayList
+                        $entry.PluginSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                        $kbMap[$kb] = $entry
+                    }
+                    $k = $kbMap[$kb]
+                    $k.Findings = [int]$k.Findings + 1
+                    if ($hn) { [void]$k.Hosts.Add($hn) }
+                    if ($isKev) { $k.Kev = $true }
+                    $rank = if ($sevRank.ContainsKey($sev)) { $sevRank[$sev] } else { 0 }
+                    if ($rank -gt $k.MaxSev) { $k.MaxSev = $rank; $k.SevName = $sev }
+                    $plg = [string]$f.PluginID
+                    if ($plg -and $k.PluginSeen.Add($plg)) { [void]$k.Plugins.Add($plg) }
+                    if ($hn) {
+                        if (-not $perHost.ContainsKey($hn)) {
+                            $perHost[$hn] = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                        }
+                        [void]$perHost[$hn].Add($kb)
+                    }
+                }
+            }
+            # Rank: KEV first, then most hosts (supersedence payoff), then worst severity.
+            $ordered = @($kbMap.Values | Sort-Object -Property `
+                @{ Expression = { [bool]$_.Kev }; Descending = $true }, `
+                @{ Expression = { $_.Hosts.Count }; Descending = $true }, `
+                @{ Expression = { $_.MaxSev }; Descending = $true }, `
+                @{ Expression = { $_.KB } })
+            $rows = New-Object System.Collections.ArrayList
+            foreach ($k in $ordered) {
+                $sampleP = @($k.Plugins | Select-Object -First 6)
+                $sampleStr = if ($k.Plugins.Count -gt 6) { ($sampleP -join ', ') + " (+$($k.Plugins.Count - 6))" } else { ($sampleP -join ', ') }
+                $row = @{
+                    _rk=$k.KB; KB=$k.KB; Hosts=$k.Hosts.Count
+                    Severity=$(if ($k.SevName) { $k.SevName } else { 'n/a' })
+                    KEV=$(if ($k.Kev) { 'KEV' } else { '' })
+                    Findings=$k.Findings; SamplePlugins=$sampleStr
+                }
+                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+            }
+            # Handoff artifacts: unique KB list (Patch Content) + per-host Host,KB CSV (WPT).
+            $kbList = (@($ordered | ForEach-Object { $_.KB }) -join "`n")
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine('Host,KB')
+            foreach ($hn in (@($perHost.Keys) | Sort-Object)) {
+                foreach ($kb in (@($perHost[$hn]) | Sort-Object)) { [void]$sb.AppendLine("$hn,$kb") }
+            }
+            $kevKbs = @($ordered | Where-Object { $_.Kev }).Count
+            & $send @{ type='status'; text="KBs needed: $($ordered.Count) distinct KB(s) ($kevKbs KEV) across $($perHost.Count) host(s); $withKb finding(s) name a KB, $noKb have no KB in the scan text (use the Remediation Planner for those)." }
+            return @{ rows=@($rows); summary=@{
+                total=$ordered.Count; kevKbs=$kevKbs; hosts=$perHost.Count
+                openFindings=$openFindings; findingsWithKb=$withKb; findingsNoKb=$noKb
+                kbList=$kbList; perHostCsv=$sb.ToString().TrimEnd()
+            } }
         }
 
         # -------------------------------------------------------------------
