@@ -298,6 +298,15 @@ function Start-JanetTwoServer {
                 # ---- static assets (no token; UI code only) ----
                 if ($path -notlike '/api/*') {
                     $rel = if ($path -eq '/' -or [string]::IsNullOrEmpty($path)) { 'index.html' } else { $path.TrimStart('/') }
+                    # audit#28: never serve a dev/underscore-prefixed asset from the
+                    # production web root (e.g. _devtest.html, _stub.view.js) - they are
+                    # dev-only harnesses that bypass the client gate and expose the tool
+                    # catalog. 404 any request whose leaf name starts with '_'.
+                    $leaf = [System.IO.Path]::GetFileName($rel)
+                    if ($leaf -and $leaf.StartsWith('_')) {
+                        & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes('not found')) 404 'text/plain'
+                        continue
+                    }
                     $full = Join-Path $webDir ($rel -replace '/', '\')
                     # path-traversal guard: resolved file must stay under web/
                     $resolved = $null
