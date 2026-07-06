@@ -179,6 +179,25 @@
     if (/dns|error/i.test(s)) return 'st-warn';
     return 'cell-dim';
   }
+  // Fleet Status board: colour the single Win24H2Status verdict.
+  //   Ready = ok/green ; Blocked = bad/red ; Already 24H2+ = accent/cyan ;
+  //   Pending reboot = warn/amber ; Offline/Error dim/red.
+  function fleetStatusCell(v) {
+    var s = String(v == null ? '' : v);
+    if (s === 'Ready') return { text: s, cls: 'st-ok' };
+    if (s.indexOf('Blocked') === 0) return { text: s, cls: 'st-bad', title: s };
+    if (s === 'Already 24H2+') return { text: s, cls: 'st-info' };
+    if (s === 'Pending reboot') return { text: s, cls: 'st-warn' };
+    if (s === 'Offline') return { text: s, cls: 'st-bad' };
+    if (s === 'Error') return { text: s, cls: 'st-warn' };
+    if (s === 'Queued') return { text: s, cls: 'cell-dim' };
+    return { text: s, cls: '' };
+  }
+  function yesNoDim(v, badWhenYes) {
+    var yes = (v === true || String(v).toLowerCase() === 'true' || String(v) === 'Yes');
+    if (v == null || v === '') return { text: '', cls: 'cell-dim' };
+    return { text: yes ? 'Yes' : 'No', cls: yes ? (badWhenYes ? 'st-bad' : 'st-ok') : 'cell-dim' };
+  }
 
   JanetViews.register('winupgrade', {
     mount: function (host, ctx) {
@@ -194,8 +213,13 @@
       // =================== layout ===================
       var root = el('div'); root.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)';
 
+      // The existing operation console lives in opsPanel; a TabHost (built at the
+      // bottom of mount) puts a read-only "Fleet Status" board FIRST, then this
+      // "Operations" tab, sharing the one Activity Log dock across the bottom.
+      var opsPanel = el('div'); opsPanel.style.cssText = 'flex:1;min-height:0;display:flex;flex-direction:column';
+
       var body = el('div'); body.style.cssText = 'flex:1;min-height:0;display:flex;gap:14px;padding:14px 16px 0';
-      root.appendChild(body);
+      opsPanel.appendChild(body);
 
       // ---------- LEFT: CONFIG COLUMN ----------
       var left = el('div'); left.style.cssText = 'flex:0 0 440px;display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto';
@@ -447,13 +471,12 @@
       progCard.appendChild(expRow);
       progCol.appendChild(progCard);
       footer.appendChild(progCol);
-      root.appendChild(footer);
+      opsPanel.appendChild(footer);
 
-      // ---------- ACTIVITY LOG: full-width dock across the bottom (was boxed in the footer) ----------
+      // ---------- ACTIVITY LOG: full-width dock across the bottom (shared by both tabs) ----------
       var logCard = ui.card({}); logCard.classList.add('j-logdock'); logCard.style.cssText += ';margin:0 16px 14px';
       var log = C.ActivityLog({ title: 'ACTIVITY LOG', defaultName: 'WindowsUpgrade_ActivityLog' });
       logCard.appendChild(log.el);
-      root.appendChild(logCard);
 
       // =================== helpers ===================
       function sectionCard(title, headerColor) {
@@ -720,15 +743,174 @@
 
       var escHtml = Janet.util.esc;
 
+      // =================== FLEET STATUS board (read-only) ===================
+      // Runs the SAME per-host readiness scan (action 'fleet-status') across the
+      // targets and rolls it up: "where is the whole fleet on the 24H2 journey?".
+      // Changes NOTHING - no admin session, no reboots, no policy writes.
+      var fleetRun = null, fleetUnsub = null;
+      function buildFleetPanel(panel) {
+        panel.style.cssText = 'display:flex;gap:14px;height:100%;min-height:0;box-sizing:border-box;padding:12px 16px';
+
+        // LEFT: targets + options + Scan Fleet
+        var fl = el('div'); fl.style.cssText = 'flex:0 0 400px;display:flex;flex-direction:column;gap:12px;min-height:0';
+        var compCard = ui.namedCard('COMPUTERS', 'One host per line - comma/space/semicolon ok; # starts a comment.');
+        compCard.style.cssText += ';flex:0 0 auto;min-height:160px;max-height:300px;display:flex;flex-direction:column;overflow:hidden';
+        var fTargets = C.TargetManager({
+          model: ctx.util.targetModel(''),
+          hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',
+          placeholder: 'WS-0001\nWS-0002\n# lab row\nWS-0003',
+          importLabel: 'Import TXT', importAccept: '.txt', countNoun: 'computer',
+          onImport: function (n, name) { log.append({ text: '[' + ts() + '] Added ' + n + ' computer(s) from ' + name, level: 'info' }); }
+        });
+        var fth = el('div'); fth.style.cssText = 'flex:1;min-height:0;display:flex'; fth.appendChild(fTargets.el);
+        compCard.appendChild(fth); fl.appendChild(compCard);
+
+        var fOpt = ui.card({}); fOpt.style.cssText += ';display:flex;flex-direction:column;gap:10px';
+        var fOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Scan a host that fails the TCP 5985/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP.' });
+        fOpt.appendChild(fOffline);
+        var ftr = el('div'); ftr.style.cssText = 'display:flex;align-items:center;gap:10px';
+        ftr.appendChild(ui.label('Max concurrent:'));
+        var fThreads = ui.number({ value: 16, min: 1, max: 64, title: 'Parallel hosts (1-64).' }); fThreads.style.width = '80px';
+        ftr.appendChild(fThreads); fOpt.appendChild(ftr);
+        var fStatus = el('div', 'muted', 'Ready'); fStatus.style.fontSize = '12px'; fOpt.appendChild(fStatus);
+        fl.appendChild(fOpt);
+
+        var fAct = ui.card({}); fAct.style.cssText += ';display:flex;flex-direction:column;gap:8px';
+        var fRunbar = C.RunBar({
+          label: 'SCAN FLEET', cancelLabel: 'CANCEL SCAN', morphToCancel: true,
+          title: 'Read-only fleet posture scan across every computer (changes nothing).',
+          guards: [ function () { return fTargets.count() ? null : 'No Computers|Add at least one computer to scan.'; } ],
+          onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
+          onRun: doFleetScan,
+          onCancel: function () { if (fleetRun) { fleetRun.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued computers skip; in-flight scans finish.', level: 'warn' }); } }
+        });
+        var frb = el('div'); frb.appendChild(fRunbar.el); fAct.appendChild(frb); fl.appendChild(fAct);
+        panel.appendChild(fl);
+
+        // RIGHT: stat cards + grid
+        var fr = el('div'); fr.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;min-height:0';
+        var fStats = C.StatCards({ cards: [
+          { key: 'already', label: 'ALREADY 24H2', color: 'cyan' },
+          { key: 'ready', label: 'READY', color: 'ok' },
+          { key: 'blocked', label: 'BLOCKED', color: 'bad' },
+          { key: 'pending', label: 'PENDING REBOOT', color: 'gold' }
+        ] });
+        fr.appendChild(fStats.el);
+
+        var fHead = ui.card({}); fHead.style.cssText += ';display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+        var fProg = C.ProgressStatusStrip({ showCount: true });
+        fProg.el.style.flex = '1'; fHead.appendChild(fProg.el);
+        var fExport = ui.ghostButton('Export CSV', { size: 'sm', title: 'Export the fleet-status rows to CSV.' });
+        var fClear = ui.button('Clear', { variant: 'danger', size: 'sm', title: 'Clear the fleet-status grid.' });
+        fHead.appendChild(fExport); fHead.appendChild(fClear);
+        fr.appendChild(fHead);
+
+        var fResults = ui.namedCard('FLEET STATUS', 'One row per computer: where it sits on the 23H2 -> 24H2 journey. Read-only.');
+        fResults.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
+        var fGrid = C.ResultsGrid({
+          title: 'Fleet Status', emptyText: 'No results yet - add computers and Scan Fleet.',
+          keyMode: { hostCol: 'Host' }, popOut: true, selectable: false,
+          columns: [
+            { key: 'Host', label: 'COMPUTER', width: 160 },
+            { key: 'Online', label: 'ONLINE', width: 78, render: function (r) { return yesNoDim(r.Online, false); } },
+            { key: 'DisplayVersion', label: 'VERSION', width: 90, render: function (r) { return { text: String(r.DisplayVersion == null ? '' : r.DisplayVersion), cls: 'cell-dim' }; } },
+            { key: 'OsBuild', label: 'BUILD', width: 80, render: function (r) { var b = parseInt(r.OsBuild, 10); return { text: (b > 0 ? String(b) : ''), cls: (b >= 26100 ? 'st-ok' : 'cell-dim') }; } },
+            { key: 'Win24H2Status', label: '24H2 STATUS', width: 210, render: function (r) { return fleetStatusCell(r.Win24H2Status); } },
+            { key: 'Eligible', label: 'ELIGIBLE', width: 84, render: function (r) { return yesNoDim(r.Eligible, false); } },
+            { key: 'BlockReason', label: 'BLOCK REASON', render: function (r) { var t = String(r.BlockReason == null ? '' : r.BlockReason); return { text: t, title: t, cls: t ? 'st-bad' : 'cell-dim' }; } },
+            { key: 'Pinned', label: 'PINNED', width: 78, render: function (r) { return yesNoDim(r.Pinned, false); } },
+            { key: 'PinnedVersion', label: 'PIN VER', width: 84, render: function (r) { return { text: String(r.PinnedVersion == null ? '' : r.PinnedVersion), cls: 'cell-dim' }; } },
+            { key: 'PendingReboot', label: 'REBOOT PENDING', width: 130, render: function (r) { return yesNoDim(r.PendingReboot, true); } },
+            { key: 'Error', label: 'ERROR', width: 160, render: function (r) { var t = String(r.Error == null ? '' : r.Error); return { text: t, title: t, cls: t ? 'st-warn' : 'cell-dim' }; } }
+          ],
+          rowClass: function (r) {
+            var s = String(r.Win24H2Status);
+            if (s === 'Ready') return 'row-ok';
+            if (s.indexOf('Blocked') === 0 || s === 'Offline') return 'row-bad';
+            if (s === 'Pending reboot' || s === 'Error') return 'row-warn';
+            return '';
+          }
+        });
+        var fgh = el('div'); fgh.style.cssText = 'flex:1;min-height:0;display:flex'; fgh.appendChild(fGrid.el);
+        fResults.appendChild(fgh); fr.appendChild(fResults);
+        panel.appendChild(fr);
+
+        var FLEET_EXPORT = [['Host', 'Computer'], ['Online', 'Online'], ['DisplayVersion', 'DisplayVersion'], ['OsBuild', 'OsBuild'], ['Win24H2Status', 'Win24H2Status'], ['Eligible', 'Eligible'], ['BlockReason', 'BlockReason'], ['Pinned', 'Pinned'], ['PinnedVersion', 'PinnedVersion'], ['PendingReboot', 'PendingReboot'], ['Error', 'Error']];
+        fExport.onclick = function () {
+          var rows = fGrid.rows();
+          if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Scan the fleet first - there are no rows yet.', okText: 'OK', cancelText: null }); return; }
+          var csv = ctx.util.toCsv(FLEET_EXPORT.map(function (p) { return p[1]; }), rows, FLEET_EXPORT.map(function (p) { return p[0]; }));
+          ctx.util.downloadBlob('WindowsUpgrade_FleetStatus_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' fleet-status row(s) to CSV.', level: 'info' });
+        };
+        fClear.onclick = function () { if (fleetRun && fleetRun.state && fleetRun.state.active) return; fGrid.clear(); fStats.reset(); fProg.reset(); fStatus.textContent = 'Ready'; fStatus.className = 'muted'; };
+
+        function recount() {
+          var c = { already: 0, ready: 0, blocked: 0, pending: 0 };
+          fGrid.rows().forEach(function (r) {
+            var s = String(r.Win24H2Status);
+            if (s === 'Already 24H2+') c.already++;
+            else if (s === 'Ready') c.ready++;
+            else if (s.indexOf('Blocked') === 0) c.blocked++;
+            else if (s === 'Pending reboot') c.pending++;
+          });
+          fStats.setAll(c);
+        }
+
+        function doFleetScan() {
+          var hosts = fTargets.hosts();
+          fGrid.clear(); fStats.reset(); fProg.reset();
+          fStatus.textContent = 'Scanning...'; fStatus.className = 'st-info';
+          log.banner('Fleet Status scan (' + hosts.length + ' computer(s))');
+          fOffline.disabled = true; fThreads.disabled = true; fClear.disabled = true;
+          fleetRun = ctx.run('fleet-status', {
+            targets: hosts.join('\n'),
+            attemptOffline: fOffline._cb.checked,
+            threads: Math.max(1, Math.min(64, parseInt(fThreads.value, 10) || 16))
+          }, { keyOf: keyByHost, destructive: false });
+          if (fleetUnsub) fleetUnsub();
+          fleetUnsub = fleetRun.subscribe({
+            status: function (t) { fStatus.textContent = t; fStatus.className = 'st-info'; },
+            progress: function (p) { fProg.setProgress(p.done, p.total); },
+            row: function (r) { fGrid.upsert(r); recount(); },
+            log: function (l) { log.append(l); },
+            error: function (e) { fStatus.textContent = (e && e.text) || 'Error'; fStatus.className = 'st-bad'; log.append({ text: (e && e.text) || 'error', level: 'err' }); },
+            active: function (a) { fRunbar.setActive(a); if (!a) { fOffline.disabled = false; fThreads.disabled = false; fClear.disabled = false; } },
+            final: function (res) {
+              var s = (res && res.summary) || {};
+              if (s.already24h2 != null) { fStats.setAll({ already: s.already24h2, ready: s.ready, blocked: s.blocked, pending: s.pendingReboot }); }
+              else { recount(); }
+              var done = 'Done - ' + (s.already24h2 || 0) + ' on 24H2, ' + (s.ready || 0) + ' ready, ' + (s.blocked || 0) + ' blocked, ' + (s.pendingReboot || 0) + ' pending reboot';
+              fStatus.textContent = done; fStatus.className = (s.blocked ? 'st-warn' : 'st-ok');
+              log.append({ text: '[' + ts() + '] FLEET STATUS ' + done, level: (s.blocked ? 'warn' : 'ok') });
+            }
+          });
+        }
+      }
+
+      // =================== assemble: TabHost + shared log dock ===================
+      var tabHolder = el('div'); tabHolder.style.cssText = 'flex:1;min-height:0;display:flex';
+      var tabs = C.TabHost({
+        rail: 'top', helpId: 'winupgrade',
+        tabs: [
+          { id: 'fleet', label: 'Fleet Status', build: buildFleetPanel },
+          { id: 'operations', label: 'Operations', build: function (panel) { panel.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0'; panel.appendChild(opsPanel); } }
+        ]
+      });
+      tabHolder.appendChild(tabs.el);
+      root.appendChild(tabHolder);
+      root.appendChild(logCard);
+
       // =================== init ===================
       setOpControlsEnabled();
       updateCabHint();
       refreshGuide();
-      log.append({ text: 'Windows Upgrade Tool ready. Run Diagnostic Scan first (read-only) to see the picture, or pick a scenario, add computers, then Test Ping / RUN.', level: 'accent' });
+      log.append({ text: 'Windows Upgrade Tool ready. Fleet Status (first tab) is a read-only board - Scan Fleet to see where every computer sits on the 24H2 journey. Operations tab runs Diagnose / Pin / Unpin / Install CAB / Force Discovery.', level: 'accent' });
       log.append({ text: 'Pin holds a feature build (optional SCCM refresh / CPU-TPM bypass); Install CAB pushes a feature update via DISM; Force Discovery re-scans (safe) or resets WU (aggressive).', level: 'dim' });
 
       host.appendChild(root);
-      this._root = root; this._unsub = function () { if (unsub) unsub(); };
+      this._root = root;
+      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (fleetUnsub) fleetUnsub(); } catch (e) {} };
     },
     unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
   });

@@ -60,6 +60,19 @@ function Get-JanetToolManifest {
                 )
             },
             @{
+                id          = 'fleet-status'
+                label       = 'Fleet Status (24H2 board)'
+                description  = 'Read-only fleet posture board for the 23H2 -> 24H2 journey (changes NOTHING). Runs the SAME per-host readiness scan as Run Diagnostic Scan across the targets and rolls each host up to a single Win24H2Status: Already 24H2+ (build 26100+); Pending reboot (a feature update is staged / the box is pending-reboot, i.e. mid-upgrade); Ready (on 23H2 / build 22631 or older AND CPU/TPM/disk all pass); Blocked: <reason> (on <=23H2 but a hardware check fails - CPU unsupported / no TPM 2.0 / disk <64GB, joined). Pinned is shown as a secondary flag with the pinned version. Returns per-host rows plus a rollup summary (already24h2 / ready / blocked / pendingReboot counts + block-reason breakdown). Read-only registry / CIM reads only - no policy writes, no reboots.'
+                kind         = 'stream-table'
+                destructive  = $false
+                columns      = @('Host','Online','DisplayVersion','OsBuild','Win24H2Status','Eligible','BlockReason','Pinned','PinnedVersion','PendingReboot','Error')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
+                )
+            },
+            @{
                 id          = 'pin'
                 label       = 'Pin Feature Version'
                 description  = '24H2 UPGRADE job: hold targets at a feature version (Windows Update for Business Target Release Version policy) - e.g. Product "Windows 11", Version "24H2". WU keeps offering monthly quality fixes but will NOT move the PC to a newer feature build until you Unpin. Pin sets a CEILING; it does not push the install - each PC moves on its next Windows Update / MECM check (a reboot + Check for updates applies it promptly).'
@@ -213,6 +226,35 @@ function ConvertTo-JanetBool {
     if ($Value -is [bool]) { return [bool]$Value }
     if ("$Value" -eq '') { return $Default }
     return ("$Value" -match '^(?i:true|1|yes|on)$')
+}
+
+function Get-WinUpgradeFleetStatus {
+    # Pure classifier: map a host's read-only scan signals to a single 24H2-journey
+    # verdict. Precedence (per the Fleet Status spec):
+    #   Error            - the scan errored (a message is present)
+    #   Offline          - the reachability probe failed
+    #   Already 24H2+    - OS build >= 26100
+    #   Pending reboot   - a feature update is staged / the box is pending-reboot (mid-upgrade)
+    #   Error            - online but the build could not be read (0)
+    #   Ready            - on 23H2 (22631) or older AND eligible (CPU/TPM/disk all pass)
+    #   Blocked: <reason>- on <=23H2 but a hardware check fails (reasons joined)
+    # Pinned is a SECONDARY flag surfaced in its own column, never folded in here.
+    param(
+        [int]$OsBuild = 0,
+        [bool]$Online = $false,
+        [bool]$Eligible = $false,
+        [string]$BlockReason = '',
+        [bool]$PendingReboot = $false,
+        [string]$ErrorText = ''
+    )
+    if ($ErrorText)          { return 'Error' }
+    if (-not $Online)        { return 'Offline' }
+    if ($OsBuild -ge 26100)  { return 'Already 24H2+' }
+    if ($PendingReboot)      { return 'Pending reboot' }
+    if ($OsBuild -le 0)      { return 'Error' }
+    if ($Eligible)           { return 'Ready' }
+    $reason = if ($BlockReason) { $BlockReason } else { 'ineligible' }
+    return "Blocked: $reason"
 }
 
 # --- SCCM CLIENT CYCLES (copied EXACTLY from References\24h2script.ps1 lines 27-33) ---
@@ -685,9 +727,11 @@ $script:WinUpgradeWorker = {
                 }
             }
 
-            'Diagnose' {
-                # Read-only comprehensive 24H2 compatibility + WU health scan. The remote
-                # scriptblock body is ported VERBATIM from the desktop $sbDiagnostic
+            { ($_ -eq 'Diagnose') -or ($_ -eq 'FleetStatus') } {
+                # Read-only comprehensive 24H2 compatibility + WU health scan. ONE remote
+                # scan, SHARED by both the Diagnose verdict action and the Fleet Status board
+                # (no second scanner) - $Op decides only how the returned data is shaped.
+                # The remote scriptblock body is ported VERBATIM from the desktop $sbDiagnostic
                 # (References\24h2script.ps1 lines 352-638); it returns a multi-line report
                 # string. DryRun is meaningless (nothing changes) so it always just reads.
                 # Constants fed via the appended worker params ($CpuPatterns/$MinRAM/$MinDisk/$MinTPM).
@@ -977,14 +1021,68 @@ $script:WinUpgradeWorker = {
                         foreach ($r in $recs) { $lines += "[REC] $r" }
                     }
 
-                    return ($lines -join "`n")
+                    # ---- structured fields for the Fleet Status board (all READ-ONLY reads) ----
+                    # OS build (int) + the friendly DisplayVersion (e.g. 23H2 / 24H2).
+                    $osBuild = 0; try { $osBuild = [int]$os.BuildNumber } catch { $osBuild = 0 }
+                    $displayVersion = ''
+                    try { $displayVersion = [string](Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name 'DisplayVersion' -ErrorAction Stop).DisplayVersion } catch { $displayVersion = '' }
+                    # WUfB Target Release Version pin state (read the policy key already located above).
+                    $pinned = $false; $pinnedVersion = ''
+                    if (Test-Path $wuPol) {
+                        $pp = Get-ItemProperty -Path $wuPol -ErrorAction SilentlyContinue
+                        if ($pp -and $pp.TargetReleaseVersion -eq 1) { $pinned = $true; $pinnedVersion = [string]$pp.TargetReleaseVersionInfo }
+                    }
+                    # Pending-reboot from the three standard signals (CBS / WU RebootRequired / PFRO).
+                    $pendingReboot = $false
+                    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $pendingReboot = $true }
+                    if (-not $pendingReboot -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) { $pendingReboot = $true }
+                    if (-not $pendingReboot) {
+                        $pfro = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+                        if ($pfro -and $pfro.PendingFileRenameOperations) { $pendingReboot = $true }
+                    }
+
+                    return [pscustomobject]@{
+                        Report         = ($lines -join "`n")
+                        OsBuild        = $osBuild
+                        DisplayVersion = $displayVersion
+                        Pinned         = $pinned
+                        PinnedVersion  = $pinnedVersion
+                        PendingReboot  = $pendingReboot
+                    }
                 }
                 # SoftwareDistribution recursive size scan can be slow; give the op a wider cap.
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($CpuPatterns,$MinRAM,$MinDisk,$MinTPM); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
-                $report = [string](Invoke-Command @ic)
+                $diag = Invoke-Command @ic
+                $report = [string]$diag.Report
                 $r.Report = $report
+                if ($Op -eq 'FleetStatus') {
+                    # Fleet Status board: reuse the SAME scan; derive the eligibility gates
+                    # (CPU / TPM / disk) from the report markers, surface the pin + pending +
+                    # build fields. The single Win24H2Status verdict is classified centrally
+                    # by Get-WinUpgradeFleetStatus back in Invoke-JanetToolAction.
+                    $cpuFail  = ($report -match '(?m)^\[FAIL\] CPU')
+                    $tpmFail  = ($report -match '(?m)^\[FAIL\] TPM')
+                    $diskFail = ($report -match '(?m)^\[FAIL\] Disk')
+                    $reasons = New-Object System.Collections.ArrayList
+                    if ($cpuFail)  { [void]$reasons.Add('CPU unsupported') }
+                    if ($tpmFail)  { [void]$reasons.Add('no TPM 2.0') }
+                    if ($diskFail) { [void]$reasons.Add('disk <64GB') }
+                    $r.Online         = $true
+                    $r.OsBuild        = [int]$diag.OsBuild
+                    $r.DisplayVersion = [string]$diag.DisplayVersion
+                    $r.Eligible       = -not ($cpuFail -or $tpmFail -or $diskFail)
+                    $r.BlockReason    = ($reasons -join '; ')
+                    $r.Pinned         = [bool]$diag.Pinned
+                    $r.PinnedVersion  = [string]$diag.PinnedVersion
+                    $r.PendingReboot  = [bool]$diag.PendingReboot
+                    $r.Error          = ''
+                    $r.Status         = 'SCANNED'
+                    $r.Detail         = "Build $([int]$diag.OsBuild) $([string]$diag.DisplayVersion)"
+                    $r.Ok             = $true
+                    return $r
+                }
                 # Derive the one-word STATUS verdict + a short one-line summary from the report
                 # markers (the ported scriptblock returns only the string). Precedence per spec:
                 #   1. build >= 26100                               -> ON 24H2
@@ -1220,6 +1318,7 @@ function Invoke-JanetToolAction {
     # Map the UI action id to the worker op.
     $op = switch ($ActionId) {
         'diagnose'       { 'Diagnose' }
+        'fleet-status'   { 'FleetStatus' }
         'pin'            { 'Pin' }
         'unpin'          { 'Unpin' }
         'forcediscovery' { 'ForceDiscovery' }
@@ -1299,6 +1398,7 @@ function Invoke-JanetToolAction {
     if ($op -eq 'Ping')           { $defThreads = 32 }
     if ($op -eq 'CheckUpgrade')   { $defThreads = 16 }
     if ($op -eq 'Diagnose')       { $defThreads = 16; $maxJobSeconds = 180 }
+    if ($op -eq 'FleetStatus')    { $defThreads = 16; $maxJobSeconds = 180 }
     if ($op -eq 'SetPageFile')    { $defThreads = 8; $maxJobSeconds = 180 }
     if ($op -eq 'ForceDiscovery') { $defThreads = 8; $maxJobSeconds = 600 }
     if ($op -eq 'Pin') {
@@ -1331,7 +1431,38 @@ function Invoke-JanetToolAction {
     # as a single positional argument. New v0.3.0 args appended at the END in the SAME
     # order as the appended worker param() tail (a mismatch silently corrupts every arg).
     $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles) }
-    $rowOf       = { param($res) @{ Host=$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail } }
+    $rowOf       = {
+        param($res)
+        if ($op -eq 'FleetStatus') {
+            # Build the rich Fleet Status row and classify Win24H2Status centrally. Timeout /
+            # cancel / worker-error paths pass a bare {Host;Ping;Status;Detail} result with no
+            # fleet fields -> those surface as Online=false + Error=<detail> (Offline for the
+            # reachability skip, Error for a genuine failure) via the classifier below.
+            $online  = [bool]$res.Online
+            $status  = [string]$res.Status
+            $errText = [string]$res.Error
+            if (-not $errText -and $status -and (@('SCANNED','Skipped') -notcontains $status)) { $errText = [string]$res.Detail }
+            $ob = 0; [void][int]::TryParse([string]$res.OsBuild, [ref]$ob)
+            $eligible    = [bool]$res.Eligible
+            $pending     = [bool]$res.PendingReboot
+            $blockReason = [string]$res.BlockReason
+            $win = Get-WinUpgradeFleetStatus -OsBuild $ob -Online $online -Eligible $eligible -BlockReason $blockReason -PendingReboot $pending -ErrorText $errText
+            return @{
+                Host          = $res.Host
+                Online        = $online
+                DisplayVersion= [string]$res.DisplayVersion
+                OsBuild       = $ob
+                Win24H2Status = $win
+                Eligible      = $eligible
+                BlockReason   = $blockReason
+                Pinned        = [bool]$res.Pinned
+                PinnedVersion = [string]$res.PinnedVersion
+                PendingReboot = $pending
+                Error         = $errText
+            }
+        }
+        @{ Host=$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail }
+    }
 
     $modeNote  = if ($dryRun) { ' [DRY-RUN]' } else { '' }
     $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
@@ -1351,7 +1482,10 @@ function Invoke-JanetToolAction {
     $pool.Open()
     # seed Queued rows so the operator sees the whole target list immediately (ping is
     # instant, so it skips straight to Online/Offline rather than flashing Queued).
-    if ($op -ne 'ping') { foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Detail='waiting for a runspace...' }) } }
+    if ($op -eq 'FleetStatus') {
+        foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Online=$false; DisplayVersion=''; OsBuild=0; Win24H2Status='Queued'; Eligible=$false; BlockReason=''; Pinned=$false; PinnedVersion=''; PendingReboot=$false; Error='' }) }
+    }
+    elseif ($op -ne 'ping') { foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Detail='waiting for a runspace...' }) } }
     $jobs = New-Object System.Collections.ArrayList
     foreach ($h in $targets) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
@@ -1474,6 +1608,39 @@ function Invoke-JanetToolAction {
     & $send @{ type='status'; text="Done$modeNote. $okCount ok, $failCount failed of $($jobs.Count)." }
     # Persistent FINISHED tally in the activity log (desktop-tool parity).
     & $send @{ type='log'; level='info'; text="[$(Get-Date -Format 'HH:mm:ss')] FINISHED$modeNote. OK=$okCount  Failed=$failCount  of $($jobs.Count).$skipNote" }
+
+    if ($op -eq 'FleetStatus') {
+        # Roll the per-host rows up into the fleet posture summary. Counts are keyed off the
+        # single Win24H2Status verdict (card-aligned); Pinned is tallied independently as a
+        # secondary flag. blockBreakdown counts each failing-check reason across Blocked hosts.
+        $fleet = [ordered]@{
+            total=$jobs.Count; already24h2=0; ready=0; blocked=0; pendingReboot=0;
+            pinned=0; on23h2OrOlder=0; online=0; offline=0; errors=0
+        }
+        $blockBreak = @{}
+        foreach ($row in $rows) {
+            if ([bool]$row.Online) { $fleet.online++ } else { $fleet.offline++ }
+            if ([bool]$row.Pinned) { $fleet.pinned++ }
+            $ob = 0; [void][int]::TryParse([string]$row.OsBuild, [ref]$ob)
+            if ($ob -gt 0 -and $ob -lt 26100) { $fleet.on23h2OrOlder++ }
+            $ws = [string]$row.Win24H2Status
+            if     ($ws -eq 'Already 24H2+')  { $fleet.already24h2++ }
+            elseif ($ws -eq 'Ready')          { $fleet.ready++ }
+            elseif ($ws -eq 'Pending reboot') { $fleet.pendingReboot++ }
+            elseif ($ws -like 'Blocked:*') {
+                $fleet.blocked++
+                foreach ($rz in (([string]$row.BlockReason) -split ';')) {
+                    $rt = $rz.Trim()
+                    if ($rt) { if ($blockBreak.ContainsKey($rt)) { $blockBreak[$rt]++ } else { $blockBreak[$rt] = 1 } }
+                }
+            }
+            elseif ($ws -eq 'Offline') { }   # already tallied via the offline counter
+            else { $fleet.errors++ }
+        }
+        $fleet.blockBreakdown = $blockBreak
+        return @{ rows = @($rows); summary = $fleet }
+    }
+
     return @{ rows = @($rows); summary = @{ total=$jobs.Count; ok=$okCount; failed=$failCount; skipped=$skipped } }
 }
 
