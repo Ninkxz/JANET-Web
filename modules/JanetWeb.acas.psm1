@@ -2088,7 +2088,7 @@ $script:AcasKbInstallBlock = {
                 foreach ($kb in $targetKBs) { if (@($allUpdates | Where-Object { $_.Name -like "*$kb*" -or $_.ArticleID -eq ($kb -replace '^KB','') }).Count -gt 0) { $found += $kb } }
                 if ($found.Count -gt 0) {
                     $toInstall = @($allUpdates | Where-Object { $dom=$false; foreach ($kb in $found) { if ($_.Name -like "*$kb*" -or $_.ArticleID -eq ($kb -replace '^KB','')) { $dom=$true; break } }; $dom })
-                    if ($toInstall.Count -gt 0) { try { Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop | Out-Null; return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
+                    if ($toInstall.Count -gt 0) { try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop).ReturnValue; if ($null -eq $rv -or [int]$rv -eq 0) { return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } else { return @{ Found=$found; Triggered=0; Error="Install trigger rejected by client (ReturnValue=$([int]$rv)); $($toInstall.Count) update(s) NOT installed" } } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
                 }
                 return @{ Found=$found; Triggered=0; Error='' }
             }

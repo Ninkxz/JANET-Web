@@ -97,9 +97,21 @@ function Enable-LenovoSecureBoot {
     $saveRes  = (Get-WmiObject -Class Lenovo_SaveBiosSettings -Namespace $ns -EA Stop
                 ).SaveBiosSettings("$BIOSPassword,ascii,us").return
     $new = (& $getSB).CurrentSetting
+    # Compare the post-write read-back to the INTENDED state (like the Dell branch) -
+    # do not derive success from the WMI return string alone. Lenovo CurrentSetting is
+    # "SecureBoot,<value>[,...]"; the value token is element [1]. A refused commit that
+    # still returned the STRING 'Success' would otherwise be reported as a clean success
+    # while the setting silently reverts on the next boot.
+    $newVal = ''
+    if ($new) { $parts = "$new" -split ','; if ($parts.Count -ge 2) { $newVal = $parts[1].Trim() } }
     $err = ''
     if ("$setRes" -ne 'Success' -or "$saveRes" -ne 'Success') {
         $err = "Lenovo BIOS write failed (SetBiosSetting='$setRes', SaveBiosSettings='$saveRes'); check the supervisor BIOS password. Secure Boot NOT persisted."
+    } elseif ($newVal -notmatch '^(?i)enable') {
+        # WMI accepted the write but the read-back does not (yet) show SecureBoot enabled.
+        # Lenovo applies the staged setting on the next boot - report pending, not a clean
+        # success, so an un-applied/reverted setting is never counted as done.
+        $new = "$new (pending reboot)"
     }
     New-Result -Mfr 'Lenovo' -Current $current -SetResult "set=$setRes; save=$saveRes" -New $new -Err $err
 }

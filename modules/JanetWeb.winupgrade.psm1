@@ -455,6 +455,26 @@ $script:WinUpgradeWorker = {
     # enqueue a live phase step the harvest loop streams as a row (parity with pkginstall).
     $pushStep = { param($step, $detail) if ($StepQueue) { try { [void]$StepQueue.Enqueue([pscustomobject]@{ Hostname=$Computer; Step=$step; Detail=$detail }) } catch {} } }
 
+    # Read-back of the three WUfB pin policy values (marker: PINREAD). Pin uses it to
+    # CONFIRM the write stuck (a GPO refresh can re-overwrite it, or the write can be
+    # silently rejected); Unpin uses it to CONFIRM the values are actually gone (a
+    # silently-failed Remove-ItemProperty must not report "removed"). Read-only and
+    # self-contained so it serializes into a bare pool runspace (no module scope).
+    $pinReadSb = {
+        $rp = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'   # marker:PINREAD
+        $p  = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
+        $names = if ($p) { @($p.PSObject.Properties.Name) } else { @() }
+        [pscustomobject]@{
+            KeyPresent               = [bool]$p
+            TargetReleaseVersion     = $(if ($names -contains 'TargetReleaseVersion') { $p.TargetReleaseVersion } else { $null })
+            ProductVersion           = $(if ($names -contains 'ProductVersion') { [string]$p.ProductVersion } else { '' })
+            TargetReleaseVersionInfo = $(if ($names -contains 'TargetReleaseVersionInfo') { [string]$p.TargetReleaseVersionInfo } else { '' })
+            HasTRV                   = ($names -contains 'TargetReleaseVersion')
+            HasProduct               = ($names -contains 'ProductVersion')
+            HasInfo                  = ($names -contains 'TargetReleaseVersionInfo')
+        }
+    }
+
     if (& $isCancelled) { $r.Status = 'Cancelled'; $r.Detail = 'cancelled before start'; return $r }
 
     # ---- reachability pre-check: pure-TCP probe (AFNET-safe; never ICMP). Loop
@@ -508,6 +528,21 @@ $script:WinUpgradeWorker = {
                 if ($credSet) { $ic.Credential = $Cred }
                 $out = Invoke-Command @ic
                 $detailParts = @("Pinned: $out")
+                # VERIFY the pin actually stuck: re-read the three policy values on the target
+                # and confirm they match what we intended. A GPO refresh could re-overwrite
+                # them, or the client could silently reject the write - either way that must
+                # NOT report DONE (audit: "reports success without verifying").
+                $icv = @{ ComputerName=$Computer; ScriptBlock=$pinReadSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                if ($credSet) { $icv.Credential = $Cred }
+                $rb = $null
+                try { $rb = Invoke-Command @icv } catch { $rb = $null }
+                $pinOk = ($null -ne $rb -and [int]$rb.TargetReleaseVersion -eq 1 -and "$($rb.ProductVersion)" -eq "$Product" -and "$($rb.TargetReleaseVersionInfo)" -eq "$Version")
+                if (-not $pinOk) {
+                    $rbNote = if ($rb) { "read-back TRV=$($rb.TargetReleaseVersion) ProductVersion='$($rb.ProductVersion)' TargetReleaseVersionInfo='$($rb.TargetReleaseVersionInfo)'" } else { 'policy key not readable after write' }
+                    $r.Status = 'FAILED'; $r.Ok = $false
+                    $r.Detail = "Pinned: $out | PIN NOT VERIFIED - policy did not read back as $Product $Version ($rbNote); a GPO refresh may have re-overwritten it or the write was rejected."
+                    break
+                }
                 # "Then run Windows Update": optionally kick the WU agent so the pinned build
                 # is detected/offered without waiting for the next scheduled scan. Best-effort -
                 # a trigger failure never fails the pin (the policy is already written).
@@ -572,13 +607,16 @@ $script:WinUpgradeWorker = {
                         Remove-ItemProperty -Path $regPath -Name 'TargetReleaseVersion'     -ErrorAction SilentlyContinue
                         Remove-ItemProperty -Path $regPath -Name 'ProductVersion'           -ErrorAction SilentlyContinue
                         Remove-ItemProperty -Path $regPath -Name 'TargetReleaseVersionInfo' -ErrorAction SilentlyContinue
+                        # If the key holds no real (non-PS*) values after removal, drop it. The
+                        # AUTHORITATIVE removed/not-removed decision is the caller's read-back
+                        # against the three specific pin value names - NOT this heuristic.
                         $remaining = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).PSObject.Properties |
                             Where-Object { $_.Name -notlike 'PS*' }
                         if (-not $remaining) {
                             Remove-Item -Path $regPath -Force -ErrorAction SilentlyContinue
-                            $msg = 'policy values removed; empty WindowsUpdate key removed'
+                            $msg = 'removal attempted; WindowsUpdate policy key was empty and was deleted'
                         } else {
-                            $msg = 'policy values removed; key kept (other values present)'
+                            $msg = 'removal attempted; other policy values kept'
                         }
                     } else {
                         $msg = 'policy key not present (nothing to remove)'
@@ -599,7 +637,29 @@ $script:WinUpgradeWorker = {
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($RemoveBypass); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
                 $out = Invoke-Command @ic
-                $r.Status = 'DONE'; $r.Detail = "$out"; $r.Ok = $true
+                # VERIFY removal: re-read the three SPECIFIC pin value names on the target and
+                # confirm they are actually gone. Remove-ItemProperty -EA SilentlyContinue can
+                # fail silently (ACL / GPO re-write), so "removed" must be gated on the read-back
+                # (audit: "reports success without verifying").
+                $icv = @{ ComputerName=$Computer; ScriptBlock=$pinReadSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                if ($credSet) { $icv.Credential = $Cred }
+                $rb = $null
+                try { $rb = Invoke-Command @icv } catch { $rb = $null }
+                if ($null -eq $rb) {
+                    $r.Status = 'FAILED'; $r.Ok = $false
+                    $r.Detail = "$out | REMOVAL NOT VERIFIED - could not re-read the policy key to confirm the pin is gone."
+                    break
+                }
+                $stillSet = @()
+                if ($rb.HasTRV)     { $stillSet += 'TargetReleaseVersion' }
+                if ($rb.HasProduct) { $stillSet += 'ProductVersion' }
+                if ($rb.HasInfo)    { $stillSet += 'TargetReleaseVersionInfo' }
+                if ($stillSet.Count -eq 0) {
+                    $r.Status = 'DONE'; $r.Detail = "$out"; $r.Ok = $true
+                } else {
+                    $r.Status = 'FAILED'; $r.Ok = $false
+                    $r.Detail = "$out | PIN NOT REMOVED - still present after removal: $([string]::Join(', ', $stillSet)) (the pin may still be active)."
+                }
             }
 
             'InstallCab' {

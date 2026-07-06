@@ -2315,7 +2315,7 @@ $script:WptKbInstallBlock = {
             foreach ($kb in $targetKBs) { if (@($allUpdates | Where-Object { $_.Name -like "*$kb*" -or $_.ArticleID -eq ($kb -replace '^KB','') }).Count -gt 0) { $found += $kb } }
             if ($found.Count -gt 0) {
                 $toInstall = @($allUpdates | Where-Object { $dom=$false; foreach ($kb in $found) { if ($_.Name -like "*$kb*" -or $_.ArticleID -eq ($kb -replace '^KB','')) { $dom=$true; break } }; $dom })
-                if ($toInstall.Count -gt 0) { try { Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop | Out-Null; return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
+                if ($toInstall.Count -gt 0) { try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop).ReturnValue; if ($null -eq $rv -or [int]$rv -eq 0) { return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } else { return @{ Found=$found; Triggered=0; Error="Install trigger rejected by client (ReturnValue=$([int]$rv)); $($toInstall.Count) update(s) NOT installed" } } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
             }
             return @{ Found=$found; Triggered=0; Error='' }
         }
@@ -3313,8 +3313,9 @@ $script:WptSccmInstallBlock = {
                     if (-not $app) { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Skipped'; Detail='not in catalog' }); continue }
                     if ($app.ApplicabilityState -ne 'Applicable') { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Skipped'; Detail="not applicable ($($app.ApplicabilityState))" }); continue }
                     $iargs = @{ EnforcePreference=[uint32]0; Id="$($app.Id)"; IsMachineTarget=[System.Convert]::ToBoolean($app.IsMachineTarget); IsRebootIfNeeded=$false; Priority='High'; Revision="$($app.Revision)" }
-                    Invoke-CimMethod -Namespace ROOT\ccm\ClientSDK -ClassName CCM_Application -MethodName Install -Arguments $iargs -EA Stop | Out-Null
-                    [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Triggered'; Detail="Install (v$($app.SoftwareVersion))" })
+                    $rv = (Invoke-CimMethod -Namespace ROOT\ccm\ClientSDK -ClassName CCM_Application -MethodName Install -Arguments $iargs -EA Stop).ReturnValue
+                    if ($null -eq $rv -or [int]$rv -eq 0) { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Triggered'; Detail="Install (v$($app.SoftwareVersion))" }) }
+                    else { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Failed'; Detail="Install rejected by client (ReturnValue=$([int]$rv))" }) }
                 } catch { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Failed'; Detail=$_.Exception.Message }) }
             }
             $upIds = @(($items | Where-Object { $_.Type -eq 'Update' }) | ForEach-Object { $_.Id })
@@ -3322,8 +3323,9 @@ $script:WptSccmInstallBlock = {
                 try {
                     $allUp = @(Get-CimInstance -Namespace ROOT\ccm\ClientSDK -Class CCM_SoftwareUpdate -EA Stop | Where-Object { $upIds -contains $_.UpdateID })
                     if ($allUp.Count -gt 0) {
-                        Invoke-CimMethod -Namespace ROOT\ccm\ClientSDK -ClassName CCM_SoftwareUpdatesManager -MethodName InstallUpdates -Arguments @{ CCMUpdates=[ciminstance[]]$allUp } -EA Stop | Out-Null
-                        foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Triggered'; Detail='InstallUpdates' }) }
+                        $rv = (Invoke-CimMethod -Namespace ROOT\ccm\ClientSDK -ClassName CCM_SoftwareUpdatesManager -MethodName InstallUpdates -Arguments @{ CCMUpdates=[ciminstance[]]$allUp } -EA Stop).ReturnValue
+                        if ($null -eq $rv -or [int]$rv -eq 0) { foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Triggered'; Detail='InstallUpdates' }) } }
+                        else { foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Failed'; Detail="InstallUpdates rejected by client (ReturnValue=$([int]$rv))" }) } }
                     } else { [void]$out.Add(@{ Type='Update'; Name="$($upIds.Count) update(s)"; Result='Skipped'; Detail='none matched in CCM_SoftwareUpdate' }) }
                 } catch { [void]$out.Add(@{ Type='Update'; Name="$($upIds.Count) update(s)"; Result='Failed'; Detail=$_.Exception.Message }) }
             }
