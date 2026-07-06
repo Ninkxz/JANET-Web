@@ -57,7 +57,7 @@ JANET Web\
 
 - **Remediation** — Workstation Patching, ACAS Nemesis, Package Installer,
   Windows Upgrade, Unsupported Remediator, Patch Content
-- **Hardening** — Secure Boot Enabler, BIOS Firmware, STIG Checker
+- **Hardening** — Secure Boot Enabler, BIOS Firmware
 - **Lifecycle** — Restart Scheduler
 - **Operations** — Remote Message
 - **Directory** — AD Search

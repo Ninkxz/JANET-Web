@@ -1413,7 +1413,7 @@ function Invoke-JanetToolAction {
     # Operator-cancel bridge: the server injects the synchronized job hashtable as
     # $Params['__job']; its 'Cancel' flag (set by POST /job/<id>/cancel) lets a
     # running search break. Absent in direct/test calls -> $cancelCheck returns
-    # $false. Mirrors the same closure other modules (e.g. stig.psm1) build.
+    # $false. Mirrors the same closure other modules (e.g. c2c.psm1) build.
     $cancelJob = $null
     if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }
@@ -1566,7 +1566,7 @@ function Invoke-JanetToolAction {
         # remote log query (engine binds null = current Kerberos identity, unchanged).
         [void]$powershell.AddArgument($Credential)
         # Drive the engine with BeginInvoke + a 150ms poll loop (mirrors the
-        # BeginInvoke/poll/BeginStop pattern in stig.psm1) so an operator Cancel
+        # BeginInvoke/poll/BeginStop pattern in c2c.psm1) so an operator Cancel
         # can break a long DC scan instead of blocking on a single Invoke().
         $output = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
         $async  = $powershell.BeginInvoke($output, $output)

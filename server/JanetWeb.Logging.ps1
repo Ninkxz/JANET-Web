@@ -44,7 +44,6 @@ $script:JanetWebToolMap = @{
     # (Logs\kev, Logs\c2c, Logs\biosfirmware). Their rows already live under
     # those ids; adding entries here would split existing logs, so they stay.
     history    = 'Patch_History'
-    stig       = 'STIG_Checker'
     patchlib   = 'Patch_Content'
 }
 

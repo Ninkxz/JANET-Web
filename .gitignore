@@ -19,9 +19,8 @@ JanetLocal/*
 # ...and the C2C Readiness baseline seed (the C2C tool needs it on a fresh clone;
 # operator edits to check thresholds / DoD root thumbprints are then trackable too)
 !JanetLocal/c2c-baseline.json
-# ...and the STIG Checker rule baseline + Reports SLA deadline baseline (same
-# ship-the-seed / track-operator-edits rationale as the two above)
-!JanetLocal/stig-baseline.json
+# ...and the Reports SLA deadline baseline (same ship-the-seed /
+# track-operator-edits rationale as the ones above)
 !JanetLocal/sla-baseline.json
 # ...and the IAVM CVE->IAVA map seed (Reports IAVM tagging + KEV xref need it on a
 # fresh clone; operator Add-IAVM edits are then version-trackable too). The SLA
