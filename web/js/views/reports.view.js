@@ -798,8 +798,8 @@
 
         // Copy a route's hosts to the clipboard and stage them on Janet.handoff so the
         // operator can paste/import them into acas/upr (which do not read ctx.targets).
-        function stageRouteHosts(hosts, bucket) {
-          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'reports route: ' + bucket); } catch (e) {} }
+        function stageRouteHosts(hosts, bucket, extra) {
+          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'reports route: ' + bucket, extra || null); } catch (e) {} }
           if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(hosts.join('\n')).catch(function () {}); }
         }
 
@@ -813,17 +813,23 @@
           var hosts = String(r.Hosts == null ? '' : r.Hosts).split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
           if (!hosts.length) { ctx.confirm({ title: 'No hosts', body: 'This route has no affected hosts - re-run Route Findings.', okText: 'OK', cancelText: null }); return; }
           var prof = String(r.Profile == null ? '' : r.Profile);
-          var pick = (prof && prof !== '-') ? (prof + ' profile') : (String(r.Action || '') + ' action');
+          // A wpt registry-key-apply route carries the reg-catalog KEY in Profile (e.g.
+          // 'BHI'); pass it as cvekey via the handoff and deep-link straight to the Reg
+          // Key Fixes tab so the fix pre-selects. acas-profile routes are unchanged.
+          var isRegKey = (String(r.ActionId || '') === 'registry-key-apply');
+          var cvekey = (isRegKey && prof && prof !== '-') ? prof : '';
+          var deepTab = isRegKey ? 'regkey' : null;
+          var pick = isRegKey ? (cvekey + ' registry fix') : ((prof && prof !== '-') ? (prof + ' profile') : (String(r.Action || '') + ' action'));
           var readsTargets = !!TARGETS_AWARE[toolId];
           var doIt = function () {
-            stageRouteHosts(hosts, r.Bucket);
+            stageRouteHosts(hosts, r.Bucket, cvekey ? { cvekey: cvekey } : null);
             if (readsTargets) {
               ctx.targets.set(hosts.join('\n'));
               log.append({ text: hosts.length + ' host(s) loaded into the shared target list (and copied to clipboard); opened ' + toolId + ' - select the ' + pick + '.', level: 'ok' });
             } else {
               log.append({ text: hosts.length + ' host(s) copied to clipboard; opened ' + toolId + ' - paste/import them there, then select the ' + pick + '. (' + toolId + ' scans its own host set, not the shared target list.)', level: 'ok' });
             }
-            if (typeof ctx.openTool === 'function') ctx.openTool(toolId);
+            if (typeof ctx.openTool === 'function') ctx.openTool(toolId, deepTab);
           };
           if (readsTargets && ctx.targets && ctx.targets.count() > 0) {
             ctx.confirm({
@@ -1083,10 +1089,15 @@
           var hosts = String(r.HostsList == null ? '' : r.HostsList).split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
           if (!hosts.length) { ctx.confirm({ title: 'No hosts', body: 'This product has no affected hosts — re-run Build Catalog.', okText: 'OK', cancelText: null }); return; }
           var prof = String(r.RouteProfile == null ? '' : r.RouteProfile);
-          var pick = prof ? (prof + ' profile') : (String(r.RouteAction || '') + ' action');
+          // wpt registry-key-apply route: Profile carries the reg-catalog KEY (cvekey);
+          // pass it via handoff + deep-link to the Reg Key Fixes tab so it pre-selects.
+          var isRegKey = (String(r.RouteActionId || '') === 'registry-key-apply');
+          var cvekey = (isRegKey && prof) ? prof : '';
+          var deepTab = isRegKey ? 'regkey' : null;
+          var pick = isRegKey ? (cvekey + ' registry fix') : (prof ? (prof + ' profile') : (String(r.RouteAction || '') + ' action'));
           var readsTargets = !!TP_TARGETS_AWARE[toolId];
           var doIt = function () {
-            if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'thirdparty: ' + r.Product); } catch (e) {} }
+            if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'thirdparty: ' + r.Product, cvekey ? { cvekey: cvekey } : null); } catch (e) {} }
             if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(hosts.join('\n')).catch(function () {}); }
             if (readsTargets) {
               ctx.targets.set(hosts.join('\n'));
@@ -1094,7 +1105,7 @@
             } else {
               log.append({ text: 'Loaded ' + hosts.length + ' host(s) for ' + r.Product + '; copied to clipboard for ' + toolId + '. Paste/import them, then review and run the gated ' + pick + ' (admin session required). ' + toolId + ' scans its own host set, not the shared target list.', level: 'ok' });
             }
-            if (typeof ctx.openTool === 'function') ctx.openTool(toolId);
+            if (typeof ctx.openTool === 'function') ctx.openTool(toolId, deepTab);
           };
           if (readsTargets && ctx.targets && ctx.targets.count() > 0) {
             ctx.confirm({

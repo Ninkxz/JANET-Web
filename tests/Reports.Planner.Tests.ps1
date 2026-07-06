@@ -11,9 +11,9 @@ Describe 'remediation-plan per-host work queue (Phase 3)' {
 
     $rows = & $script:Mod {
         $script:AcasFindings = @(
-            # hostA: 1 Critical KEV Chrome (routable), 1 Apache (manual) + 1 Patched (excluded)
-            [pscustomobject]@{ Hostname='hostA'; PluginID='1'; VulnName='Google Chrome flaw'; Severity='Critical'; CVE='CVE-2024-1'; Category='Chrome'; Status='Open'; Solution='Update Chrome'; InKEV=$true;  KevCves='CVE-2024-1'; IAVA='' }
-            [pscustomobject]@{ Hostname='hostA'; PluginID='2'; VulnName='Apache Struts';        Severity='High';     CVE='';          Category='Apache'; Status='Open'; Solution='';            InKEV=$false; KevCves=''; IAVA='' }
+            # hostA: 1 Critical KEV Chrome (routable), 1 Registry Fix (manual) + 1 Patched (excluded)
+            [pscustomobject]@{ Hostname='hostA'; PluginID='1'; VulnName='Google Chrome flaw'; Severity='Critical'; CVE='CVE-2024-1'; Category='Chrome';       Status='Open'; Solution='Update Chrome'; InKEV=$true;  KevCves='CVE-2024-1'; IAVA='' }
+            [pscustomobject]@{ Hostname='hostA'; PluginID='2'; VulnName='SMB signing not required'; Severity='High'; CVE='';          Category='Registry Fix'; Status='Open'; Solution='';            InKEV=$false; KevCves=''; IAVA='' }
             [pscustomobject]@{ Hostname='hostA'; PluginID='3'; VulnName='Old thing';            Severity='Low';      CVE='';          Category='Chrome'; Status='Patched'; Solution='';         InKEV=$false; KevCves=''; IAVA='' }
             # hostB: 1 Medium Defender (routable), no KEV
             [pscustomobject]@{ Hostname='hostB'; PluginID='4'; VulnName='Windows Defender out of date'; Severity='Medium'; CVE=''; Category='Other'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' }
@@ -37,12 +37,12 @@ Describe 'remediation-plan per-host work queue (Phase 3)' {
         [int]($rows | Where-Object { $_['Host'] -eq 'hostA' } | ForEach-Object { $_['Findings'] }) | Should Be 2
     }
 
-    It 'splits routable vs manual (hostA: Chrome routable, Apache manual)' {
+    It 'splits routable vs manual (hostA: Chrome routable, Registry Fix manual)' {
         $a = $rows | Where-Object { $_['Host'] -eq 'hostA' }
         [int]$a['Routable'] | Should Be 1
         [int]$a['Manual']   | Should Be 1
         $a['Plan'] | Should Match 'acas: Google Chrome'
-        $a['Plan'] | Should Match 'manual: Apache'
+        $a['Plan'] | Should Match 'manual: Registry Fix'
     }
 
     It 'promotes a Defender finding (by vuln name) to the routable Defender route' {

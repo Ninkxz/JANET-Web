@@ -86,7 +86,7 @@
   // transient cross-tool handoff (in-memory, this page session only)
   var pending = null;
   Janet.handoff = {
-    send: function (hosts, label) { pending = { hosts: (hosts || []).filter(Boolean), label: label || '', stamp: (Janet.util && Janet.util.clockStr ? Janet.util.clockStr() : '') }; },
+    send: function (hosts, label, extra) { pending = { hosts: (hosts || []).filter(Boolean), label: label || '', stamp: (Janet.util && Janet.util.clockStr ? Janet.util.clockStr() : ''), extra: extra || null }; },
     peek: function () { return pending; },
     take: function () { var p = pending; pending = null; return p; },
     clear: function () { pending = null; }

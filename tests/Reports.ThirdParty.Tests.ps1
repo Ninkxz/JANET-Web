@@ -83,7 +83,7 @@ Describe 'thirdparty-catalog: non-KB product rollup' {
     }
 }
 
-Describe 'thirdparty-catalog: Apache Log4j is not remediable (no auto-route)' {
+Describe 'thirdparty-catalog: Apache Log4j routes to the ACAS Log4j jar-replace profile' {
     $log4j = & $script:Mod {
         $script:AcasFindings = @(
             [pscustomobject]@{ Hostname='hL1'; PluginID='90'; VulnName='Apache Log4j 1.x Multiple Vulnerabilities'; Severity='Critical'; CVE='CVE-2021-44228'; Category='Apache'; Status='Open'; Solution='Upgrade Apache Log4j to a supported version.'; InKEV=$true; KevCves='CVE-2021-44228'; IAVA='' }
@@ -92,17 +92,19 @@ Describe 'thirdparty-catalog: Apache Log4j is not remediable (no auto-route)' {
         Invoke-JanetToolAction -ActionId 'thirdparty-catalog' -Params @{} -Emit { param($e) }
     }
 
-    It 'names the product but exposes no route (Routable=false, empty RouteTool)' {
+    It 'names the product and routes it to acas run-vulnerability (Log4j profile)' {
         $row = @($log4j.rows | Where-Object { $_.Product -eq 'Apache Log4j' })[0]
-        $row              | Should Not BeNullOrEmpty
-        $row.Routable     | Should Be $false
-        $row.RouteTool    | Should BeNullOrEmpty
-        $row.Route        | Should Match 'manual'
-        [int]$log4j.summary.routable | Should Be 0
-        [int]$log4j.summary.manual   | Should Be 1
+        $row               | Should Not BeNullOrEmpty
+        $row.Routable      | Should Be $true
+        $row.RouteTool     | Should Be 'acas'
+        $row.RouteActionId | Should Be 'run-vulnerability'
+        $row.RouteProfile  | Should Be 'Apache Log4j - Replace Vulnerable Jars'
+        $row.Route         | Should Match 'acas'
+        [int]$log4j.summary.routable | Should Be 1
+        [int]$log4j.summary.manual   | Should Be 0
     }
 
-    It 'still surfaces the affected host list for the routeless product' {
+    It 'still surfaces the affected host list for the routed product' {
         $row   = @($log4j.rows | Where-Object { $_.Product -eq 'Apache Log4j' })[0]
         $hosts = @([string]$row.HostsList -split "`n" | Where-Object { $_ })
         $hosts.Count | Should Be 2

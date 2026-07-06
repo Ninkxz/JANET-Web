@@ -539,20 +539,47 @@ $script:LastSquadronRollup     = $null
 #     clipboard instead (see reports.view.js sendRoute).
 #   - upr:  JanetWeb.upr.psm1  -> tool id 'upr' (Unsupported Product Remediator),
 #     for EOL / unsupported / not-our-patch products.
-# Buckets with no safe one-click route (Apache / Other and anything unlisted) fall
-# through to 'manual review' (Routable=$false) at the action.
+# Buckets with no safe one-click route (Other and anything unlisted) fall through
+# to 'manual review' (Routable=$false) at the action. Tracked-exception buckets
+# (IsException, empty ToolId) route to NOTHING but are labelled a POA&M exception,
+# so coverage counts them apart from both routable and manual-review piles.
+#
+# ROUTE Profile CONVENTION: for an acas 'run-vulnerability' route Profile is the
+# ACAS profile name; for a wpt 'registry-key-apply' route Profile carries the
+# reg-key CATALOG KEY (becomes the 'cvekey' param at the handoff).
 $script:RemediationRouteMap = @{
     'Chrome'        = @{ ToolId='acas'; ActionId='run-vulnerability'; Action='Run Vulnerability Update';      Profile='Google Chrome - Update' }
     'Edge'          = @{ ToolId='acas'; ActionId='run-vulnerability'; Action='Run Vulnerability Update';      Profile='Microsoft Edge - Update' }
     'Office'        = @{ ToolId='acas'; ActionId='run-vulnerability'; Action='Run Vulnerability Update';      Profile='Microsoft 365 - Force Update' }
     'Defender'      = @{ ToolId='acas'; ActionId='run-vulnerability'; Action='Run Vulnerability Update';      Profile='Windows Defender - Update Definitions' }
+    # Apache / Log4j / Tomcat / Struts / httpd all bucket to 'Apache' - route them
+    # to the ACAS Log4j jar-replace profile (the vast bulk of the pile is Log4j).
+    # NOTE: that profile currently swaps only 2 hard-coded lib paths (HID + Adobe);
+    # generalizing it is a SEPARATE follow-up - routing the bucket is still correct.
+    'Apache'        = @{ ToolId='acas'; ActionId='run-vulnerability'; Action='Run Vulnerability Update';      Profile='Apache Log4j - Replace Vulnerable Jars' }
     'KB Patch'      = @{ ToolId='wpt';  ActionId='kb-install';        Action='Install KBs';                   Profile='' }
     # Only genuine unquoted-service-path findings route to that profile (it mutates
     # service ImagePath registry values). The broad 'Registry Fix' bucket (SMB
-    # signing, IE/GPO hardening, spec-exec keys, ...) has NO one-click route and
-    # falls through to manual review - see the promotion in remediation-route.
+    # signing, IE/GPO hardening, ...) has NO one-click route and falls through to
+    # manual review - see the promotion in remediation-route.
     'Unquoted Service Path' = @{ ToolId='acas'; ActionId='run-vulnerability'; Action='Run Vulnerability Update'; Profile='Windows Unquoted Service Path - Remediate' }
+    # Intel BHI / speculative-execution -> the WPT reg-key fix (FeatureSettingsOverride
+    # bits). Profile carries the reg-catalog KEY 'BHI' -> becomes cvekey at the handoff.
+    'Speculative Execution' = @{ ToolId='wpt'; ActionId='registry-key-apply'; Action='Apply Registry Fix'; Profile='BHI' }
     'NOT OUR PATCH' = @{ ToolId='upr';  ActionId='';                  Action='Unsupported Product Remediator'; Profile='' }
+    # No local PowerShell fix (self-signed / untrusted certs, ~764 findings). Routes
+    # to nothing but is a TRACKED exception (POA&M), not a "manual review" that
+    # implies a fix exists. Empty ToolId + IsException keep it out of routable counts.
+    'Exception (no local fix)' = @{ ToolId=''; ActionId=''; Action='Tracked exception - no local fix (POA&M)'; Profile=''; IsException=$true }
+}
+
+# A route is an ACTIONABLE one-click fix only when it names a tool. Tracked-exception
+# entries (IsException + empty ToolId) are explicitly "no local fix" (POA&M) - counted
+# apart from both routable and plain manual-review buckets. Central so every consumer
+# (Router / Planner / Catalog / Campaign / Command Brief) reads the same rule.
+function Test-JanetWebRouteActionable {
+    param($Route)
+    return [bool]($Route -and -not [string]::IsNullOrWhiteSpace([string]$Route.ToolId))
 }
 
 # Scan-name -> category/owner classifier. ORDER MATTERS - first match wins.
@@ -628,7 +655,13 @@ function Categorize-Finding {
     if ($combined -match 'apache|log4j|tomcat|httpd|struts')      { return 'Apache' }
     if ($combined -match 'office|word|excel|outlook|powerpoint|visio|access|onenote|microsoft 365') { return 'Office' }
     if ($combined -match '\bkb\d{6,}\b|cumulative update|security update|servicing stack|\.net framework.*update') { return 'KB Patch' }
+    # Speculative-execution / Intel BHI - the WPT reg-key 'BHI' fix (FeatureSettingsOverride).
+    # ABOVE 'Registry Fix' so BHI (whose solution names a registry key) is not stolen by it.
+    if ($combined -match 'bhi|branch history injection|cve-2022-0001|spectre|meltdown|speculative execution|featuresettingsoverride') { return 'Speculative Execution' }
     if ($combined -match 'registry|regedit|reg key|group policy|gpo|local policy') { return 'Registry Fix' }
+    # Untrusted / self-signed certificates have no local PS fix - track as a POA&M
+    # exception (ABOVE the NOT OUR PATCH / Other catch-alls) rather than imply a fix.
+    if ($combined -match 'cert.*not.*trust|self-signed certificate|untrusted certificate') { return 'Exception (no local fix)' }
     if ($combined -match 'not a(n)?\s+(microsoft|windows)|third.party|vendor|contact.*vendor|no (patch|fix|update) available|eol|end.of.life|unsupported|adobe|java|firefox|vmware|cisco|oracle|apple') { return 'NOT OUR PATCH' }
     return 'Other'
 }
@@ -4729,6 +4762,8 @@ function Invoke-JanetToolAction {
             $rows = New-Object System.Collections.ArrayList
             $routableFindings = 0
             $routableBuckets  = 0
+            $exceptionFindings = 0
+            $exceptionBuckets  = 0
             $hostCap   = 40   # capped host display; full list ships in Hosts for the view handoff
             $pluginCap = 8
             foreach ($item in $sorted) {
@@ -4739,32 +4774,38 @@ function Invoke-JanetToolAction {
                 } else { ($hostList -join ', ') }
                 $sampleP = @($b.Plugins | Select-Object -First $pluginCap)
                 $sampleStr = if ($b.Plugins.Count -gt $pluginCap) { ($sampleP -join ', ') + " ... (+$($b.Plugins.Count - $pluginCap))" } else { ($sampleP -join ', ') }
-                if ($route) { $routableFindings += $b.FindingCount; $routableBuckets++ }
+                $isAct = Test-JanetWebRouteActionable $route
+                $isExc = [bool]($route -and $route.IsException)
+                if ($isAct)      { $routableFindings  += $b.FindingCount; $routableBuckets++ }
+                elseif ($isExc)  { $exceptionFindings += $b.FindingCount; $exceptionBuckets++ }
                 $row = @{
                     Host          = $b.Bucket
                     Bucket        = $b.Bucket
-                    Tool          = $(if ($route) { $route.ToolId } else { '-' })
-                    ToolId        = $(if ($route) { $route.ToolId } else { '' })
+                    Tool          = $(if ($isAct) { $route.ToolId } else { '-' })
+                    ToolId        = $(if ($isAct) { $route.ToolId } else { '' })
                     Action        = $(if ($route) { $route.Action } else { 'Manual review' })
-                    ActionId      = $(if ($route) { $route.ActionId } else { '' })
-                    Profile       = $(if ($route -and $route.Profile) { $route.Profile } else { '-' })
+                    ActionId      = $(if ($isAct) { $route.ActionId } else { '' })
+                    Profile       = $(if ($isAct -and $route.Profile) { $route.Profile } else { '-' })
                     FindingCount  = $b.FindingCount
                     HostCount     = $hostList.Count
                     Hosts         = ($hostList -join "`n")   # full list for the view's Send-to-tool handoff
                     HostsDisplay  = $hostsDisplay
                     SamplePlugins = $sampleStr
-                    Routable      = [bool]$route
+                    Routable      = [bool]$isAct
+                    IsException   = [bool]$isExc
                 }
                 [void]$rows.Add($row)
                 & $send (@{ type='row' } + $row)
             }
 
             $routablePct = if ($totalOpen -gt 0) { [math]::Round(($routableFindings / $totalOpen) * 100, 1) } else { 0 }
-            $manualFindings = $totalOpen - $routableFindings
-            & $send @{ type='status'; text="Router: $($rows.Count) bucket(s), $routableBuckets routable ($routablePct% of $totalOpen open finding(s)); $manualFindings finding(s) need manual review." }
+            $manualFindings = $totalOpen - $routableFindings - $exceptionFindings
+            $excNote = if ($exceptionFindings -gt 0) { " $exceptionFindings finding(s) are tracked exceptions (no local fix / POA&M)." } else { '' }
+            & $send @{ type='status'; text="Router: $($rows.Count) bucket(s), $routableBuckets routable ($routablePct% of $totalOpen open finding(s)); $manualFindings finding(s) need manual review.$excNote" }
             return @{ rows=@($rows); summary=@{
                 total=$rows.Count; openFindings=$totalOpen
                 routableBuckets=$routableBuckets; routableFindings=$routableFindings
+                exceptionBuckets=$exceptionBuckets; exceptionFindings=$exceptionFindings
                 manualFindings=$manualFindings; routablePct=$routablePct
             } }
         }
@@ -4797,10 +4838,11 @@ function Invoke-JanetToolAction {
                 if (-not $hosts.ContainsKey($hn)) {
                     $hosts[$hn] = @{
                         Host=$hn; Findings=0; Crit=0; High=0; Med=0; Low=0; Kev=0
-                        Routable=0; Manual=0
+                        Routable=0; Manual=0; Exception=0
                         Routes = New-Object System.Collections.ArrayList        # ordered distinct route labels
                         RouteSeen = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
                         ManualBuckets = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
+                        ExceptionBuckets = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
                     }
                 }
                 $h = $hosts[$hn]
@@ -4808,10 +4850,13 @@ function Invoke-JanetToolAction {
                 switch ([string]$f.Severity) { 'Critical' { $h.Crit++ } 'High' { $h.High++ } 'Medium' { $h.Med++ } 'Low' { $h.Low++ } }
                 if ([bool]$f.InKEV) { $h.Kev++ }
                 $route = if ($script:RemediationRouteMap.ContainsKey($bucket)) { $script:RemediationRouteMap[$bucket] } else { $null }
-                if ($route) {
+                if (Test-JanetWebRouteActionable $route) {
                     $h.Routable++
                     $label = if ($route.Profile) { "$($route.ToolId): $($route.Profile)" } else { "$($route.ToolId): $($route.Action)" }
                     if ($h.RouteSeen.Add($label)) { [void]$h.Routes.Add($label) }
+                } elseif ($route -and $route.IsException) {
+                    $h.Exception++
+                    [void]$h.ExceptionBuckets.Add($bucket)
                 } else {
                     $h.Manual++
                     [void]$h.ManualBuckets.Add($bucket)
@@ -4832,16 +4877,18 @@ function Invoke-JanetToolAction {
                 if ($h.Routable -gt 0) { $hostsWithRoutes++ }
                 $planParts = @($h.Routes)
                 if ($h.ManualBuckets.Count -gt 0) { $planParts += "manual: " + ((@($h.ManualBuckets | Sort-Object)) -join ', ') }
+                if ($h.ExceptionBuckets.Count -gt 0) { $planParts += "exception (no local fix): " + ((@($h.ExceptionBuckets | Sort-Object)) -join ', ') }
                 $sevStr = "$($h.Crit)/$($h.High)/$($h.Med)/$($h.Low)"
                 $row = @{
-                    _rk      = $h.Host
-                    Host     = $h.Host
-                    Findings = $h.Findings
-                    Sev      = $sevStr
-                    KEV      = $h.Kev
-                    Routable = $h.Routable
-                    Manual   = $h.Manual
-                    Plan     = ($planParts -join ' · ')
+                    _rk       = $h.Host
+                    Host      = $h.Host
+                    Findings  = $h.Findings
+                    Sev       = $sevStr
+                    KEV       = $h.Kev
+                    Routable  = $h.Routable
+                    Manual    = $h.Manual
+                    Exception = $h.Exception
+                    Plan      = ($planParts -join ' · ')
                 }
                 [void]$rows.Add($row)
                 if ($idx -le 800) { & $send (@{ type='row' } + $row) }
@@ -4988,14 +5035,15 @@ function Invoke-JanetToolAction {
                 # Tally the route per finding; the product's Route is the plurality
                 # route (so a handful of mis-bucketed findings can't hijack the row -
                 # the bulk of a product's findings decides its route).
-                $label = if ($route) { if ($route.Profile) { "$($route.ToolId): $($route.Profile)" } else { "$($route.ToolId): $($route.Action)" } } else { 'manual / none' }
+                $routeAct = Test-JanetWebRouteActionable $route
+                $label = if ($routeAct) { if ($route.Profile) { "$($route.ToolId): $($route.Profile)" } else { "$($route.ToolId): $($route.Action)" } } else { 'manual / none' }
                 if (-not $p.RouteCounts.ContainsKey($label)) { $p.RouteCounts[$label] = 0 }
                 $p.RouteCounts[$label] = [int]$p.RouteCounts[$label] + 1
                 # Keep the STRUCTURED route (tool/action/profile) beside its label so the
                 # plurality winner below can surface concrete ids for the handoff - taken
                 # from the SAME $script:RemediationRouteMap the Router/Planner resolve, so
                 # the catalog can never drift from a parallel map.
-                if (-not $p.RouteObjs.ContainsKey($label)) { $p.RouteObjs[$label] = $route }
+                if (-not $p.RouteObjs.ContainsKey($label)) { $p.RouteObjs[$label] = $(if ($routeAct) { $route } else { $null }) }
                 # Representative FIXED/target version: the highest version token in the
                 # finding text (Tenable "Upgrade to X" lines put the target as highest).
                 $vers = @(Get-VersionsFromText $text)
@@ -5161,8 +5209,8 @@ function Invoke-JanetToolAction {
                 $vn = ($f.VulnName -as [string]).ToLower(); $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
                 $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' } elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' } else { [string]$f.Category }
                 if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
-                if ($script:RemediationRouteMap.ContainsKey($bucket)) {
-                    $r = $script:RemediationRouteMap[$bucket]
+                $r = if ($script:RemediationRouteMap.ContainsKey($bucket)) { $script:RemediationRouteMap[$bucket] } else { $null }
+                if (Test-JanetWebRouteActionable $r) {
                     [void]$routes.Add($(if ($r.Profile) { "$($r.ToolId): $($r.Profile)" } else { "$($r.ToolId): $($r.Action)" }))
                 }
             }
@@ -6843,16 +6891,18 @@ function Invoke-JanetToolAction {
                     @{ Expression = { if ($_.Route) { 0 } else { 1 } } }, `
                     @{ Expression = { -$_.B.FindingCount } }, `
                     @{ Expression = { $_.B.Bucket } })
-                $rrows = New-Object System.Collections.ArrayList; $routableF = 0; $routableB = 0
+                $rrows = New-Object System.Collections.ArrayList; $routableF = 0; $routableB = 0; $exceptionF = 0
                 foreach ($item in $rsorted) {
                     $b = $item.B; $rt = $item.Route
-                    if ($rt) { $routableF += $b.FindingCount; $routableB++ }
-                    [void]$rrows.Add(@{ Bucket=$b.Bucket; Tool=$(if ($rt) { $rt.ToolId } else { '-' }); Action=$(if ($rt) { $rt.Action } else { 'Manual review' })
-                                       FindingCount=$b.FindingCount; HostCount=$b.Hosts.Count; Routable=[bool]$rt })
+                    $rtAct = Test-JanetWebRouteActionable $rt
+                    if ($rtAct) { $routableF += $b.FindingCount; $routableB++ }
+                    elseif ($rt -and $rt.IsException) { $exceptionF += $b.FindingCount }
+                    [void]$rrows.Add(@{ Bucket=$b.Bucket; Tool=$(if ($rtAct) { $rt.ToolId } else { '-' }); Action=$(if ($rt) { $rt.Action } else { 'Manual review' })
+                                       FindingCount=$b.FindingCount; HostCount=$b.Hosts.Count; Routable=[bool]$rtAct })
                 }
                 $routablePct = if ($totalOpen -gt 0) { [math]::Round(($routableF / $totalOpen) * 100, 1) } else { 0 }
-                $routeSec = @{ HasData=$true; OpenFindings=$totalOpen; RoutableFindings=$routableF; ManualFindings=($totalOpen - $routableF)
-                               RoutablePct=$routablePct; RoutableBuckets=$routableB; Rows=@($rrows) }
+                $routeSec = @{ HasData=$true; OpenFindings=$totalOpen; RoutableFindings=$routableF; ManualFindings=($totalOpen - $routableF - $exceptionF)
+                               ExceptionFindings=$exceptionF; RoutablePct=$routablePct; RoutableBuckets=$routableB; Rows=@($rrows) }
             }
 
             # ---- (f) Scan closure (only if a compare/closure ran this session) ----

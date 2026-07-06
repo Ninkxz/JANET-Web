@@ -1283,9 +1283,9 @@
       // Reports Remediation Router loads a route's hosts into shared targets then
       // opens the mapped acas/upr tool). Same registry lookup the palette uses; an
       // unknown id is a safe no-op.
-      openTool: function (toolId) {
+      openTool: function (toolId, tab) {
         var t = (TOOLS || []).filter(function (x) { return x.id === toolId; })[0];
-        if (t) openTool(t);
+        if (t) openTool(t, tab || null);
       }
     };
   }

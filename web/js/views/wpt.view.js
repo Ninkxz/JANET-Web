@@ -1462,6 +1462,17 @@
           }
         });
 
+        // Cross-tool handoff: the Reports Remediation Router / Third-Party Catalog can
+        // open us straight onto a specific reg-key fix (e.g. BHI for CVE-2022-0001) by
+        // staging a cvekey on Janet.handoff. Pre-select it if it names a known fix. We
+        // only PEEK (do not take) so the Targets tab still offers the host handoff; the
+        // affected hosts were already loaded into the shared target list by the router.
+        try {
+          var _ho = (window.Janet && Janet.handoff && Janet.handoff.peek) ? Janet.handoff.peek() : null;
+          var _ck = (_ho && _ho.extra && _ho.extra.cvekey) ? String(_ho.extra.cvekey) : '';
+          if (_ck && fixSel && FIXES.indexOf(_ck) !== -1) { fixSel.value = _ck; }
+        } catch (e) {}
+
         // APPLY bar
         var bar = el('div'); bar.style.cssText = 'display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap';
         rebootCb = ui.checkbox('Notify user + reboot 1 hour after a successful apply', { color: 'var(--warn)' });
