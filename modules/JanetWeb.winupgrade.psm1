@@ -125,6 +125,26 @@ function Get-JanetToolManifest {
                 )
             },
             @{
+                id          = 'upgrade-drive'
+                label       = 'Drive 24H2 (WUfB)'
+                description  = 'Actively DRIVE the 23H2 -> 24H2 feature update over Windows Update for Business, per host. Reads readiness FIRST, then: SKIPS hosts already on 24H2+ (build 26100+) and SKIPS hardware-blocked hosts (CPU/TPM/disk fail) unless "bypass" is ticked (never drives an ineligible host silently); PINS the target (Product "Windows 11", Version "24H2") using the same Target Release Version policy write as Pin; TRIGGERS the Windows Update agent to detect/download/install the OFFERED feature update (UsoClient StartScan/StartDownload/StartInstall + the WUA COM). HONEST LIMITATION: Windows does NOT guarantee a headless feature-update INSTALL from a trigger - this PINS + ACCELERATES the WU path; the reliable completion is pin -> WU stages the update -> reboot. It does NOT claim the update installed - it reports TriggerResult (what it kicked) and RE-READS whether the host is now STAGED (feature update pending / pending-reboot). ONLY if "Reboot when staged" is ticked AND a host is CONFIRMED staged does it reboot that host on a per-host countdown to complete the swap; an un-staged host is NEVER rebooted. Reboots carry the same DNS-mismatch guard as the Restart tool, and the JANET dispatcher box is dropped from the wave. Dry-run reports what WOULD happen and changes NOTHING.'
+                kind         = 'stream-table'
+                destructive  = $true
+                confirm      = 'Drive 24H2 on these targets: each eligible host is PINNED to the target feature version and the Windows Update agent is TRIGGERED to stage the update. IF "Reboot when staged" is ticked and this is NOT a Dry-run, any host confirmed STAGED (feature update pending) will REBOOT after the per-host countdown to complete the upgrade - an un-staged host is never rebooted. Hosts already on 24H2+ or hardware-blocked (without bypass) are skipped. Proceed?'
+                columns      = @('Host','Online','OsBuild','DisplayVersion','WasPinned','TriggerResult','Staged','Rebooted','CountdownSec','Skipped','Error')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='product'; label='Product'; type='text'; required=$true; default='Windows 11'; help='Windows Update for Business ProductVersion to pin, e.g. "Windows 11".' },
+                    @{ name='version'; label='Version'; type='text'; required=$true; default='24H2'; help='TargetReleaseVersionInfo to pin/drive to, e.g. "24H2".' },
+                    @{ name='bypass'; label='Apply CPU/TPM bypass for unsupported hardware (MoSetup)'; type='bool'; required=$false; default=$false; help='WARNING: sets HKLM:\SYSTEM\Setup\MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU = 1 so a PC with an unsupported CPU / TPM can take 24H2 - AND lets this tool drive an otherwise hardware-blocked host. Microsoft-unsupported config; such devices may not receive all future updates. Without this, a hardware-blocked host is SKIPPED (never driven silently).' },
+                    @{ name='rebootWhenStaged'; label='Reboot when staged (per-host countdown) to complete the upgrade'; type='bool'; required=$false; default=$false; help='CUSTOMER-AFFECTING: after triggering WU, if a host is CONFIRMED staged (feature update pending / pending-reboot) it will REBOOT after the countdown to finish 24H2. An un-staged host is NEVER rebooted. Off by default. The JANET dispatcher host is dropped from the wave, and every reboot is guarded by a DNS-name-match check.' },
+                    @{ name='countdownSeconds'; label='Reboot countdown (seconds)'; type='int'; required=$false; default=300; help='Per-host shutdown /r /t countdown before a staged host reboots. Default 300 (5 min). Clamped 30-86400.' },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='dryRun'; label='Dry-run (no changes - reports what WOULD happen)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=8 }
+                )
+            },
+            @{
                 id          = 'installcab'
                 label       = 'Install Feature CAB'
                 description  = '25H2 UPDATE job: copy a feature-update .cab/.msu (e.g. the 25H2 enablement package KB5054156) to C:\Temp on each target and install it with DISM /Online /Add-Package, optionally rebooting ~10s after a successful install. A CAB install changes the build directly and IGNORES a Pin - if the fleet is pinned to 24H2, run Unpin FIRST to keep the WU policy consistent.'
@@ -257,6 +277,87 @@ function Get-WinUpgradeFleetStatus {
     return "Blocked: $reason"
 }
 
+function Get-WinUpgradeLocalIdentity {
+    # The set of names/addresses that ARE this dispatcher box, so an 'upgrade-drive'
+    # wave that reboots staged hosts never reboots the machine running JANET Web.
+    # Copied from the Restart tool's Get-JanetLocalIdentity (audit#10 self-guard).
+    if ($script:WinUpgradeLocalIdentity) { return $script:WinUpgradeLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    $script:WinUpgradeLocalIdentity = $set
+    return $set
+}
+
+function Test-WinUpgradeHostIsSelf {
+    # Is $Target this dispatcher box? (name / shortname / IP / loopback). Mirror of the
+    # Restart tool's Test-JanetHostIsSelf.
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-WinUpgradeLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }
+    }
+    return $false
+}
+
+function Get-WinUpgradeDrivePlan {
+    # PURE decision authority for the 'upgrade-drive' action - the single source of
+    # truth for the SAFETY invariants, unit-tested directly and MIRRORED inline by the
+    # worker's UpgradeDrive path (which, like every worker here, runs in a bare pool
+    # runspace and therefore cannot call a module function). Keep the two in sync.
+    #
+    #   Skip precedence (report, NEVER act):
+    #     OsBuild >= 26100              -> Skipped='already 24H2+'   (no pin/trigger/reboot)
+    #     not Eligible AND not Bypass   -> Skipped='blocked (<reason>)'  (never drive an
+    #                                      ineligible host silently; operator must opt into bypass)
+    #   Otherwise: WouldPin + WouldTrigger.
+    #   Reboot happens ONLY when: RebootWhenStaged AND Staged AND the DNS name-guard passes.
+    #     - RebootWhenStaged AND Staged but ExpectedName is present and != LocalName
+    #       -> RebootAborted (guard), ShouldReboot=$false.
+    #     - Staged=$false                                     -> ShouldReboot=$false (NEVER
+    #       reboot an un-staged host - the core invariant).
+    param(
+        [int]$OsBuild = 0,
+        [bool]$Eligible = $false,
+        [string]$BlockReason = '',
+        [bool]$Bypass = $false,
+        [bool]$RebootWhenStaged = $false,
+        [bool]$Staged = $false,
+        [int]$CountdownSeconds = 300,
+        [string]$ExpectedName = '',   # dialed short hostname ('' for an IP target -> guard skipped)
+        [string]$LocalName = ''       # the host's own $env:COMPUTERNAME (as read on the box)
+    )
+    $plan = [ordered]@{
+        Skipped = ''; WouldPin = $false; WouldTrigger = $false
+        ShouldReboot = $false; RebootAborted = $false; RebootAbortReason = ''; CountdownSec = $CountdownSeconds
+    }
+    if ($OsBuild -ge 26100) { $plan.Skipped = 'already 24H2+'; return $plan }
+    if ((-not $Eligible) -and (-not $Bypass)) {
+        $reason = if ($BlockReason) { $BlockReason } else { 'ineligible' }
+        $plan.Skipped = "blocked ($reason)"; return $plan
+    }
+    $plan.WouldPin = $true
+    $plan.WouldTrigger = $true
+    if ($RebootWhenStaged -and $Staged) {
+        if ($ExpectedName -and ($ExpectedName.Trim().ToUpper() -ne ([string]$LocalName).Trim().ToUpper())) {
+            $plan.RebootAborted = $true
+            $plan.RebootAbortReason = "DNS mismatch: dialed '$ExpectedName' but this machine is '$LocalName' - reboot ABORTED"
+        } else {
+            $plan.ShouldReboot = $true
+        }
+    }
+    return $plan
+}
+
 # --- SCCM CLIENT CYCLES (copied EXACTLY from References\24h2script.ps1 lines 27-33) ---
 # Machine Policy Retrieval & Eval, Software Updates Deployment Eval / Scan, etc.
 $script:WinUpgradeCycles = @(
@@ -292,6 +393,30 @@ $script:WinUpgradeCpuPatterns = @(
 # call operator, because PS 5.1 wraps a native command's stderr in ErrorRecord
 # objects which Invoke-Command then reports as remote errors and corrupts the
 # exit code. ProcessStartInfo bypasses that.
+
+# Shared pin policy-write remote block (the Windows Update for Business Target Release
+# Version write, + optional MoSetup CPU/TPM bypass). Defined ONCE at module scope and
+# passed into the worker as $PinBlock, so BOTH the 'pin' action and the 'upgrade-drive'
+# action reuse the exact same proven write (never re-implemented). It is only ever used
+# as a REMOTE Invoke-Command -ScriptBlock (serialized to the target), so it is safe to
+# hand to a bare pool runspace. Body copied verbatim from the reference $sbApply.
+$script:WinUpgradePinBlock = {
+    param($tv, $prod, $doBypass)
+    $regPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+    New-ItemProperty -Path $regPath -Name 'TargetReleaseVersion'     -PropertyType DWord  -Value 1    -Force | Out-Null
+    New-ItemProperty -Path $regPath -Name 'ProductVersion'           -PropertyType String -Value $prod -Force | Out-Null
+    New-ItemProperty -Path $regPath -Name 'TargetReleaseVersionInfo' -PropertyType String -Value $tv   -Force | Out-Null
+    $msg = "ProductVersion=$prod; TargetReleaseVersionInfo=$tv"
+    if ($doBypass) {
+        $moKey = 'HKLM:\SYSTEM\Setup\MoSetup'
+        if (-not (Test-Path $moKey)) { New-Item -Path $moKey -Force | Out-Null }
+        New-ItemProperty -Path $moKey -Name 'AllowUpgradesWithUnsupportedTPMOrCPU' -Value 1 -PropertyType DWord -Force | Out-Null
+        $msg += '; CPU/TPM BYPASS SET (MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU=1)'
+    }
+    $msg
+}
+
 $script:WinUpgradeWorker = {
     param(
         [string]$Computer,
@@ -318,7 +443,11 @@ $script:WinUpgradeWorker = {
         [int]$MinRAM,           # Diagnose: minimum RAM GB (4)
         [int]$MinDisk,          # Diagnose: minimum free disk GB (64)
         [string]$MinTPM,        # Diagnose: minimum TPM version ("2.0")
-        $Cycles                 # ForceDiscovery/Pin SCCM refresh: SCCM client schedule GUID array
+        $Cycles,                # ForceDiscovery/Pin SCCM refresh: SCCM client schedule GUID array
+        # --- upgrade-drive appended params (kept at the END so existing positional args are unshifted) ---
+        [bool]$RebootWhenStaged,# UpgradeDrive: reboot a CONFIRMED-staged host on a countdown
+        [int]$CountdownSeconds, # UpgradeDrive: per-host reboot countdown seconds
+        $PinBlock               # shared pin policy-write scriptblock (reused by Pin + UpgradeDrive)
     )
 
     $r = [ordered]@{ Host = $Computer; Ping = ''; Status = ''; Detail = ''; Ok = $false; Report = '' }
@@ -370,25 +499,10 @@ $script:WinUpgradeWorker = {
                 }
                 $pinNote = if ($Bypass) { "Writing TargetReleaseVersion policy ($Product $Version) + CPU/TPM bypass..." } else { "Writing TargetReleaseVersion policy ($Product $Version)..." }
                 & $pushStep 'Pinning' $pinNote
-                # $doBypass appended at the END of the remote param() (matches the call-site
-                # ArgumentList order). MoSetup key + value name copied EXACTLY from the
-                # reference $sbApply (lines 653-657).
-                $sb = {
-                    param($tv, $prod, $doBypass)
-                    $regPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
-                    if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-                    New-ItemProperty -Path $regPath -Name 'TargetReleaseVersion'     -PropertyType DWord  -Value 1    -Force | Out-Null
-                    New-ItemProperty -Path $regPath -Name 'ProductVersion'           -PropertyType String -Value $prod -Force | Out-Null
-                    New-ItemProperty -Path $regPath -Name 'TargetReleaseVersionInfo' -PropertyType String -Value $tv   -Force | Out-Null
-                    $msg = "ProductVersion=$prod; TargetReleaseVersionInfo=$tv"
-                    if ($doBypass) {
-                        $moKey = 'HKLM:\SYSTEM\Setup\MoSetup'
-                        if (-not (Test-Path $moKey)) { New-Item -Path $moKey -Force | Out-Null }
-                        New-ItemProperty -Path $moKey -Name 'AllowUpgradesWithUnsupportedTPMOrCPU' -Value 1 -PropertyType DWord -Force | Out-Null
-                        $msg += '; CPU/TPM BYPASS SET (MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU=1)'
-                    }
-                    $msg
-                }
+                # REUSE the shared module-scope pin policy-write ($PinBlock) - the same
+                # write the 'upgrade-drive' action pins with. $doBypass is the last remote
+                # param() arg (matches the call-site ArgumentList order).
+                $sb = $PinBlock
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($Version,$Product,$Bypass); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
@@ -727,7 +841,7 @@ $script:WinUpgradeWorker = {
                 }
             }
 
-            { ($_ -eq 'Diagnose') -or ($_ -eq 'FleetStatus') } {
+            { ($_ -eq 'Diagnose') -or ($_ -eq 'FleetStatus') -or ($_ -eq 'UpgradeDrive') } {
                 # Read-only comprehensive 24H2 compatibility + WU health scan. ONE remote
                 # scan, SHARED by both the Diagnose verdict action and the Fleet Status board
                 # (no second scanner) - $Op decides only how the returned data is shaped.
@@ -1057,6 +1171,181 @@ $script:WinUpgradeWorker = {
                 $diag = Invoke-Command @ic
                 $report = [string]$diag.Report
                 $r.Report = $report
+                if ($Op -eq 'UpgradeDrive') {
+                    # DRIVE 23H2 -> 24H2 over WUfB. REUSES the readiness read above and the
+                    # pin policy-write ($PinBlock); the decision logic MIRRORS the pure
+                    # Get-WinUpgradeDrivePlan (kept in sync) and the reboot carries the same
+                    # DNS-mismatch guard as the Restart tool. Nothing here re-implements the
+                    # read or the policy write.
+                    $r.Report = ''   # per-host readiness report is noise for a multi-host drive
+                    $osBuild = 0; try { $osBuild = [int]$diag.OsBuild } catch { $osBuild = 0 }
+                    $cpuFail  = ($report -match '(?m)^\[FAIL\] CPU')
+                    $tpmFail  = ($report -match '(?m)^\[FAIL\] TPM')
+                    $diskFail = ($report -match '(?m)^\[FAIL\] Disk')
+                    $eligible = -not ($cpuFail -or $tpmFail -or $diskFail)
+                    $reasons = New-Object System.Collections.ArrayList
+                    if ($cpuFail)  { [void]$reasons.Add('CPU unsupported') }
+                    if ($tpmFail)  { [void]$reasons.Add('no TPM 2.0') }
+                    if ($diskFail) { [void]$reasons.Add('disk <64GB') }
+                    $blockReason = ($reasons -join '; ')
+                    $stagedNow = [bool]$diag.PendingReboot
+
+                    $r.Online         = $true
+                    $r.OsBuild        = $osBuild
+                    $r.DisplayVersion = [string]$diag.DisplayVersion
+                    $r.WasPinned      = $false
+                    $r.TriggerResult  = ''
+                    $r.Staged         = $stagedNow
+                    $r.Rebooted       = $false
+                    $r.CountdownSec   = 0
+                    $r.Skipped        = ''
+                    $r.Error          = ''
+
+                    # -- skip decisions (report, NEVER act) - mirror Get-WinUpgradeDrivePlan --
+                    if ($osBuild -ge 26100) {
+                        $r.Skipped = 'already 24H2+'; $r.Status = 'Skipped'
+                        $r.Detail  = "Already on 24H2+ (build $osBuild) - nothing to drive."
+                        $r.Ok = $true; return $r
+                    }
+                    if ((-not $eligible) -and (-not $Bypass)) {
+                        $rz = if ($blockReason) { $blockReason } else { 'ineligible' }
+                        $r.Skipped = "blocked ($rz)"; $r.Status = 'Skipped'
+                        $r.Detail  = "Hardware-blocked ($rz); bypass not requested - NOT driven (tick bypass to force). No pin, no reboot."
+                        $r.Ok = $true; return $r
+                    }
+
+                    # -- dry-run: report WOULD-actions, change NOTHING --
+                    if ($DryRun) {
+                        $would = New-Object System.Collections.ArrayList
+                        [void]$would.Add("would pin $Product $Version")
+                        if ($Bypass) { [void]$would.Add('would apply CPU/TPM bypass (MoSetup)') }
+                        [void]$would.Add('would trigger Windows Update (UsoClient/WUA)')
+                        if ($RebootWhenStaged) {
+                            if ($stagedNow) { [void]$would.Add("host is staged now -> WOULD reboot in ${CountdownSeconds}s") }
+                            else { [void]$would.Add('host not staged -> would NOT reboot') }
+                        }
+                        $r.TriggerResult = '(dry-run: not triggered)'
+                        $r.CountdownSec  = $CountdownSeconds
+                        $r.Status = 'DRY-RUN'
+                        $r.Detail = "DRY-RUN ($authNote): $($would -join '; ')."
+                        $r.Ok = $true; return $r
+                    }
+
+                    $so2 = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000
+                    $baseIc = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so2; ErrorAction='Stop' }
+                    if ($credSet) { $baseIc.Credential = $Cred }
+
+                    # -- 3) PIN to the target (REUSE the shared pin policy-write $PinBlock) --
+                    & $pushStep 'Pinning' "Pinning $Product $Version..."
+                    $pinOut = ''
+                    try {
+                        $icP = $baseIc.Clone(); $icP.ScriptBlock = $PinBlock; $icP.ArgumentList = @($Version, $Product, $Bypass)
+                        $pinOut = [string](Invoke-Command @icP); $r.WasPinned = $true
+                    } catch { $pinOut = "pin error: $($_.Exception.Message)"; $r.WasPinned = $false }
+
+                    # -- 4) TRIGGER Windows Update (best-effort accelerator; NOT a guaranteed install) --
+                    & $pushStep 'Triggering' 'Triggering Windows Update detect/download/install...'
+                    $trigSb = {
+                        # PHASE:TRIGGER - HONEST: Windows does NOT guarantee a headless feature-
+                        # update INSTALL from a trigger. This kicks the WU agent to detect/download/
+                        # install the OFFERED feature update; the reliable completion is
+                        # pin -> WU stages the update -> reboot. We report what we KICKED, never
+                        # "installed". UsoClient StartScan/StartDownload/StartInstall exist on 22631;
+                        # the WUA COM DetectNow is a belt-and-braces detect trigger.
+                        $fired = New-Object System.Collections.ArrayList
+                        $uso = Join-Path $env:SystemRoot 'System32\UsoClient.exe'
+                        if (Test-Path -LiteralPath $uso) {
+                            foreach ($verb in 'StartScan','StartDownload','StartInstall') {
+                                try { Start-Process -FilePath $uso -ArgumentList $verb -WindowStyle Hidden -ErrorAction Stop; [void]$fired.Add("UsoClient $verb") } catch {}
+                            }
+                        }
+                        try { (New-Object -ComObject Microsoft.Update.AutoUpdate).DetectNow(); [void]$fired.Add('WUA DetectNow') } catch {}
+                        if ($fired.Count -eq 0) { 'no WU trigger fired (UsoClient/WUA unavailable on this build)' } else { 'triggered: ' + ($fired -join ', ') + ' (accelerator - completion not guaranteed by a trigger)' }
+                    }
+                    try { $icT = $baseIc.Clone(); $icT.ScriptBlock = $trigSb; $r.TriggerResult = [string](Invoke-Command @icT) }
+                    catch { $r.TriggerResult = "trigger error: $($_.Exception.Message)" }
+
+                    # -- 5) RE-READ staged state (is a feature update now pending?) --
+                    & $pushStep 'Checking' 'Re-reading staged / pending-reboot state...'
+                    $stagedAfter = $stagedNow
+                    try {
+                        $stSb = {
+                            # PHASE:STAGED - re-read whether a feature update is now staged / the box
+                            # is pending-reboot (same signals as the readiness read + $WINDOWS.~BT).
+                            $p = $false
+                            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $p = $true }
+                            if (-not $p -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) { $p = $true }
+                            if (-not $p) {
+                                $pfro = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+                                if ($pfro -and $pfro.PendingFileRenameOperations) { $p = $true }
+                            }
+                            if (-not $p -and (Test-Path -LiteralPath 'C:\$WINDOWS.~BT\Sources')) { $p = $true }
+                            [pscustomobject]@{ Staged = $p }
+                        }
+                        $icS = $baseIc.Clone(); $icS.ScriptBlock = $stSb
+                        $sres = Invoke-Command @icS
+                        $stagedAfter = [bool]$sres.Staged
+                    } catch {}
+                    $r.Staged = $stagedAfter
+
+                    # -- 6) REBOOT-WHEN-STAGED (ONLY if opted in AND CONFIRMED staged; guarded) --
+                    #    NEVER reboot an un-staged host. The DNS-mismatch guard runs INSIDE the
+                    #    remote block (authoritative); IP targets skip the name compare (an IP has
+                    #    no DNS indirection) by passing '' - exactly like the Restart tool.
+                    if ($RebootWhenStaged -and $stagedAfter) {
+                        $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+                        & $pushStep 'Rebooting' "Staged; issuing reboot (${CountdownSeconds}s countdown)..."
+                        $rbSb = {
+                            param($sec, $msg, $expected)
+                            $o = @{ ExitCode = $null; Error = '' }
+                            # PHASE:REBOOT - DNS-mismatch guard (HARD ABORT), mirrors the Restart tool:
+                            # the box that answered runs this, so $env:COMPUTERNAME IS the real machine;
+                            # if it isn't the one we dialed (stale DNS / reused IP), abort before shutdown.
+                            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                                $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
+                                return $o
+                            }
+                            try {
+                                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                                $psi.FileName               = 'shutdown.exe'
+                                $psi.Arguments              = "/r /t $sec /f /c `"$msg`""
+                                $psi.UseShellExecute        = $false
+                                $psi.RedirectStandardOutput = $true
+                                $psi.RedirectStandardError  = $true
+                                $psi.CreateNoWindow         = $true
+                                $proc = [System.Diagnostics.Process]::Start($psi)
+                                $sout = $proc.StandardOutput.ReadToEnd()
+                                $serr = $proc.StandardError.ReadToEnd()
+                                $proc.WaitForExit()
+                                $o.ExitCode = $proc.ExitCode
+                                if ($proc.ExitCode -ne 0) { $o.Error = ($sout + $serr).Trim() }
+                            } catch { $o.Error = $_.Exception.Message }
+                            return $o
+                        }
+                        try {
+                            $icB = $baseIc.Clone(); $icB.ScriptBlock = $rbSb; $icB.ArgumentList = @($CountdownSeconds, 'JANET Web: driving Windows 11 24H2 feature update', $expectedName)
+                            $rb = Invoke-Command @icB
+                            if ($rb.Error) { $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot NOT issued: $($rb.Error)" }
+                            elseif ($rb.ExitCode -eq 0) { $r.Rebooted = $true; $r.CountdownSec = $CountdownSeconds; $r.Status = 'REBOOTING'; $r.Detail = "Pinned + triggered; STAGED; reboot issued (${CountdownSeconds}s). $($r.TriggerResult)" }
+                            else { $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot FAILED (shutdown exit $($rb.ExitCode)): $($rb.Error)" }
+                        } catch {
+                            $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot FAILED to issue: $($_.Exception.Message)"
+                        }
+                        $r.Ok = $true; return $r
+                    }
+
+                    # not rebooting: report staged-not-rebooted vs driven-not-yet-staged.
+                    $r.Rebooted = $false
+                    if ($stagedAfter) {
+                        $r.Status = 'STAGED'
+                        $offNote = if ($RebootWhenStaged) { '' } else { ' (rebootWhenStaged off)' }
+                        $r.Detail = "Pinned + triggered; STAGED (feature update pending), not rebooted$offNote. Reboot to complete. $($r.TriggerResult)"
+                    } else {
+                        $r.Status = 'DRIVEN'
+                        $r.Detail = "Pinned + triggered; not yet staged - WU will stage the update, then a reboot completes 24H2. $($r.TriggerResult)"
+                    }
+                    $r.Ok = $true; return $r
+                }
                 if ($Op -eq 'FleetStatus') {
                     # Fleet Status board: reuse the SAME scan; derive the eligibility gates
                     # (CPU / TPM / disk) from the report markers, surface the pin + pending +
@@ -1322,6 +1611,7 @@ function Invoke-JanetToolAction {
         'pin'            { 'Pin' }
         'unpin'          { 'Unpin' }
         'forcediscovery' { 'ForceDiscovery' }
+        'upgrade-drive'  { 'UpgradeDrive' }
         'installcab'     { 'InstallCab' }
         'checkupgrade'   { 'CheckUpgrade' }
         'setpagefile'    { 'SetPageFile' }
@@ -1344,6 +1634,7 @@ function Invoke-JanetToolAction {
         'Pin'            { 'TouchHost' }
         'Unpin'          { 'TouchHost' }
         'ForceDiscovery' { 'TouchHost' }
+        'UpgradeDrive'   { 'VulnPatched' }
         'InstallCab'     { 'VulnPatched' }
         'SetPageFile'    { 'TouchHost' }
         default          { $null }
@@ -1368,6 +1659,14 @@ function Invoke-JanetToolAction {
     $bypass         = ConvertTo-JanetBool $Params['bypass'] $false
     $sccmRefresh    = ConvertTo-JanetBool $Params['sccmRefresh'] $false
     $removeBypass   = ConvertTo-JanetBool $Params['removeBypass'] $true
+    # upgrade-drive options: reboot a CONFIRMED-staged host on a countdown (OFF by default).
+    $rebootWhenStaged = ConvertTo-JanetBool $Params['rebootWhenStaged'] $false
+    $countdownSeconds = 300
+    if ($Params['countdownSeconds']) { $cs2 = 0; if ([int]::TryParse([string]$Params['countdownSeconds'], [ref]$cs2)) { $countdownSeconds = $cs2 } }
+    if ($countdownSeconds -lt 30)    { $countdownSeconds = 30 }
+    if ($countdownSeconds -gt 86400) { $countdownSeconds = 86400 }
+    # Shared pin policy-write block threaded to the worker (reused by Pin + UpgradeDrive).
+    $pinBlock       = $script:WinUpgradePinBlock
     # Diagnose constants + SCCM cycle GUIDs (defined once at module scope, copied EXACTLY
     # from the reference) threaded to the worker via the ArgFactory tail.
     $cpuPatterns    = $script:WinUpgradeCpuPatterns
@@ -1401,10 +1700,30 @@ function Invoke-JanetToolAction {
     if ($op -eq 'FleetStatus')    { $defThreads = 16; $maxJobSeconds = 180 }
     if ($op -eq 'SetPageFile')    { $defThreads = 8; $maxJobSeconds = 180 }
     if ($op -eq 'ForceDiscovery') { $defThreads = 8; $maxJobSeconds = 600 }
-    if ($op -eq 'Pin') {
+    # UpgradeDrive: heavy per host (readiness read + pin + WU trigger + re-read + optional
+    # reboot); low fan-out + a wide watchdog.
+    if ($op -eq 'UpgradeDrive')   { $defThreads = 8; $maxJobSeconds = 600 }
+    if ($op -eq 'Pin' -or $op -eq 'UpgradeDrive') {
         if ([string]::IsNullOrWhiteSpace($product) -or [string]::IsNullOrWhiteSpace($version)) {
-            & $send @{ type='log'; level='warn'; text='Product and Version are both required to pin a target release.' }
+            & $send @{ type='log'; level='warn'; text='Product and Version are both required to drive/pin a target release.' }
             return @{ rows=@(); summary=@{ total=$targets.Count } }
+        }
+    }
+    # Self-guard: never DRIVE+REBOOT the JANET dispatcher box. When upgrade-drive is set
+    # to reboot staged hosts (and this is a real run), drop any target that IS this machine
+    # - a self-reboot would kill the HttpListener mid-dispatch. (Restart tool audit#10; the
+    # in-worker DNS guard does NOT catch self - our own name resolves to us so it passes.)
+    if ($op -eq 'UpgradeDrive' -and $rebootWhenStaged -and -not $dryRun) {
+        $keptT = New-Object System.Collections.ArrayList
+        $selfT = New-Object System.Collections.ArrayList
+        foreach ($t in $targets) { if (Test-WinUpgradeHostIsSelf $t) { [void]$selfT.Add($t) } else { [void]$keptT.Add($t) } }
+        if ($selfT.Count -gt 0) {
+            $targets = $keptT
+            & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this drive wave ($($selfT -join ', ')) - a self-reboot would abort the dispatch." }
+            if ($targets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to drive.' }
+                return @{ rows=@(); summary=@{ total=0; selfSkipped=$selfT.Count } }
+            }
         }
     }
     if ($op -eq 'InstallCab') {
@@ -1430,7 +1749,7 @@ function Invoke-JanetToolAction {
     # BeginInvoke loop preserves each element (incl. the $cpuPatterns / $cycles arrays)
     # as a single positional argument. New v0.3.0 args appended at the END in the SAME
     # order as the appended worker param() tail (a mismatch silently corrupts every arg).
-    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles) }
+    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock) }
     $rowOf       = {
         param($res)
         if ($op -eq 'FleetStatus') {
@@ -1461,6 +1780,33 @@ function Invoke-JanetToolAction {
                 Error         = $errText
             }
         }
+        if ($op -eq 'UpgradeDrive') {
+            # Rich drive row. Timeout / cancel / worker-error results arrive as a bare
+            # {Host;Ping;Status;Detail} ordered hashtable with no drive fields -> surface
+            # those as Error=<detail> via the null-safe getter + the FAILED/Cancelled test.
+            $get = {
+                param($k, $d)
+                try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}
+                return $d
+            }
+            $status = [string]$res.Status
+            $isErr  = ($status -eq 'FAILED' -or $status -eq 'Cancelled')
+            return @{
+                Host           = $res.Host
+                Online         = [bool](& $get 'Online' $false)
+                OsBuild        = [int](& $get 'OsBuild' 0)
+                DisplayVersion = [string](& $get 'DisplayVersion' '')
+                WasPinned      = [bool](& $get 'WasPinned' $false)
+                TriggerResult  = [string](& $get 'TriggerResult' '')
+                Staged         = [bool](& $get 'Staged' $false)
+                Rebooted       = [bool](& $get 'Rebooted' $false)
+                CountdownSec   = [int](& $get 'CountdownSec' 0)
+                Skipped        = [string](& $get 'Skipped' '')
+                Error          = if ($isErr) { [string]$res.Detail } else { [string](& $get 'Error' '') }
+                Status         = $status
+                Detail         = [string]$res.Detail
+            }
+        }
         @{ Host=$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail }
     }
 
@@ -1484,6 +1830,9 @@ function Invoke-JanetToolAction {
     # instant, so it skips straight to Online/Offline rather than flashing Queued).
     if ($op -eq 'FleetStatus') {
         foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Online=$false; DisplayVersion=''; OsBuild=0; Win24H2Status='Queued'; Eligible=$false; BlockReason=''; Pinned=$false; PinnedVersion=''; PendingReboot=$false; Error='' }) }
+    }
+    elseif ($op -eq 'UpgradeDrive') {
+        foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Online=$false; OsBuild=0; DisplayVersion=''; WasPinned=$false; TriggerResult=''; Staged=$false; Rebooted=$false; CountdownSec=0; Skipped=''; Error=''; Status='Queued'; Detail='waiting for a runspace...' }) }
     }
     elseif ($op -ne 'ping') { foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Detail='waiting for a runspace...' }) } }
     $jobs = New-Object System.Collections.ArrayList

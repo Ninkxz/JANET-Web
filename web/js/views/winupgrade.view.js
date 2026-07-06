@@ -138,6 +138,7 @@
       case 'READY':
       case 'ON 24H2':
       case 'CLEAN':
+      case 'DRIVEN':
       case 'Online': return 'st-ok';
       // live in-progress phases streamed by the engine's step queue
       case 'Working':
@@ -148,6 +149,9 @@
       case 'Scanning':
       case 'Reading':
       case 'PageFile':
+      case 'Triggering':
+      case 'Checking':
+      case 'REBOOTING':
       case 'Rebooting': return 'st-info';
       case 'Pinged': return 'cell-dim';
       case 'NO LOG': return 'cell-dim';
@@ -166,6 +170,7 @@
       case 'MEMORY':
       case 'ERRORS':
       case 'NEEDS REBOOT':
+      case 'STAGED':
       case 'Skipped':
       case 'Cancelled': return 'st-warn';
       default: return '';
@@ -748,6 +753,8 @@
       // targets and rolls it up: "where is the whole fleet on the 24H2 journey?".
       // Changes NOTHING - no admin session, no reboots, no policy writes.
       var fleetRun = null, fleetUnsub = null;
+      var driveRun = null, driveUnsub = null;
+      var fleetGridRef = null;   // set by buildFleetPanel so Drive can seed Ready hosts
       function buildFleetPanel(panel) {
         panel.style.cssText = 'display:flex;gap:14px;height:100%;min-height:0;box-sizing:border-box;padding:12px 16px';
 
@@ -831,6 +838,7 @@
             return '';
           }
         });
+        fleetGridRef = fGrid;   // Drive 24H2 tab can seed itself from the Ready rows here
         var fgh = el('div'); fgh.style.cssText = 'flex:1;min-height:0;display:flex'; fgh.appendChild(fGrid.el);
         fResults.appendChild(fgh); fr.appendChild(fResults);
         panel.appendChild(fr);
@@ -888,12 +896,250 @@
         }
       }
 
+      // =================== DRIVE 24H2 (WUfB) board ===================
+      // Actively drives 23H2 -> 24H2 over Windows Update for Business per host: read
+      // readiness, skip already-24H2 / hardware-blocked (unless bypass), PIN the target,
+      // TRIGGER Windows Update, re-read staged state, and (only if "Reboot when staged"
+      // is ticked AND a host is CONFIRMED staged) reboot it on a per-host countdown.
+      // Destructive -> gated on an admin session (unless Dry-run) + a danger confirm.
+      function buildDrivePanel(panel) {
+        panel.style.cssText = 'display:flex;gap:14px;height:100%;min-height:0;box-sizing:border-box;padding:12px 16px';
+
+        // LEFT: targets + options + Drive
+        var dl = el('div'); dl.style.cssText = 'flex:0 0 420px;display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto';
+
+        var dCompCard = ui.namedCard('COMPUTERS', 'One host per line - comma/space/semicolon ok; # starts a comment.');
+        dCompCard.style.cssText += ';flex:0 0 auto;min-height:150px;max-height:260px;display:flex;flex-direction:column;overflow:hidden';
+        var dTargets = C.TargetManager({
+          model: ctx.util.targetModel(''),
+          hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',
+          placeholder: 'WS-0001\nWS-0002\n# lab row\nWS-0003',
+          importLabel: 'Import TXT', importAccept: '.txt', countNoun: 'computer',
+          onImport: function (n, name) { log.append({ text: '[' + ts() + '] Added ' + n + ' computer(s) from ' + name, level: 'info' }); }
+        });
+        var dth = el('div'); dth.style.cssText = 'flex:1;min-height:0;display:flex'; dth.appendChild(dTargets.el);
+        dCompCard.appendChild(dth);
+        var seedBtn = ui.ghostButton('Seed READY hosts from Fleet Status', { size: 'sm', title: 'Copy the hosts the Fleet Status board classified "Ready" (on 23H2, hardware OK) into this list.' });
+        seedBtn.style.marginTop = '6px';
+        seedBtn.onclick = function () {
+          if (!fleetGridRef) { ctx.confirm({ title: 'No Fleet Status yet', body: 'Open the Fleet Status tab and Scan Fleet first - then this copies its READY hosts here.', okText: 'OK', cancelText: null }); return; }
+          var ready = fleetGridRef.rows().filter(function (r) { return String(r.Win24H2Status) === 'Ready'; }).map(function (r) { return String(r.Host); });
+          if (!ready.length) { ctx.confirm({ title: 'No READY hosts', body: 'The Fleet Status board has no hosts classified READY. Scan the fleet first, or add hosts manually.', okText: 'OK', cancelText: null }); return; }
+          dTargets.setText(ready.join('\n'));
+          log.append({ text: '[' + ts() + '] Seeded ' + ready.length + ' READY host(s) from Fleet Status.', level: 'info' });
+        };
+        dCompCard.appendChild(seedBtn);
+        dl.appendChild(dCompCard);
+
+        var dOpt = ui.card({}); dOpt.style.cssText += ';display:flex;flex-direction:column;gap:10px';
+        var dOptH = el('div', 'j-section-h', 'DRIVE OPTIONS'); dOptH.style.marginBottom = '2px'; dOpt.appendChild(dOptH);
+        var pvRow = el('div'); pvRow.style.cssText = 'display:flex;gap:10px';
+        var dProd = ui.input({ value: 'Windows 11', title: 'Windows Update for Business ProductVersion to pin, e.g. "Windows 11".' }); dProd.style.width = '150px';
+        var dVer  = ui.input({ value: '24H2', title: 'TargetReleaseVersionInfo to pin/drive to, e.g. "24H2".' }); dVer.style.width = '90px';
+        pvRow.appendChild(ui.field('Product', dProd)); pvRow.appendChild(ui.field('Version', dVer));
+        dOpt.appendChild(pvRow);
+        var dBypass = ui.checkbox('Apply CPU/TPM bypass for unsupported hardware (MoSetup)', { color: 'var(--warn)', title: 'Sets MoSetup\\AllowUpgradesWithUnsupportedTPMOrCPU = 1 and lets this tool drive an otherwise hardware-blocked host. Microsoft-unsupported config. Without it, hardware-blocked hosts are SKIPPED.' });
+        dOpt.appendChild(dBypass);
+
+        // --- REBOOT-WHEN-STAGED: the customer-affecting control, visually distinct ---
+        var dangerBox = el('div');
+        dangerBox.style.cssText = 'border:1px solid var(--bad);border-radius:6px;padding:8px 10px;display:flex;flex-direction:column;gap:8px;background:rgba(255,80,80,0.06)';
+        var dangerH = el('div', null, 'CUSTOMER-AFFECTING'); dangerH.style.cssText = 'font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--bad)';
+        dangerBox.appendChild(dangerH);
+        var dReboot = ui.checkbox('Reboot a host when it is CONFIRMED staged (per-host countdown)', { color: 'var(--bad)', title: 'After triggering WU, any host confirmed staged (feature update pending) will REBOOT after the countdown to complete 24H2. An un-staged host is never rebooted. The JANET dispatcher box is dropped from the wave.' });
+        dangerBox.appendChild(dReboot);
+        var cdRow = el('div'); cdRow.style.cssText = 'display:flex;align-items:center;gap:10px';
+        cdRow.appendChild(ui.label('Countdown (seconds):'));
+        var dCountdown = ui.number({ value: 300, min: 30, max: 86400, title: 'Per-host reboot countdown before a staged host restarts. Default 300 (5 min).' }); dCountdown.style.width = '100px';
+        cdRow.appendChild(dCountdown);
+        dangerBox.appendChild(cdRow);
+        dOpt.appendChild(dangerBox);
+
+        var dDry = ui.checkbox('Dry-run (no changes - reports what WOULD happen)', { color: 'var(--warn)', title: 'Reads readiness and reports the intended pin / trigger / reboot per host without writing or rebooting anything.' });
+        dOpt.appendChild(dDry);
+        var dOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 probe. Reachability is TCP-only - AFNET drops ICMP.' });
+        dOpt.appendChild(dOffline);
+        var dThrRow = el('div'); dThrRow.style.cssText = 'display:flex;align-items:center;gap:10px';
+        dThrRow.appendChild(ui.label('Max concurrent:'));
+        var dThreads = ui.number({ value: 8, min: 1, max: 64, title: 'Parallel hosts (1-64). Drive is heavy per host, so it defaults low (8).' }); dThreads.style.width = '80px';
+        dThrRow.appendChild(dThreads); dOpt.appendChild(dThrRow);
+        var dStatus = el('div', 'muted', 'Ready'); dStatus.style.fontSize = '12px'; dOpt.appendChild(dStatus);
+        dl.appendChild(dOpt);
+
+        var dActCard = ui.card({}); dActCard.style.cssText += ';display:flex;flex-direction:column;gap:8px';
+        var dRunbar = C.RunBar({
+          label: 'DRIVE 24H2', cancelLabel: 'CANCEL DRIVE', morphToCancel: true,
+          title: 'Pin + trigger Windows Update (and optionally reboot staged hosts) across every computer.',
+          guards: [
+            function () { return dTargets.count() ? null : 'No Computers|Add at least one computer before driving.'; },
+            function () {
+              var p = (dProd.value || '').trim(), v = (dVer.value || '').trim();
+              return (p && v) ? null : 'Product + Version Required|Drive needs both a Product (e.g. "Windows 11") and a Version (e.g. "24H2").';
+            },
+            function () {
+              if (dDry._cb.checked) return null;   // dry-run never changes anything
+              return ctx.session.state.credSet ? null : 'Admin Session Required|Driving 24H2 pins policy, triggers WU and (optionally) reboots hosts. Set credentials (top-right) and start an admin session, or tick Dry-run.';
+            }
+          ],
+          onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
+          onRun: doDrive,
+          onCancel: function () { if (driveRun) { driveRun.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued computers skip; in-flight drives finish.', level: 'warn' }); } }
+        });
+        var drb = el('div'); drb.appendChild(dRunbar.el); dActCard.appendChild(drb); dl.appendChild(dActCard);
+        panel.appendChild(dl);
+
+        // RIGHT: stat cards + progress + grid
+        var dr = el('div'); dr.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;min-height:0';
+        var dStats = C.StatCards({ cards: [
+          { key: 'driven', label: 'DRIVEN', color: 'ok' },
+          { key: 'staged', label: 'STAGED', color: 'gold' },
+          { key: 'rebooting', label: 'REBOOTING', color: 'cyan' },
+          { key: 'skipped', label: 'SKIPPED', color: 'bad' }
+        ] });
+        dr.appendChild(dStats.el);
+
+        var dHead = ui.card({}); dHead.style.cssText += ';display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+        var dProg = C.ProgressStatusStrip({ showCount: true });
+        dProg.el.style.flex = '1'; dHead.appendChild(dProg.el);
+        var dExport = ui.ghostButton('Export CSV', { size: 'sm', title: 'Export the drive result rows to CSV.' });
+        var dClear = ui.button('Clear', { variant: 'danger', size: 'sm', title: 'Clear the drive grid.' });
+        dHead.appendChild(dExport); dHead.appendChild(dClear);
+        dr.appendChild(dHead);
+
+        var dResults = ui.namedCard('DRIVE RESULTS', 'One row per computer: what was pinned / triggered / staged / rebooted on the 24H2 drive.');
+        dResults.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
+        var dGrid = C.ResultsGrid({
+          title: 'Drive 24H2', emptyText: 'No results yet - add computers and DRIVE 24H2.',
+          keyMode: { hostCol: 'Host' }, popOut: true, selectable: false,
+          columns: [
+            { key: 'Host', label: 'COMPUTER', width: 150 },
+            { key: 'Online', label: 'ONLINE', width: 74, render: function (r) { return yesNoDim(r.Online, false); } },
+            { key: 'OsBuild', label: 'BUILD', width: 76, render: function (r) { var b = parseInt(r.OsBuild, 10); return { text: (b > 0 ? String(b) : ''), cls: (b >= 26100 ? 'st-ok' : 'cell-dim') }; } },
+            { key: 'DisplayVersion', label: 'VER', width: 74, render: function (r) { return { text: String(r.DisplayVersion == null ? '' : r.DisplayVersion), cls: 'cell-dim' }; } },
+            { key: 'Status', label: 'STATUS', width: 104, render: function (r) { return { text: String(r.Status == null ? '' : r.Status), cls: statusCellCls(r.Status) }; } },
+            { key: 'WasPinned', label: 'PINNED', width: 74, render: function (r) { return yesNoDim(r.WasPinned, false); } },
+            { key: 'TriggerResult', label: 'WU TRIGGER', width: 220, render: function (r) { var t = String(r.TriggerResult == null ? '' : r.TriggerResult); return { text: t, title: t, cls: 'cell-dim' }; } },
+            { key: 'Staged', label: 'STAGED', width: 74, render: function (r) { var y = yesNoDim(r.Staged, false); if (y.text === 'Yes') y.cls = 'st-warn'; return y; } },
+            { key: 'Rebooted', label: 'REBOOTED', width: 88, render: function (r) { return yesNoDim(r.Rebooted, true); } },
+            { key: 'CountdownSec', label: 'COUNTDOWN', width: 92, render: function (r) { var c = parseInt(r.CountdownSec, 10); return { text: (c > 0 ? (c + 's') : ''), cls: (c > 0 ? 'st-warn' : 'cell-dim') }; } },
+            { key: 'Skipped', label: 'SKIPPED', width: 150, render: function (r) { var t = String(r.Skipped == null ? '' : r.Skipped); return { text: t, title: t, cls: t ? 'st-warn' : 'cell-dim' }; } },
+            { key: 'Detail', label: 'DETAIL', render: function (r) { var t = String(r.Detail == null ? '' : r.Detail); return { text: t, title: t }; } },
+            { key: 'Error', label: 'ERROR', width: 150, render: function (r) { var t = String(r.Error == null ? '' : r.Error); return { text: t, title: t, cls: t ? 'st-bad' : 'cell-dim' }; } }
+          ],
+          rowClass: function (r) {
+            var s = String(r.Status);
+            if (s === 'DRIVEN' || s === 'REBOOTING') return 'row-ok';
+            if (s === 'FAILED' || s === 'Offline') return 'row-bad';
+            if (s === 'STAGED' || s === 'NEEDS REBOOT' || s === 'Skipped' || s === 'DRY-RUN' || s === 'Cancelled') return 'row-warn';
+            return '';
+          }
+        });
+        var dgh = el('div'); dgh.style.cssText = 'flex:1;min-height:0;display:flex'; dgh.appendChild(dGrid.el);
+        dResults.appendChild(dgh); dr.appendChild(dResults);
+        panel.appendChild(dr);
+
+        var DRIVE_EXPORT = [['Host', 'Computer'], ['Online', 'Online'], ['OsBuild', 'OsBuild'], ['DisplayVersion', 'DisplayVersion'], ['Status', 'Status'], ['WasPinned', 'Pinned'], ['TriggerResult', 'TriggerResult'], ['Staged', 'Staged'], ['Rebooted', 'Rebooted'], ['CountdownSec', 'CountdownSec'], ['Skipped', 'Skipped'], ['Detail', 'Detail'], ['Error', 'Error']];
+        dExport.onclick = function () {
+          var rows = dGrid.rows();
+          if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Drive the fleet first - there are no rows yet.', okText: 'OK', cancelText: null }); return; }
+          var csv = ctx.util.toCsv(DRIVE_EXPORT.map(function (p) { return p[1]; }), rows, DRIVE_EXPORT.map(function (p) { return p[0]; }));
+          ctx.util.downloadBlob('WindowsUpgrade_Drive24H2_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' drive row(s) to CSV.', level: 'info' });
+        };
+        dClear.onclick = function () { if (driveRun && driveRun.state && driveRun.state.active) return; dGrid.clear(); dStats.reset(); dProg.reset(); dStatus.textContent = 'Ready'; dStatus.className = 'muted'; };
+
+        function dRecount() {
+          var c = { driven: 0, staged: 0, rebooting: 0, skipped: 0 };
+          dGrid.rows().forEach(function (r) {
+            var s = String(r.Status);
+            if (s === 'DRIVEN') c.driven++;
+            else if (s === 'STAGED' || s === 'NEEDS REBOOT') c.staged++;
+            else if (s === 'REBOOTING') c.rebooting++;
+            else if (s === 'Skipped' || s === 'DRY-RUN') c.skipped++;
+          });
+          dStats.setAll(c);
+        }
+
+        function lockDrive(on) {
+          dProd.disabled = on; dVer.disabled = on; dBypass._cb.disabled = on;
+          dReboot._cb.disabled = on; dCountdown.disabled = on;
+          dDry._cb.disabled = on; dOffline._cb.disabled = on; dThreads.disabled = on;
+          dClear.disabled = on; seedBtn.disabled = on;
+        }
+
+        async function doDrive() {
+          var hosts = dTargets.hosts();
+          var dry = dDry._cb.checked;
+          var rebootWhenStaged = dReboot._cb.checked;
+          var countdown = Math.max(30, Math.min(86400, parseInt(dCountdown.value, 10) || 300));
+          var product = (dProd.value || '').trim(), version = (dVer.value || '').trim();
+
+          var label = 'DRIVE ' + product + ' ' + version
+            + (dBypass._cb.checked ? ' + BYPASS' : '')
+            + (rebootWhenStaged ? (' + REBOOT-WHEN-STAGED (' + countdown + 's)') : '')
+            + (dry ? ' [DRY-RUN]' : '');
+          var authLabel = ctx.session.state.credSet ? (ctx.session.state.user ? ('as ' + ctx.session.state.user) : 'set credential') : 'current Windows session';
+          var warnReboot = rebootWhenStaged && !dry;
+          var extraWarn = warnReboot
+            ? ('<br><br><span style="color:var(--bad);font-weight:700">WARNING: any host CONFIRMED staged (feature update pending) will REBOOT ~' + countdown + 's after the trigger. Un-staged hosts are not rebooted; the JANET dispatcher box is dropped from the wave.</span>')
+            : '';
+          var confirmBody = 'Operation: <b>' + escHtml(label) + '</b><br>'
+            + 'Targets: <b>' + hosts.length + '</b><br>'
+            + 'Auth: <b>' + escHtml(authLabel) + '</b><br>'
+            + '<span class="muted">Pins the target + triggers Windows Update. A trigger accelerates but does not guarantee a headless install - completion is pin &rarr; WU stages &rarr; reboot.</span>'
+            + extraWarn;
+
+          var ok = await ctx.confirm({
+            title: 'Confirm Drive 24H2', danger: warnReboot,
+            body: confirmBody, list: hosts.slice(0, 6),
+            okText: dry ? 'Preview' : 'Drive', cancelText: 'Cancel'
+          });
+          if (!ok) { log.append({ text: '[' + ts() + '] Drive cancelled at confirm.', level: 'warn' }); return; }
+
+          dGrid.clear(); dStats.reset(); dProg.reset();
+          hosts.forEach(function (h) { dGrid.upsert({ Host: h, Online: false, OsBuild: 0, DisplayVersion: '', WasPinned: false, TriggerResult: '', Staged: false, Rebooted: false, CountdownSec: 0, Skipped: '', Error: '', Status: 'Queued', Detail: 'Queued' }); });
+          dStatus.textContent = 'Driving...'; dStatus.className = 'st-info';
+          log.banner(label + ' on ' + hosts.length + ' computer(s)');
+          lockDrive(true);
+
+          var params = {
+            targets: hosts.join('\n'),
+            product: product, version: version,
+            bypass: dBypass._cb.checked,
+            rebootWhenStaged: rebootWhenStaged,
+            countdownSeconds: countdown,
+            attemptOffline: dOffline._cb.checked,
+            dryRun: dry,
+            threads: Math.max(1, Math.min(64, parseInt(dThreads.value, 10) || 8))
+          };
+          driveRun = ctx.run('upgrade-drive', params, { keyOf: keyByHost, destructive: !dry });
+          if (driveUnsub) driveUnsub();
+          driveUnsub = driveRun.subscribe({
+            status: function (t) { dStatus.textContent = t; dStatus.className = 'st-info'; },
+            progress: function (p) { dProg.setProgress(p.done, p.total); },
+            row: function (r) { dGrid.upsert(r); dRecount(); },
+            log: function (l) { log.append(l); },
+            error: function (e) { dStatus.textContent = (e && e.text) || 'Error'; dStatus.className = 'st-bad'; log.append({ text: (e && e.text) || 'error', level: 'err' }); },
+            active: function (a) { dRunbar.setActive(a); if (!a) { lockDrive(false); dRecount(); } },
+            final: function (res) {
+              var c = { driven: 0, staged: 0, rebooting: 0, skipped: 0 };
+              dGrid.rows().forEach(function (r) { var s = String(r.Status); if (s === 'DRIVEN') c.driven++; else if (s === 'STAGED' || s === 'NEEDS REBOOT') c.staged++; else if (s === 'REBOOTING') c.rebooting++; else if (s === 'Skipped' || s === 'DRY-RUN') c.skipped++; });
+              dStats.setAll(c);
+              var done = 'Done - ' + c.driven + ' driven, ' + c.staged + ' staged, ' + c.rebooting + ' rebooting, ' + c.skipped + ' skipped';
+              dStatus.textContent = done; dStatus.className = (c.rebooting ? 'st-warn' : 'st-ok');
+              log.append({ text: '[' + ts() + '] DRIVE 24H2 ' + done, level: 'ok' });
+            }
+          });
+        }
+      }
+
       // =================== assemble: TabHost + shared log dock ===================
       var tabHolder = el('div'); tabHolder.style.cssText = 'flex:1;min-height:0;display:flex';
       var tabs = C.TabHost({
         rail: 'top', helpId: 'winupgrade',
         tabs: [
           { id: 'fleet', label: 'Fleet Status', build: buildFleetPanel },
+          { id: 'drive', label: 'Drive 24H2 (WUfB)', build: buildDrivePanel },
           { id: 'operations', label: 'Operations', build: function (panel) { panel.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0'; panel.appendChild(opsPanel); } }
         ]
       });
@@ -910,7 +1156,7 @@
 
       host.appendChild(root);
       this._root = root;
-      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (fleetUnsub) fleetUnsub(); } catch (e) {} };
+      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (fleetUnsub) fleetUnsub(); } catch (e) {} try { if (driveUnsub) driveUnsub(); } catch (e) {} };
     },
     unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
   });
