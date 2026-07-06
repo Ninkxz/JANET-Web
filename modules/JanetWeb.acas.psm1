@@ -1650,7 +1650,15 @@ $script:AcasUpdateWorker = {
             $postV = if ($result.Post -is [hashtable] -and $result.Post.Version) { [string]$result.Post.Version } else { 'n/a' }
             $marker = "<<PRE=$preV>><<POST=$postV>>"
             if ($preV -eq 'n/a' -and $postV -eq 'n/a') { return "$updateStr $marker" }
-            $diff = if ($preV -eq $postV) { 'unchanged (async update may be in progress)' } else { "bumped: $preV -> $postV" }
+            if ($preV -eq $postV) {
+                # The trigger was sent but the version did NOT change (or is not yet
+                # verifiable). That is NOT a confirmed update - a genuinely-failed trigger
+                # whose version stayed put would otherwise read as OK/green. Return a
+                # DISTINCT 'UNCONFIRMED' state (not FAIL, not OK) so AcasOkOf renders it
+                # amber. A real version bump below stays a confirmed Success/OK.
+                return "UNCONFIRMED: version unchanged after update (async update may still be in progress) | $updateStr $marker"
+            }
+            $diff = "bumped: $preV -> $postV"
             return "$updateStr | $diff $marker"
         } catch {
             return "FAIL: $($_.Exception.Message)"
@@ -1909,8 +1917,12 @@ $script:AcasPreflightWorker = {
 #  Module-level scriptblock constants (shared across switch arms).
 # -----------------------------------------------------------------------------
 
-# $script:AcasOkOf  -- success predicate shared by every fan-out call
-$script:AcasOkOf = { param($res) (-not ($res -like 'FAIL*')) }
+# $script:AcasOkOf  -- success predicate shared by every fan-out call.
+#   'FAIL*'        = hard failure.
+#   'UNCONFIRMED*' = trigger sent but the change is not yet verifiable (version
+#                    unchanged after an update). Neither counts as a confirmed OK, so
+#                    both render NOT-green (amber). A genuine bump / plain OK stays OK.
+$script:AcasOkOf = { param($res) (-not ($res -like 'FAIL*')) -and (-not ($res -like 'UNCONFIRMED*')) }
 
 # $script:AcasUpdateRowOf -- 8-col update row (patch-selected/auto-patch/run-all)
 #   $stamp is inlined so this is closure-free at module scope.

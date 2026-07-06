@@ -753,6 +753,36 @@ function Invoke-JanetDhcpApply {
         return @{ rows=@($rows); summary=@{ total=1; ok=1; failed=0; status='NoChange' } }
     }
 
+    # No-op re-apply: the desired values already match what the server has (same
+    # values in the same order). The BULK path already short-circuits this to
+    # NoChange (~line 442); do the same for single-scope so a re-apply of an
+    # unchanged option is NOT written and mis-reported as 'Changed' / a
+    # VulnPatched-Success. Reaching here means the pre-read SUCCEEDED (a read error
+    # aborts above), so this only fires on a genuine equal read, never off a
+    # fail-closed empty. The remove-both-empty no-op is handled just above; this
+    # covers a populated option whose value is unchanged. Audited as a read that
+    # changed nothing (TouchHost/Skipped, itemCount 0), mirroring the removal no-op.
+    if ($sameOrder -and $new.Count -gt 0) {
+        & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Skipped'; itemCount=0; detail=("scope=$ScopeId opt=$OptionId apply no-op: option already set to the requested value(s)") }
+        $row = @{
+            Host      = $Server
+            ScopeId   = $ScopeId
+            OptionId  = $OptionId
+            Status    = 'NoChange'
+            OldValues = ($orig -join ', ')
+            NewValues = ($new  -join ', ')
+            Added     = ''
+            Removed   = ''
+            Reordered = $false
+            Error     = ''
+        }
+        [void]$rows.Add($row)
+        & $Send (@{ type='row' } + $row)
+        & $Send @{ type='progress'; done=1; total=1 }
+        & $Send @{ type='status'; text="Option $OptionId already set to the requested value(s) on scope $ScopeId; nothing to change." }
+        return @{ rows=@($rows); summary=@{ total=1; ok=1; failed=0; status='NoChange' } }
+    }
+
     try {
         if ([string]::IsNullOrWhiteSpace($ScopeId)) {
             throw "Internal: ScopeId is empty -- supply a scope and try again."

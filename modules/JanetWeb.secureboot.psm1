@@ -88,6 +88,17 @@ function Enable-LenovoSecureBoot {
     $getSB  = { Get-WmiObject -Class Lenovo_BiosSetting -Namespace $ns -EA Stop |
                     Where-Object { ($_.CurrentSetting -split ',') -contains 'SecureBoot' } }
     $current  = (& $getSB).CurrentSetting
+    # Idempotent re-run guard: Lenovo CurrentSetting is "SecureBoot,<value>[,...]"; the
+    # value token is element [1]. If it ALREADY reads enabled yet the OS-booted-state gate
+    # upstream did NOT short-circuit => the enable is already STAGED and the host is
+    # PENDING REBOOT. Skip re-firing SetBiosSetting/SaveBiosSettings and report the
+    # already-pending state instead of re-writing (and re-committing) the set value.
+    $curVal = ''
+    if ($current) { $cparts = "$current" -split ','; if ($cparts.Count -ge 2) { $curVal = $cparts[1].Trim() } }
+    if ($curVal -match '^(?i)enable') {
+        return New-Result -Mfr 'Lenovo' -Current $current -SetResult 'AlreadyPending' `
+            -New "$current (already pending reboot)" -Err ''
+    }
     $setRes   = (Get-WmiObject -Class Lenovo_SetBiosSetting -Namespace $ns -EA Stop
                 ).SetBiosSetting("SecureBoot,Enable,$BIOSPassword,ascii,us").return
     # Commit - without this the setting reverts on next boot. Lenovo WMI methods
@@ -123,6 +134,15 @@ function Enable-HPSecureBoot {
 
     $current   = ((Get-WmiObject -Namespace $ns -Class HP_BIOSEnumeration -EA Stop |
                       Where-Object { $_.Name -in $sbLabels }) | Select-Object -First 1).CurrentValue
+
+    # Idempotent re-run guard: the current value already reads as an enabled label yet
+    # the OS-booted-state gate upstream did NOT short-circuit => the enable is already
+    # STAGED and the host is PENDING REBOOT. Skip re-firing SetBIOSSetting and report
+    # the already-pending state instead of re-writing the (already-set) value.
+    if ("$current" -in $enabledVals) {
+        return New-Result -Mfr 'HP' -Current $current -SetResult 'AlreadyPending' `
+            -New "$current (already pending reboot)" -Err ''
+    }
 
     $allEnum   = Get-WmiObject -Namespace $ns -Class HP_BIOSEnumeration -EA Stop
     # Select-Object -First 1: a model exposing BOTH 'Secure Boot' and 'Configure
@@ -168,6 +188,16 @@ function Enable-DellSecureBoot {
     $current = (Get-CimInstance -Namespace $ns -ClassName EnumerationAttribute -EA Stop |
                     Where-Object AttributeName -eq 'SecureBoot').CurrentValue
 
+    # Idempotent re-run guard: the firmware-config current value ALREADY shows Secure
+    # Boot enabled, yet the OS-booted-state gate upstream did NOT short-circuit
+    # (Confirm-SecureBootUEFI still reports OFF) => the enable is already STAGED and the
+    # host is PENDING REBOOT. Re-firing SetAttribute would needlessly re-write the
+    # already-set value, so SKIP the write and report the already-pending state.
+    if ("$current" -match '^(?i)\s*enabl') {
+        return New-Result -Mfr 'Dell' -Current $current -SetResult 'AlreadyPending' `
+            -New "$current (already pending reboot)" -Err ''
+    }
+
     $enc      = [System.Text.UTF8Encoding]::new()
     $pwdBytes = $enc.GetBytes($BIOSPassword)          # avoid $pwd - it's a built-in alias
 
@@ -183,7 +213,11 @@ function Enable-DellSecureBoot {
     if ($setRes -ne 0) {
         $err = "Dell BIOS write rejected (SetAttribute Status=$setRes); a non-zero Status is usually a wrong or required BIOS admin password. Secure Boot NOT changed."
     } elseif ("$new" -eq "$current") {
-        $new = "$new (no change detected)"
+        # Dell (like HP) exposes the currently-BOOTED value in EnumerationAttribute.CurrentValue,
+        # not the staged NVRAM change. SetAttribute returned 0 (accepted) but the read-back is
+        # unchanged => the setting is STAGED for the next boot, not applied now. Report a
+        # pending-reboot state (mirroring the HP branch) instead of a clean immediate success.
+        $new = "$new (pending reboot)"
     }
     New-Result -Mfr 'Dell' -Current $current -SetResult $setRes -New $new -Err $err
 }
@@ -231,13 +265,19 @@ try {
     # Confirm-SecureBootUEFI failure: EFI driver missing, insufficient rights,
     # etc.) must NOT fall through to the OEM write path.
     elseif ($null -eq $osSB.Supported) {
+        # UNREADABLE state (generic Confirm-SecureBootUEFI failure: EFI driver missing,
+        # insufficient rights, etc.). This is NOT "already compliant" - it is indeterminate.
+        # Flag it DISTINCTLY (Unknown=$true, SetResult='Unknown', Skipped=$false) so the
+        # consumer resolves a distinct 'Unknown' status rather than bucketing it as
+        # 'Skipped' alongside an already-enabled host. Still NO BIOS write is attempted.
         $out = [PSCustomObject]@{
             Manufacturer = $mfr
             CurrentValue = 'Unknown'
-            SetResult    = 'Skipped'
+            SetResult    = 'Unknown'
             NewValue     = 'Unknown'
             Error        = 'Could not determine Secure Boot support state (Confirm-SecureBootUEFI failed). BIOS write not attempted.'
-            Skipped      = $true
+            Skipped      = $false
+            Unknown      = $true
             Timestamp    = (Get-Date -Format 'o')
         }
     }
@@ -572,7 +612,8 @@ $script:SbeLiveWorker = {
         }
         return [ordered]@{ Computer=$comp; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error='Payload ran but produced no result within 90 s.'; Skipped=$false }
     }
-    $resolvedStatus = if     ($result.Skipped -eq $true) { 'Skipped' }
+    $resolvedStatus = if     ($result.Unknown -eq $true) { 'Unknown' }
+                      elseif ($result.Skipped -eq $true) { 'Skipped' }
                       elseif ($result.Error)              { 'Error'   }
                       else                                { 'Success' }
     return [ordered]@{
@@ -720,8 +761,13 @@ function Invoke-JanetToolAction {
                     $isSkip = ($status -eq 'Skipped')
                     $isOk   = ($status -eq 'Success')
                     $isDryR = ($status -eq 'DryRun')
-                    if ($isOk)        { $okCount++ }
-                    elseif ($isSkip)  { $skipCount++ }
+                    # 'Unknown' = the support state could not be read; NO write was attempted
+                    # and the outcome is indeterminate. Bucket it with Skipped (not counted as
+                    # OK, not a hard Failure) but keep its DISTINCT 'Unknown' row status.
+                    $isUnknown = ($status -eq 'Unknown')
+                    if ($isOk)          { $okCount++ }
+                    elseif ($isSkip)    { $skipCount++ }
+                    elseif ($isUnknown) { $skipCount++ }
                     elseif (-not $isDryR) { $failCount++ }
 
                     $row = @{
@@ -736,7 +782,7 @@ function Invoke-JanetToolAction {
                     [void]$rows.Add($row)
                     & $send (@{ type='row' } + $row)
 
-                    $lvl = if ($isOk -or $isSkip -or $isDryR) { '' } else { 'err' }
+                    $lvl = if ($isOk -or $isSkip -or $isDryR -or $isUnknown) { '' } else { 'err' }
                     $detailText = if ($res.Error) { [string]$res.Error } else { "$status ($($res.Manufacturer))" }
                     & $send @{ type='log'; level=$lvl; text=("{0}: {1} - {2}" -f $res.Computer, $status, $detailText) }
 
@@ -744,7 +790,7 @@ function Invoke-JanetToolAction {
                     # VulnPatched. Success + Skipped (already-enabled) both count;
                     # failures count as Failure. Dry-run preflight rows are NOT logged.
                     if (-not $isDryR) {
-                        $auditResult = if ($isOk) { 'Success' } elseif ($isSkip) { 'Skipped' } else { 'Failure' }
+                        $auditResult = if ($isOk) { 'Success' } elseif ($isSkip -or $isUnknown) { 'Skipped' } else { 'Failure' }
                         $itemCount   = if ($isOk) { 1 } else { 0 }
                         # Carry the Before->After transition into the audit trail for
                         # non-error rows (HP success stages '<target> (pending reboot)',

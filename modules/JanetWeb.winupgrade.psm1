@@ -78,6 +78,7 @@ function Get-JanetToolManifest {
                 description  = '24H2 UPGRADE job: hold targets at a feature version (Windows Update for Business Target Release Version policy) - e.g. Product "Windows 11", Version "24H2". WU keeps offering monthly quality fixes but will NOT move the PC to a newer feature build until you Unpin. Pin sets a CEILING; it does not push the install - each PC moves on its next Windows Update / MECM check (a reboot + Check for updates applies it promptly).'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Write the Windows Update for Business Target Release Version policy to HOLD the selected host(s) at the Product / Version entered above (e.g. Windows 11 24H2) - they will NOT move to a newer feature build until you Unpin. If "Apply CPU/TPM bypass for unsupported hardware (MoSetup)" is ticked, this ALSO writes HKLM:\SYSTEM\Setup\MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU = 1, a Microsoft-unsupported configuration. A Dry-run writes nothing. Proceed?'
                 columns      = @('Host','Ping','Status','Detail')
                 inputs       = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -97,6 +98,7 @@ function Get-JanetToolManifest {
                 description  = 'Remove the Target Release Version policy so the PC follows its normal Windows Update path again and can move to newer feature builds. Use this to reverse a Pin - e.g. run Unpin FIRST before pushing the 25H2 update to a fleet that was pinned to 24H2 (keeps the WU policy consistent; DISM installs regardless of the pin).'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Remove the Target Release Version pin from the selected host(s) so they follow normal Windows Update again and can move to newer feature builds. If "Also remove the CPU/TPM bypass key (MoSetup)" is ticked, this also deletes HKLM:\SYSTEM\Setup\MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU, returning the device to a supported-hardware-only stance. A Dry-run writes nothing. Proceed?'
                 columns      = @('Host','Ping','Status','Detail')
                 inputs       = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },

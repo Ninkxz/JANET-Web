@@ -514,13 +514,29 @@ $script:RpiDeployHostScript = {
                     $successExits = @(0, 1641, 3010)
                     $softFail     = $outStr -match '(?im)^\s*(ERROR|FAILED|FAILURE)\b'
                     if ($successExits -contains $exitCode) {
-                        $res.Status = 'Success'
-                        $res.Reason = switch ($exitCode) {
+                        $baseReason = switch ($exitCode) {
                             3010 { 'Success (reboot required)' }
                             1641 { 'Success (reboot initiated)' }
                             default { 'Success' }
                         }
-                        if ($softFail) { $res.Reason += ' - note: output had ERROR/FAILED line(s); review the log' }
+                        if ($softFail) {
+                            # The exit code says success, but the PSADT output carried
+                            # ERROR/FAILED/FAILURE line(s) - a SOFT-FAILURE. Surface it as a
+                            # DISTINCT 'Success (warnings)' status (with the offending line(s))
+                            # so it is visible in the grid/audit rather than masked as a clean
+                            # Success by a mere footnote. A truly clean run stays 'Success'.
+                            $warnLines = @($outStr -split "`r?`n" |
+                                            Where-Object { $_ -match '(?im)^\s*(ERROR|FAILED|FAILURE)\b' } |
+                                            ForEach-Object { $_.Trim() } |
+                                            Select-Object -First 3)
+                            $warnText  = ($warnLines -join ' | ')
+                            $res.Status = 'Success (warnings)'
+                            $res.Reason = "$baseReason - WARNING: output had ERROR/FAILED line(s); review the log" +
+                                          $(if ($warnText) { " [$warnText]" } else { '' })
+                        } else {
+                            $res.Status = 'Success'
+                            $res.Reason = $baseReason
+                        }
                     } elseif ($exitCode -eq 60012) {
                         $res.Status = 'Deferred'
                         $res.Reason = 'User deferred install (PSADT 60012)'
@@ -842,9 +858,10 @@ function Invoke-JanetToolAction {
                 }
 
                 switch ($status) {
-                    'Success'  { $okCount++ }
-                    'Deferred' { $deferred++ }
-                    default    { $failCount++ }
+                    'Success'            { $okCount++ }
+                    'Success (warnings)' { $okCount++ }   # exit code succeeded (soft-fail surfaced via the distinct status + warn log)
+                    'Deferred'           { $deferred++ }
+                    default              { $failCount++ }
                 }
 
                 $row = @{
@@ -856,14 +873,15 @@ function Invoke-JanetToolAction {
 
                 # Map to JANET audit buckets: a state-changing install = VulnPatched.
                 $auditResult = switch ($status) {
-                    'Success'  { 'Success' }
-                    'Deferred' { 'Skipped' }
-                    default    { 'Failure' }
+                    'Success'            { 'Success' }
+                    'Success (warnings)' { 'Success' }
+                    'Deferred'           { 'Skipped' }
+                    default              { 'Failure' }
                 }
                 $itemCount = if ($auditResult -eq 'Success') { 1 } else { 0 }
                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$auditResult; itemCount=$itemCount; detail="$pkgName $repairTag$detail" }
 
-                & $send @{ type='log'; level=$(if($status -eq 'Success'){''}elseif($status -eq 'Deferred'){'warn'}else{'err'}); text="${repairTag}[$($j.Host)] $status : $detail" }
+                & $send @{ type='log'; level=$(if($status -eq 'Success'){''}elseif($status -eq 'Deferred' -or $status -eq 'Success (warnings)'){'warn'}else{'err'}); text="${repairTag}[$($j.Host)] $status : $detail" }
 
                 $done++
                 & $send @{ type='progress'; done=$done; total=$jobs.Count }
