@@ -3061,6 +3061,22 @@ $script:WptMaintLockBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
+        # DNS-mismatch guard (HARD ABORT): a maintenance hard-lock restricts interactive
+        # logon on the box that answers; verify it's the one we dialed before touching it
+        # (stale DNS / reused IP could lock out the WRONG machine). One quick WinRM probe,
+        # copied from WptRebootBlock (~1665) / WptPatchBlock (~1606). An IPv4-literal target
+        # has no shortname to compare -> skip. Empty probe -> proceed (don't regress).
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $targetShort = ($Computer -split '\.')[0]
+            $probeSplat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+            if ($Cred) { $probeSplat['Credential']=$Cred; $probeSplat['Authentication']=$Auth }
+            $actualName = try { Invoke-Command @probeSplat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Mode = 'Failed'
+                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no maintenance lock applied"
+                return $r
+            }
+        }
         $out = Invoke-Command @splat -ArgumentList $Caption, $Message, $HardLock -ScriptBlock {
             param($caption, $message, $hardlock)
             $res = @{ Banner=$false; HardLock=$false; Err='' }

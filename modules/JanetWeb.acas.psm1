@@ -1482,6 +1482,19 @@ $script:AcasUpdateWorker = {
             }
         }
 
+        # DNS-mismatch guard (HARD ABORT): before running ANY remediation/install,
+        # verify the box that answered is the one we dialed (stale DNS / reused IP could
+        # remediate the WRONG machine). Session-based name compare, copied from
+        # WptPatchBlock (JanetWeb.wpt.psm1 ~1606); an IPv4-literal target has no shortname
+        # to compare, so skip the compare. Empty probe -> proceed (don't regress).
+        if ($TargetIn -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $targetShort = ($TargetIn -split '\.')[0]
+            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no remediation run"
+            }
+        }
+
         # Full update: verify-before, update, verify-after in ONE session.
         # Scriptblocks do not round-trip over WinRM -ArgumentList, so we pass
         # the source text and rehydrate with [scriptblock]::Create() remotely.
@@ -1569,6 +1582,18 @@ $script:AcasRebootWorker = {
     # operator's identity is used - not the server process's ambient token. Only
     # fall back to the ambient "/m \\HOST" path when no credential is set.
     if ($Cred) {
+        # DNS-mismatch guard (HARD ABORT): verify the box that answers is the one we
+        # dialed before scheduling a reboot (stale DNS / reused IP could reboot the WRONG
+        # machine). One quick WinRM probe, copied from WptRebootBlock (JanetWeb.wpt.psm1
+        # ~1665). An IPv4-literal target has no shortname to compare -> skip. If the probe
+        # can't run (empty), proceed as before so a working reboot isn't regressed.
+        if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $targetShort = ($Target -split '\.')[0]
+            $actualName = try { Invoke-Command -ComputerName $Target -Authentication Negotiate -Credential $Cred -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent <<EXIT=>>"
+            }
+        }
         try {
             $rc = Invoke-Command -ComputerName $Target -Authentication Negotiate -Credential $Cred `
                                  -ArgumentList $warn -ErrorAction Stop -ScriptBlock {
@@ -1586,6 +1611,16 @@ $script:AcasRebootWorker = {
         }
     }
 
+    # DNS-mismatch guard (HARD ABORT) before the ambient /m reboot: same compare as the
+    # credentialed path above / WptRebootBlock (JanetWeb.wpt.psm1 ~1665). An IPv4-literal
+    # target has no shortname to compare -> skip. Empty probe -> proceed (don't regress).
+    if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        $targetShort = ($Target -split '\.')[0]
+        $actualName = try { Invoke-Command -ComputerName $Target -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent <<EXIT=>>"
+        }
+    }
     $shutArgs = @('/m', "\\$Target", '/r', '/t', '300', '/c', $warn)
     try {
         $proc = Start-Process -FilePath $shutdown -ArgumentList $shutArgs -Wait -PassThru -NoNewWindow

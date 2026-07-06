@@ -867,6 +867,22 @@ $UprWorkerBlock = {
 
             ## --- Uninstall pass (report-uninstall only) ---
             if ($DoUninstall) {
+                ## DNS-mismatch guard (HARD ABORT): UPR uninstall is PERMANENT removal, and
+                ## the Tenable PDF hands back stale/ambiguous host tokens (see ~330-345), so
+                ## verify the box that answered is the one we dialed before removing anything.
+                ## Session-based name compare, copied from WptPatchBlock (JanetWeb.wpt.psm1
+                ## ~1606); an IPv4-literal target has no shortname to compare -> skip. Empty
+                ## probe -> proceed (don't regress). On a confirmed mismatch, remove NOTHING.
+                if ($ConnectTarget -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+                    $targetShort = ($ConnectTarget -split '\.')[0]
+                    $actualName = try { Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+                    if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                        $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no uninstall performed"
+                        foreach ($cand in $candidates) { if ($cand.Decision -eq 'Uninstall') { $cand.Result = 'Aborted (DNS mismatch)' } }
+                        $r.Candidates = $candidates
+                        return $r
+                    }
+                }
                 foreach ($cand in $candidates) {
                     if ($cand.Decision -eq 'Skipped (Tanium)') { $cand.Result = 'Skipped (Tanium)'; continue }
                     if ($cand.Decision -eq 'Skipped (protected)') { $cand.Result = 'Skipped (protected)'; continue }

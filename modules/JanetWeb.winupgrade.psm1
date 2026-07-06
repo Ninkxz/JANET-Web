@@ -674,11 +674,22 @@ $script:WinUpgradeWorker = {
                         $note = if ($needsReboot) { 'installed (reboot required)' } else { 'installed (exit 0)' }
                         if ($Reboot -and -not (& $isCancelled)) {
                             & $pushStep 'Rebooting' 'Install OK; issuing reboot (10s)...'
+                            # DNS-mismatch guard: mirror the upgrade-drive reboot (~1298-1307).
+                            # An IPv4-literal target has no shortname to compare -> pass '' to skip.
+                            $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
                             # Delayed reboot via shutdown.exe (ProcessStartInfo so we capture its
                             # real exit code); /t 10 lets the WinRM call return before the box drops.
                             try {
-                                $rbres = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                                $rbres = Invoke-Command -Session $session -ErrorAction Stop -ArgumentList $expectedName -ScriptBlock {
+                                    param($expected)
                                     $o = @{ ExitCode = $null; Error = '' }
+                                    # DNS-mismatch guard (HARD ABORT): the box that answered runs this,
+                                    # so $env:COMPUTERNAME IS the real machine; if it isn't the one we
+                                    # dialed (stale DNS / reused IP), abort before shutdown.
+                                    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                                        $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
+                                        return $o
+                                    }
                                     try {
                                         $psi = New-Object System.Diagnostics.ProcessStartInfo
                                         $psi.FileName               = 'shutdown.exe'
@@ -808,8 +819,19 @@ $script:WinUpgradeWorker = {
                     try {
                         $icr = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                         if ($credSet) { $icr.Credential = $Cred }
-                        $rbres = Invoke-Command @icr -ScriptBlock {
+                        # DNS-mismatch guard: mirror the upgrade-drive reboot (~1298-1307).
+                        # An IPv4-literal target has no shortname to compare -> pass '' to skip.
+                        $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+                        $rbres = Invoke-Command @icr -ArgumentList $expectedName -ScriptBlock {
+                            param($expected)
                             $o = @{ ExitCode = $null; Error = '' }
+                            # DNS-mismatch guard (HARD ABORT): the box that answered runs this, so
+                            # $env:COMPUTERNAME IS the real machine; if it isn't the one we dialed
+                            # (stale DNS / reused IP), abort before shutdown.
+                            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                                $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
+                                return $o
+                            }
                             try {
                                 $psi = New-Object System.Diagnostics.ProcessStartInfo
                                 $psi.FileName               = 'shutdown.exe'
