@@ -3117,8 +3117,29 @@ SeInteractiveLogonRight = *S-1-5-32-544
 '@
                     Set-Content -Path $cfg -Value $infText -Encoding Unicode -Force
                     & secedit /configure /db "$db" /cfg "$cfg" /areas USER_RIGHTS /quiet 2>&1 | Out-Null
-                    Remove-Item $exp, $cfg, $db -Force -EA SilentlyContinue
-                    $res.HardLock = $true
+                    $cfgRc = $LASTEXITCODE
+                    # VERIFY (fail-closed): secedit's exit code is no longer discarded, and
+                    # we RE-READ the effective SeInteractiveLogonRight and confirm it is the
+                    # intended locked state (Administrators only). HardLock is reported ONLY
+                    # when BOTH hold; otherwise a no-op secedit would falsely read "LOCKED".
+                    $vrf = Join-Path $tmp 'janet_sec_verify.inf'
+                    Remove-Item $vrf -Force -EA SilentlyContinue
+                    & secedit /export /areas USER_RIGHTS /cfg "$vrf" /quiet 2>&1 | Out-Null
+                    $eff = ''
+                    if (Test-Path $vrf) {
+                        $vline = (Get-Content $vrf -EA SilentlyContinue | Where-Object { $_ -match '^\s*SeInteractiveLogonRight\s*=' } | Select-Object -First 1)
+                        if ($vline) { $eff = ($vline -split '=', 2)[1].Trim() }
+                    }
+                    $normEff  = (($eff -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object) -join ','
+                    $normWant = 'S-1-5-32-544' # normalized (leading '*' stripped below)
+                    $normEff  = ($normEff -replace '\*','')
+                    Remove-Item $exp, $cfg, $db, $vrf -Force -EA SilentlyContinue
+                    if ($cfgRc -eq 0 -and $normEff -eq $normWant) {
+                        $res.HardLock = $true
+                    } else {
+                        $res.HardLock = $false
+                        $res.Err = ("$($res.Err) | hardlock NOT verified (secedit exit=$cfgRc; effective SeInteractiveLogonRight='$eff'; users may NOT be locked)").Trim(' |')
+                    }
                 } catch { $res.Err = ("$($res.Err) | hardlock: $($_.Exception.Message)").Trim(' |') }
             }
             return $res
@@ -3133,7 +3154,7 @@ SeInteractiveLogonRight = *S-1-5-32-544
                 $r.Mode = 'Hard lock'
                 $r.Detail = if ($bannerOk) { 'Banner set; interactive logon restricted to Administrators' } else { 'HOST LOCKED (logon restricted to Administrators) - WARNING: banner write failed' }
             } else {
-                $r.Mode = 'Failed'; $r.Detail = "Hard-lock failed: $($out.Err)"
+                $r.Mode = 'Failed'; $r.Detail = "Hard-lock NOT verified (host may NOT be locked): $($out.Err)"
             }
         } else {
             $r.Success = $bannerOk
@@ -3188,10 +3209,31 @@ SeInteractiveLogonRight = $orig
 "@
                     Set-Content -Path $cfg -Value $infText -Encoding Unicode -Force
                     & secedit /configure /db "$db" /cfg "$cfg" /areas USER_RIGHTS /quiet 2>&1 | Out-Null
-                    Remove-Item $cfg, $db -Force -EA SilentlyContinue
-                    Remove-ItemProperty -Path $bkKey -Name OrigSeInteractiveLogonRight -EA SilentlyContinue
-                    Remove-ItemProperty -Path $bkKey -Name LockedAt -EA SilentlyContinue
-                    $res.Restored = $true
+                    $cfgRc = $LASTEXITCODE
+                    # VERIFY (fail-closed): a failed unlock must NOT read "restored" while
+                    # standard users stay locked out. Check secedit's exit code AND re-read
+                    # the effective SeInteractiveLogonRight, confirming it now matches the
+                    # intended restored state ($orig). Only then report Restored, and only
+                    # then clear the backup markers (so a failed restore can be retried).
+                    $vrf = Join-Path $tmp 'janet_sec_unlock_verify.inf'
+                    Remove-Item $vrf -Force -EA SilentlyContinue
+                    & secedit /export /areas USER_RIGHTS /cfg "$vrf" /quiet 2>&1 | Out-Null
+                    $eff = ''
+                    if (Test-Path $vrf) {
+                        $vline = (Get-Content $vrf -EA SilentlyContinue | Where-Object { $_ -match '^\s*SeInteractiveLogonRight\s*=' } | Select-Object -First 1)
+                        if ($vline) { $eff = ($vline -split '=', 2)[1].Trim() }
+                    }
+                    $normEff  = ((($eff  -split ',') | ForEach-Object { ($_ -replace '\*','').Trim() } | Where-Object { $_ } | Sort-Object) -join ',')
+                    $normWant = ((($orig -split ',') | ForEach-Object { ($_ -replace '\*','').Trim() } | Where-Object { $_ } | Sort-Object) -join ',')
+                    Remove-Item $cfg, $db, $vrf -Force -EA SilentlyContinue
+                    if ($cfgRc -eq 0 -and $normEff -eq $normWant) {
+                        Remove-ItemProperty -Path $bkKey -Name OrigSeInteractiveLogonRight -EA SilentlyContinue
+                        Remove-ItemProperty -Path $bkKey -Name LockedAt -EA SilentlyContinue
+                        $res.Restored = $true
+                    } else {
+                        $res.Restored = $false
+                        $res.Err = ("$($res.Err) | restore NOT verified -- users may still be locked out (secedit exit=$cfgRc; effective SeInteractiveLogonRight='$eff')").Trim(' |')
+                    }
                 } catch { $res.Err = ("$($res.Err) | restore: $($_.Exception.Message)").Trim(' |') }
             } else {
                 $res.Restored = $true; $res.Source = 'banner-only'

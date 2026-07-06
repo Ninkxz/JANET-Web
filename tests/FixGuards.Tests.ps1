@@ -135,6 +135,7 @@ Describe 'UPR uninstall DNS-mismatch hard-abort (UprWorkerBlock)' {
             function script:Invoke-Command {
                 param($Session, $ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
                 if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }
+                if ($ScriptBlock -and ($ScriptBlock.ToString() -match 'UprVerifyPresent')) { return ([pscustomobject]@{ Present = $false }) }   # post-uninstall re-enum: product genuinely gone
                 if ($ArgumentList) { $script:__destr = $true; return 'OK (shim removed)' }   # the uninstall call
                 # otherwise: the installed-software enumeration -> hand back one removable app
                 return @( @{ Name = 'FakeVulnApp'; Version = '1.0'; Publisher = 'x'; Type = 'EXE'; UninstallString = 'C:\x.exe'; QuietUninstall = ''; PSChildName = 'FakeVulnApp' } )

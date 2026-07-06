@@ -350,7 +350,18 @@ $script:DhcpLoadScript = {
     try {
         $ov = Get-DhcpServerv4OptionValue -ScopeId $sid -OptionId $optId -ErrorAction Stop
     } catch {
-        return [pscustomobject]@{ Ok = $true; Values = @(); NotSet = $true; Err = $null }
+        # FAIL-CLOSED: distinguish a genuine "option not configured" (safe: really
+        # not set) from a READ ERROR (RPC blip / connectivity / permission). A read
+        # error must NOT be reported as an empty/not-set value, or an Append would
+        # wipe the live list and a Remove short-circuit would pass. Only the "does
+        # not exist" family means NotSet; anything else is Ok=$false with the error.
+        $rmsg = [string]$_.Exception.Message
+        $rfid = [string]$_.FullyQualifiedErrorId
+        $notPresent = ($rmsg -match '(?i)does not exist' -or $rmsg -match '(?i)not\s+configured' -or $rmsg -match '(?i)no\s+option\s+value' -or $rfid -match '(?i)NotFound|DoesNotExist|20000')
+        if ($notPresent) {
+            return [pscustomobject]@{ Ok = $true; Values = @(); NotSet = $true; Err = $null }
+        }
+        return [pscustomobject]@{ Ok = $false; Values = @(); NotSet = $false; Err = ("read failed: $rmsg") }
     }
     $vals = @()
     if ($ov -and $ov.Value) {
@@ -392,10 +403,30 @@ $script:DhcpBulkScript = {
         try {
             $sid = [ipaddress]$sidStr
             $existing = @()
+            # FAIL-CLOSED read: a read error must NOT collapse to "empty" (that would
+            # make Append write ONLY the new IPs -- deleting the live list -- and let a
+            # Remove short-circuit wipe config). Only a genuine "option not configured"
+            # is treated as empty; any other read failure flags this scope ReadError and
+            # SKIPS the write entirely.
+            $readOk = $true; $readErrMsg = $null
             try {
                 $ov = Get-DhcpServerv4OptionValue -ScopeId $sid -OptionId $optId -ErrorAction Stop
                 if ($ov -and $ov.Value) { $existing = @($ov.Value | ForEach-Object { [string]$_ }) }
-            } catch { $existing = @() }
+            } catch {
+                $rmsg = [string]$_.Exception.Message
+                $rfid = [string]$_.FullyQualifiedErrorId
+                if ($rmsg -match '(?i)does not exist' -or $rmsg -match '(?i)not\s+configured' -or $rmsg -match '(?i)no\s+option\s+value' -or $rfid -match '(?i)NotFound|DoesNotExist|20000') {
+                    $existing = @()
+                } else {
+                    $readOk = $false; $readErrMsg = $rmsg
+                }
+            }
+            if (-not $readOk) {
+                $rec.Status = 'ReadError'
+                $rec.Error  = ("refused (fail-closed): could not read current option value, no write attempted: $readErrMsg")
+                [void]$out.Add($rec)
+                continue
+            }
             $rec.Before = $existing
 
             switch ($mode) {
@@ -422,11 +453,27 @@ $script:DhcpBulkScript = {
                 # stale-computed replace. The re-read is a local DhcpServer query
                 # inside this same remote session -- no extra WSMan round-trip.
                 $current = @()
+                # FAIL-CLOSED re-read: if the pre-write re-read errors, we cannot prove
+                # the server state is unchanged, so REFUSE the write (never remove/replace
+                # off an errored read that looks like "empty").
+                $reReadOk = $true; $reErrMsg = $null
                 try {
                     $cv = Get-DhcpServerv4OptionValue -ScopeId $sid -OptionId $optId -ErrorAction Stop
                     if ($cv -and $cv.Value) { $current = @($cv.Value | ForEach-Object { [string]$_ }) }
-                } catch { $current = @() }
-                if (($current -join '|') -ne ($existing -join '|')) {
+                } catch {
+                    $cmsg = [string]$_.Exception.Message
+                    $cfid = [string]$_.FullyQualifiedErrorId
+                    if ($cmsg -match '(?i)does not exist' -or $cmsg -match '(?i)not\s+configured' -or $cmsg -match '(?i)no\s+option\s+value' -or $cfid -match '(?i)NotFound|DoesNotExist|20000') {
+                        $current = @()
+                    } else {
+                        $reReadOk = $false; $reErrMsg = $cmsg
+                    }
+                }
+                if (-not $reReadOk) {
+                    $rec.Status = 'ReadError'
+                    $rec.After  = $existing
+                    $rec.Error  = ("refused (fail-closed): could not re-read current option value before write, no write attempted: $reErrMsg")
+                } elseif (($current -join '|') -ne ($existing -join '|')) {
                     $rec.Status = 'Stale'
                     $rec.After  = $current
                     $rec.Error  = ('refused: option changed on the server since read (was [' + ($existing -join ', ') + '], now [' + ($current -join ', ') + ']) -- reload and retry')
@@ -506,6 +553,11 @@ function Invoke-JanetDhcpLoad {
         if ([string]::IsNullOrWhiteSpace($ScopeId)) { throw "Scope ID is required." }
         $result = Invoke-JanetOnDhcp -Server $Server -Script $script:DhcpLoadScript `
                     -Arguments @($ScopeId, $OptionId) -Credential $Credential
+        # FAIL-CLOSED: a read error (Ok=$false) is NOT "option not set" -- surface it
+        # as a failure row rather than a misleading empty/NotSet result.
+        if ($result -and ($result.PSObject.Properties['Ok']) -and (-not $result.Ok)) {
+            throw ($(if ($result.Err) { [string]$result.Err } else { 'could not read current option value' }))
+        }
         $vals = @($result.Values | ForEach-Object { [string]$_ })
         $row = @{
             Host       = $Server
@@ -556,7 +608,15 @@ function Invoke-JanetDhcpApply {
     try {
         $loadRes = Invoke-JanetOnDhcp -Server $Server -Script $script:DhcpLoadScript `
                      -Arguments @($ScopeId, $OptionId) -Credential $Credential
-        $orig = @($loadRes.Values | ForEach-Object { [string]$_ })
+        # FAIL-CLOSED: the load script now reports Ok=$false on a genuine READ ERROR
+        # (vs. Ok=$true/NotSet=$true for a legitimately unset option). Treat Ok=$false
+        # as a read failure so we ABORT below instead of computing a fabricated diff
+        # off a fake-empty before-state (which would wipe live config on a write).
+        if ($loadRes -and ($loadRes.PSObject.Properties['Ok']) -and (-not $loadRes.Ok)) {
+            $readErr = $(if ($loadRes.Err) { [string]$loadRes.Err } else { 'could not read current option value' })
+        } else {
+            $orig = @($loadRes.Values | ForEach-Object { [string]$_ })
+        }
     } catch {
         $readErr = $_.Exception.Message
     }

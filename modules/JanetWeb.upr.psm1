@@ -1019,6 +1019,54 @@ $UprWorkerBlock = {
                         }
                     } catch { $appResult = "FAIL: $($_.Exception.Message)" }
                     $cand.Result = [string]$appResult
+
+                    ## VERIFY (fail-closed): a "success" exit code does NOT prove removal.
+                    ## A legacy EXE can ignore the guessed silent switches, exit 0, and remove
+                    ## nothing -- yet the row would read OK and the finding would be marked
+                    ## remediated while the product is still installed/vulnerable. So after any
+                    ## handler that reported OK, RE-ENUMERATE the uninstall registry (HKLM +
+                    ## WOW6432Node + HKCU) for THIS product (DisplayName / PSChildName / GUID)
+                    ## and report OK ONLY when it is absent. Exit 3010 => "reboot required"
+                    ## (verify-after-reboot is out of scope, just labelled). If we cannot
+                    ## re-read install state, we do NOT claim success (fail-closed).
+                    if (($cand.Result -match '^\s*OK\b')) {
+                        $rebootNeeded = ([string]$cand.Result -match '3010')
+                        $stillPresent = $null
+                        try {
+                            $vout = Invoke-Command -Session $session -ErrorAction Stop -ArgumentList $cand.Product, $cand.PSChildName, $cand.UninstallString -ScriptBlock {
+                                param($vName, $vChild, $vUnStr)
+                                # UprVerifyPresent: post-uninstall re-enumeration of the uninstall registry
+                                $vGuid = ''
+                                if ($vChild -match '^\{[^\}]+\}$') { $vGuid = $vChild }
+                                elseif ($vUnStr -match '(\{[^\}]+\})') { $vGuid = $Matches[1] }
+                                $found = $false
+                                $vpaths = @(
+                                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                                    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                                )
+                                foreach ($vp in $vpaths) {
+                                    foreach ($it in @(Get-ItemProperty $vp -EA SilentlyContinue)) {
+                                        if (-not $it.DisplayName) { continue }
+                                        if (($it.DisplayName -eq $vName) -or ($vChild -and $it.PSChildName -eq $vChild) -or ($vGuid -and $it.PSChildName -eq $vGuid)) { $found = $true }
+                                    }
+                                }
+                                return [pscustomobject]@{ Present = [bool]$found }
+                            }
+                            $stillPresent = [bool]$vout.Present
+                        } catch {
+                            $stillPresent = $null   # unreadable -> fail-closed below
+                        }
+                        if ($null -eq $stillPresent) {
+                            $cand.Result = "FAIL (uninstall exit OK but removal could NOT be verified -- product state unreadable) [$appResult]"
+                        } elseif ($stillPresent) {
+                            $cand.Result = "FAIL (uninstall ran but product still present) [$appResult]"
+                        } elseif ($rebootNeeded) {
+                            $cand.Result = "OK (removed, reboot required) [$appResult]"
+                        } else {
+                            $cand.Result = [string]$appResult
+                        }
+                    }
                 }
             }
 
