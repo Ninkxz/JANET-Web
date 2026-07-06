@@ -692,6 +692,7 @@
         var ok = await ctx.confirm({
           title: 'Confirm Run', danger: !dry && !readonly,
           body: confirmBody, list: hosts.slice(0, 6),
+          preflight: { targets: hosts, actionLabel: opLabel },
           okText: dry ? 'Preview' : (readonly ? 'Scan' : 'Run'), cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: '[' + ts() + '] Run cancelled at confirm.', level: 'warn' }); return; }
@@ -1092,6 +1093,7 @@
           var ok = await ctx.confirm({
             title: 'Confirm Drive 24H2', danger: warnReboot,
             body: confirmBody, list: hosts.slice(0, 6),
+            preflight: { targets: hosts, actionLabel: 'Drive 24H2' },
             okText: dry ? 'Preview' : 'Drive', cancelText: 'Cancel'
           });
           if (!ok) { log.append({ text: '[' + ts() + '] Drive cancelled at confirm.', level: 'warn' }); return; }

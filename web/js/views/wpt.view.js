@@ -666,7 +666,7 @@
                 : patchForced
                   ? 'Patch <b>' + hosts.length + '</b> workstation(s) — <b>FORCED</b> posture. App installs will <b>REBOOT the box when an install needs it</b> (customer-affecting). Use for quarantined / no-user hosts only.'
                   : 'Patch <b>' + hosts.length + '</b> workstation(s) — <b>non-invasive</b> posture. Triggers MECM updates + pending app installs; <b>reboots are suppressed</b> so patching runs while users work.';
-            var ok = await ctx.confirm({ title: 'Confirm ' + label + (patchMode ? (' · ' + (patchForced ? 'FORCED' : 'non-invasive')) : ''), danger: danger, body: body, list: hosts.slice(0, 6), okText: danger ? (patchForced ? 'Force patch' : 'Reboot') : 'Proceed', cancelText: 'Cancel' });
+            var ok = await ctx.confirm({ title: 'Confirm ' + label + (patchMode ? (' · ' + (patchForced ? 'FORCED' : 'non-invasive')) : ''), danger: danger, body: body, list: hosts.slice(0, 6), preflight: { targets: hosts, actionLabel: label }, okText: danger ? (patchForced ? 'Force patch' : 'Reboot') : 'Proceed', cancelText: 'Cancel' });
             if (!ok) { api.log.append({ text: label + ' cancelled by operator.', level: 'warn' }); return; }
           }
           api.log.banner(label + ' - ' + hosts.length + ' host(s)' + (patchMode ? (' [' + (patchForced ? 'FORCED' : 'non-invasive') + ']') : ''));

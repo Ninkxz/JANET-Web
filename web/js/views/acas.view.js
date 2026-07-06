@@ -790,6 +790,7 @@
           danger: !verifyOnly,
           body: (verifyOnly ? 'Verify' : 'Push') + ' <b>' + esc(prof) + '</b> ' + (verifyOnly ? 'on' : 'to') + ' <b>' + hosts.length + '</b> affected host(s) for:<br><b>' + esc(c.plugin) + '</b>',
           list: hosts.slice(0, 8),
+          preflight: { targets: hosts, actionLabel: verifyOnly ? 'Verify' : 'Patch' },
           okText: verifyOnly ? 'Verify' : 'Patch', cancelText: 'Cancel'
         }).then(function (ok) {
           if (!ok) return;
@@ -810,6 +811,7 @@
           danger: !verifyOnly,
           body: (verifyOnly ? 'Confirm post-reboot state on' : 'Schedule a reboot (shutdown /r /t 300) on') + ' <b>' + hosts.length + '</b> affected host(s) for:<br><b>' + esc(c.plugin) + '</b>' + (verifyOnly ? '' : '<br><br>Users see: <i>' + esc(warningText || '') + '</i>'),
           list: hosts.slice(0, 8),
+          preflight: { targets: hosts, actionLabel: verifyOnly ? 'Verify post-reboot' : 'Schedule Reboot' },
           okText: verifyOnly ? 'Verify' : 'Schedule Reboot', cancelText: 'Cancel'
         }).then(function (ok) {
           if (!ok) return;
@@ -1185,7 +1187,7 @@
           var ok = await ctx.confirm({
             title: 'Install KBs', danger: true,
             body: 'Install <b>' + checked.length + '</b> KB(s) across <b>' + hosts.length + '</b> host(s) via <b>' + esc(method) + '</b>' + (msuPath ? ' (MSU fallback set)' : '') + (noRebootCb._cb.checked ? ' [no auto-reboot]' : '') + '?',
-            list: hosts.slice(0, 6), okText: 'Install', cancelText: 'Cancel'
+            list: hosts.slice(0, 6), preflight: { targets: hosts, actionLabel: 'Install KBs' }, okText: 'Install', cancelText: 'Cancel'
           });
           if (!ok) return;
           kbResGrid.clear(); kbProg.reset();

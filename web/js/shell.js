@@ -62,6 +62,29 @@
     });
     return out;
   }
+  // Pure target resolver for the confirm "preflight" summary card. Given an array
+  // of host tokens (or a newline-delimited string), returns what a wave will
+  // ACTUALLY touch: { total, unique, duplicates, blanks, list } where list is the
+  // trimmed, blank-stripped, case-insensitively de-duplicated host array (order
+  // preserved). total = raw entry count; duplicates = case-insensitive repeats
+  // removed; blanks = empty/whitespace entries removed. Pure: no DOM, no side
+  // effects. Invariant: total === unique + duplicates + blanks. (Mirrors the
+  // parseHosts dedupe rule; kept separate so it can also report the drop counts.)
+  function resolveTargets(rawList) {
+    var arr = Array.isArray(rawList)
+      ? rawList
+      : String(rawList == null ? '' : rawList).split(/\r\n|\r|\n/);
+    var total = arr.length;
+    var seen = {}, list = [], duplicates = 0, blanks = 0;
+    for (var i = 0; i < arr.length; i++) {
+      var h = String(arr[i] == null ? '' : arr[i]).trim();
+      if (!h) { blanks++; continue; }
+      var k = h.toLowerCase();
+      if (seen[k]) { duplicates++; continue; }
+      seen[k] = 1; list.push(h);
+    }
+    return { total: total, unique: list.length, duplicates: duplicates, blanks: blanks, list: list };
+  }
   // A decoupled, DOM-free target list model (TargetManager binds to one of these).
   function targetModel(initial) {
     var raw = initial || '', listeners = [];
@@ -110,7 +133,7 @@
   // attached helpers to Janet.util before shell.js loaded.
   Janet.util = Object.assign(Janet.util || {}, {
     el: el, qs: qs, sleep: sleep, esc: esc, fileStamp: fileStamp,
-    clockStr: clockStr, parseHosts: parseHosts, targetModel: targetModel, downloadBlob: downloadBlob,
+    clockStr: clockStr, parseHosts: parseHosts, resolveTargets: resolveTargets, targetModel: targetModel, downloadBlob: downloadBlob,
     parseCsv: parseCsv, toCsv: toCsv, sevBar: sevBar
   });
   /* ========================================================================

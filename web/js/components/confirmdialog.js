@@ -67,10 +67,42 @@
     return body;
   }
 
+  // Optional target-preflight summary (ADDITIVE). Rendered ONLY when a caller
+  // passes opts.preflight = { targets:<array|string>, actionLabel?:string }.
+  // Advisory UI: it summarizes what a (usually destructive) wave will actually
+  // touch - unique host count, plus how many duplicates/blank lines were dropped -
+  // so the operator sees the real target set before clicking through. It does NOT
+  // gate, weaken, or alter the confirm's ack/credential flow; the OK button and its
+  // behavior are untouched. When opts.preflight is absent this is never called and
+  // the dialog renders exactly as before. Numbers come from Janet.util.resolveTargets
+  // (pure); labels use textContent (el()) so host names are never treated as HTML.
+  function preflightBlock(opts) {
+    var pf = opts.preflight || {};
+    var u = (window.Janet && Janet.util) || {};
+    var r = (typeof u.resolveTargets === 'function')
+      ? u.resolveTargets(pf.targets)
+      : { total: 0, unique: 0, duplicates: 0, blanks: 0, list: [] };
+    var box = el('div', 'j-modal-preflight' + (opts.danger ? ' danger' : ''));
+    var label = pf.actionLabel ? String(pf.actionLabel) : '';
+    box.appendChild(el('div', 'j-modal-preflight-h',
+      'PREFLIGHT' + (label ? ' · ' + label : '') + ' — ' + r.unique + ' unique host(s)'));
+    if (r.duplicates > 0) box.appendChild(el('div', 'j-modal-preflight-sub', r.duplicates + ' duplicate(s) removed'));
+    if (r.blanks > 0) box.appendChild(el('div', 'j-modal-preflight-sub', r.blanks + ' blank line(s) removed'));
+    box.appendChild(el('div', 'j-modal-preflight-note', 'The dispatcher host is auto-excluded from destructive waves server-side.'));
+    if (r.list.length) {
+      var sample = el('div', 'j-modal-list');
+      r.list.slice(0, 6).forEach(function (h) { sample.appendChild(el('div', null, String(h))); });
+      if (r.list.length > 6) sample.appendChild(el('div', 'j-modal-preflight-more', '+ ' + (r.list.length - 6) + ' more'));
+      box.appendChild(sample);
+    }
+    return box;
+  }
+
   function ConfirmDialog(opts) {
     opts = opts || {};
     return modal(function (card, close) {
       appendBody(card, opts);
+      if (opts.preflight) card.appendChild(preflightBlock(opts));   // additive: absent -> render path unchanged
       var acts = el('div', 'j-modal-actions');
       if (opts.cancelText !== null) {
         var cancel = ui().ghostButton(opts.cancelText || 'Cancel', { onClick: function () { close(false); } });
