@@ -342,9 +342,11 @@
         var testHost = ui.input({ placeholder: 'hostname', title: 'Synchronous single-host restart test (returns exit code + hint).' }); testHost.style.width = '180px';
         var testBtn = ui.button('Test single host...', { variant: 'gold', size: 'sm', title: 'Fire one synchronous shutdown /r and show the exit code + error hint.' });
         testBtn.onclick = function () { doTestSingle(testHost.value); };
+        var testDry = ui.checkbox('Dry run', { color: 'var(--warn)', title: 'Preview only - no machine is contacted and nothing reboots.' });
+        refs.testDry = testDry;
         var testOut = el('span', 'muted'); testOut.style.cssText = 'font-family:var(--mono);font-size:12px';
         refs.testOut = testOut;
-        testRow.appendChild(testHost); testRow.appendChild(testBtn); testRow.appendChild(testOut);
+        testRow.appendChild(testHost); testRow.appendChild(testBtn); testRow.appendChild(testDry); testRow.appendChild(testOut);
         cfg.appendChild(testRow);
 
         // proceed CTA -> jump to Dispatch tab
@@ -569,8 +571,9 @@
       function doTestSingle(hostname) {
         var h = String(hostname || '').trim();
         if (!h) { ctx.confirm({ title: 'Hostname required', body: 'Enter a hostname to test.', okText: 'OK', cancelText: null }); return; }
-        if (refs.testOut) { refs.testOut.textContent = 'Testing ' + h + '...'; refs.testOut.className = 'st-info'; }
-        var tr = ctx.run('test-single-host', { hostname: h, leadSeconds: 60, message: 'TEST: this machine will restart shortly.' });
+        var testDryRun = refs.testDry ? refs.testDry._cb.checked : false;
+        if (refs.testOut) { refs.testOut.textContent = (testDryRun ? 'Dry-run check of ' : 'Testing ') + h + '...'; refs.testOut.className = 'st-info'; }
+        var tr = ctx.run('test-single-host', { hostname: h, leadSeconds: 60, message: 'TEST: this machine will restart shortly.', dryRun: testDryRun });
         if (testUnsub) testUnsub();
         testUnsub = tr.subscribe({
           row: function (r) {

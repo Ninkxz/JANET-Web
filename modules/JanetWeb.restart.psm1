@@ -93,7 +93,8 @@ function Get-JanetToolManifest {
                 inputs       = @(
                     @{ name='hostname';    label='Hostname';              type='text';     required=$true },
                     @{ name='leadSeconds'; label='Countdown (seconds, min 30)';   type='int';      required=$false; default=60 },
-                    @{ name='message';     label='Popup message';         type='textarea'; required=$false; default='TEST: this machine will restart shortly.' }
+                    @{ name='message';     label='Popup message';         type='textarea'; required=$false; default='TEST: this machine will restart shortly.' },
+                    @{ name='dryRun';      label='Dry run (preview only - do not restart)'; type='bool'; required=$false; default=$false }
                 )
             },
             @{
@@ -1604,10 +1605,35 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='Hostname is required.' }
                 return @{ rows=@(); summary=@{ total=0 } }
             }
+            # Self-guard (audit#10, parity with dispatch-restart's self-exclusion ~line 1282):
+            # REFUSE to test-reboot the JANET dispatcher itself. The in-worker DNS-mismatch
+            # guard (Invoke-RrsShutdownDirect) does NOT catch this - our own name resolves to
+            # us, so the name compare passes - and a reboot here would kill the HttpListener
+            # mid-session. Test-JanetHostIsSelf covers short/FQDN/IP/loopback.
+            if (Test-JanetHostIsSelf $hostname) {
+                & $send @{ type='log'; level='warn'; text="Self-guard: '$hostname' is this JANET dispatcher host - refused. A test restart here would reboot the server mid-session." }
+                $row = [ordered]@{ Host=$hostname; ExitCode=$null; Success=$false; Stdout=''; ErrorHint='Refused: this is the JANET dispatcher host (self-reboot guard).' }
+                & $send (@{ type='row' } + $row)
+                & $send @{ type='audit'; action='TouchHost'; target=$hostname; result='Skipped'; itemCount=0; detail='self-guard: dispatcher host - no reboot' }
+                & $send @{ type='status'; text='Refused: self-reboot guard (dispatcher host).' }
+                return @{ rows=@($row); summary=@{ total=1; ok=0; failed=0; refused=1 } }
+            }
+            $dryRun = Get-RrsBool $Params['dryRun'] $false
             # Floor 30s = the desktop test dialog's minimum - no accidental instant reboot.
             $leadSeconds = Get-RrsInt $Params['leadSeconds'] 60 30 99999
             $message     = [string]$Params['message']
             if ([string]::IsNullOrWhiteSpace($message)) { $message = 'TEST: this machine will restart shortly.' }
+
+            if ($dryRun) {
+                # Dry run: report what WOULD happen; contact nothing, reboot nothing
+                # (mirrors dispatch-restart's dry-run honesty - audited Skipped, not Success).
+                & $send @{ type='status'; text="DRY RUN: would test-restart $hostname (shutdown /r /t $leadSeconds) - no reboot dispatched." }
+                $row = [ordered]@{ Host=$hostname; ExitCode=$null; Success=$true; Stdout="DRY-RUN - would issue shutdown /r /t $leadSeconds /f (no reboot dispatched)"; ErrorHint='DRY RUN - no machine contacted' }
+                & $send (@{ type='row' } + $row)
+                & $send @{ type='audit'; action='TouchHost'; target=$hostname; result='Skipped'; itemCount=0; detail="dry-run test shutdown /r /t $leadSeconds" }
+                & $send @{ type='status'; text='Done (dry run). No reboot dispatched.' }
+                return @{ rows=@($row); summary=@{ total=1; ok=0; failed=0; dryRun=1 } }
+            }
 
             & $send @{ type='status'; text="Testing restart on $hostname (/t=$leadSeconds)..." }
             $res  = Invoke-RrsShutdownDirect -Hostname $hostname -LeadSeconds $leadSeconds -Message $message -Credential $Credential
