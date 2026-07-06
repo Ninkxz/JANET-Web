@@ -419,6 +419,26 @@ function Get-JanetToolManifest {
                 )
             },
             @{
+                id          = 'burndown-snapshot'
+                label       = 'Burndown: Snapshot Now'
+                description  = 'Append one point to the persisted vuln-backlog trend (JanetLocal\trend\burndown.jsonl): total open findings + severity mix + KEV + host count, reusing the same Build-CoraSummary tallies posture-digest uses (not recomputed). Read-only against hosts - only appends one small local JSON line. Can be armed on the off-hours Scheduler (reports/burndown-snapshot) to capture a nightly point automatically, so the Burndown trend fills in with nobody at the keyboard.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Field','Value')
+                inputs       = @(
+                    @{ name='label'; label='Snapshot label (optional)'; type='text'; required=$false }
+                )
+            },
+            @{
+                id          = 'burndown'
+                label       = 'Burndown Trend'
+                description  = 'Read the persisted vuln-backlog trend (JanetLocal\trend\burndown.jsonl) and compute the trajectory: open-findings delta and % closed from the first snapshot to the latest, KEV closed, plus the raw snapshot series for the chart. "Are we winning?" at a glance. Read-only; take snapshots (Burndown: Snapshot Now, or arm it nightly on the Scheduler) to build the series over time.'
+                kind         = 'table'
+                destructive  = $false
+                columns      = @('Date','TotalOpen','Critical','High','KEV','Hosts')
+                inputs       = @()
+            },
+            @{
                 id          = 'campaign-create'
                 label       = 'Create Remediation Campaign'
                 description  = 'Snapshot the currently loaded OPEN findings into a persisted remediation campaign (JanetLocal\campaigns\<id>.json): the finding keys (Hostname|PluginID), the affected host set, the distinct mapped JANET remediations, and the severity/KEV mix. This ties finding -> fix -> (later) re-verify so a wave can be tracked to closure. READ-ONLY: creates the tracking record only; the actual remediation runs through the gated engines. Re-import the next scan and use the campaign to prove closure.'
@@ -1066,6 +1086,77 @@ function Get-ReportsCampaigns {
         $sorted = @($out | Sort-Object -Property @{ Expression = { [string]$_.createdUtc }; Descending = $true })
         return @{ Campaigns = $sorted; Source = $dir; Ok = $true }
     } catch { return @{ Campaigns = @(); Source = "read error: $($_.Exception.Message)"; Ok = $false } }
+}
+
+# =============================================================================
+#  Burndown trend  -  JanetLocal\trend\burndown.jsonl
+#  A persisted vuln-backlog time series: one compact JSON object per line,
+#  appended by 'burndown-snapshot' and read back by 'burndown' to show the
+#  trajectory ("are we winning?"). Deliberately JSONL (append-only), unlike
+#  the one-file-per-record campaign store above, because a time series is
+#  naturally append-only and never needs a per-record rewrite. Read-only
+#  against hosts; only ever appends to this one local file.
+# =============================================================================
+
+# $script:ReportsTrendDir is a testability seam ONLY (no SPA/manifest field
+# sets it): Pester points it at a temp folder so tests never touch the real
+# JanetLocal\trend store. Unset/blank (the normal path) -> the real default.
+$script:ReportsTrendDir = $null
+function Get-ReportsTrendDir {
+    if (-not [string]::IsNullOrWhiteSpace($script:ReportsTrendDir)) { return $script:ReportsTrendDir }
+    return (Join-Path $PSScriptRoot '..\JanetLocal\trend')
+}
+function Get-ReportsTrendPath { Join-Path (Get-ReportsTrendDir) 'burndown.jsonl' }
+
+# Append one compact JSON record as a new line (dir/file created if missing).
+# Plain UTF-8 (no BOM) so a BOM never lands mid-file on a line other than the
+# first - Get-ReportsTrendRecords strips a leading BOM defensively anyway.
+function Add-ReportsTrendRecord {
+    param($Record)
+    $res = @{ Written = $false; Error = '' }
+    try {
+        $dir = Get-ReportsTrendDir
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+        $path = Get-ReportsTrendPath
+        $line = ($Record | ConvertTo-Json -Depth 4 -Compress)
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $sw = New-Object System.IO.StreamWriter($path, $true, $utf8NoBom)
+        try { $sw.WriteLine($line) } finally { $sw.Dispose() }
+        $res.Written = $true
+    } catch { $res.Error = $_.Exception.Message }
+    return $res
+}
+
+# Read every trend record ascending by tsUtc. Tolerates a missing/empty store
+# and skips any corrupt line rather than throwing. Returns a flat array.
+#
+# Two snapshots taken seconds apart can share the same tsUtc string (the
+# format is whole-seconds); Sort-Object is not guaranteed stable across ties,
+# so an explicit file-order index is carried as the tie-breaker to keep
+# same-second records in append (chronological) order instead of risking a
+# sort-stability flip.
+function Get-ReportsTrendRecords {
+    $out = New-Object System.Collections.ArrayList
+    try {
+        $path = Get-ReportsTrendPath
+        if (Test-Path -LiteralPath $path) {
+            $i = 0
+            foreach ($line in @(Get-Content -LiteralPath $path -ErrorAction Stop)) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $clean = $line
+                if ($clean.Length -gt 0 -and [int]$clean[0] -eq 0xFEFF) { $clean = $clean.Substring(1) }
+                try {
+                    $rec = $clean | ConvertFrom-Json -ErrorAction Stop
+                    Add-Member -InputObject $rec -NotePropertyName '_seq' -NotePropertyValue $i -Force
+                    [void]$out.Add($rec)
+                    $i++
+                } catch {}
+            }
+        }
+    } catch {}
+    $sorted = @($out | Sort-Object -Property @{ Expression = { [string]$_.tsUtc } }, @{ Expression = { $_._seq } })
+    foreach ($r in $sorted) { $r.PSObject.Properties.Remove('_seq') }
+    return $sorted
 }
 
 # Upsert the ledger from the current in-session findings and persist it. For every
@@ -6919,6 +7010,107 @@ function Invoke-JanetToolAction {
                 generatedUtc = $digest.GeneratedUtc
                 error = $writeErr
             } }
+        }
+
+        # -------------------------------------------------------------------
+        'burndown-snapshot' {
+            # Append one point to the persisted vuln-backlog trend. REUSE, not
+            # reinvention: Build-CoraSummary gives the same severity/host tallies
+            # posture-digest uses; the only new work here is the KEV tally (same
+            # open-filter semantics as command-brief/posture-digest's KEV section)
+            # and the append itself. Read-only against hosts.
+            if ($script:AcasFindings.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse or load a report first - nothing to snapshot.' }
+                return @{ rows=@(); summary=@{ ok=$false } }
+            }
+            & $send @{ type='status'; text='Snapshotting current vuln posture for the burndown trend...' }
+
+            $cora = Build-CoraSummary
+            $kevCount = 0
+            foreach ($f in $script:AcasFindings) {
+                if ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH') { continue }
+                if ([bool]$f.InKEV) { $kevCount++ }
+            }
+            $label = ([string]$Params['label']).Trim()
+            $record = [ordered]@{
+                tsUtc     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                totalOpen = [int]$cora.ConsideredFindings
+                critical  = [int]$cora.SevCount['Critical']
+                high      = [int]$cora.SevCount['High']
+                medium    = [int]$cora.SevCount['Medium']
+                low       = [int]$cora.SevCount['Low']
+                kev       = $kevCount
+                hosts     = [int]$cora.UniqueHosts
+            }
+            if (-not [string]::IsNullOrWhiteSpace($label)) { $record['label'] = $label }
+
+            $save = Add-ReportsTrendRecord -Record $record
+            if (-not $save.Written) {
+                & $send @{ type='error'; text="Burndown snapshot NOT saved: $($save.Error)" }
+                return @{ rows=@(); summary=@{ ok=$false; error=$save.Error } }
+            }
+            $count = @(Get-ReportsTrendRecords).Count
+
+            $rows = New-Object System.Collections.ArrayList
+            foreach ($kv in @(
+                @{ Field='Timestamp (UTC)'; Value=[string]$record.tsUtc },
+                @{ Field='Total open'; Value=[string]$record.totalOpen },
+                @{ Field='Severity (C/H/M/L)'; Value="$($record.critical)/$($record.high)/$($record.medium)/$($record.low)" },
+                @{ Field='KEV'; Value=[string]$record.kev },
+                @{ Field='Hosts'; Value=[string]$record.hosts },
+                @{ Field='Snapshots on file'; Value=[string]$count }
+            )) { [void]$rows.Add($kv); & $send (@{ type='row' } + $kv) }
+
+            & $send @{ type='audit'; action='TouchHost'; target='Burndown snapshot'; result='Success'; itemCount=1; detail="open=$($record.totalOpen) kev=$($record.kev) hosts=$($record.hosts); $count snapshot(s) on file" }
+            & $send @{ type='status'; text="Burndown snapshot recorded: $($record.totalOpen) open, $($record.kev) KEV, $($record.hosts) hosts. $count snapshot(s) on file." }
+            return @{ rows=@($rows); summary=@{ ok=$true; record=$record; count=$count } }
+        }
+
+        # -------------------------------------------------------------------
+        'burndown' {
+            # Read the persisted trend series + compute the trajectory. Read-only.
+            $records = @(Get-ReportsTrendRecords)
+            if ($records.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No burndown snapshots yet. Use Snapshot Now (or arm reports/burndown-snapshot on the Scheduler) to start the trend.' }
+                return @{ rows=@(); summary=@{ points=0; firstOpen=0; lastOpen=0; deltaOpen=0; pctClosed=0; firstKev=0; lastKev=0; kevClosed=0; series=@(); note='No snapshots recorded yet.' } }
+            }
+            & $send @{ type='status'; text="Building burndown trend over $($records.Count) snapshot(s)..." }
+
+            $rows = New-Object System.Collections.ArrayList
+            $series = New-Object System.Collections.ArrayList
+            foreach ($r in $records) {
+                $dateStr = [string]$r.tsUtc
+                try { $d = [datetime]::MinValue; if ([datetime]::TryParse([string]$r.tsUtc, [ref]$d)) { $dateStr = $d.ToLocalTime().ToString('yyyy-MM-dd HH:mm') } } catch {}
+                $row = @{
+                    _rk       = [string]$r.tsUtc
+                    Date      = $dateStr
+                    TotalOpen = [int]$r.totalOpen
+                    Critical  = [int]$r.critical
+                    High      = [int]$r.high
+                    KEV       = [int]$r.kev
+                    Hosts     = [int]$r.hosts
+                }
+                [void]$rows.Add($row)
+                & $send (@{ type='row' } + $row)
+                [void]$series.Add(@{ ts=[string]$r.tsUtc; totalOpen=[int]$r.totalOpen; kev=[int]$r.kev })
+            }
+
+            $first = $records[0]; $last = $records[$records.Count - 1]
+            $firstOpen = [int]$first.totalOpen; $lastOpen = [int]$last.totalOpen
+            $deltaOpen = $lastOpen - $firstOpen
+            $pctClosed = if ($firstOpen -gt 0) { [math]::Round((($firstOpen - $lastOpen) / $firstOpen) * 100, 1) } else { 0 }
+            $firstKev = [int]$first.kev; $lastKev = [int]$last.kev
+            $kevClosed = $firstKev - $lastKev
+
+            $summary = @{
+                points     = $records.Count
+                firstOpen  = $firstOpen; lastOpen = $lastOpen; deltaOpen = $deltaOpen
+                pctClosed  = $pctClosed
+                firstKev   = $firstKev; lastKev = $lastKev; kevClosed = $kevClosed
+                series     = $series.ToArray()
+            }
+            & $send @{ type='status'; text="Burndown: $($summary.points) snapshot(s), open $firstOpen -> $lastOpen (delta $deltaOpen, $pctClosed% closed)." }
+            return @{ rows=@($rows); summary=$summary }
         }
 
         default {

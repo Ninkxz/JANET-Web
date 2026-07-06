@@ -1225,6 +1225,190 @@
         };
       }
 
+      // ---- Burndown (persisted vuln-backlog trend) --------------------------------
+      // Builds a tiny inline-SVG line/area chart from summary.series (no chart lib):
+      // totalOpen as a filled area + line, kev as a thin dashed line, scaled to the
+      // series' own min/max. Degrades to a text hint for 0/1 points.
+      function buildBurndownSvg(series) {
+        var W = 640, H = 170, padTop = 14, padBottom = 22, padLeft = 34, padRight = 10;
+        var n = series.length;
+        var opens = series.map(function (p) { return +p.totalOpen || 0; });
+        var kevs = series.map(function (p) { return +p.kev || 0; });
+        var maxV = Math.max.apply(null, opens.concat(kevs, [1]));
+        var plotW = W - padLeft - padRight, plotH = H - padTop - padBottom;
+        function xAt(i) { return padLeft + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW); }
+        function yAt(v) { return padTop + plotH - (maxV > 0 ? (v / maxV) * plotH : 0); }
+        function fmtDate(ts) { try { var d = new Date(ts); if (isNaN(d.getTime())) return String(ts); return (d.getMonth() + 1) + '/' + d.getDate(); } catch (e) { return String(ts); } }
+
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        svg.setAttribute('preserveAspectRatio', 'none');
+        svg.style.cssText = 'width:100%;height:170px;display:block';
+
+        function line(x1, y1, x2, y2, cls) {
+          var l = document.createElementNS(svgNS, 'line');
+          l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+          l.setAttribute('class', cls || ''); l.setAttribute('stroke', 'var(--line-soft)'); l.setAttribute('stroke-width', '1');
+          return l;
+        }
+        function text(x, y, str, anchor, cls) {
+          var t = document.createElementNS(svgNS, 'text');
+          t.setAttribute('x', x); t.setAttribute('y', y); t.setAttribute('text-anchor', anchor || 'start');
+          t.setAttribute('font-size', '9'); t.setAttribute('font-family', 'Consolas,monospace');
+          t.setAttribute('fill', 'var(--text-dim)'); if (cls) t.setAttribute('class', cls);
+          t.textContent = str; return t;
+        }
+
+        // baseline + top gridlines
+        svg.appendChild(line(padLeft, padTop + plotH, padLeft + plotW, padTop + plotH));
+        svg.appendChild(line(padLeft, padTop, padLeft + plotW, padTop));
+        svg.appendChild(text(padLeft - 6, padTop + 3, String(maxV), 'end'));
+        svg.appendChild(text(padLeft - 6, padTop + plotH + 3, '0', 'end'));
+
+        var openPts = opens.map(function (v, i) { return xAt(i) + ',' + yAt(v); }).join(' ');
+        var areaPts = openPts + ' ' + xAt(n - 1) + ',' + (padTop + plotH) + ' ' + xAt(0) + ',' + (padTop + plotH);
+        var area = document.createElementNS(svgNS, 'polygon');
+        area.setAttribute('points', areaPts);
+        area.setAttribute('fill', 'var(--accent-wash)');
+        svg.appendChild(area);
+
+        var openLine = document.createElementNS(svgNS, 'polyline');
+        openLine.setAttribute('points', openPts);
+        openLine.setAttribute('fill', 'none'); openLine.setAttribute('stroke', 'var(--accent-2)'); openLine.setAttribute('stroke-width', '2');
+        svg.appendChild(openLine);
+
+        var kevPts = kevs.map(function (v, i) { return xAt(i) + ',' + yAt(v); }).join(' ');
+        var kevLine = document.createElementNS(svgNS, 'polyline');
+        kevLine.setAttribute('points', kevPts);
+        kevLine.setAttribute('fill', 'none'); kevLine.setAttribute('stroke', 'var(--bad)'); kevLine.setAttribute('stroke-width', '1.5'); kevLine.setAttribute('stroke-dasharray', '4 3');
+        svg.appendChild(kevLine);
+
+        // point markers (small dots) so single/sparse series are still visible
+        opens.forEach(function (v, i) {
+          var dot = document.createElementNS(svgNS, 'circle');
+          dot.setAttribute('cx', xAt(i)); dot.setAttribute('cy', yAt(v)); dot.setAttribute('r', i === n - 1 ? 3 : 2);
+          dot.setAttribute('fill', 'var(--accent-2)');
+          svg.appendChild(dot);
+        });
+
+        svg.appendChild(text(xAt(0), H - 6, fmtDate(series[0].ts), 'start'));
+        svg.appendChild(text(xAt(n - 1), H - 6, fmtDate(series[n - 1].ts), 'end'));
+        svg.appendChild(text(xAt(n - 1), yAt(opens[n - 1]) - 7, String(opens[n - 1]) + ' open', n === 1 ? 'middle' : 'end', 'st-accent'));
+        if (kevs[n - 1] > 0) svg.appendChild(text(xAt(n - 1), yAt(kevs[n - 1]) + 12, String(kevs[n - 1]) + ' kev', n === 1 ? 'middle' : 'end', 'st-bad'));
+
+        return svg;
+      }
+
+      // A single stat tile matching the StatCards look, but with a colour that
+      // flips per-value (down=good/green, up=bad/red) — StatCards' colour is
+      // fixed at creation so the delta tile is built by hand instead.
+      function deltaTile(label) {
+        var tile = el('div', 'j-stat accent');
+        var num = el('div', 'j-stat-num', '0');
+        tile.appendChild(num);
+        tile.appendChild(el('div', 'j-stat-cap', label));
+        function setValue(delta) {
+          var sign = delta > 0 ? '+' : '';
+          num.textContent = sign + delta;
+          tile.className = 'j-stat ' + (delta < 0 ? 'ok' : (delta > 0 ? 'bad' : 'cyan'));
+        }
+        return { el: tile, setValue: setValue };
+      }
+
+      function buildBurndown(panel) {
+        panelFlex(panel);
+        panel.appendChild(sectionTitle('BURNDOWN (VULN-BACKLOG TREND)', true));
+        panel.appendChild(hint('Persists a point-in-time snapshot of the current vuln backlog (JanetLocal\\trend\\burndown.jsonl) — total open findings, severity mix, KEV, and host count — reusing the same tallies the Dashboard/CORA and Posture Digest use. Take a snapshot now, or arm Burndown: Snapshot Now on the off-hours Scheduler (Reports / Burndown: Snapshot Now) to capture one automatically every night, then watch the line trend down. Read-only.'));
+
+        var row = btnRow();
+        var labelInput = ui.input({ placeholder: 'Snapshot label (optional)', title: 'Optional free-text label for this point (e.g. "post-wave-3").' });
+        labelInput.style.width = '220px';
+        var snapBtn = ui.button('Snapshot Now', { variant: 'gold', size: 'sm', title: 'Append one point to the trend from the currently loaded findings.' });
+        var refreshBtn = ui.button('Refresh Trend', { variant: 'cyan', size: 'sm', title: 'Reload the persisted trend series.' });
+        row.appendChild(ui.eyebrow('SNAPSHOT')); row.appendChild(labelInput); row.appendChild(snapBtn); row.appendChild(refreshBtn);
+        panel.appendChild(row);
+
+        var cards = C.StatCards({ cards: [
+          { key: 'openNow', label: 'OPEN NOW', color: 'accent' },
+          { key: 'kevNow', label: 'KEV NOW', color: 'bad' },
+          { key: 'snapshots', label: 'SNAPSHOTS', color: 'cyan' }
+        ] });
+        var delta = deltaTile('DELTA SINCE FIRST');
+        cards.el.appendChild(delta.el);
+        cards.el.style.margin = '8px 0'; panel.appendChild(cards.el);
+
+        var chartHolder = el('div'); chartHolder.style.cssText = 'border:1px solid var(--line-soft);border-radius:4px;padding:10px 8px 4px;background:var(--bg-rail2)';
+        var chartNote = el('div', 'muted', 'Take snapshots over time to see a trend.');
+        chartNote.style.cssText = 'font-size:12px;text-align:center;padding:24px 0';
+        chartHolder.appendChild(chartNote);
+        panel.appendChild(chartHolder);
+
+        var prog = C.ProgressStatusStrip({ showCount: false }); prog.el.style.marginTop = '6px'; panel.appendChild(prog.el);
+
+        var grid = C.ResultsGrid({
+          title: 'Snapshots', emptyText: 'No snapshots yet — click Snapshot Now.', keyMode: { rk: true }, popOut: true,
+          sort: { key: 'Date', dir: -1 },
+          columns: [
+            { key: 'Date', label: 'DATE', width: 150 },
+            { key: 'TotalOpen', label: 'OPEN', width: 80, sortVal: function (r) { return +r.TotalOpen || 0; } },
+            { key: 'Critical', label: 'CRIT', width: 70, colorRule: gt0cls('st-sev-crit') },
+            { key: 'High', label: 'HIGH', width: 70, colorRule: gt0cls('st-sev-high') },
+            { key: 'KEV', label: 'KEV', width: 70, sortVal: function (r) { return +r.KEV || 0; }, colorRule: gt0cls('st-bad') },
+            { key: 'Hosts', label: 'HOSTS', width: 80, sortVal: function (r) { return +r.Hosts || 0; } }
+          ]
+        });
+        var gh = gridHolder(grid, 160); gh.style.flex = '1'; gh.style.marginTop = '10px'; panel.appendChild(gh);
+        panel.appendChild(hint('Tip: arm this on the Scheduler — pick the Reports tool, the "Burndown: Snapshot Now" action, and schedule it nightly so the trend fills in with nobody at the keyboard.'));
+
+        function renderChart(series) {
+          chartHolder.innerHTML = '';
+          if (!series || series.length < 2) {
+            var note = el('div', 'muted', series && series.length === 1 ? 'One snapshot recorded — take another to see a trend.' : 'Take snapshots over time to see a trend.');
+            note.style.cssText = 'font-size:12px;text-align:center;padding:24px 0';
+            chartHolder.appendChild(note);
+            return;
+          }
+          chartHolder.appendChild(buildBurndownSvg(series));
+        }
+
+        function refreshTrend() {
+          log.banner('Burndown Trend');
+          grid.clear(); cards.reset(); prog.reset();
+          runIntoGrid('burndown', {}, {
+            grid: grid, prog: prog, keyOf: function (ev) { return ev._rk != null ? String(ev._rk) : null; },
+            onFinal: function (res) {
+              var s = res && res.summary || {};
+              cards.setAll({ openNow: s.lastOpen || 0, kevNow: s.lastKev || 0, snapshots: s.points || 0 });
+              delta.setValue(s.deltaOpen || 0);
+              renderChart(s.series || []);
+              if (s.points > 0) {
+                log.banner('Burndown: ' + s.points + ' snapshot(s), open ' + (s.firstOpen || 0) + ' -> ' + (s.lastOpen || 0) + ' (' + (s.pctClosed || 0) + '% closed since first).');
+              } else {
+                log.append({ text: s.note || 'No snapshots yet — take one with Snapshot Now.', level: 'dim' });
+              }
+            }
+          });
+        }
+
+        snapBtn.onclick = function () {
+          log.banner('Burndown: Snapshot Now');
+          var h = ctx.run('burndown-snapshot', { label: (labelInput.value || '').trim() });
+          track(h.subscribe({
+            row: function (r) { log.append({ text: r.Field + ': ' + r.Value, level: 'ok' }); },
+            log: function (l) { log.append(l); },
+            error: function (e) { log.append({ text: e.text, level: 'err' }); },
+            final: function (res) {
+              var s = res && res.summary || {};
+              if (s.ok) { labelInput.value = ''; refreshTrend(); }
+              else { log.append({ text: 'Snapshot not recorded — load ACAS findings first (ACAS Import tab).', level: 'warn' }); }
+            }
+          }));
+        };
+        refreshBtn.onclick = refreshTrend;
+        refreshTrend();   // load on first mount
+      }
+
       // ---- Remediation Campaigns (persisted closed-loop tracking) -----------------
       function buildCampaigns(panel) {
         panelFlex(panel);
@@ -2170,6 +2354,7 @@
           { id: 'thirdparty', label: 'Third-Party Catalog', build: buildThirdPartyCatalog },
           { id: 'iavm', label: 'IAVM Board', build: buildIavmBoard },
           { id: 'digest', label: 'Posture Digest', build: buildPostureDigest },
+          { id: 'burndown', label: 'Burndown', build: buildBurndown },
           { id: 'campaigns', label: 'Campaigns', build: buildCampaigns },
           { id: 'compare', label: 'Patch Cross-Ref', build: buildCompare },
           { id: 'weekly', label: 'Weekly Export', build: buildWeekly },
