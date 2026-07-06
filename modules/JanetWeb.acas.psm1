@@ -495,29 +495,48 @@ $script:AcasUpdateProfiles = @{
         # to that local temp before running - so this auto-runs when the jars are
         # present where the host can read them (default: the desktop staging share,
         # or an operator-set source path).
-        Desc   = 'Replace log4j-api/core jars with 2.25.4 across HID + Adobe lib paths (recursive). Auto-runs when the 2.25.4 jars are staged where the JANET Web host can read them (host copies them into each session).'
+        Desc   = 'Replace log4j-api/core jars with 2.25.4. Covers the known service paths (HID Global + Adobe AEM: stop-service -> swap -> start-service) PLUS a recursive discovery of vulnerable log4j jars anywhere under the search roots (default C:\Program Files + C:\Program Files (x86)); each discovered lib dir gets the same safe copy-before-delete swap, and a jar held by a running process is flagged replaced-pending-reboot rather than failing. Auto-runs when the 2.25.4 jars are staged where the JANET Web host can read them (host copies them into each session).'
         NeedsStaging = $true
         Script = {
-            $sourceShare = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles'
-            $newApi      = 'log4j-api-2.25.4.jar'
-            $newCore     = 'log4j-core-2.25.4.jar'
-            $targets     = @(
-                @{ Path='C:\Program Files\HID Global\Credential Management Client\lib'; Service='HIDCredentialManagementClient' }
-                @{ Path='C:\Program Files\Adobe\Adobe Experience Manager Forms Designer\Java\libs'; Service='AdobeExperienceManagerFormsDesigner' }
-            )
+            # ---- configurable inputs (defaults used in production; tests inject overrides
+            #      by pre-setting these vars in the caller scope, same idea as the host's
+            #      staging rewrite. The single-quoted sourceShare assignment below is the
+            #      one the host regex-rewrites to point at the staged local temp. ----
+            if (-not $sourceShare) { $sourceShare = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles' }
+            # Recursive discovery roots - extend this list to cover more install locations.
+            if (-not $searchRoots) { $searchRoots = @('C:\Program Files', 'C:\Program Files (x86)') }
+            # Known (path -> service) mappings: reliable stop-service -> swap -> start-service.
+            if (-not $knownTargets) {
+                $knownTargets = @(
+                    @{ Path='C:\Program Files\HID Global\Credential Management Client\lib'; Service='HIDCredentialManagementClient' }
+                    @{ Path='C:\Program Files\Adobe\Adobe Experience Manager Forms Designer\Java\libs'; Service='AdobeExperienceManagerFormsDesigner' }
+                )
+            }
+            $newApi  = 'log4j-api-2.25.4.jar'
+            $newCore = 'log4j-core-2.25.4.jar'
+
             $srcApi  = Join-Path $sourceShare $newApi
             $srcCore = Join-Path $sourceShare $newCore
             if (-not (Test-Path -LiteralPath $srcApi))  { return "FAIL: source jar missing: $srcApi" }
             if (-not (Test-Path -LiteralPath $srcCore)) { return "FAIL: source jar missing: $srcCore" }
 
-            $liveReplaced    = 0
-            $archiveDeleted  = 0
-            $skippedRoots    = 0
-            $skippedCurrent  = 0
-            $errors          = New-Object System.Collections.Generic.List[string]
+            $liveReplaced       = 0   # known service-path lib dirs swapped
+            $discoveredReplaced = 0   # discovered lib dirs fully swapped (old jars removed)
+            $pendingReboot      = 0   # discovered lib dirs with a locked stale jar (new jar placed, old kept)
+            $archiveDeleted     = 0
+            $skippedRoots       = 0
+            $skippedCurrent     = 0
+            $backupDirs         = New-Object System.Collections.Generic.List[string]
+            $pendingPaths       = New-Object System.Collections.Generic.List[string]
+            $errors             = New-Object System.Collections.Generic.List[string]
+            $knownDirs          = New-Object System.Collections.Generic.List[string]
 
-            foreach ($t in $targets) {
+            # =====================================================================
+            #  PASS 1: known (path -> service) targets - stop service, swap, start.
+            # =====================================================================
+            foreach ($t in $knownTargets) {
                 $libPath = $t.Path
+                $knownDirs.Add($libPath.TrimEnd('\')) | Out-Null
                 if (-not (Test-Path -LiteralPath $libPath)) { $skippedRoots++; continue }
                 try {
                     $allJars = @(Get-ChildItem -LiteralPath $libPath -Filter 'log4j-*.jar' -Recurse -File -Force -ErrorAction SilentlyContinue)
@@ -536,7 +555,7 @@ $script:AcasUpdateProfiles = @{
                 $liveStale    = @($stale | Where-Object { $_.FullName -notlike '*\Backup_*\*' })
 
                 $wasRunning = $false
-                if ($liveStale.Count -gt 0) {
+                if ($liveStale.Count -gt 0 -and $t.Service) {
                     $svc = Get-Service -Name $t.Service -ErrorAction SilentlyContinue
                     $wasRunning = ($svc -and $svc.Status -eq 'Running')
                     if ($wasRunning) {
@@ -549,6 +568,7 @@ $script:AcasUpdateProfiles = @{
                     if ($liveStale.Count -gt 0) {
                         $backupDir = Join-Path $libPath ("Backup_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
                         New-Item -Path $backupDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                        $backupDirs.Add($backupDir) | Out-Null
 
                         # Back up the stale live jars first (copy only - do NOT remove yet).
                         foreach ($f in $liveStale) {
@@ -595,14 +615,91 @@ $script:AcasUpdateProfiles = @{
                 }
             }
 
-            $summary = "live=$liveReplaced archive=$archiveDeleted current=$skippedCurrent rootsSkipped=$skippedRoots"
+            # =====================================================================
+            #  PASS 2: discovery - vulnerable log4j-(api|core) jars ANYWHERE under
+            #  the search roots that are NOT already 2.25.4, NOT under a Backup_*
+            #  dir, and NOT already covered by a known target path. Group by lib dir.
+            #  No service is guessed: same safe copy-before-delete swap, but a stale
+            #  jar held open by a running process is flagged replaced-pending-reboot
+            #  (new jar stays + backup stays) instead of a hard failure or jar-less dir.
+            # =====================================================================
+            $discoStale = New-Object System.Collections.Generic.List[object]
+            foreach ($root in $searchRoots) {
+                if (-not (Test-Path -LiteralPath $root)) { continue }
+                try {
+                    $rootJars = @(Get-ChildItem -LiteralPath $root -Filter 'log4j-*.jar' -Recurse -File -Force -ErrorAction SilentlyContinue)
+                } catch { $rootJars = @() }
+                foreach ($j in $rootJars) {
+                    if ($j.Name -notmatch '^log4j-(api|core)-') { continue }        # api/core only
+                    if ($j.Name -notlike '*.jar') { continue }
+                    if ($j.FullName -like '*\Backup_*\*') { continue }              # never touch Backup_*
+                    $dir = $j.DirectoryName.TrimEnd('\')
+                    $covered = $false                                              # already handled by a known path (equal or a subdir of it)?
+                    foreach ($kd in $knownDirs) {
+                        if ($dir -eq $kd -or $dir.StartsWith($kd + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $covered = $true; break }
+                    }
+                    if ($covered) { continue }
+                    if ($j.Name -eq $newApi -or $j.Name -eq $newCore) { $skippedCurrent++; continue }  # already 2.25.4
+                    $discoStale.Add($j) | Out-Null
+                }
+            }
+
+            foreach ($g in ($discoStale | Group-Object { $_.DirectoryName.TrimEnd('\') })) {
+                $libPath    = $g.Name
+                $groupStale = @($g.Group)
+                if ($groupStale.Count -eq 0) { continue }
+
+                $backupDir = Join-Path $libPath ("Backup_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                try {
+                    New-Item -Path $backupDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    $backupDirs.Add($backupDir) | Out-Null
+                } catch {
+                    $errors.Add("$backupDir create failed: $($_.Exception.Message)") | Out-Null
+                    continue
+                }
+
+                # Back up the stale jars first (copy only - do NOT remove yet).
+                foreach ($f in $groupStale) {
+                    try { Copy-Item -LiteralPath $f.FullName -Destination $backupDir -Force -ErrorAction Stop }
+                    catch { $errors.Add("$($f.FullName) backup failed: $($_.Exception.Message)") | Out-Null }
+                }
+
+                # Copy the replacement jars in BEFORE deleting the originals. The new jar
+                # names differ from the stale ones, so this never overwrites a locked file.
+                $rootApi  = Join-Path $libPath $newApi
+                $rootCore = Join-Path $libPath $newCore
+                $copyOk = $true
+                try { Copy-Item -LiteralPath $srcApi  -Destination $rootApi  -Force -ErrorAction Stop }
+                catch { $copyOk = $false; $errors.Add("$rootApi copy failed: $($_.Exception.Message)") | Out-Null }
+                try { Copy-Item -LiteralPath $srcCore -Destination $rootCore -Force -ErrorAction Stop }
+                catch { $copyOk = $false; $errors.Add("$rootCore copy failed: $($_.Exception.Message)") | Out-Null }
+
+                if (-not ($copyOk -and (Test-Path -LiteralPath $rootApi) -and (Test-Path -LiteralPath $rootCore))) {
+                    # New jars not confirmed - leave stale in place (never leave the dir jar-less).
+                    $errors.Add("${libPath}: replacement jars not confirmed present - stale jars left in place (lib dir not left jar-less)") | Out-Null
+                    continue
+                }
+
+                # New jars are on disk. Remove the stale ones; a locked jar (running JVM)
+                # is NOT a hard failure - the new jar stays, the backup stays, flag pending.
+                $locked = $false
+                foreach ($f in $groupStale) {
+                    try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop }
+                    catch { $locked = $true; $pendingPaths.Add($f.FullName) | Out-Null }
+                }
+                if ($locked) { $pendingReboot++ } else { $discoveredReplaced++ }
+            }
+
+            $summary = "live=$liveReplaced discovered=$discoveredReplaced pendingReboot=$pendingReboot current=$skippedCurrent archive=$archiveDeleted rootsSkipped=$skippedRoots backups=$($backupDirs.Count)"
             if ($errors.Count -gt 0) {
                 return "FAIL ($summary; errors: " + ($errors -join '; ') + ')'
             }
-            if ($liveReplaced -eq 0 -and $archiveDeleted -eq 0) {
+            $note = ''
+            if ($pendingReboot -gt 0) { $note = "; pending-reboot(locked): " + ($pendingPaths -join '; ') }
+            if ($liveReplaced -eq 0 -and $discoveredReplaced -eq 0 -and $pendingReboot -eq 0 -and $archiveDeleted -eq 0) {
                 return "OK (nothing to do; $summary)"
             }
-            return "OK ($summary)"
+            return "OK ($summary$note)"
         }
         Verify = {
             $targets = @(
