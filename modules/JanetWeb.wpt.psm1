@@ -2330,12 +2330,15 @@ $script:WptKbInstallBlock = {
                 $msuName = Split-Path $MsuPath -Leaf
                 try {
                     Copy-Item -LiteralPath $MsuPath -Destination "C:\Temp\$msuName" -ToSession $sess -Force -EA Stop
-                    $wusaArgs = "C:\Temp\$msuName /quiet"; if ($NoReboot) { $wusaArgs += ' /norestart' }
+                    # Quote the package path: an MSU whose filename contains a space
+                    # (e.g. 'Windows11 24H2 KB####.msu') would otherwise split the wusa
+                    # command line and fail package-not-found on every host.
+                    $wusaArgs = "`"C:\Temp\$msuName`" /quiet"; if ($NoReboot) { $wusaArgs += ' /norestart' }
                     $exit = Invoke-Command -Session $sess -ArgumentList $wusaArgs -EA Stop -ScriptBlock { param($a) (Start-Process -FilePath 'wusa.exe' -ArgumentList $a -Wait -PassThru -NoNewWindow -EA Stop).ExitCode }
                     if ($exit -eq 0 -or $exit -eq 3010) { $r.MSUInstalled++; $r.Details += "MSU $($msuName): installed (exit $exit)" }
                     elseif ($exit -eq 2359302) { $r.Skipped++; $r.Details += "MSU $($msuName): already installed" }
                     else { $r.Errors += "MSU $msuName exit $exit" }
-                    Invoke-Command -Session $sess -ArgumentList $msuName -EA SilentlyContinue -ScriptBlock { param($n) Remove-Item "C:\Temp\$n" -Force -EA SilentlyContinue }
+                    Invoke-Command -Session $sess -ArgumentList $msuName -EA SilentlyContinue -ScriptBlock { param($n) Remove-Item -LiteralPath "C:\Temp\$n" -Force -EA SilentlyContinue }
                 } catch { $r.Errors += "MSU copy/install: $($_.Exception.Message)" }
             }
         } elseif ($remaining.Count -gt 0) { foreach ($kb in $remaining) { $r.Skipped++; $r.Details += "$kb not in MECM, no MSU path -- skipped" } }

@@ -101,7 +101,13 @@ function ConvertTo-JanetMsiList {
     # falls back to discovering *.msi recursively under the bundle folder).
     param([string]$Raw)
     if ([string]::IsNullOrWhiteSpace($Raw)) { return @() }
-    @($Raw -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # Reject a rooted path (C:\, \, \\server) or any '..' segment: each entry MUST
+    # stay inside the bundle. Otherwise a pasted '..\..\Windows\System32\x.msi' would
+    # read outside $PkgPath and write outside the target's staging dir. Subdir
+    # entries like 'x64\foo.msi' are kept.
+    @($Raw -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object {
+        $_ -and -not [System.IO.Path]::IsPathRooted($_) -and ($_ -notmatch '(^|[\\/])\.\.([\\/]|$)')
+    })
 }
 
 # Per-host scriptblock. Runs inside an isolated runspace -- NO outer-scope vars
