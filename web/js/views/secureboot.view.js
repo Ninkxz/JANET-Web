@@ -177,7 +177,7 @@
           status: function (t) { setStatus(t, (String(t) === 'error') ? 'st-bad' : 'st-info'); prog.setPhase(t); },
           progress: function (p) { prog.setProgress(p.done, p.total); setStatus('Running... ' + p.done + ' / ' + p.total + ' done', 'st-info'); },
           row: function (r) { grid.upsert(r); },
-          error: function (e) { setStatus((e && e.text) || 'Run error', 'st-bad'); ctx.confirm({ title: 'Secure Boot - Error', body: (e && e.text) || 'The run failed to start.', okText: 'OK', cancelText: null }); },
+          error: function (e) { setStatus((e && e.text) || 'Run error', 'st-bad'); ctx.confirm({ title: 'Secure Boot - Error', body: Janet.util.esc((e && e.text) || 'The run failed to start.'), okText: 'OK', cancelText: null }); },
           log: function (l) { if (l && l.level === 'err') setStatus(l.text, 'st-bad'); },
           active: function (a) {
             runbar.setActive(a);
