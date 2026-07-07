@@ -436,7 +436,15 @@ function Start-JanetWebServer {
                 }
 
                 # ---- /api/* : enforce the per-launch session token (constant-time) ----
-                $tok = $req.Headers['X-Janet-Token']; if ([string]::IsNullOrEmpty($tok)) { $tok = $req.QueryString['t'] }
+                # The query-string token (?t=) is honoured ONLY on the unload beacon-cancel
+                # route: navigator.sendBeacon (POST /api/job/<id>/cancel, fired on pagehide)
+                # cannot set the X-Janet-Token header, so ?t= is its sole carrier there. Every
+                # other /api/* route must present the header token, so a bare URL carrying ?t=
+                # (referer leak, shared link, browser history) can't drive the tool/action
+                # surface. The bootstrap page load is a static (non-/api/) route and the SPA
+                # strips ?t= after first paint, so no /api/* GET ever needs it.
+                $tok = $req.Headers['X-Janet-Token']
+                if ([string]::IsNullOrEmpty($tok) -and $verb -eq 'POST' -and $path -match '^/api/job/[^/]+/cancel$') { $tok = $req.QueryString['t'] }
                 $tokenOk = $false
                 if ($tok -and $tok.Length -eq $Token.Length) {
                     $d = 0; for ($ti = 0; $ti -lt $Token.Length; $ti++) { $d = $d -bor ([int][char]$tok[$ti] -bxor [int][char]$Token[$ti]) }
@@ -599,10 +607,12 @@ function Start-JanetWebServer {
                             & $writeJson $resp @{ error="unknown action '$sAct' for tool '$sTool'" } 404; continue
                         }
                         $sDestructive = ($sActObj -and $sActObj.destructive) -or ($sTool -eq 'acas' -and $acasByIdDestructive -contains $sAct)
-                        # ARMING a destructive wave requires the admin session up front, so an
-                        # unattended wave can only be scheduled by an authenticated operator.
-                        if ($sDestructive -and -not ($state.AckGiven -and $null -ne $state.Cred)) {
-                            & $writeJson $resp @{ error='Admin session required to arm a destructive wave: set ADW credentials and Start Admin Session first.' } 403; continue
+                        # ARMING any wave requires the admin session up front, so an unattended
+                        # wave can only be scheduled by an authenticated operator (a bare token-
+                        # holder must not be able to leave standing automation armed). Destructive
+                        # waves stay additionally fail-safe via the live-session check at fire time.
+                        if (-not ($state.AckGiven -and $null -ne $state.Cred)) {
+                            & $writeJson $resp @{ error='Admin session required to arm a schedule: set ADW credentials and Start Admin Session first.' } 403; continue
                         }
                         # Parse fireAt (accept ISO 8601, local or Z). Reject a past time (>2 min ago).
                         $fireStr = [string]$sbody['fireAt']
@@ -611,6 +621,13 @@ function Start-JanetWebServer {
                         $fireUtc = $fireDt.ToUniversalTime()
                         if ($fireUtc -lt ([DateTime]::UtcNow.AddMinutes(-2))) { & $writeJson $resp @{ error='fireAt is in the past' } 400; continue }
                         $rec = ([string]$sbody['recurrence']).ToLower(); if ($rec -notin @('none','daily','weekly')) { $rec = 'none' }
+                        # Recurrence is a destructive-wave convenience only (a recurring destructive
+                        # wave stays fail-safe via the live-admin-session check at fire time). A
+                        # recurring NON-destructive wave is exactly the standing unattended scan
+                        # automation the operating model forbids, so non-destructive waves are one-shot.
+                        if (-not $sDestructive -and $rec -ne 'none') {
+                            & $writeJson $resp @{ error='recurrence is a destructive-wave convenience; non-destructive waves are one-shot' } 400; continue
+                        }
                         $sParams = @{}
                         if ($sbody['params'] -and $sbody['params'] -is [System.Management.Automation.PSCustomObject]) { foreach ($pp in $sbody['params'].PSObject.Properties) { $sParams[$pp.Name] = $pp.Value } }
                         $sid = [guid]::NewGuid().ToString('N')
@@ -1336,6 +1353,15 @@ function Start-JanetWebServer {
         }
     } finally {
         try { Write-JanetWebRollup -Context $state.LogCtx -ClosingNotes $state.ClosingNotes } catch {}
+        # Stop + dispose the off-hours scheduler poller runspace so a Ctrl+C leaves no
+        # orphan poller behind: an orphan keeps polling with a now-stale token, 403s the
+        # gated fire route, and stamps armed schedules blocked/error - racing a relaunched
+        # server for the same files.
+        if ($state.SchedPoller) {
+            try { $state.SchedPoller.Ps.Stop() } catch {}
+            try { $state.SchedPoller.Ps.Dispose() } catch {}
+            try { $state.SchedPoller.Rs.Dispose() } catch {}
+        }
         foreach ($slot in $state.ToolRunspaces.Values) { try { $slot.RS.Close(); $slot.RS.Dispose() } catch {} }
         try { $listener.Stop(); $listener.Close() } catch {}
         Write-Host "  JANET Web stopped." -ForegroundColor DarkGray

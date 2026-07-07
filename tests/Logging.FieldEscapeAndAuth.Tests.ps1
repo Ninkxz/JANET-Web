@@ -107,3 +107,34 @@ Describe 'FIX - blank-password detection uses IsNullOrEmpty (JanetWeb.Auth.ps1)'
         (& $script:__usableCheck $null) | Should Be $false
     }
 }
+
+# -----------------------------------------------------------------------------
+Describe 'FIX - Resolve-JanetWebToolName rejects dot-only ids (JanetWeb.Logging.ps1)' {
+
+    # A dot-only tool id ('.', '..') survived the char-strip and would resolve a log
+    # path AT or ABOVE the log root. The fix falls those back to the frozen default.
+    . (Join-Path $script:Root 'server\JanetWeb.Logging.ps1')
+
+    It "'..' does not climb above the log root - falls back to the default" {
+        Resolve-JanetWebToolName -ToolId '..' | Should Be 'JANET-TWO'
+    }
+    It "'.' (current dir) falls back to the default" {
+        Resolve-JanetWebToolName -ToolId '.' | Should Be 'JANET-TWO'
+    }
+    It "a longer dot run ('...') falls back to the default" {
+        Resolve-JanetWebToolName -ToolId '...' | Should Be 'JANET-TWO'
+    }
+    It 'an empty id still falls back to the default (unchanged)' {
+        Resolve-JanetWebToolName -ToolId '' | Should Be 'JANET-TWO'
+    }
+    It 'a mapped id still resolves to its desktop folder (happy path unchanged)' {
+        Resolve-JanetWebToolName -ToolId 'wpt' | Should Be 'WPT'
+    }
+    It 'an ordinary unmapped id still passes through sanitized (happy path unchanged)' {
+        Resolve-JanetWebToolName -ToolId 'kev' | Should Be 'kev'
+    }
+    It 'a dots+separator traversal id is stripped to one safe segment, not resolved as a path' {
+        # '../evil': the '/' becomes '_', so it can't climb, and it is not dot-only.
+        Resolve-JanetWebToolName -ToolId '../evil' | Should Be '.._evil'
+    }
+}

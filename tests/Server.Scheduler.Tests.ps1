@@ -1,8 +1,12 @@
 ﻿# =============================================================================
 #  Server.Scheduler.Tests.ps1 - Pester 3.4 tests for the off-hours scheduler
-#  (arm-and-walk-away). Starts a REAL server, arms a READ-ONLY wave a few seconds
-#  out, and confirms the background poller fires it through the gated route. Also
-#  confirms a DESTRUCTIVE wave cannot be armed without an admin session (403).
+#  (arm-and-walk-away). Starts a REAL server and confirms:
+#    - ARMING any wave (destructive OR read-only) now requires an admin session,
+#      so a bare token-holder can't leave standing automation armed (403). Since
+#      setting a credential pops a live smartcard dialog we can't drive in a unit
+#      test, the "poller fires" + "DELETE cancels" cases seed an armed schedule
+#      file DIRECTLY on disk (the poller/route read the file regardless of how it
+#      was armed) and exercise the background poller through the gated route.
 #  No destructive action is ever run against any host (read-only fire only).
 #
 #  Run:  Invoke-Pester -Path .\tests\Server.Scheduler.Tests.ps1
@@ -10,6 +14,7 @@
 $script:Root  = Split-Path $PSScriptRoot -Parent
 $script:Port  = 18121
 $script:Token = 'PESTER-SCHED-TOKEN-0123456789abcdef'
+$script:SchedDir = Join-Path (Join-Path $script:Root 'JanetLocal') 'schedule'
 
 function Invoke-SchedReq {
     param([string]$Method, [string]$Path, [string]$Body = '')
@@ -26,6 +31,22 @@ function Invoke-SchedReq {
     }
 }
 
+# Seed an armed schedule file straight to the poller's watch dir (bypasses the arm
+# gate, which now needs a live admin session we can't establish in a unit test).
+function New-SchedFile {
+    param([string]$ToolId, [string]$ActionId, [string]$FireAtUtc, [string]$Label, [string]$Recurrence = 'none')
+    if (-not (Test-Path -LiteralPath $script:SchedDir)) { New-Item -ItemType Directory -Path $script:SchedDir -Force | Out-Null }
+    $sid = ([guid]::NewGuid().ToString('N'))
+    $obj = [ordered]@{
+        id = $sid; createdUtc = ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')); createdBy = 'PESTER'
+        toolId = $ToolId; actionId = $ActionId; label = $Label; destructive = $false
+        fireAtUtc = $FireAtUtc; recurrence = $Recurrence; status = 'armed'; params = @{}; firedUtc = ''; note = ''
+    }
+    $file = Join-Path $script:SchedDir ("$sid.json")
+    [System.IO.File]::WriteAllText($file, ($obj | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+    return $sid
+}
+
 Describe 'Off-hours scheduler (arm-and-walk-away)' {
 
     $serverCmd = ". '$script:Root\server\JanetWeb.Server.ps1'; Start-JanetWebServer -Root '$script:Root' -Port $script:Port -Token '$script:Token'"
@@ -39,15 +60,14 @@ Describe 'Off-hours scheduler (arm-and-walk-away)' {
 
     It 'server starts' { $script:Up | Should Be $true }
 
-    It 'arms a read-only wave (reports/campaign-list) to fire in 3s' {
-        $fireAt = (Get-Date).ToUniversalTime().AddSeconds(3).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    It 'refuses to arm a READ-ONLY wave without an admin session (403)' {
+        # FIX (P2): arming ANY schedule now requires the live admin session, not just
+        # destructive waves - a bare token-holder must not be able to arm standing work.
+        $fireAt = (Get-Date).ToUniversalTime().AddMinutes(5).ToString('yyyy-MM-ddTHH:mm:ssZ')
         $body = @{ toolId='reports'; actionId='campaign-list'; fireAt=$fireAt; label='PESTER read-only'; recurrence='none' } | ConvertTo-Json -Compress
         $r = Invoke-SchedReq 'POST' '/api/schedule' $body
-        $r.Status | Should Be 200
-        $o = $r.Body | ConvertFrom-Json
-        $o.ok | Should Be $true
-        $o.destructive | Should Be $false
-        $script:Sid = $o.id
+        $r.Status | Should Be 403
+        $r.Body | Should Match 'Admin session required'
     }
 
     It 'refuses to arm a DESTRUCTIVE wave without an admin session (403)' {
@@ -58,7 +78,11 @@ Describe 'Off-hours scheduler (arm-and-walk-away)' {
         $r.Body | Should Match 'Admin session required'
     }
 
-    It 'the background poller fires the due read-only wave (status -> fired)' {
+    It 'the background poller fires a due read-only wave (status -> fired)' {
+        # Seed an already-due armed read-only wave straight to the watch dir; the poller
+        # fires it through the gated route (read-only needs no admin session at fire time).
+        $fireAt = (Get-Date).ToUniversalTime().AddSeconds(-30).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $script:Sid = New-SchedFile -ToolId 'reports' -ActionId 'campaign-list' -FireAtUtc $fireAt -Label 'PESTER poller-fire'
         Start-Sleep -Seconds 20   # poller ticks every 15s
         $list = (Invoke-SchedReq 'GET' '/api/schedule').Body | ConvertFrom-Json
         $mine = $list.schedules | Where-Object { $_.id -eq $script:Sid }
@@ -69,8 +93,7 @@ Describe 'Off-hours scheduler (arm-and-walk-away)' {
 
     It 'cancels a schedule (DELETE marks it cancelled)' {
         $fireAt = (Get-Date).ToUniversalTime().AddHours(5).ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $body = @{ toolId='reports'; actionId='campaign-list'; fireAt=$fireAt; label='PESTER cancel' } | ConvertTo-Json -Compress
-        $cid = ((Invoke-SchedReq 'POST' '/api/schedule' $body).Body | ConvertFrom-Json).id
+        $cid = New-SchedFile -ToolId 'reports' -ActionId 'campaign-list' -FireAtUtc $fireAt -Label 'PESTER cancel'
         $del = Invoke-SchedReq 'DELETE' "/api/schedule/$cid"
         $del.Status | Should Be 200
         ($del.Body | ConvertFrom-Json).status | Should Be 'cancelled'
@@ -79,9 +102,8 @@ Describe 'Off-hours scheduler (arm-and-walk-away)' {
     It 'teardown: stop server + remove test schedule files' {
         if ($script:Proc -and -not $script:Proc.HasExited) { Stop-Process -Id $script:Proc.Id -Force }
         Start-Sleep -Milliseconds 400
-        $sd = Join-Path $script:Root 'JanetLocal\schedule'
-        if (Test-Path $sd) {
-            foreach ($f in (Get-ChildItem $sd -Filter '*.json' -File)) {
+        if (Test-Path $script:SchedDir) {
+            foreach ($f in (Get-ChildItem $script:SchedDir -Filter '*.json' -File)) {
                 try { $j = Get-Content $f.FullName -Raw | ConvertFrom-Json; if ($j.label -like 'PESTER*') { [System.IO.File]::Delete($f.FullName) } } catch {}
             }
         }

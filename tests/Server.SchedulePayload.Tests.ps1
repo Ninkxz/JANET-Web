@@ -72,3 +72,47 @@ Describe 'Scheduler arm/fire payload (P2-2 no-empty-params fix)' {
         $shellSrc | Should Match "api\('POST', '/schedule',\s*\{[^}]*params:\s*armParams"
     }
 }
+
+Describe 'Scheduler arm gate + recurrence (P2 operating-model fixes)' {
+
+    $script:Src = Get-Content -LiteralPath $script:ServerPath -Raw
+
+    # --- FIX (P2-a): arming ANY wave requires the admin session, not just destructive ---
+    It 'the arm gate no longer keys on $sDestructive (any wave needs the admin session)' {
+        # the old destructive-ONLY arm gate + its message must be gone...
+        $script:Src.Contains("if (`$sDestructive -and -not (`$state.AckGiven -and `$null -ne `$state.Cred)) {") | Should Be $false
+        $script:Src.Contains('Admin session required to arm a destructive wave') | Should Be $false
+    }
+    It 'the arm route gates any wave on the live admin session (ack + cred)' {
+        $script:Src.Contains("if (-not (`$state.AckGiven -and `$null -ne `$state.Cred)) {") | Should Be $true
+        $script:Src.Contains('Admin session required to arm a schedule') | Should Be $true
+    }
+
+    # --- FIX (P2-b): non-destructive waves are one-shot (no standing scan automation) ---
+    It 'a non-destructive wave with recurrence != none is rejected (400)' {
+        $script:Src.Contains("if (-not `$sDestructive -and `$rec -ne 'none') {") | Should Be $true
+        $script:Src.Contains('non-destructive waves are one-shot') | Should Be $true
+    }
+    It 'destructive recurrence (daily/weekly) is still allowed to advance in the poller' {
+        # unchanged fail-safe: a destructive recurrence re-arms only when it fires OK,
+        # and the fire route still 403s without a live session.
+        $script:Src.Contains("([string]`$o.recurrence) -eq 'daily' -or ([string]`$o.recurrence) -eq 'weekly'") | Should Be $true
+    }
+}
+
+Describe 'API auth: query-string token scoped to the beacon-cancel route (P3 hardening)' {
+
+    $script:Src = Get-Content -LiteralPath $script:ServerPath -Raw
+
+    It 'no longer accepts ?t= unconditionally on every /api/* route' {
+        # the old unconditional fallback ("$tok = $req.QueryString['t']" for any empty
+        # header) must be gone.
+        $script:Src.Contains("if ([string]::IsNullOrEmpty(`$tok)) { `$tok = `$req.QueryString['t'] }") | Should Be $false
+    }
+    It 'accepts ?t= ONLY on POST /api/job/<id>/cancel (sendBeacon can''t set headers)' {
+        $script:Src.Contains("if ([string]::IsNullOrEmpty(`$tok) -and `$verb -eq 'POST' -and `$path -match '^/api/job/[^/]+/cancel`$') { `$tok = `$req.QueryString['t'] }") | Should Be $true
+    }
+    It 'the constant-time header/token compare is preserved' {
+        $script:Src.Contains('$d = 0; for ($ti = 0; $ti -lt $Token.Length; $ti++)') | Should Be $true
+    }
+}

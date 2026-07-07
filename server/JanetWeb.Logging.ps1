@@ -51,7 +51,11 @@ function Resolve-JanetWebToolName {
     param([string]$ToolId)
     if ($ToolId -and $script:JanetWebToolMap.ContainsKey($ToolId)) { return $script:JanetWebToolMap[$ToolId] }
     if ([string]::IsNullOrWhiteSpace($ToolId)) { return 'JANET-TWO' }
-    return ($ToolId -replace '[\\/:*?"<>|]', '_')
+    $clean = ($ToolId -replace '[\\/:*?"<>|]', '_')
+    # A dot-only id ('.', '..') survives the char-strip but would resolve a path
+    # segment AT or ABOVE the log root, so treat it as empty and fall back.
+    if ([string]::IsNullOrWhiteSpace($clean) -or $clean -match '^\.+$') { return 'JANET-TWO' }
+    return $clean
 }
 
 function Get-JanetWebUserFolderName {
