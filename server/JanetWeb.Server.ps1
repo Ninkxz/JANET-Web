@@ -11,15 +11,26 @@
 #  run on background runspaces and stream events the browser polls.
 #
 #  Routes:
-#    GET  /                                     -> web/index.html
-#    GET  /css/*  /js/*  ...                     -> static assets under web/
-#    GET    /api/tools
-#    GET    /api/cred        POST /api/cred       DELETE /api/cred
-#    GET    /api/target-groups   POST /api/target-groups
-#    GET    /api/tool/<id>/manifest
-#    POST   /api/tool/<id>/action/<actionId>
-#    GET    /api/job/<jobId>/events?since=N
-#    POST   /api/job/<jobId>/cancel
+#    GET  /                                        -> web/index.html
+#    GET  /css/*  /js/*  ...                        -> static assets under web/
+#    GET    /api/tools                              -> tool registry (id/name/category/icon)
+#    GET/POST/DELETE /api/cred                       -> get/set/clear the session credential
+#    POST   /api/session/start                       -> admin-session ack (arms destructive actions)
+#    POST   /api/session/end                         -> end the admin session
+#    GET    /api/status                              -> server + session status
+#    GET/POST /api/target-groups                     -> saved host-list groups
+#    GET/POST/DELETE /api/schedule[/<id>]             -> off-hours scheduler (arm/list/cancel)
+#    GET    /api/dashboard                            -> hub rollup (flat files only, touches no hosts)
+#    GET    /api/logs/tail                            -> tail a tool's log
+#    GET    /api/logs/transcript                      -> full session transcript
+#    POST   /api/upload                               -> file upload (scan import, packages, ...)
+#    GET/POST /api/report-preview                     -> one-shot pre-token report preview link
+#    GET    /api/tool/pkginstall/packages             -> pkginstall: list deployable packages
+#    GET    /api/tool/pkginstall/msis                 -> pkginstall: list .msi files in a bundle
+#    GET    /api/tool/<id>/manifest                   -> per-tool UI manifest
+#    POST   /api/tool/<id>/action/<actionId>          -> run a tool action (session-gated if destructive)
+#    GET    /api/job/<jobId>/events?since=N           -> poll job progress/events
+#    POST   /api/job/<jobId>/cancel                   -> cancel a running job
 # =============================================================================
 
 function Start-JanetWebServer {
@@ -82,6 +93,8 @@ function Start-JanetWebServer {
     Write-Host ("  Packages: $packagesDir") -ForegroundColor DarkGray
     # Export the resolved packages root so worker runspaces (e.g. patchlib inventory,
     # which honors a -PackagesRoot override) inherit the same folder the server chose.
+    # Name is frozen (TWO-era): existing operator environments already set
+    # JANET2_PACKAGES_ROOT, so renaming it would silently break their override.
     $env:JANET2_PACKAGES_ROOT = $packagesDir
     # Local Log4j staging folder (always seeded under the local .\Packages, even
     # when we READ packages from the share - the on-box default the ACAS Log4j

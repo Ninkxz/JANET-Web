@@ -30,5 +30,7 @@ rem  server-side Get-Credential smartcard picker can fail to surface. The classi
 rem  conhost host pops the picker reliably, so we pin it explicitly. The sentinel
 rem  tells JanetWeb.Internal.ps1 we are ALREADY in conhost, so its own Windows-Terminal
 rem  guard does not relaunch a second window.
+rem  JANETTWO_CONHOST is a frozen (TWO-era) name - this .cmd and JanetWeb.Internal.ps1
+rem  must keep agreeing on it, so it is not renamed on its own.
 set "JANETTWO_CONHOST=1"
 start "JANET Web" conhost.exe powershell.exe -NoExit -STA -ExecutionPolicy Bypass -File "%~dp0JanetWeb.Internal.ps1" %*

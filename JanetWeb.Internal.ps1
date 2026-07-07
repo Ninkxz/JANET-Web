@@ -14,8 +14,8 @@
     PURE POWERSHELL - no modules to install, no third-party software. Uses only
     the .NET HttpListener that ships with Windows (PowerShell 5.1 and 7). Suited
     to a locked-down AFNET box. Runs entirely as YOU on localhost - the same
-    security model as the WinForms tools. The originals in ..\Tools\ are never
-    touched; their engines are reused by the modules under .\modules\.
+    security model as the WinForms tools. Self-contained: the tool engines live
+    under .\modules\ (one .psm1 per tool), no external source to fork from.
 
     The loopback listener binds fine as a normal (non-elevated) user. Launch it
     from the PowerShell session you do admin work in, so remote actions run under
@@ -48,6 +48,8 @@ $ErrorActionPreference = 'Stop'
 # in a fresh conhost window and stop this instance. The JANETTWO_CONHOST sentinel
 # (set by the .cmd, and here before relaunch) prevents any relaunch loop, and the
 # UserInteractive gate keeps headless/automation launches from spawning a window.
+# JANETTWO_CONHOST is a frozen (TWO-era) name - "Launch JANET Web.cmd" and this
+# script must keep agreeing on it, so it is not renamed on its own.
 $janetSpawnedByExplorer = $false
 try {
     $janetMeProc     = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop

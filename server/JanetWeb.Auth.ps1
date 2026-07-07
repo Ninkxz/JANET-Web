@@ -54,6 +54,9 @@ function Prompt-JanetWebCredential {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
         Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
         try {
+            # Namespace 'JTwo' is frozen (TWO-era): Add-Type compiles this into the
+            # AppDomain once per process, so renaming it risks a recompile/type-identity
+            # collision if anything else in this session already loaded the old name.
             Add-Type -Namespace JTwo -Name FgWin -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();

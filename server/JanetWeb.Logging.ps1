@@ -50,6 +50,9 @@ $script:JanetWebToolMap = @{
 function Resolve-JanetWebToolName {
     param([string]$ToolId)
     if ($ToolId -and $script:JanetWebToolMap.ContainsKey($ToolId)) { return $script:JanetWebToolMap[$ToolId] }
+    # 'JANET-TWO' is the frozen empty-id fallback (both return sites below): it is
+    # the existing log-folder/rollup-row name on the share, so renaming it would
+    # split an operator's log history across two folder names. Deliberate, not residue.
     if ([string]::IsNullOrWhiteSpace($ToolId)) { return 'JANET-TWO' }
     $clean = ($ToolId -replace '[\\/:*?"<>|]', '_')
     # A dot-only id ('.', '..') survives the char-strip but would resolve a path

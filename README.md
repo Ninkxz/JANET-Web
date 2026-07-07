@@ -1,119 +1,86 @@
 # JANET Web
 
-A pure-PowerShell, **zero-outside-dependency**, web-local re-front of the whole JANET
-sysadmin tool suite -- the successor to **JANET ONE**.
+A pure-PowerShell, zero-outside-dependency, operator-launched web app for endpoint
+administration and vulnerability remediation. It is the reference implementation
+of the JANET suite: 18 tools covering patching, ACAS/Tenable remediation, package
+push, Windows upgrade, hardening, restart scheduling, remote messaging, AD search,
+DHCP, and read-only reporting (dashboard, KEV, C2C readiness, patch history,
+sysadmin sweeps).
 
-## Why JANET Web exists
+JANET Web binds a `System.Net.HttpListener` to `127.0.0.1` only, serves a static
+vanilla-JS SPA, and runs each tool's logic through a background runspace that
+streams progress back to the browser. No third-party software, no install step,
+no external network calls - suitable for a locked-down / air-gapped AFNET
+workstation.
 
-JANET ONE proved the architecture (a `System.Net.HttpListener` server + static
-HTML/CSS/JS + one engine module per tool, no external software -- the key requirement
-for locked-down / air-gapped accreditation). **But** it rendered every tool through a
-single *generic, manifest-driven* SPA: one cookie-cutter form + grid per action. That
-made every tool look and feel the same and **lost the real usability of the desktop
-JANET tools** -- their bespoke tabbed screens, the way you run things, and especially the
-live **activity-run** experience (activity log + colour-coded results grid + progress +
-per-host rows).
+## Launch it
 
-**JANET Web keeps the proven backend/plumbing but rebuilds the frontend so each tool
-gets a FAITHFUL, bespoke per-tool view that mirrors its desktop WinForms tool** -- the
-screens, tabs, run controls, and the live activity/results view -- tool by tool. No
-generic renderer.
+Double-click **`Launch JANET Web.cmd`**. It:
 
-## Decisions (locked for this build)
+1. Best-effort strips the "Mark of the Web" off every file in the folder
+   (`Unblock-File`), so a copied/extracted deployment doesn't trip a security
+   prompt per script or load under Constrained Language Mode.
+2. Forces the classic blue console (`conhost.exe`) instead of Windows Terminal,
+   because the server-side "Set Credentials" smartcard picker
+   (`Get-Credential`) does not reliably surface under Windows Terminal's ConPTY
+   host.
+3. Runs `JanetWeb.Internal.ps1`, which mints a per-launch session token, starts
+   the server, and opens your browser to the tokenized URL.
 
-- **Backend (engines):** RE-FORK each engine fresh from the desktop `Tools\*.ps1` source
-  of truth (see `fork-source\`). We do *not* reuse JANET ONE's `modules\*.psm1` -- though
-  `X:\J.A.N.E.T ONE\modules\` is a useful cross-check (it already fixed many bugs).
-- **Frontend:** faithful **per-tool views** mirroring each desktop tool's UX. The shared
-  building blocks (run/command bar, activity-log panel, results grid, target manager,
-  credential/session bar, confirm/arming dialog, progress strip) are reused by every
-  per-tool view -- desktop fidelity *without* a cookie-cutter generic renderer.
-- **Plumbing:** REUSE JANET ONE's proven web-local plumbing -- the HttpListener server,
-  per-launch loopback token security, the background-runspace streaming + polling model,
-  the central-audit-CSV logging bridge, the credential/session gate, and the
-  `-Emit` streaming event contract (`status` / `progress` / `row` / `log` / `audit` /
-  `final`). Reference it in place at `X:\J.A.N.E.T ONE\` (server\, web\).
-- **Stack rules:** Windows PowerShell 5.1 must parse everything; `.ps1`/`.psm1` are
-  UTF-8 **with BOM** and **ASCII-only source**; zero third-party software.
-- **Do NOT modify `X:\J.A.N.E.T`** (the desktop suite) -- it is reference only; we copied
-  the tools out into `fork-source\`.
+`Ctrl+C` in that console window stops the server. Running `JanetWeb.Internal.ps1`
+directly (double-click, IDE terminal, PowerShell 7) is self-healing - it detects
+it's not in conhost and relaunches itself there.
+
+Everything runs as YOU, on localhost, the same security model as the desktop
+WinForms tools - no elevation, no service account.
+
+## Admin session model
+
+Every *destructive* action (patch, reboot, uninstall, registry apply, etc.) is
+gated server-side, not just in the browser: **Set Credentials** (stores a
+`PSCredential` for the session) plus **Start Admin Session** (an explicit
+responsibility acknowledgement) must both be live, or the server rejects the
+action with a 403. Read-only actions (scans, queries, AD search, reporting) never
+require a session. The off-hours scheduler requires a live admin session to arm
+*any* wave, non-destructive waves are one-shot (no recurrence), and destructive
+waves are re-checked at fire time - if the admin session is gone when a
+scheduled wave is due, it is blocked, not run.
+
+## Logs
+
+Each tool writes a per-session detail CSV plus a fleet usage rollup. The primary
+target is the production share
+(`\\dm-tn-01\sh-usafe-automation$\JANET\Logs`); if that's unreachable, logging
+falls back to a local spool under `JanetLocal\` (same layout as the desktop
+tools). Use the **Patch History** tool to browse the audit trail (per-host
+timeline, recent activity, per-operator summary, staleness) without touching the
+raw CSVs.
+
+## Tests
+
+A Pester suite lives under `tests\` and covers the destructive-action gates, the
+remediation/campaign/POA&M engines, the DNS-mismatch and self-reboot guards, and
+the input-hardening (traversal, CSV-injection, upload sanitization) checks:
+
+```powershell
+Invoke-Pester -Path .\tests
+```
 
 ## Layout
 
 ```
 JANET Web\
-  fork-source\            Copied-in JANET tools (the fork basis + UI reference)
-    JANET.ps1             The desktop hub/launcher (suite-level UX reference)
-    JANET_Config.json     Desktop tool registry
-    Tools\                The 12 desktop WinForms tools (.ps1)
-  docs\
-    HANDOFF.md            >> The build guide (how to build JANET Web). START HERE.
-    REVIEW.md             What makes JANET and JANET ONE tick (review notes)
-    ui-specs\             One faithful UI-rebuild spec per tool (<tool>.md)
-  server\, web\, modules\   The built runtime: HttpListener server, static SPA, one engine module per tool
+  modules\        One engine .psm1 per tool (18) - the actual remediation/report logic
+  server\         HTTP host (JanetWeb.Server.ps1), auth/session gate (JanetWeb.Auth.ps1),
+                   logging bridge (JanetWeb.Logging.ps1), tool-registry.json
+  web\            The static SPA (index.html, js\components, js\views) - no build step
+  JanetLocal\     Seed catalogs (KEV, C2C baseline, SLA baseline, IAVM map, BIOS
+                   firmware baseline) and runtime state (campaigns, schedule, sessions)
+  tests\          Pester test suite
+  docs\           Current review notes + per-tool UI specs (ui-specs\)
+  Packages\       Local staging for patch content (PSADT / MSI / MSU / CAB / EXE)
+  JanetWeb.Internal.ps1     Session/token bootstrap + server start (do not run directly)
+  Launch JANET Web.cmd      The actual entry point - double-click this
 ```
 
-## The 18 tools
-
-- **Remediation** — Workstation Patching, ACAS Nemesis, Package Installer,
-  Windows Upgrade, Unsupported Remediator, Patch Content
-- **Hardening** — Secure Boot Enabler, BIOS Firmware
-- **Lifecycle** — Restart Scheduler
-- **Operations** — Remote Message
-- **Directory** — AD Search
-- **Network** — DHCP Scope Options
-- **Reporting** — Reports, KEV Cross-Check, C2C Readiness, Patch History
-- **Beta** — Beta Lab (staging area for experimental, read-only fixes)
-
-(Source of truth: `server\tool-registry.json`.)
-
-## Closed-loop vulnerability remediation
-
-Beyond the per-tool actions, the **Reports** tool drives an end-to-end
-finding → fix → proof workflow off an imported ACAS/Tenable scan:
-
-1. **Import** — parse a `.nessus` / CSV / TSV scan into normalized findings,
-   auto-flagged against the in-tool CISA **KEV** catalog and IAVM map.
-2. **Plan** — the **Remediation Planner** turns findings into a per-host work
-   queue (patch X, update Y, remove Z), worst hosts first (KEV → Critical),
-   with each step mapped to the JANET tool that clears it. The **Remediation
-   Router** gives the per-bucket view.
-3. **Fix** — the operator executes each step through the mapped tool
-   (WPT / ACAS / UPR), which keeps its own admin-session ack + confirm-word +
-   DNS-mismatch / self-guards. Planning is read-only; **no remediation runs
-   without the gated flow**.
-4. **Track** — snapshot the open findings into a persisted **Campaign**
-   (`JanetLocal\campaigns\<id>.json`: finding keys, host set, mapped routes,
-   severity/KEV mix).
-5. **Prove** — after the wave, re-import the next scan and **Verify** the
-   campaign: each snapshotted finding still open = still-open, gone =
-   remediated; the campaign flips to **VERIFIED-CLOSED** at 100%. The
-   **Patch Cross-Ref** tab shows the before/after delta headline
-   (remediated / still-open / new / % closed).
-
-Supporting reports: **SLA / Aging** (per-severity remediation windows, KEV
-override, overdue/due-soon/on-track buckets), **eMASS POA&M** export (26-column
-import-template CSV, DISA CAT, SLA-derived completion dates), a hub **Network
-Posture** panel (severity meter + aging chips + KEV exposure), Squadron Rollup,
-and the Executive Command Brief. All read-only; all self-contained CSV/HTML
-output, no external calls.
-
-**Off-hours scheduler (arm-and-walk-away).** The hub's **Scheduled Waves** panel
-arms a tool action to fire at a future time (`POST /api/schedule`); a background
-poller on the persistent server fires the due wave by calling the server's own
-gated action route over loopback — so it runs through the identical admin-session
-+ engine guards. No credential is stored on disk: a **destructive** wave requires a
-live admin session both to arm and to fire, and is **blocked (not run)** if the
-session is gone at fire time (fail-safe). Supports one-shot / daily / weekly.
-
-## Status
-
-Built. All 18 tools have bespoke per-tool views over the pure-PowerShell backend
-(`server\` HttpListener, `web\` static SPA, one `modules\` engine per tool).
-`docs\HANDOFF.md`, `docs\REVIEW.md`, and the per-tool `docs\ui-specs\*.md` are the
-review + UI-spec basis it was built from. Remaining: on-AFNET live validation.
-
-A Pester test suite lives under `tests\` (run `Invoke-Pester -Path .\tests`);
-it covers the destructive-action gates, the remediation/campaign/POA&M engines,
-and the input-hardening guards. All web assets are vanilla JS/CSS with no build
-step and no external dependencies.
+Tool registry (id, name, category, icon, summary) is `server\tool-registry.json`.
