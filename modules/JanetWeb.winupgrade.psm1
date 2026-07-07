@@ -49,7 +49,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'diagnose'
                 label       = 'Run Diagnostic Scan'
-                description  = 'Read-only 24H2 readiness + Windows Update health scan (changes NOTHING). Per host it checks CPU / TPM / Secure Boot / RAM / disk against the Windows 11 24H2 minimums, the Target Release Version policy + CPU/TPM bypass state, feature-update deferrals / pauses (blocks), the WU service health, and SCCM client 24H2 deployment visibility, then returns a one-word verdict: ON 24H2 (already build 26100+); HW INCOMPAT (unsupported CPU/TPM and no bypass set); BLOCKED (a deferral / pause is holding the feature update); NEEDS POLICY (Target Release Version not set); READY (all clear to Pin / Force Discovery). The full colour-coded report streams to the activity log.'
+                description  = 'Read-only 24H2 readiness + Windows Update health + failed-upgrade forensics scan (changes NOTHING). Per host it checks CPU / TPM / Secure Boot / RAM / disk against the Windows 11 24H2 minimums, the Target Release Version policy (incl. a HALF-WRITTEN pin) + CPU/TPM bypass state, feature-update deferrals / pauses - distinguishing an EXPIRED (lingering) pause window from an active block - the WU service health, and SCCM client 24H2 deployment visibility. It also analyses a FAILED in-place upgrade: it reports C:\$WINDOWS.~BT staging size + age and flags STALE staging left by a rolled-back attempt (never mis-reads it as "in progress"), matches the current setuperr.log against a failure-signature table (registry-hive corrupt 0x000003F1, broken component store CBS_E_INVALID_PACKAGE / FOD-inventory, out-of-memory 0x8007000E, AD LDS adammigrate.dll, cancelled 0x800704C7), surfaces driver-injection failures with an ADVISORY (not blanket) read of DISM BootCritical (a non-boot-class or absent device is called a likely false positive), and reads SetupDiag results - only ever parsing the authoritative ~BT logs (older C:\Windows\Panther logs are labelled stale). Returns a one-word verdict: ON 24H2 (already build 26100+); HW INCOMPAT (unsupported CPU/TPM and no bypass set); BLOCKED (a deferral / pause is holding the feature update); NEEDS POLICY (Target Release Version not set or half-written); READY (all clear to Pin / Force Discovery). The full colour-coded report streams to the activity log; a diagnose that times out points at a wedged WU/WMI stack (winmgmt /verifyrepository).'
                 kind         = 'stream-table'
                 destructive  = $false
                 columns      = @('Host','Ping','Status','Detail')
@@ -398,6 +398,116 @@ $script:WinUpgradeCpuPatterns = @(
     'Snapdragon\s*[78]cx',
     'Snapdragon\s*X\s*(Elite|Plus)'
 )
+
+# =============================================================================
+#  DIAGNOSE DECISION HELPERS (fleet-batch lessons: 23H2 -> 24H2, 8 boxes / 7 causes)
+#
+#  These are PURE, script-scope, unit-tested helpers. The Diagnose remote scan runs
+#  ON the target in a bare pool runspace and therefore CANNOT call a module function,
+#  so it MIRRORS this logic INLINE (the same pattern Get-WinUpgradeDrivePlan uses).
+#  The helpers are the tested source of truth; keep the inline mirror in sync.
+# =============================================================================
+
+# Plainly non-boot device classes. DISM tags a failed-injection driver "boot-critical"
+# defensively; for these classes (or an absent device) that flag is almost always a
+# FALSE POSITIVE and removing the driver is frequently the actual 24H2 fix (field batch:
+# a disconnected HID presenter dongle tagged boot-critical blocked its own removal).
+$script:WinUpgradeNonBootDriverClasses = @(
+    'HIDClass','Mouse','Keyboard','Media','Image','Printer','Camera','SoftwareDevice','Bluetooth'
+)
+
+# Setup-failure signature table (extensible pattern -> cause -> fix), evaluated over the
+# CURRENT ~BT\Sources\Panther\setuperr.log. A rule fires if ANY of its 'Patterns' match
+# (OR), or - when 'All' is set - only if EVERY pattern matches (AND). One [FAIL]+[REC]
+# per hit. This is the tested source of truth; the remote scan mirrors it inline.
+$script:WinUpgradeSetupErrRules = @(
+    @{ Code='REGISTRY_CORRUPT'; Patterns=@('0x000003F1','(?i)configuration registry database is corrupt');
+       Message='registry hive corrupt';
+       Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow; if it persists, deeper hive repair.' }
+    @{ Code='COMPONENT_STORE'; Patterns=@('CBS_E_INVALID_PACKAGE','(?i)Failed to enumerate store capabilities');
+       Message='component store broken';
+       Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow to rebuild the component store.' }
+    @{ Code='COMPONENT_STORE'; All=@('(?i)FOD inventory','E_INVALIDARG');
+       Message='component store broken (FOD inventory E_INVALIDARG)';
+       Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow to rebuild the component store.' }
+    @{ Code='OOM'; Patterns=@('0x8007000E');
+       Message='out of memory (E_OUTOFMEMORY)';
+       Rec='Run Set Page File (fixed 16 GB) on this host, then re-run the feature update.' }
+    @{ Code='ADLDS_MIGRATE'; All=@('adammigrate\.dll','0x80070002');
+       Message='AD LDS migration plugin (adammigrate.dll) failing';
+       Rec='Investigate the AD LDS migration plugin AFTER clearing the other blockers, then re-diagnose.' }
+    @{ Code='SETUP_CANCELLED'; Patterns=@('0x800704C7');
+       Message='setup cancelled (0x800704C7)';
+       Rec='Cross-check DEFERRALS & BLOCKS - an expired/lingering pause can present as a cancel; clear stale pause values + re-trigger.' }
+)
+
+function Get-WinUpgradeSetupErrSignatures {
+    # PURE: match the failure-signature table against a setuperr.log body, returning one
+    # descriptor per HIT (Code/Message/Rec), table order. Mirrored inline by the remote scan.
+    param([string]$LogText)
+    if ([string]::IsNullOrWhiteSpace($LogText)) { return @() }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($rule in $script:WinUpgradeSetupErrRules) {
+        $hit = $false
+        if ($rule.ContainsKey('All')) {
+            $hit = $true
+            foreach ($p in $rule['All']) { if ($LogText -notmatch $p) { $hit = $false; break } }
+        } else {
+            foreach ($p in $rule['Patterns']) { if ($LogText -match $p) { $hit = $true; break } }
+        }
+        if ($hit) { [void]$out.Add([pscustomobject]@{ Code=$rule['Code']; Message=$rule['Message']; Rec=$rule['Rec'] }) }
+    }
+    return $out.ToArray()
+}
+
+function Get-WinUpgradePauseClass {
+    # PURE: classify one WU pause value. Only an End/Expiry value name carries a window end
+    # we can place in time: end in the PAST -> 'Expired' (lingering values, clear + re-trigger);
+    # end in the FUTURE -> 'Active' (a real pause block). A Start-time value or an unparseable
+    # date is just 'Block'. Mirrored inline by the remote scan.
+    param([string]$ValueName, $Value, [datetime]$Now = (Get-Date))
+    $isEnd = ($ValueName -match '(?i)(End|Expiry)Time$')
+    $dt = [datetime]::MinValue
+    $parsed = [datetime]::TryParse([string]$Value, [ref]$dt)
+    if ($isEnd -and $parsed) {
+        if ($dt -lt $Now) { return 'Expired' } else { return 'Active' }
+    }
+    return 'Block'
+}
+
+function Get-WinUpgradeStagingClass {
+    # PURE: classify a C:\$WINDOWS.~BT staging folder. A rolled-back attempt leaves the tree
+    # behind but NOTHING is in progress (field batch: 7 boxes with rolled-back staging were
+    # all misread as 'updates in progress - let them complete'). Precedence:
+    #   RollbackMarker present            -> 'Stale' (rolled-back attempt, clear it)
+    #   a setup process (SetupHost/Prep)  -> 'Active' (genuinely mid-upgrade)
+    #   folder older than 24h, no process -> 'Stale'
+    #   otherwise (recent, no process)    -> 'Recent' (may await reboot; NOT 'in progress')
+    param([double]$AgeHours, [bool]$RollbackMarker, [bool]$SetupProcessRunning)
+    if ($RollbackMarker)      { return 'Stale' }
+    if ($SetupProcessRunning) { return 'Active' }
+    if ($AgeHours -gt 24)     { return 'Stale' }
+    return 'Recent'
+}
+
+function Test-WinUpgradeTrvHalfWritten {
+    # PURE: a half-written Target Release Version pin - TargetReleaseVersion=1 but the
+    # ProductVersion OR TargetReleaseVersionInfo string is empty. WU treats it as
+    # incomplete/inert; re-apply. Mirrored inline by the remote scan.
+    param($TargetReleaseVersion, [string]$ProductVersion, [string]$TargetReleaseVersionInfo)
+    $trv = 0; [void][int]::TryParse([string]$TargetReleaseVersion, [ref]$trv)
+    if ($trv -ne 1) { return $false }
+    return ([string]::IsNullOrWhiteSpace($ProductVersion) -or [string]::IsNullOrWhiteSpace($TargetReleaseVersionInfo))
+}
+
+function Test-WinUpgradeNonBootDriverClass {
+    # PURE: is this a plainly non-boot device class? (used to downgrade a DISM BootCritical
+    # flag to 'likely false positive' for a failed-injection driver). Mirrored inline.
+    param([string]$DriverClass)
+    if ([string]::IsNullOrWhiteSpace($DriverClass)) { return $false }
+    foreach ($c in $script:WinUpgradeNonBootDriverClasses) { if ($DriverClass -ieq $c) { return $true } }
+    return $false
+}
 
 # Per-host worker. Runs in an isolated runspace -- NO outer-scope vars are
 # visible; everything comes via .AddArgument(). Returns one [ordered] result
@@ -1013,12 +1123,20 @@ $script:WinUpgradeWorker = {
                     $lines += ""
                     $lines += "=== REGISTRY STATE ==="
 
-                    # Target release version policy
+                    # Target release version policy. A HALF-WRITTEN pin (TargetReleaseVersion=1
+                    # but ProductVersion or TargetReleaseVersionInfo empty) is inert - WU treats
+                    # it as incomplete; flag [FAIL] and re-apply (mirrors Test-WinUpgradeTrvHalfWritten).
                     $wuPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+                    $trvHalfWritten = $false
                     if (Test-Path $wuPol) {
                         $p = Get-ItemProperty -Path $wuPol -ErrorAction SilentlyContinue
                         if ($p.TargetReleaseVersion -eq 1) {
-                            $lines += "[PASS] Target Release Policy : Product=$($p.ProductVersion) Version=$($p.TargetReleaseVersionInfo) (enabled)"
+                            if ([string]::IsNullOrWhiteSpace([string]$p.ProductVersion) -or [string]::IsNullOrWhiteSpace([string]$p.TargetReleaseVersionInfo)) {
+                                $trvHalfWritten = $true
+                                $lines += "[FAIL] Target Release Policy : HALF-WRITTEN (TargetReleaseVersion=1 but Product='$($p.ProductVersion)' Version='$($p.TargetReleaseVersionInfo)') - re-apply the pin"
+                            } else {
+                                $lines += "[PASS] Target Release Policy : Product=$($p.ProductVersion) Version=$($p.TargetReleaseVersionInfo) (enabled)"
+                            }
                         } else {
                             $lines += "[WARN] Target Release Policy : exists but TargetReleaseVersion != 1 (not active)"
                         }
@@ -1087,15 +1205,37 @@ $script:WinUpgradeWorker = {
                         }
                     }
 
-                    # UX Settings pause
+                    # UX Settings pause. An End/Expiry value whose time is in the PAST is a
+                    # LINGERING (expired) pause, not an active block - flag [WARN] EXPIRED, distinct
+                    # from an active [BLOCK] with its window shown (mirrors Get-WinUpgradePauseClass).
+                    # Each Start is paired with its End/Expiry so a leftover Start value on an
+                    # expired window is not mis-reported as a phantom active block. Force Discovery
+                    # aggressive mode clears these values.
                     $wuUx = "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"
+                    $expiredPauseFound = $false
                     if (Test-Path $wuUx) {
-                        foreach ($valName in @("PauseFeatureUpdatesStartTime","PauseFeatureUpdatesEndTime",
-                                               "PauseUpdatesStartTime","PauseUpdatesExpiryTime")) {
-                            $pv = Get-ItemProperty -Path $wuUx -Name $valName -ErrorAction SilentlyContinue
-                            if ($pv.$valName) {
-                                $lines += "[BLOCK] UX\$valName = $($pv.$valName)"
+                        $nowLocal = Get-Date
+                        $pausePairs = @(
+                            @{ Start='PauseFeatureUpdatesStartTime'; End='PauseFeatureUpdatesEndTime' },
+                            @{ Start='PauseUpdatesStartTime';        End='PauseUpdatesExpiryTime' }
+                        )
+                        foreach ($pair in $pausePairs) {
+                            $sv = Get-ItemProperty -Path $wuUx -Name $pair.Start -ErrorAction SilentlyContinue
+                            $ev = Get-ItemProperty -Path $wuUx -Name $pair.End   -ErrorAction SilentlyContinue
+                            $startVal = if ($sv) { [string]$sv.($pair.Start) } else { '' }
+                            $endVal   = if ($ev) { [string]$ev.($pair.End) }   else { '' }
+                            if (-not $startVal -and -not $endVal) { continue }
+                            $edt = [datetime]::MinValue
+                            $endParsed = ($endVal -and [datetime]::TryParse($endVal, [ref]$edt))
+                            if ($endParsed -and $edt -lt $nowLocal) {
+                                $lines += "[WARN] UX pause $($pair.Start)/$($pair.End) : window EXPIRED (ended $edt) - lingering values, clear + re-trigger (Force Discovery aggressive removes them)"
+                                $expiredPauseFound = $true
+                            } elseif ($endParsed) {
+                                $lines += "[BLOCK] UX pause active until $edt (Start=$startVal End=$endVal)"
                                 $blockersFound = $true
+                            } else {
+                                if ($startVal) { $lines += "[BLOCK] UX\$($pair.Start) = $startVal"; $blockersFound = $true }
+                                if ($endVal)   { $lines += "[BLOCK] UX\$($pair.End) = $endVal";     $blockersFound = $true }
                             }
                         }
                         # FlightSettingsMaxPauseDays - not a block itself but relevant
@@ -1204,6 +1344,213 @@ $script:WinUpgradeWorker = {
                         $lines += "[INFO] SCCM Client : not installed (device may not be SCCM-managed)"
                     }
 
+                    # ===== SECTION: STAGING ($WINDOWS.~BT) =====
+                    # A leftover C:\$WINDOWS.~BT is NOT proof an upgrade is in progress: a
+                    # rolled-back attempt leaves the whole staging tree behind (field batch: 7
+                    # boxes with rolled-back staging were all misread as 'in progress - let them
+                    # complete'). Report size + age, classify staleness, and NEVER call it 'in
+                    # progress' unless a setup process (SetupHost/SetupPrep) is actually running.
+                    # Mirrors Get-WinUpgradeStagingClass.
+                    $lines += ""
+                    $lines += "=== STAGING (`$WINDOWS.~BT) ==="
+                    $btPath = 'C:\$WINDOWS.~BT'
+                    $btSizeGB = 0; $stagingClass = 'None'
+                    if (Test-Path -LiteralPath $btPath) {
+                        try { $btSizeGB = [math]::Round((Get-ChildItem -LiteralPath $btPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum / 1GB, 1) } catch { $btSizeGB = 0 }
+                        $btItem = Get-Item -LiteralPath $btPath -Force -ErrorAction SilentlyContinue
+                        $btAge  = if ($btItem) { $btItem.LastWriteTime } else { $null }
+                        $ageHours = if ($btAge) { [math]::Round(((Get-Date) - $btAge).TotalHours, 1) } else { 9999 }
+                        # a running setup process = genuinely mid-upgrade
+                        $setupProcs = @(Get-Process -Name 'SetupHost','SetupPrep','Windows10UpgraderApp','SetupPlatformTool' -ErrorAction SilentlyContinue)
+                        $setupRunning = ($setupProcs.Count -gt 0)
+                        # rollback markers in the CURRENT ~BT Panther logs (the only logs describing
+                        # this attempt); grep 'rollback|roll back|abort'
+                        $rollbackMarker = $false
+                        $btPanther = 'C:\$WINDOWS.~BT\Sources\Panther'
+                        if (Test-Path -LiteralPath $btPanther) {
+                            foreach ($lg in @('setupact.log','setuperr.log')) {
+                                $lp = Join-Path $btPanther $lg
+                                if (Test-Path -LiteralPath $lp) {
+                                    try { if (Select-String -Path $lp -Pattern 'rollback|roll back|abort' -ErrorAction SilentlyContinue | Select-Object -First 1) { $rollbackMarker = $true; break } } catch {}
+                                }
+                            }
+                        }
+                        # classify (mirror Get-WinUpgradeStagingClass)
+                        if     ($rollbackMarker)  { $stagingClass = 'Stale' }
+                        elseif ($setupRunning)    { $stagingClass = 'Active' }
+                        elseif ($ageHours -gt 24) { $stagingClass = 'Stale' }
+                        else                      { $stagingClass = 'Recent' }
+                        $ageTxt = if ($btAge) { "$btAge (${ageHours}h ago)" } else { 'unknown age' }
+                        $lines += "[INFO] Staging folder : ${btSizeGB} GB, last modified $ageTxt"
+                        if ($setupRunning) { $lines += "[INFO] Setup process : $(($setupProcs | ForEach-Object { $_.Name }) -join ', ') running" }
+                        switch ($stagingClass) {
+                            'Active' { $lines += "[INFO] Staging state : ACTIVE - a setup process is running (genuinely mid-upgrade)" }
+                            'Stale'  {
+                                $why = if ($rollbackMarker) { 'rollback markers in the ~BT Panther logs' } else { "older than 24h (${ageHours}h) with no running setup process" }
+                                $lines += "[WARN] Stale staging from a rolled-back attempt - nothing is in progress ($why)"
+                                $lines += "[REC] Clear C:\`$WINDOWS.~BT to reclaim ~${btSizeGB} GB AFTER fixing the root cause below, then re-trigger"
+                            }
+                            'Recent' { $lines += "[INFO] Staging state : recent (<24h) with no setup process - may await a reboot; do NOT assume in-progress" }
+                        }
+                    } else {
+                        $lines += "[INFO] No `$WINDOWS.~BT staging folder (no recent in-place upgrade attempt)"
+                    }
+
+                    # ===== SECTION: SETUP FAILURE ANALYSIS =====
+                    # Parse the CURRENT attempt's setuperr.log against the failure-signature table,
+                    # surface driver-injection failures, and read SetupDiag. Only the ~BT\Sources\
+                    # Panther logs describe THIS attempt; a C:\Windows\Panther log older than 90 days
+                    # (or older than the ~BT log) is from a prior servicing pass - labelled stale and
+                    # never parsed for a failure cause. Gated on not-yet-24H2 (no ~BT on a done box).
+                    $setupSignatureHit = $false
+                    if ([int]$os.BuildNumber -lt 26100) {
+                        $lines += ""
+                        $lines += "=== SETUP FAILURE ANALYSIS ==="
+                        $btErr = 'C:\$WINDOWS.~BT\Sources\Panther\setuperr.log'
+                        $curErrText = ''; $curErrTime = $null
+                        if (Test-Path -LiteralPath $btErr) {
+                            $ei = Get-Item -LiteralPath $btErr -Force -ErrorAction SilentlyContinue
+                            $curErrTime = if ($ei) { $ei.LastWriteTime } else { $null }
+                            $sr = $null
+                            try {
+                                $fs = [System.IO.File]::Open($btErr, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                                try { $sr = New-Object System.IO.StreamReader($fs); $curErrText = $sr.ReadToEnd() } finally { if ($sr) { $sr.Dispose() }; $fs.Dispose() }
+                            } catch { try { $curErrText = Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $curErrText = '' } }
+                            $lines += "[INFO] Current setuperr.log : ~BT\Sources\Panther (modified $curErrTime)"
+                        } else {
+                            $lines += "[INFO] No ~BT\Sources\Panther\setuperr.log (no current in-place attempt to analyse)"
+                        }
+                        # stale-log discrimination for C:\Windows\Panther (never parsed for a cause)
+                        $winPantherErr = "$env:SystemRoot\Panther\setuperr.log"
+                        if (Test-Path -LiteralPath $winPantherErr) {
+                            $wi = Get-Item -LiteralPath $winPantherErr -Force -ErrorAction SilentlyContinue
+                            $wTime = if ($wi) { $wi.LastWriteTime } else { $null }
+                            $ageDays = if ($wTime) { [math]::Round(((Get-Date) - $wTime).TotalDays, 0) } else { 9999 }
+                            $olderThanBt = ($curErrTime -and $wTime -and $wTime -lt $curErrTime)
+                            if ($ageDays -gt 90 -or $olderThanBt) {
+                                $lines += "[INFO] C:\Windows\Panther\setuperr.log is STALE (modified $wTime, ${ageDays}d old) - prior servicing pass; ignored for failure analysis"
+                            } else {
+                                $lines += "[INFO] C:\Windows\Panther\setuperr.log present (modified $wTime) - recent, but ~BT is authoritative for the current attempt"
+                            }
+                        }
+                        # --- FAILURE-SIGNATURE TABLE over the CURRENT log (one [FAIL]+[REC] per hit) ---
+                        # Mirrors $script:WinUpgradeSetupErrRules / Get-WinUpgradeSetupErrSignatures.
+                        if ($curErrText) {
+                            $sigRules = @(
+                                @{ Patterns=@('0x000003F1','(?i)configuration registry database is corrupt'); Message='registry hive corrupt'; Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow; if it persists, deeper hive repair.' },
+                                @{ Patterns=@('CBS_E_INVALID_PACKAGE','(?i)Failed to enumerate store capabilities'); Message='component store broken'; Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow to rebuild the component store.' },
+                                @{ All=@('(?i)FOD inventory','E_INVALIDARG'); Message='component store broken (FOD inventory E_INVALIDARG)'; Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow to rebuild the component store.' },
+                                @{ Patterns=@('0x8007000E'); Message='out of memory (E_OUTOFMEMORY)'; Rec='Run Set Page File (fixed 16 GB) on this host, then re-run the feature update.' },
+                                @{ All=@('adammigrate\.dll','0x80070002'); Message='AD LDS migration plugin (adammigrate.dll) failing'; Rec='Investigate the AD LDS migration plugin AFTER clearing the other blockers, then re-diagnose.' },
+                                @{ Patterns=@('0x800704C7'); Message='setup cancelled (0x800704C7)'; Rec='Cross-check DEFERRALS & BLOCKS - an expired/lingering pause can present as a cancel; clear stale pause values + re-trigger.' }
+                            )
+                            foreach ($rule in $sigRules) {
+                                $hit = $false
+                                if ($rule.ContainsKey('All')) {
+                                    $hit = $true
+                                    foreach ($pp in $rule['All']) { if ($curErrText -notmatch $pp) { $hit = $false; break } }
+                                } else {
+                                    foreach ($pp in $rule['Patterns']) { if ($curErrText -match $pp) { $hit = $true; break } }
+                                }
+                                if ($hit) {
+                                    $setupSignatureHit = $true
+                                    $lines += "[FAIL] Setup failure: $($rule['Message'])"
+                                    $lines += "[REC] $($rule['Rec'])"
+                                }
+                            }
+                            if (-not $setupSignatureHit) {
+                                $lastErr = @($curErrText -split '\r?\n' | Where-Object { $_ -match '\S' } | Select-Object -Last 1)
+                                $le = if ($lastErr.Count -gt 0) { ([string]$lastErr[0]).Trim() } else { '' }
+                                if ($le.Length -gt 300) { $le = $le.Substring(0,300) }
+                                if ($le) { $lines += "[WARN] setuperr.log has errors but no known signature matched. Last line: $le" }
+                                else     { $lines += "[PASS] setuperr.log present, no error content" }
+                            }
+                            # --- DRIVER INJECTION FAILURES ---
+                            $failedInfs = @()
+                            try {
+                                foreach ($mm in [regex]::Matches($curErrText, 'Failed to inject driver package.*\\([^\\]+\.inf)')) {
+                                    if ($mm.Groups.Count -gt 1) { $failedInfs += $mm.Groups[1].Value }
+                                }
+                            } catch {}
+                            $failedInfs = @($failedInfs | Sort-Object -Unique)
+                            if ($failedInfs.Count -gt 0) {
+                                $lines += "[FAIL] Driver injection failed during 'Apply Drivers' (Safe OS) - a common 24H2 rollback cause"
+                                $allDrv = $null
+                                try { $allDrv = Get-WindowsDriver -Online -ErrorAction Stop } catch { $lines += "[INFO] Get-WindowsDriver unavailable - falling back to pnputil /enum-drivers" }
+                                # non-boot classes (mirror $script:WinUpgradeNonBootDriverClasses)
+                                $nonBootClasses = @('HIDClass','Mouse','Keyboard','Media','Image','Printer','Camera','SoftwareDevice','Bluetooth')
+                                foreach ($inf in $failedInfs) {
+                                    # resolve the published oemNN.inf
+                                    $pub = @()
+                                    if ($allDrv) { $pub = @($allDrv | Where-Object { $_.OriginalFileName -and ([System.IO.Path]::GetFileName($_.OriginalFileName) -ieq $inf) } | ForEach-Object { $_.Driver }) }
+                                    if ($pub.Count -eq 0) {
+                                        try { $pn = & pnputil /enum-drivers 2>$null; $cur=$null; foreach ($ln in $pn) { if ($ln -match 'Published Name\s*:\s*(\S+)') { $cur=$matches[1] } elseif ($ln -match 'Original Name\s*:\s*(\S+)') { if ($matches[1] -ieq $inf -and $cur) { $pub += $cur } } } } catch {}
+                                    }
+                                    $pub = @($pub | Sort-Object -Unique)
+                                    if ($pub.Count -eq 0) { $lines += "[WARN] $inf : failed injection but no matching driver-store entry (may already be removed)"; continue }
+                                    foreach ($pp in $pub) {
+                                        $present=$false; $devName=''; $drvClass=''
+                                        try {
+                                            $sd = Get-CimInstance Win32_PnPSignedDriver -Filter "InfName='$pp'" -ErrorAction SilentlyContinue
+                                            foreach ($row in @($sd)) {
+                                                if ($row.DeviceClass -and -not $drvClass) { $drvClass = [string]$row.DeviceClass }
+                                                if ($row.DeviceID) {
+                                                    $pd = Get-PnpDevice -InstanceId $row.DeviceID -ErrorAction SilentlyContinue
+                                                    if ($pd) { if ($pd.Present) { $present=$true }; if (-not $devName -and $pd.FriendlyName) { $devName = $pd.FriendlyName }; if (-not $drvClass -and $pd.Class) { $drvClass = [string]$pd.Class } }
+                                                }
+                                            }
+                                        } catch {}
+                                        $drvObj = if ($allDrv) { @($allDrv | Where-Object { $_.Driver -ieq $pp })[0] } else { $null }
+                                        if (-not $drvClass -and $drvObj -and $drvObj.ClassName) { $drvClass = [string]$drvObj.ClassName }
+                                        $bootCritical = ($drvObj -and [bool]$drvObj.BootCritical)
+                                        $isNonBoot = $false
+                                        foreach ($nc in $nonBootClasses) { if ($drvClass -ieq $nc) { $isNonBoot = $true; break } }
+                                        $usetxt = if ($present) { 'device present/connected' } else { 'device absent/disconnected' }
+                                        $extra  = if ($devName) { "  [$devName]" } else { '' }
+                                        $cls    = if ($drvClass) { " class=$drvClass" } else { '' }
+                                        # BootCritical is ADVISORY: a plainly non-boot class or an absent
+                                        # device makes it a LIKELY FALSE POSITIVE (field batch: a
+                                        # disconnected HID dongle tagged boot-critical blocked its own
+                                        # removal, which was the actual fix). Otherwise verify first.
+                                        if ($bootCritical) {
+                                            if ($isNonBoot -or -not $present) {
+                                                $lines += "[WARN] $inf -> $pp ($usetxt$cls)$extra | DISM BootCritical set but likely FALSE POSITIVE (non-boot class / device absent) - safe to remove"
+                                            } else {
+                                                $lines += "[WARN] $inf -> $pp ($usetxt$cls)$extra | DISM BootCritical - present boot-class device; verify before removing"
+                                            }
+                                        } else {
+                                            $lines += "[INFO] $inf -> $pp ($usetxt$cls)$extra | not boot-critical"
+                                        }
+                                    }
+                                    $lines += "[REC] Remove the driver: pnputil /delete-driver <oemNN.inf> /force, then clear C:\`$WINDOWS.~BT and re-trigger the upgrade"
+                                }
+                            }
+                        }
+                        # --- SETUPDIAG ---
+                        $sdr = "$env:SystemRoot\Logs\SetupDiag\SetupDiagResults.xml"
+                        if (Test-Path -LiteralPath $sdr) {
+                            $parsedDiag = $false
+                            try {
+                                [xml]$sdx = Get-Content -LiteralPath $sdr -Raw -ErrorAction Stop
+                                $node = $sdx.SelectSingleNode('//*[local-name()="SetupDiag"]')
+                                if (-not $node) { $node = $sdx.DocumentElement }
+                                $rule = ''; foreach ($rn in @('ProfileName','Rule','MatchingProfile')) { try { if ($node.$rn) { $rule = [string]$node.$rn; break } } catch {} }
+                                $det  = ''; foreach ($dn in @('FailureDetails','FailureData','Output','Detail')) { try { if ($node.$dn) { $det = [string]$node.$dn; break } } catch {} }
+                                $rem  = ''; foreach ($en in @('Remediation','Remediations')) { try { if ($node.$en) { $rem = [string]$node.$en; break } } catch {} }
+                                if ($rule -or $det -or $rem) {
+                                    $parsedDiag = $true
+                                    if ($rule.Length -gt 300) { $rule = $rule.Substring(0,300) }
+                                    if ($det.Length  -gt 300) { $det  = $det.Substring(0,300) }
+                                    if ($rem.Length  -gt 300) { $rem  = $rem.Substring(0,300) }
+                                    $lines += "[FAIL] SetupDiag: $rule - $det"
+                                    if ($rem) { $lines += "[REC] SetupDiag remediation: $rem" }
+                                    $setupSignatureHit = $true
+                                }
+                            } catch { $parsedDiag = $false }
+                            if (-not $parsedDiag) { $lines += "[INFO] SetupDiag results present at $sdr (could not parse - inspect manually)" }
+                        }
+                    }
+
                     # ===== SECTION: RECOMMENDATIONS =====
                     $lines += ""
                     $lines += "=== RECOMMENDATIONS ==="
@@ -1222,6 +1569,22 @@ $script:WinUpgradeWorker = {
                         }
                         if ($blockersFound) {
                             $recs += "Deferrals/blocks detected - try Force Discovery with Aggressive mode, or contact GPO admin"
+                        }
+                        if ($trvHalfWritten) {
+                            $recs += "Target Release Version pin is HALF-WRITTEN - re-apply the pin (Pin action / Force Discovery re-writes it)"
+                        }
+                        if ($expiredPauseFound) {
+                            $recs += "An EXPIRED pause window is lingering - clear it (Force Discovery aggressive removes the pause values), then re-trigger"
+                        }
+                        if ($stagingClass -eq 'Stale') {
+                            $recs += "Stale ~BT staging from a rolled-back attempt - clear C:\`$WINDOWS.~BT to reclaim ~${btSizeGB} GB AFTER fixing the root cause, then re-trigger (do NOT wait for it to 'complete')"
+                        }
+                        if ($setupSignatureHit) {
+                            $recs += "A known setup-failure signature was found above - action its [REC] before re-running the upgrade"
+                        }
+                        # disk + staging: low free space AND a >1 GB ~BT -> reclaim it to clear the runway
+                        if ($freeGB -lt $minDisk -and $btSizeGB -gt 1) {
+                            $recs += "Free disk is ${freeGB} GB (< ${minDisk} GB) and ~BT holds ~${btSizeGB} GB - clear ~BT to reclaim it; target 25+ GB free before re-trigger"
                         }
                         if ($recs.Count -eq 0) {
                             $recs += "Run Apply (Step 2) to set policy and trigger scans"
@@ -1494,6 +1857,13 @@ $script:WinUpgradeWorker = {
                 if ($bypassOn) { [void]$sum.Add('bypass ACTIVE') }
                 [void]$sum.Add($(if ($policyOk) { 'policy set' } else { 'policy not set' }))
                 if ($hasBlock) { [void]$sum.Add('deferral/block present') }
+                # Read-only summary enrichment (does NOT change the verdict precedence above):
+                # surface a logged setup-failure signature and stale (rolled-back) staging so the
+                # one-line detail flags them without the operator opening the full report.
+                $setupFail    = ($report -match '(?m)^\[FAIL\] Setup failure:' -or $report -match '(?m)^\[FAIL\] SetupDiag:')
+                $staleStaging = ($report -match '(?mi)^\[WARN\] Stale staging')
+                if ($setupFail)    { [void]$sum.Add('setup failure logged') }
+                if ($staleStaging) { [void]$sum.Add('stale staging (rolled back)') }
                 $r.Status = $verdict; $r.Detail = ($sum -join ' | '); $r.Ok = $true
             }
 
@@ -2009,7 +2379,12 @@ function Invoke-JanetToolAction {
                     try { [void]$stopHandles.Add([pscustomobject]@{ PS=$j.PS; Handle=$j.PS.BeginStop($null, $null) }) } catch {}
                     $j.PS = $null
                     $failCount++; $done++
-                    $trow = & $rowOf ([ordered]@{ Host=$j.Host; Ping=''; Status='FAILED'; Detail="Job timeout over ${maxJobSeconds}s"; Ok=$false })
+                    # A read-only Diagnose that times out usually means the target's WU/WMI stack
+                    # is wedged (field batch: one box was unreadable for exactly this reason) - point
+                    # the operator at the repository check instead of a bare timeout message.
+                    $timeoutDetail = "Job timeout over ${maxJobSeconds}s"
+                    if ($op -eq 'Diagnose') { $timeoutDetail = "Job timeout over ${maxJobSeconds}s - target's WU/WMI stack may be wedged. Check 'winmgmt /verifyrepository' and consider a WMI repair (winmgmt /salvagerepository) before re-scanning." }
+                    $trow = & $rowOf ([ordered]@{ Host=$j.Host; Ping=''; Status='FAILED'; Detail=$timeoutDetail; Ok=$false })
                     [void]$rows.Add($trow)
                     & $send (@{ type='row' } + $trow)
                     # Abandon/timeout path for this host is still a failure of the
