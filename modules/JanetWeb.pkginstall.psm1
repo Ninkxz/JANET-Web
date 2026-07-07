@@ -159,6 +159,14 @@ $script:RpiDeployHostScript = {
     $session         = $null
     $remoteSharePath = $null
 
+    # Wrong-box guard (P2-6a): the box that answers the remote Invoke-Command
+    # block below is checked against the hostname we DIALED before the
+    # installer runs -- stale DNS / a reused IP could otherwise hand this
+    # install to the wrong machine. IP-literal targets have no DNS indirection
+    # (the box answering at that IP IS the box) and their first dot-token
+    # ('192') can never equal a COMPUTERNAME, so pass '' to skip the guard.
+    $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+
     try {
         ## 1. Probe 5985 (the port we actually need for WinRM). Inlined because
         ## the runspace can't see Test-RpiReachable from outer scope.
@@ -364,13 +372,20 @@ $script:RpiDeployHostScript = {
             ## copied bundle root), shell `msiexec /i <full> $MsiArgs /L*v <log>`
             ## on the remote and capture per-MSI exit codes. Host aggregate Status
             ## is Success only when EVERY MSI returned a success exit (0/1641/3010).
-            $invokeResult = Invoke-Command -Session $session -ArgumentList $remoteLocalPath, $MsiList, $MsiArgs -ScriptBlock {
-                param($destPath, $msiList, $msiArgs)
+            $invokeResult = Invoke-Command -Session $session -ArgumentList $remoteLocalPath, $MsiList, $MsiArgs, $expectedName -ScriptBlock {
+                param($destPath, $msiList, $msiArgs, $expected)
                 $res = [pscustomobject]@{
                     Status   = 'Failed'
                     ExitCode = $null
                     Reason   = ''
                     Output   = ''
+                }
+                # Wrong-box guard (HARD ABORT): the box that answered runs this block,
+                # so $env:COMPUTERNAME IS the real machine. If it isn't the one we
+                # dialed (stale DNS / reused IP), abort before any msiexec runs.
+                if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                    $res.Reason = "wrong box: dialed '$expected', answered '$($env:COMPUTERNAME)' - ABORTED, no install run"
+                    return $res
                 }
                 try {
                     Get-ChildItem -Path $destPath -Filter *.msi -Recurse -EA SilentlyContinue | Unblock-File
@@ -489,13 +504,20 @@ $script:RpiDeployHostScript = {
                 }
             } -EA Stop
         } else {
-            $invokeResult = Invoke-Command -Session $session -ArgumentList $remoteLocalPath -ScriptBlock {
-                param($destPath)
+            $invokeResult = Invoke-Command -Session $session -ArgumentList $remoteLocalPath, $expectedName -ScriptBlock {
+                param($destPath, $expected)
                 $res = [pscustomobject]@{
                     Status   = 'Failed'
                     ExitCode = $null
                     Reason   = ''
                     Output   = ''
+                }
+                # Wrong-box guard (HARD ABORT): the box that answered runs this block,
+                # so $env:COMPUTERNAME IS the real machine. If it isn't the one we
+                # dialed (stale DNS / reused IP), abort before Deploy-Application.ps1 runs.
+                if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                    $res.Reason = "wrong box: dialed '$expected', answered '$($env:COMPUTERNAME)' - ABORTED, no install run"
+                    return $res
                 }
                 try {
                     Get-ChildItem -Path $destPath -Filter *.ps1 -Recurse -EA SilentlyContinue | Unblock-File

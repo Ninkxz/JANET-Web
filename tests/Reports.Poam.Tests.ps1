@@ -39,11 +39,24 @@ Describe 'export-poam eMASS POA&M CSV (audit Phase 3)' {
         $rows[0].PSObject.Properties.Name -contains 'CCI' | Should Be $true
     }
 
-    It 'maps ACAS severity to DISA CAT (Critical=CAT I, High=CAT II, Med/Low=CAT III)' {
-        ($rows | Where-Object { $_.Host -eq 'hostA' }).'Raw Severity' | Should Be 'CAT I'
-        ($rows | Where-Object { $_.Host -eq 'hostB' }).'Raw Severity' | Should Be 'CAT II'
-        ($rows | Where-Object { $_.Host -eq 'hostC' }).'Raw Severity' | Should Be 'CAT III'
-        ($rows | Where-Object { $_.Host -eq 'hostE' }).'Raw Severity' | Should Be 'CAT III'
+    It 'maps ACAS severity to DISA CAT in the Severity column (Critical=CAT I, High=CAT II, Med/Low=CAT III)' {
+        ($rows | Where-Object { $_.Host -eq 'hostA' }).Severity | Should Be 'CAT I'
+        ($rows | Where-Object { $_.Host -eq 'hostB' }).Severity | Should Be 'CAT II'
+        ($rows | Where-Object { $_.Host -eq 'hostC' }).Severity | Should Be 'CAT III'
+        ($rows | Where-Object { $_.Host -eq 'hostE' }).Severity | Should Be 'CAT III'
+    }
+
+    It 'puts the REAL Tenable severity in Raw Severity (FIX P3-6), not the DISA CAT' {
+        ($rows | Where-Object { $_.Host -eq 'hostA' }).'Raw Severity' | Should Be 'Critical'
+        ($rows | Where-Object { $_.Host -eq 'hostB' }).'Raw Severity' | Should Be 'High'
+        ($rows | Where-Object { $_.Host -eq 'hostC' }).'Raw Severity' | Should Be 'Medium'
+        ($rows | Where-Object { $_.Host -eq 'hostE' }).'Raw Severity' | Should Be 'Low'
+    }
+
+    It 'leaves CCI blank - the IAVA number is NOT a CCI (FIX P3-6)' {
+        # hostA carries IAVA 2024-A-0001; it must appear in Comments, never in CCI.
+        ($rows | Where-Object { $_.Host -eq 'hostA' }).CCI | Should BeNullOrEmpty
+        ($rows | Where-Object { $_.Host -eq 'hostA' }).Comments | Should Match '2024-A-0001'
     }
 
     It 'counts KEV findings' {

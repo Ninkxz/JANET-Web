@@ -1033,9 +1033,59 @@ function ConvertTo-AcasHostList {
     foreach ($tok in ($Raw -split '[\r\n,;\t ]+')) {
         $h = Get-AcasShortHost ($tok.Trim())
         # Accept only a bare host/IPv4 token; drop UNC/URL/junk before any remote call.
-        if ($h -and ($h -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') -and $seen.Add($h)) { [void]$out.Add($h) }
+        if ($h -and (Test-AcasHostToken $h) -and $seen.Add($h)) { [void]$out.Add($h) }
     }
     return $out.ToArray()
+}
+
+function Test-AcasHostToken {
+    # Whitelist gate for anything about to become a REMOTE TARGET. Get-AcasShortHost
+    # only normalizes - it does NO character validation - so a garbled/hostile CSV
+    # 'DNS Name' (or the un-normalized IP column) could otherwise reach the target
+    # list. Enforce the SAME regex the pasted-blob path (ConvertTo-AcasHostList) uses:
+    # a bare short hostname or IPv4 literal only. Rejects embedded spaces, switches,
+    # UNC/URL/pipe/semicolon junk. IPv4 literals stay valid (digits + dots).
+    param([string]$Token)
+    if ([string]::IsNullOrWhiteSpace($Token)) { return $false }
+    return ([string]$Token) -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$'
+}
+
+# -----------------------------------------------------------------------------
+#  ACAS-local dispatcher self-guard (independent of restart.psm1 - no cross-import).
+#  The reboot worker runs shutdown.exe ON THE CONTROLLER targeting \\HOST, so a
+#  target that resolves to THIS box would reboot the JANET host and kill the
+#  HttpListener mid-wave. Mirror the restart.psm1 identity/self test locally.
+# -----------------------------------------------------------------------------
+function Get-AcasLocalIdentity {
+    # Every identity that names THIS dispatcher host: shortname, FQDN, all NIC IPs,
+    # loopback. Case-insensitive HashSet, computed once and cached.
+    if ($script:AcasLocalIdentity) { return $script:AcasLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    $script:AcasLocalIdentity = $set
+    return $set
+}
+
+function Test-AcasHostIsSelf {
+    # True when a target token names THIS dispatcher host (short / FQDN / NIC IP /
+    # loopback). An IPv4 literal is only self if it is one of our own NIC IPs (exact
+    # set match) or a 127.x loopback - never via the shortname-alias branch.
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-AcasLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }   # shortname alias (hostnames only)
+    }
+    return $false
 }
 
 # =============================================================================
@@ -1208,6 +1258,11 @@ function ConvertFrom-AcasCsv {
         $ip  = (& $getCol $r $map.ip)
         $pick = if ($dns) { $dns } elseif ($nb) { $nb } elseif ($ip) { $ip } else { '' }
         if (-not $pick) { $noHostSkipped++; continue }
+        # Whitelist the chosen host token BEFORE it becomes a finding (and thus a group
+        # host / remote target). The IP column above is NOT run through Get-AcasShortHost,
+        # so a garbled/hostile cell would otherwise pass straight through. Reject, never
+        # silently forward, non-conforming tokens (embedded space/switch/UNC/pipe junk).
+        if (-not (Test-AcasHostToken $pick)) { $noHostSkipped++; continue }
         if (Test-AcasIsServer -HostName $pick) { $serversSkipped++; continue }
         [void]$findings.Add([pscustomobject]@{
             Host       = $pick
@@ -1628,7 +1683,7 @@ $script:AcasUpdateWorker = {
             param($updateTxt, $verifyTxt)
             $pre = $null
             if ($verifyTxt) {
-                try { $pre = & ([scriptblock]::Create($verifyTxt)) } catch { $pre = $null }
+                try { $pre = & ([scriptblock]::Create($verifyTxt)) } catch { $pre = 'JANET_PROBE_ERR' }
             }
 
             $updateOut = & ([scriptblock]::Create($updateTxt))
@@ -1636,7 +1691,7 @@ $script:AcasUpdateWorker = {
 
             $post = $null
             if ($verifyTxt) {
-                try { $post = & ([scriptblock]::Create($verifyTxt)) } catch { $post = $null }
+                try { $post = & ([scriptblock]::Create($verifyTxt)) } catch { $post = 'JANET_PROBE_ERR' }
             }
 
             return @{ Update = $updateStr; Pre = $pre; Post = $post }
@@ -1646,9 +1701,24 @@ $script:AcasUpdateWorker = {
                                      -ArgumentList $updateText, $verifyText `
                                      -ErrorAction Stop
             $updateStr = [string]$result.Update
+            # Distinguish "verify probe THREW" (host went unreachable / access-denied
+            # mid-op) from "verify probe RAN but found no version". The combined
+            # scriptblock stamps the sentinel 'JANET_PROBE_ERR' on a thrown probe; a real
+            # probe returns a hashtable. A thrown probe confirms NOTHING and must NEVER
+            # read as Success - only a probe that actually ran may yield a green result.
+            $preErr  = ($result.Pre  -is [string] -and $result.Pre  -eq 'JANET_PROBE_ERR')
+            $postErr = ($result.Post -is [string] -and $result.Post -eq 'JANET_PROBE_ERR')
             $preV  = if ($result.Pre  -is [hashtable] -and $result.Pre.Version)  { [string]$result.Pre.Version }  else { 'n/a' }
             $postV = if ($result.Post -is [hashtable] -and $result.Post.Version) { [string]$result.Post.Version } else { 'n/a' }
             $marker = "<<PRE=$preV>><<POST=$postV>>"
+            if ($preErr -or $postErr) {
+                # A thrown pre/post probe -> UNCONFIRMED (amber), NEVER Success. Formerly a
+                # both-sides throw fell through to the self-reported "$updateStr" (rendered
+                # GREEN) and a post-only throw became "bumped: real -> n/a" (counted as a
+                # confirmed fix). Fail CLOSED: we could not observe the remediation.
+                $which = if ($preErr -and $postErr) { 'pre+post' } elseif ($postErr) { 'post' } else { 'pre' }
+                return "UNCONFIRMED: verify probe errored ($which) - remediation could not be confirmed (host may have gone unreachable mid-update) | $updateStr $marker"
+            }
             if ($preV -eq 'n/a' -and $postV -eq 'n/a') { return "$updateStr $marker" }
             if ($preV -eq $postV) {
                 # The trigger was sent but the version did NOT change (or is not yet
@@ -3039,10 +3109,29 @@ function Invoke-JanetToolAction {
                 foreach ($hf in @($Params['hosts'])) { $sh = Get-AcasShortHost ([string]$hf); if ($sh) { [void]$allow.Add($sh) } }
                 if ($allow.Count -gt 0) { $targets = @($g.Hosts | Where-Object { $allow.Contains($_) }) }
             }
+            # Defense-in-depth: re-run the target whitelist on the by-id/CSV path (the
+            # group Hosts were validated at parse, but never trust the derived list) and
+            # reject - not silently forward - any non-conforming token before dispatch.
+            $badTok = @($targets | Where-Object { -not (Test-AcasHostToken $_) })
+            if ($badTok.Count -gt 0) {
+                & $send @{ type='log'; level='warn'; text="Rejected $($badTok.Count) invalid host token(s): $($badTok -join ', ')" }
+                $targets = @($targets | Where-Object { Test-AcasHostToken $_ })
+            }
             if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No targets for this group.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $vulnDisplay = $g.DisplayName
 
             if ($ActionId -eq 'reboot-selected') {
+                # Self-guard: NEVER reboot the dispatcher host - the reboot worker runs
+                # shutdown.exe ON THIS box targeting \\HOST, so a self-target would kill
+                # the JANET HttpListener mid-wave. Drop any target that resolves to us
+                # (short/FQDN/NIC-IP/loopback) and warn; verify-selected is read-only so
+                # it needs no guard. Mirrors the restart/winupgrade self-guard locally.
+                $selfHits = @($targets | Where-Object { Test-AcasHostIsSelf $_ })
+                if ($selfHits.Count -gt 0) {
+                    & $send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from reboot wave (never reboot self): $($selfHits -join ', ')" }
+                    $targets = @($targets | Where-Object { -not (Test-AcasHostIsSelf $_) })
+                }
+                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to reboot.' }; return @{ rows=@(); summary=@{ total=0 } } }
                 $warn = [string]$Params['warningText']
                 if ([string]::IsNullOrWhiteSpace($warn)) { $warn = 'This workstation will reboot in 5 minutes for required security updates. Save your work now.' }
                 & $send @{ type='status'; text="Scheduling reboot on $($targets.Count) host(s) for [$vulnDisplay]..." }

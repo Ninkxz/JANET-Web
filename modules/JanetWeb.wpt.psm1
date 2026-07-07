@@ -478,6 +478,58 @@ function Get-WptThreadCount {
     return [Math]::Max(1, [Math]::Min(64, $threads))
 }
 
+# Set of identities that resolve to THIS dispatcher host: shortname, FQDN, all
+# NIC IPs, and loopback. Wpt-local mirror of the restart tool's
+# Get-JanetLocalIdentity/Test-JanetHostIsSelf (JanetWeb.restart.psm1 ~173/188) -
+# deliberately re-implemented here rather than cross-imported, so this module
+# stays self-contained. Used to drop the JANET dispatcher host from a reboot
+# wave before it fires (a self-reboot would kill the HttpListener mid-dispatch
+# and abandon every other host in the fan-out). Computed once and cached.
+function Get-WptLocalIdentity {
+    if ($script:WptLocalIdentity) { return $script:WptLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    $script:WptLocalIdentity = $set
+    return $set
+}
+
+# True if a target token names this dispatcher host (short/FQDN/IP/loopback).
+function Test-WptHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-WptLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }                      # any loopback literal
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }  # shortname alias, hostnames only
+    }
+    return $false
+}
+
+# Drop the JANET dispatcher host from a reboot wave (self-guard): rebooting the
+# box this HttpListener runs on would abort our own process mid-dispatch and
+# abandon every other host in the fan-out. Warns via -Send when it drops one.
+# Returns @{ Targets=<string[] kept>; SkippedCount=<int> }.
+function Remove-WptSelfTargets {
+    param([string[]]$Targets, [scriptblock]$Send)
+    $selfSkipped = New-Object System.Collections.ArrayList
+    $kept = New-Object System.Collections.ArrayList
+    foreach ($t in $Targets) {
+        if (Test-WptHostIsSelf $t) { [void]$selfSkipped.Add($t) } else { [void]$kept.Add($t) }
+    }
+    if ($selfSkipped.Count -gt 0) {
+        & $Send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this wave ($($selfSkipped -join ', ')) - a self-reboot would abort the whole dispatch." }
+    }
+    return @{ Targets = $kept.ToArray(); SkippedCount = $selfSkipped.Count }
+}
+
 # -----------------------------------------------------------------------------
 #  Fleet compliance snapshots + trending (feature #6)
 #  A Bulk Scan can persist ONE CSV per run to JanetLocal\snapshots; the read-only
@@ -1605,11 +1657,15 @@ $script:WptPatchBlock = {
     try {
         # DNS-mismatch guard (HARD ABORT): never trigger installs on a box that
         # isn't the one we dialed. Session-based name compare (no PTR on AFNET).
-        $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-            $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no patch triggered"
-            return $r  # the finally below removes the session
+        # An IPv4-literal target has no shortname to compare -> skip (an IP dialed
+        # directly can't be a stale-DNS mismatch).
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no patch triggered"
+                return $r  # the finally below removes the session
+            }
         }
         # Only count a host as triggered when the client-SDK method actually accepted
         # the request (ReturnValue 0/null). InstallUpdates / CCM_Application.Install can
@@ -1670,14 +1726,17 @@ $script:WptRebootBlock = {
         # that answers is the one we dialed before rebooting (stale DNS / reused IP
         # could reboot the WRONG machine). One quick WinRM round-trip. If the verify
         # can't run (empty), proceed as before so we don't regress reboots where the
-        # WMI path works but WinRM doesn't. Never trust a PTR lookup on AFNET.
-        $icSplat = @{ ComputerName=$Computer; ErrorAction='Stop' }
-        if ($Cred) { $icSplat['Credential']=$Cred; if ($Auth) { $icSplat['Authentication']=$Auth } }
-        $actualName = try { Invoke-Command @icSplat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent"
-            return $r
+        # WMI path works but WinRM doesn't. Never trust a PTR lookup on AFNET. An
+        # IPv4-literal target has no shortname to compare -> skip.
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $icSplat = @{ ComputerName=$Computer; ErrorAction='Stop' }
+            if ($Cred) { $icSplat['Credential']=$Cred; if ($Auth) { $icSplat['Authentication']=$Auth } }
+            $actualName = try { Invoke-Command @icSplat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent"
+                return $r
+            }
         }
         $splat = @{ ComputerName=$Computer; Force=$true; ErrorAction='Stop' }
         if ($Cred) { $splat['Credential']=$Cred }
@@ -1700,12 +1759,14 @@ $script:WptRebootScheduleBlock = {
         if ($Cred) { $splat['Credential']=$Cred }
         if ($Auth) { $splat['Authentication']=$Auth }
         $cmt = 'WPT: scheduled reboot. Save your work.'
-        $res = Invoke-Command @splat -ArgumentList $DelaySeconds, $Message, $cmt, (($Computer -split '\.')[0]) -ScriptBlock {
-            param($d, $b, $cmt, $expected)
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $res = Invoke-Command @splat -ArgumentList $DelaySeconds, $Message, $cmt, (($Computer -split '\.')[0]), $isIPv4 -ScriptBlock {
+            param($d, $b, $cmt, $expected, $isIPv4)
             # DNS-mismatch guard (HARD ABORT): this block runs ON the box that answered,
             # so $env:COMPUTERNAME is the real machine. Abort before arming shutdown if
-            # it isn't the host we dialed (stale DNS / reused IP).
-            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+            # it isn't the host we dialed (stale DNS / reused IP). An IPv4-literal
+            # target has no shortname to compare -> skip (can't be a stale-DNS mismatch).
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
                 return "DNS_MISMATCH: dialed '$expected' but this machine is '$($env:COMPUTERNAME)'"
             }
             $notifyErr = ''
@@ -2300,11 +2361,14 @@ $script:WptKbInstallBlock = {
     try {
         # DNS-mismatch guard (HARD ABORT): never install KBs on a box that isn't the
         # one we dialed (stale DNS / reused IP). Session-based name compare (no PTR).
-        $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-            $r.Errors += "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no KB installed"
-            return $r  # the finally below removes the session
+        # An IPv4-literal target has no shortname to compare -> skip.
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Errors += "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no KB installed"
+                return $r  # the finally below removes the session
+            }
         }
         # MECM first: match each requested KB in CCM_SoftwareUpdate (not-compliant) by
         # ArticleID/Name, then InstallUpdates the matched set.
@@ -2501,16 +2565,27 @@ $script:WptCleanBlock = {
                     if (-not (Test-Path -LiteralPath $tp -EA SilentlyContinue)) { & $add 'INFO' "[$thisHost]   Skip (not present): $tp"; continue }
                     & $add 'ACTION' "[$thisHost]   Scanning: $tp"
                     $items = Get-ChildItem -LiteralPath $tp -Recurse -Force -File -EA SilentlyContinue
-                    $pathFiles = 0; $pathBytes = 0
+                    $pathFiles = 0; $pathBytes = 0; $pathLocked = 0
                     foreach ($it in $items) {
-                        $totalBytes += $it.Length; $totalFiles++; $pathFiles++; $pathBytes += $it.Length
-                        if (-not $dry) { try { Remove-Item -LiteralPath $it.FullName -Force -EA Stop } catch {} }
+                        # Count a file toward "Deleted" only on a CONFIRMED delete (dry-run
+                        # counts the enumeration, since that IS the would-delete estimate).
+                        # Previously every enumerated file was counted regardless of whether
+                        # Remove-Item actually succeeded, so locked files inflated the total.
+                        if ($dry) {
+                            $totalBytes += $it.Length; $totalFiles++; $pathFiles++; $pathBytes += $it.Length
+                        } else {
+                            try {
+                                Remove-Item -LiteralPath $it.FullName -Force -EA Stop
+                                $totalBytes += $it.Length; $totalFiles++; $pathFiles++; $pathBytes += $it.Length
+                            } catch { $pathLocked++ }
+                        }
                     }
                     $pathMB = [Math]::Round($pathBytes / 1MB, 1)
                     if ($pathFiles -gt 0) {
                         $verb = if ($dry) { 'Would delete' } else { 'Deleted' }
                         & $add 'DELETE' "[$thisHost]     $verb $pathFiles file(s), $pathMB MB from $(Split-Path $tp -Leaf)"
                     }
+                    if ($pathLocked -gt 0) { & $add 'WARN' "[$thisHost]     $pathLocked file(s) locked/skipped (not deleted) in $(Split-Path $tp -Leaf)" }
                 }
                 return @{ Bytes=$totalBytes; Files=$totalFiles; Events=$ev.ToArray() }
             }
@@ -2534,14 +2609,26 @@ $script:WptCleanBlock = {
                 $mb = [Math]::Round($bytes / 1MB, 1)
                 & $add 'ACTION' "[$thisHost]   ccmcache holds $mb MB in $(@($files).Count) file(s)"
                 if (-not $dry) {
+                    $lockedCount = 0
                     foreach ($it in (Get-ChildItem -LiteralPath $cachePath -Force -EA SilentlyContinue)) {
-                        try { Remove-Item -LiteralPath $it.FullName -Recurse -Force -EA Stop } catch {}
+                        try { Remove-Item -LiteralPath $it.FullName -Recurse -Force -EA Stop } catch { $lockedCount++ }
                     }
-                    & $add 'DELETE' "[$thisHost]     Deleted ccmcache contents ($mb MB)"
+                    # Re-measure what's actually left: a locked file/folder survives the
+                    # swallowed catch above, so the reported "Deleted" total must come from
+                    # a confirmed before/after delta, not the pre-delete enumeration (which
+                    # previously inflated the count whenever something was locked).
+                    $remainFiles = @(Get-ChildItem -LiteralPath $cachePath -Recurse -Force -File -EA SilentlyContinue)
+                    $remainBytes = 0; foreach ($f in $remainFiles) { $remainBytes += $f.Length }
+                    $freedBytes = $bytes - $remainBytes; if ($freedBytes -lt 0) { $freedBytes = 0 }
+                    $freedFiles = (@($files).Count) - $remainFiles.Count; if ($freedFiles -lt 0) { $freedFiles = 0 }
+                    $freedMB = [Math]::Round($freedBytes / 1MB, 1)
+                    if ($lockedCount -gt 0) { & $add 'WARN' "[$thisHost]     $lockedCount item(s) locked/skipped (not deleted)" }
+                    & $add 'DELETE' "[$thisHost]     Deleted ccmcache contents ($freedMB MB, $freedFiles file(s))"
+                    return @{ Bytes=$freedBytes; Files=$freedFiles; Events=$ev.ToArray() }
                 } else {
                     & $add 'DELETE' "[$thisHost]     Would delete ccmcache contents ($mb MB)"
+                    return @{ Bytes=$bytes; Files=@($files).Count; Events=$ev.ToArray() }
                 }
-                return @{ Bytes=$bytes; Files=@($files).Count; Events=$ev.ToArray() }
             }
             $r.Events = @($r.Events) + @($cacheResult.Events)
             $r.CacheMB = [Math]::Round(($cacheResult.Bytes / 1MB), 1)
@@ -2752,12 +2839,15 @@ $script:WptRegApplyBlock = {
         if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
         # DNS-mismatch guard (HARD ABORT): never write registry keys on a box that
         # isn't the one we dialed. One quick WinRM round-trip; name compare (no PTR).
-        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-            $r.Reachable = $true
-            $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no registry change"
-            return $r
+        # An IPv4-literal target has no shortname to compare -> skip.
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Reachable = $true
+                $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no registry change"
+                return $r
+            }
         }
         $post = Invoke-Command @splat -ArgumentList $RegPath, $Defs -ScriptBlock {
             param($p, $defs)
@@ -3029,11 +3119,16 @@ $script:WptCleanUserAppsBlock = {
                         $bytes = 0
                         try { foreach ($f in (Get-ChildItem -LiteralPath $path -Recurse -Force -File -EA SilentlyContinue)) { $bytes += $f.Length } } catch {}
                         $mb = [Math]::Round($bytes / 1MB, 1)
-                        $totalBytes += $bytes; $found++
+                        $found++
                         if ($dry) {
+                            # Dry run: the enumeration IS the "would delete" estimate.
+                            $totalBytes += $bytes
                             & $add 'DELETE' "[$thisHost]   Would remove $app for $($prof.Name): $rel ($mb MB)"
                         } else {
-                            try { Remove-Item -LiteralPath $path -Recurse -Force -EA Stop; $removed++; & $add 'DELETE' "[$thisHost]   Removed $app for $($prof.Name): $rel ($mb MB)" }
+                            # Live run: only count bytes toward the freed total on a CONFIRMED
+                            # delete - previously $totalBytes was added unconditionally, so a
+                            # locked (failed) removal still inflated the reported freed MB.
+                            try { Remove-Item -LiteralPath $path -Recurse -Force -EA Stop; $removed++; $totalBytes += $bytes; & $add 'DELETE' "[$thisHost]   Removed $app for $($prof.Name): $rel ($mb MB)" }
                             catch { & $add 'ERR' "[$thisHost]   Failed $app for $($prof.Name): $($_.Exception.Message)" }
                         }
                     }
@@ -3296,10 +3391,13 @@ $script:WptSccmInstallBlock = {
     try {
         # DNS-mismatch guard (HARD ABORT): never deploy to a box that isn't the one
         # we dialed. Name compare (no PTR on AFNET); if the probe can't run, proceed.
-        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-            return ,@(@{ Type=''; Name=$Computer; Result='Failed'; Detail="DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken" })
+        # An IPv4-literal target has no shortname to compare -> skip.
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                return ,@(@{ Type=''; Name=$Computer; Result='Failed'; Detail="DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken" })
+            }
         }
         $res = Invoke-Command @splat -ArgumentList $ItemsText -ScriptBlock {
             param($itemsText)
@@ -3578,10 +3676,13 @@ $script:WptSoftwareUninstallBlock = {
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     # DNS-mismatch guard (HARD ABORT): never uninstall on a box that isn't the one
     # we dialed. Name compare (no PTR on AFNET); if the probe can't run, proceed.
-    $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-    $targetShort = ($Computer -split '\.')[0]
-    if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-        return ,@(@{ App=$Computer; Type=''; Result='Failed'; Detail="DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken" })
+    # An IPv4-literal target has no shortname to compare -> skip.
+    if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+        $targetShort = ($Computer -split '\.')[0]
+        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            return ,@(@{ App=$Computer; Type=''; Result='Failed'; Detail="DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken" })
+        }
     }
     return Invoke-Command @splat -ArgumentList (,$AppNames) -ScriptBlock {
         param([string[]]$Names)
@@ -3810,12 +3911,15 @@ $script:WptAppActionBlock = {
     try {
         # DNS-mismatch guard (HARD ABORT): never fire a CCM app action on a box that
         # isn't the one we dialed (audit#2 - every sibling destructive block has this).
-        # Name compare (no PTR on AFNET); if the probe can't run, proceed.
-        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"
-            return $r
+        # Name compare (no PTR on AFNET); if the probe can't run, proceed. An
+        # IPv4-literal target has no shortname to compare -> skip.
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"
+                return $r
+            }
         }
         $remote = Invoke-Command @splat -ArgumentList $AppId,$Revision,$IsMachineTarget,$Method,$AppName -ScriptBlock {
             param([string]$Id, [string]$Rev, $Machine, [string]$Mthd, [string]$Nm)
@@ -4584,7 +4688,15 @@ function Invoke-JanetToolAction {
         }
         'reboot' {
             $threads = Get-WptThreadCount $Params 16
-            return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+            # Self-guard: drop the JANET dispatcher host from the wave before rebooting
+            # it (mirrors JanetWeb.restart.psm1's dispatch-restart self-guard).
+            $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+            $rebootTargets = $guarded.Targets
+            if ($rebootTargets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to reboot.' }
+                return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } }
+            }
+            return Invoke-WptFanOut -Targets $rebootTargets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptRebootBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
                 -OkOf { param($r) [bool]$r.Success } `
@@ -4596,7 +4708,15 @@ function Invoke-JanetToolAction {
             $seconds = 900; if ($Params['seconds']) { [int]::TryParse([string]$Params['seconds'], [ref]$seconds) | Out-Null }
             if ($seconds -lt 0) { $seconds = 0 }
             $msg = [string]$Params['message']
-            return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+            # Self-guard: drop the JANET dispatcher host from the wave before arming a
+            # scheduled reboot on it (mirrors JanetWeb.restart.psm1's dispatch-restart).
+            $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+            $rebootTargets = $guarded.Targets
+            if ($rebootTargets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to schedule.' }
+                return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } }
+            }
+            return Invoke-WptFanOut -Targets $rebootTargets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptRebootScheduleBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $seconds, $msg) } `
                 -OkOf { param($r) [bool]$r.Success } `

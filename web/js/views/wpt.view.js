@@ -1223,7 +1223,14 @@
           if (needCred()) return;
           var prof = applySel.value;
           if (prof === 'Custom Command' && !customCmd.value.trim()) { notice('Command required', 'Enter the custom command to run.'); return; }
-          var ok = await ctx.confirm({ title: 'Apply ' + prof, danger: true, body: 'Run profile <b>' + esc(prof) + '</b> on <b>' + count + '</b> ' + noun + ' host(s)? This changes machines.', okText: 'Apply', cancelText: 'Cancel' });
+          var isCustom = (prof === 'Custom Command');
+          var ok = await ctx.confirm({
+            title: 'Apply ' + prof, danger: true,
+            body: 'Run profile <b>' + esc(prof) + '</b> on <b>' + count + '</b> ' + noun + ' host(s)? This changes machines.'
+              + (isCustom ? '<br><br>This runs an <b>arbitrary remote command</b> you typed, with admin rights, on every target above.' : ''),
+            confirmWord: isCustom ? 'RUN' : null,
+            okText: 'Apply', cancelText: 'Cancel'
+          });
           if (!ok) { tab.log.append({ text: 'Apply cancelled.', level: 'warn' }); return; }
           tab.log.banner('Apply ' + prof + ' - ' + count + ' ' + noun + ' host(s)');
           applyBtn.disabled = applySelBtn.disabled = true;
@@ -1786,7 +1793,7 @@
         log.append({ text: 'Reboot Countdown ready. Set the timing + mode, then Arm Countdown. Cancel any time before it fires.', level: 'accent' });
 
         // ----- client-side countdown + post-reboot monitor -----
-        var state = { armed: false, mode: 'auto', endAt: 0, warnEvery: 0, lastWarn: 0, tick: null, monitor: null, audio: null };
+        var state = { armed: false, mode: 'auto', endAt: 0, warnEvery: 0, lastWarn: 0, tick: null, monitor: null, audio: null, armedHosts: null };
         function clearTimers() { if (state.tick) { clearInterval(state.tick); state.tick = null; } if (state.monitor) { clearInterval(state.monitor); state.monitor = null; } }
         track(function () { clearTimers(); });   // unmount cleanup
         function ensureAudio() { try { if (!state.audio) state.audio = new (window.AudioContext || window.webkitAudioContext)(); if (state.audio.state === 'suspended') state.audio.resume(); } catch (e) {} }
@@ -1802,7 +1809,10 @@
         function setArmedUi(on) { state.armed = on; armBtn.disabled = on; cancelBtn.disabled = !on; totalMin.disabled = on; warnMin.disabled = on; modeSel.disabled = on; }
         function warnBody(remainSec) { return (bodyInput.value || '').trim() + ' (about ' + Math.max(1, Math.round(remainSec / 60)) + ' minute(s) remaining)'; }
         function sendWarning(remainSec) {
-          var run = ctx.run('remote-message', { targets: ctx.targets.raw, title: titleInput.value, body: warnBody(remainSec), timeout: 0, threads: 16 });
+          // Once armed, always warn the SNAPSHOT hosts - never re-read ctx.targets.raw
+          // (the operator may have edited the shared host box mid-countdown).
+          var targetsRaw = (state.armedHosts != null) ? state.armedHosts : ctx.targets.raw;
+          var run = ctx.run('remote-message', { targets: targetsRaw, title: titleInput.value, body: warnBody(remainSec), timeout: 0, threads: 16 });
           track(run.subscribe({ final: function () { log.append({ text: 'Warning popup sent (' + mmss(remainSec) + ' left).', level: 'info' }); } }));
         }
         function startCountdown(totalSec) {
@@ -1814,7 +1824,7 @@
             var remain = (state.endAt - Date.now()) / 1000;
             if (remain <= 0) {
               clearInterval(state.tick); state.tick = null;
-              if (state.mode === 'auto') { cdLabel.textContent = 'Rebooting now...'; log.banner('Countdown reached zero - hosts rebooting. Starting monitor.'); startMonitor(); }
+              if (state.mode === 'auto') { cdLabel.textContent = 'Rebooting now...'; log.banner('Countdown reached zero - hosts rebooting. Starting monitor.'); startMonitor(state.armedHosts != null ? ctx.util.parseHosts(state.armedHosts) : null); }
               else { cdLabel.textContent = 'Countdown complete.'; log.banner('Warnings-only countdown complete.'); setArmedUi(false); }
               return;
             }
@@ -1878,21 +1888,26 @@
             okText: auto ? 'Arm Reboot' : 'Start Warnings', cancelText: 'Cancel'
           });
           if (!ok) { log.append({ text: 'Arm cancelled by operator.', level: 'warn' }); return; }
+          // Snapshot the host list NOW - once armed, Cancel/warnings/monitor must all
+          // target these exact hosts even if the operator edits the shared host box
+          // mid-countdown (P2-3: previously each re-read ctx.targets.raw live).
+          state.armedHosts = ctx.targets.raw;
+          var armedHostsArr = ctx.util.parseHosts(state.armedHosts);
           ensureAudio();
           grid.clear(); prog.reset(); setArmedUi(true);
-          log.banner((auto ? 'Arming scheduled reboot' : 'Starting warnings') + ' - ' + ctx.targets.count() + ' host(s), ' + totalMin.value + ' min, warn every ' + warnMin.value + ' min');
+          log.banner((auto ? 'Arming scheduled reboot' : 'Starting warnings') + ' - ' + armedHostsArr.length + ' host(s), ' + totalMin.value + ' min, warn every ' + warnMin.value + ' min');
           if (auto) {
-            var run = ctx.run('reboot-schedule', { targets: ctx.targets.raw, seconds: totalSec, message: bodyInput.value, threads: 16 }, {});
+            var run = ctx.run('reboot-schedule', { targets: state.armedHosts, seconds: totalSec, message: bodyInput.value, threads: 16 }, {});
             track(run.subscribe({
               status: function (t) { prog.setPhase(t); },
               progress: function (p) { prog.setProgress(p.done, p.total); },
               row: function (r) { grid.upsert({ Host: r.Host, Phase: asBool(r.Success) ? 'Armed' : 'Failed', RebootAt: r.RebootAt, Detail: r.Detail }); },
               log: function (l) { log.append(l); },
               error: function (e) { log.append({ text: e.text, level: 'err' }); },
-              final: function () { var armed = grid.rows().filter(function (x) { return /armed/i.test(String(x.Phase)); }).length; log.banner('Scheduled on ' + armed + '/' + ctx.targets.count() + ' host(s).'); }
+              final: function () { var armed = grid.rows().filter(function (x) { return /armed/i.test(String(x.Phase)); }).length; log.banner('Scheduled on ' + armed + '/' + armedHostsArr.length + ' host(s).'); }
             }));
           } else {
-            ctx.targets.hosts().forEach(function (h) { grid.upsert({ Host: h, Phase: 'Warning', Detail: 'warnings only' }); });
+            armedHostsArr.forEach(function (h) { grid.upsert({ Host: h, Phase: 'Warning', Detail: 'warnings only' }); });
             sendWarning(totalSec);
           }
           startCountdown(totalSec);
@@ -1910,9 +1925,11 @@
         cancelBtn.onclick = async function () {
           if (!state.armed) return;
           clearTimers(); cdLabel.textContent = 'Cancelling...';
+          // Cancel the ARMED hosts, not whatever is currently in the shared host box.
+          var armedHostsArr = ctx.util.parseHosts(state.armedHosts || '');
           if (state.mode === 'auto') {
-            log.banner('Cancelling scheduled reboot (shutdown /a) - ' + ctx.targets.count() + ' host(s)');
-            var run = ctx.run('reboot-abort', { targets: ctx.targets.raw, threads: 16 }, {});
+            log.banner('Cancelling scheduled reboot (shutdown /a) - ' + armedHostsArr.length + ' host(s)');
+            var run = ctx.run('reboot-abort', { targets: state.armedHosts, threads: 16 }, {});
             track(run.subscribe({
               row: function (r) { grid.upsert({ Host: r.Host, Phase: asBool(r.Success) ? 'Cancelled' : 'Failed', RebootAt: '', Detail: r.Detail }); },
               log: function (l) { log.append(l); },

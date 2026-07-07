@@ -901,6 +901,72 @@ $UprWorkerBlock = {
                     try {
                         $appResult = Invoke-Command -Session $session -ErrorAction Stop -ArgumentList $cand.Product, $cand.Type, $cand.UninstallString, $cand.QuietUninstall, $cand.PSChildName -ScriptBlock {
                             param($name, $type, $unStr, $quietStr, $childName)
+
+                            # === SECURITY (P2-5): never shell a raw registry UninstallString ===
+                            # A low-priv local user can plant a crafted UninstallString /
+                            # QuietUninstallString (e.g. '...\uninst.exe" & evil.cmd'); the old
+                            # code ran it via `cmd.exe /c "<string>"` under the operator's admin
+                            # WinRM credential -> LPE. These helpers DECOMPOSE the string into an
+                            # executable + a DISCRETE argument array and invoke it with no shell,
+                            # so metacharacters (& | > < ^) are passed as inert literals and are
+                            # never interpreted. Anything that cannot be safely decomposed is
+                            # REJECTED (surfaced), never handed to cmd /c.
+                            # NOTE: mirrored verbatim by tests\Upr.UninstallStringParse.Tests.ps1.
+                            function Get-SafeUninstallPlan {
+                                param([string]$UnStr)
+                                # Returns: Kind='Msi'  -> Exe='msiexec.exe'; Args=@('/x',$guid,'/qn','/norestart')
+                                #          Kind='Exe'  -> Exe=<path>; Args=@(<discrete arg tokens>)
+                                #          Kind='Reject'-> Reason=<why>  (NEVER shelled via cmd /c)
+                                if ([string]::IsNullOrWhiteSpace($UnStr)) {
+                                    return [pscustomobject]@{ Kind = 'Reject'; Exe = $null; Args = @(); Guid = $null; Reason = 'empty uninstall string' }
+                                }
+                                $s = $UnStr.Trim()
+                                # MSI form: rebuild strictly from the ProductCode GUID, so no
+                                # operator-supplied text reaches the argument line at all.
+                                if ($s -match '(?i)msiexec(\.exe)?\b' -and $s -match '(\{[0-9A-Fa-f\-]{8,}\})') {
+                                    $guid = $Matches[1]
+                                    return [pscustomobject]@{ Kind = 'Msi'; Exe = 'msiexec.exe'; Args = @('/x', $guid, '/qn', '/norestart'); Guid = $guid; Reason = $null }
+                                }
+                                # EXE form: take a leading quoted path, else an unquoted token that
+                                # terminates in .exe/.com. Unparseable (e.g. unquoted path with
+                                # spaces) -> Reject rather than fall back to a shell.
+                                $exe = $null; $rest = ''
+                                if ($s -match '^\s*"([^"]+)"\s*(.*)$') {
+                                    $exe = $Matches[1]; $rest = $Matches[2]
+                                } elseif ($s -match '^\s*(\S+\.(?:exe|com))\s*(.*)$') {
+                                    $exe = $Matches[1]; $rest = $Matches[2]
+                                } else {
+                                    return [pscustomobject]@{ Kind = 'Reject'; Exe = $null; Args = @(); Guid = $null; Reason = "unparseable uninstall string (no quoted or .exe-terminated executable)" }
+                                }
+                                $argList = @()
+                                if (-not [string]::IsNullOrWhiteSpace($rest)) {
+                                    foreach ($tok in [regex]::Matches($rest, '"([^"]*)"|(\S+)')) {
+                                        if ($tok.Groups[1].Success) { $argList += $tok.Groups[1].Value } else { $argList += $tok.Groups[2].Value }
+                                    }
+                                }
+                                return [pscustomobject]@{ Kind = 'Exe'; Exe = $exe; Args = $argList; Guid = $null; Reason = $null }
+                            }
+                            function Invoke-SafeUninstall {
+                                param([string]$UnStr, [string[]]$AppendArgs)
+                                $plan = Get-SafeUninstallPlan $UnStr
+                                if ($plan.Kind -eq 'Reject') {
+                                    return [pscustomobject]@{ Ran = $false; ExitCode = $null; Detail = "rejected: $($plan.Reason)" }
+                                }
+                                # Validate a concrete EXE path exists before launching (msiexec
+                                # resolves via PATH, so it is exempt from Test-Path).
+                                if ($plan.Kind -eq 'Exe' -and -not (Test-Path -LiteralPath $plan.Exe)) {
+                                    return [pscustomobject]@{ Ran = $false; ExitCode = $null; Detail = "executable not found: $($plan.Exe)" }
+                                }
+                                $argList = @($plan.Args)
+                                # Best-effort silent switches only for bare EXE uninstallers; MSI
+                                # already carries a complete, safe argument set.
+                                if ($plan.Kind -eq 'Exe' -and $AppendArgs) { $argList += @($AppendArgs | Where-Object { $_ }) }
+                                $sp = @{ FilePath = $plan.Exe; Wait = $true; PassThru = $true; NoNewWindow = $true; ErrorAction = 'SilentlyContinue' }
+                                if ($argList.Count -gt 0) { $sp['ArgumentList'] = $argList }
+                                $proc = Start-Process @sp
+                                if ($null -eq $proc) { return [pscustomobject]@{ Ran = $false; ExitCode = $null; Detail = 'process did not start' } }
+                                return [pscustomobject]@{ Ran = $true; ExitCode = $proc.ExitCode; Detail = $null }
+                            }
                             try {
                                 ## === Microsoft 365 handler (SaRA-style package script + setup.exe /configure) ===
                                 if ($name -match 'Microsoft 365|Office.*365|O365|Office.*ProPlus') {
@@ -921,9 +987,9 @@ $UprWorkerBlock = {
                                         $steps += "setup.exe /configure exit $($proc.ExitCode)"
                                     }
                                     if (-not [string]::IsNullOrWhiteSpace($unStr)) {
-                                        $proc = Start-Process cmd.exe -ArgumentList "/c `"$unStr`"" -Wait -PassThru -NoNewWindow
-                                        if ($proc.ExitCode -eq 0) { return "OK (Office removed via uninstall string)" }
-                                        $steps += "Uninstall string exit $($proc.ExitCode)"
+                                        $u = Invoke-SafeUninstall -UnStr $unStr
+                                        if ($u.Ran -and $u.ExitCode -eq 0) { return "OK (Office removed via uninstall string)" }
+                                        if ($u.Ran) { $steps += "Uninstall string exit $($u.ExitCode)" } else { $steps += "Uninstall string $($u.Detail)" }
                                     }
                                     return "FAIL (Office -- all methods attempted: $($steps -join ' | '))"
                                 }
@@ -999,20 +1065,16 @@ $UprWorkerBlock = {
                                     ## success. A null process (Start-Process failed) or any other exit
                                     ## code is a real failure -- never report OK unconditionally.
                                     if (-not [string]::IsNullOrWhiteSpace($quietStr)) {
-                                        $proc = Start-Process cmd.exe -ArgumentList "/c `"$quietStr`"" -Wait -PassThru -NoNewWindow
-                                        if ($null -ne $proc -and ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)) { return "OK (QuietUninstall exit $($proc.ExitCode))" }
-                                        else { return "FAIL (QuietUninstall exit $(if ($proc) { $proc.ExitCode } else { 'no process' }))" }
+                                        $u = Invoke-SafeUninstall -UnStr $quietStr
+                                        if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010)) { return "OK (QuietUninstall exit $($u.ExitCode))" }
+                                        else { return "FAIL (QuietUninstall $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                     } elseif (-not [string]::IsNullOrWhiteSpace($unStr)) {
-                                        $exePath = ($unStr -split '/|--')[0].Trim('"').Trim()
-                                        if (Test-Path $exePath) {
-                                            $proc = Start-Process $exePath -ArgumentList "/S /silent /quiet /uninstall /norestart" -Wait -PassThru -NoNewWindow -EA SilentlyContinue
-                                            if ($null -ne $proc -and ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)) { return "OK (EXE exit $($proc.ExitCode))" }
-                                            else { return "FAIL (EXE exit $(if ($proc) { $proc.ExitCode } else { 'no process' }))" }
-                                        } else {
-                                            $proc = Start-Process cmd.exe -ArgumentList "/c `"$unStr /S /quiet /norestart`"" -Wait -PassThru -NoNewWindow -EA SilentlyContinue
-                                            if ($null -ne $proc -and ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)) { return "OK (CMD exit $($proc.ExitCode))" }
-                                            else { return "FAIL (CMD exit $(if ($proc) { $proc.ExitCode } else { 'no process' }))" }
-                                        }
+                                        ## Safe decomposition (no cmd /c): the planted UninstallString
+                                        ## never reaches a shell. Append conservative silent switches
+                                        ## so a bare EXE uninstaller still runs unattended.
+                                        $u = Invoke-SafeUninstall -UnStr $unStr -AppendArgs @('/S','/silent','/quiet','/uninstall','/norestart')
+                                        if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010)) { return "OK (EXE exit $($u.ExitCode))" }
+                                        else { return "FAIL (EXE $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                     } else { return "FAIL: No uninstall string available" }
                                 }
                             } catch { return "FAIL: $($_.Exception.Message)" }

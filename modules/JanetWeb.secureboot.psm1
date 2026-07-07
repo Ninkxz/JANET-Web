@@ -62,6 +62,55 @@ function ConvertTo-SecureBootHostList {
     return $out.ToArray()
 }
 
+# -----------------------------------------------------------------------------
+# Self-guard (P2-6b): secureboot-local equivalent of JanetWeb.restart.psm1's
+# Get-JanetLocalIdentity / Test-JanetHostIsSelf (audit#10). Deliberately NOT
+# cross-imported from restart.psm1 - each engine module owns its own copy so
+# they can load independently. Enabling Secure Boot leaves the target pending
+# a reboot; if that target were the box running JANET, the eventual reboot
+# (or a hung firmware write) could take the JANET server down mid-fleet-run.
+# Set of identities that resolve to THIS dispatcher host: shortname, FQDN, all
+# NIC IPs, and loopback. Computed once and cached. Case-insensitive HashSet.
+# -----------------------------------------------------------------------------
+function Get-JanetSbeLocalIdentity {
+    if ($script:SbeLocalIdentity) { return $script:SbeLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # Also add every locally-BOUND unicast IPv4 (mgmt/OOB NICs, lagging DNS): a bound
+    # IP not registered under this box's own name would otherwise be missed by the
+    # DNS lookup above, letting a pasted IP-literal target slip past the self-guard.
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
+    $script:SbeLocalIdentity = $set
+    return $set
+}
+
+# True if a target token names this dispatcher host (short/FQDN/IP/loopback).
+function Test-JanetSbeHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-JanetSbeLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }                      # any loopback literal
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }  # shortname alias, hostnames only
+    }
+    return $false
+}
+
 # ----------------------------------------------------------------------------
 # PAYLOAD - runs on the REMOTE machine as SYSTEM via scheduled task.
 # $BIOSPassword and $ResultPath are prepended as variable assignments before
@@ -461,6 +510,31 @@ $script:SbeLiveWorker = {
     $sbDrive        = "SBE_$($comp -replace '[^A-Za-z0-9]','')"
     $sbDriveMounted = $false
     try {
+        # AFNET-safe: open ONE WinRM session up front (Register here, Start next,
+        # Unregister in finally) instead of a DCOM CIM session. Opened FIRST, before
+        # any C$/SMB is touched, so the wrong-box guard right below can hard-abort
+        # BEFORE the password-bearing payload is ever dropped onto the target.
+        # Mirror the suite splat - Authentication=Negotiate always, Credential only
+        # when supplied. IdleTimeout exceeds the 90s poll so the session is still
+        # alive for the finally Unregister.
+        $wsOpt    = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 300000
+        $sessArgs = @{ ComputerName=$comp; Authentication='Negotiate'; SessionOption=$wsOpt; ErrorAction='Stop' }
+        if ($cred) { $sessArgs['Credential'] = $cred }
+        $session = New-PSSession @sessArgs
+
+        # Wrong-box guard (P2-6b, HARD ABORT): the box that answers this WinRM
+        # session may not be the one we dialed (stale DNS / reused IP). Verify
+        # BEFORE dropping the password-bearing payload or arming the Secure Boot
+        # task. IP-literal targets have no DNS indirection (the box answering at
+        # that IP IS the box), so skip the compare for them.
+        $expectedName = if ($comp -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($comp -split '\.')[0] }
+        if ($expectedName) {
+            $answeringName = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME }
+            if ($answeringName.Trim().ToUpper() -ne $expectedName.Trim().ToUpper()) {
+                throw "wrong box: dialed '$expectedName', answered '$answeringName' - ABORTED, Secure Boot task not armed"
+            }
+        }
+
         # CREDENTIAL: mount the target C$ admin share with the operator credential
         # so the payload drop, ACL lock, result read-back and cleanup all
         # authenticate as $cred - NOT the server process token. Once this SMB
@@ -487,18 +561,6 @@ $script:SbeLiveWorker = {
         Set-Content -LiteralPath $scriptUnc -Value $fullScript -Encoding UTF8 -Force -ErrorAction Stop
         $fullScript = $null
         & icacls.exe "$scriptUnc" /inheritance:r /grant:r "*S-1-5-18:(M)" "*S-1-5-32-544:(M)" 2>$null | Out-Null
-
-        # AFNET-safe: open ONE WinRM session and run the ScheduledTasks cmdlets
-        # LOCALLY on the target (Register here, Start next, Unregister in finally)
-        # instead of a DCOM CIM session. The password-bearing payload was already
-        # dropped to C$ over SMB above; here we only arm the SYSTEM task that runs
-        # it. Mirror the suite splat - Authentication=Negotiate always, Credential
-        # only when supplied. IdleTimeout exceeds the 90s poll so the session is
-        # still alive for the finally Unregister.
-        $wsOpt    = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 300000
-        $sessArgs = @{ ComputerName=$comp; Authentication='Negotiate'; SessionOption=$wsOpt; ErrorAction='Stop' }
-        if ($cred) { $sessArgs['Credential'] = $cred }
-        $session = New-PSSession @sessArgs
 
         Invoke-Command -Session $session -ArgumentList $taskName, $localScriptPath -ErrorAction Stop -ScriptBlock {
             param($tn, $scriptPath)
@@ -679,6 +741,26 @@ function Invoke-JanetToolAction {
     if ($badNames.Count -gt 0) {
         & $send @{ type='log'; level='err'; text=("These target names are not valid hostnames; nothing was run: " + ($badNames -join ', ') + ". Use only letters, digits, dot, hyphen, and underscore.") }
         return @{ rows=@(); summary=@{ total=$targets.Count; ok=0; failed=0 } }
+    }
+
+    # Self-guard (P2-6b, mirrors restart.psm1's dispatch-restart self-exclusion,
+    # audit#10): drop the JANET dispatcher host from the run. Secure Boot leaves the
+    # target PENDING REBOOT; if that target is the box running JANET, the eventual
+    # reboot (or a hung firmware write) can take the JANET server down mid-run. The
+    # in-worker DNS-mismatch guard does NOT catch this case (our own name resolves
+    # to us, so the compare passes) - drop it here regardless of dry-run mode.
+    $selfSkipped = New-Object System.Collections.ArrayList
+    $nonSelf     = New-Object System.Collections.ArrayList
+    foreach ($t in $targets) {
+        if (Test-JanetSbeHostIsSelf $t) { [void]$selfSkipped.Add($t) } else { [void]$nonSelf.Add($t) }
+    }
+    if ($selfSkipped.Count -gt 0) {
+        $targets = $nonSelf.ToArray()
+        & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this run ($($selfSkipped -join ', ')) - Secure Boot leaves a target pending reboot, and a self-reboot would take down the JANET server mid-run." }
+        if ($targets.Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to run.' }
+            return @{ rows=@(); summary=@{ total=0; selfSkipped=$selfSkipped.Count } }
+        }
     }
 
     # Dry-run snapshot (atomic in the web action - cannot toggle mid-run).

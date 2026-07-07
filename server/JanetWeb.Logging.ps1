@@ -349,6 +349,21 @@ function Invoke-JanetWebHeaderEnsure {
     return $sister
 }
 
+function Write-JanetWebLostRowSentinel {
+    # Last-resort breadcrumb for the "audit row never lost" guarantee: if BOTH the
+    # central share and the local spool write fail, drop one line to a %TEMP%
+    # sentinel file so the loss is at least discoverable. Best-effort - wrapped so
+    # this can never itself throw back into the caller.
+    param([string]$LocalPath, [string]$Line)
+    try {
+        $sentinelDir = Join-Path $env:TEMP 'JanetWeb'
+        if (-not (Test-Path -LiteralPath $sentinelDir)) { New-Item -ItemType Directory -Path $sentinelDir -Force -ErrorAction Stop | Out-Null }
+        $sentinelFile = Join-Path $sentinelDir 'lost-rows.log'
+        $entry = "{0}`t{1}`t{2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $LocalPath, $Line
+        Add-Content -LiteralPath $sentinelFile -Value $entry -Encoding UTF8 -ErrorAction Stop
+    } catch {}
+}
+
 function Add-JanetWebCsvRow {
     # Append one line: cheap cached ping-gate, then network with a short backoff;
     # on failure, mark the share down and spool the line locally so it's never
@@ -375,7 +390,10 @@ function Add-JanetWebCsvRow {
         try {
             $target = Invoke-JanetWebHeaderEnsure -Path $LocalPath -Header $Header
             Add-Content -LiteralPath $target -Value $Line -Encoding UTF8 -ErrorAction Stop
-        } catch {}
+        } catch {
+            Write-Warning "JanetWeb: local spool write failed for '$LocalPath' - audit row not persisted: $($_.Exception.Message)"
+            Write-JanetWebLostRowSentinel -LocalPath $LocalPath -Line $Line
+        }
     } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
 }
 
@@ -508,10 +526,13 @@ function Add-JanetWebTextLine {
         }
         try {
             $dir = Split-Path -Parent $LocalPath
-            if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null }
-            if (-not (Test-Path -LiteralPath $LocalPath) -and $HeaderBlock) { Set-Content -LiteralPath $LocalPath -Value $HeaderBlock -Encoding UTF8 -ErrorAction SilentlyContinue }
-            Add-Content -LiteralPath $LocalPath -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
-        } catch {}
+            if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+            if (-not (Test-Path -LiteralPath $LocalPath) -and $HeaderBlock) { Set-Content -LiteralPath $LocalPath -Value $HeaderBlock -Encoding UTF8 -ErrorAction Stop }
+            Add-Content -LiteralPath $LocalPath -Value $Line -Encoding UTF8 -ErrorAction Stop
+        } catch {
+            Write-Warning "JanetWeb: local spool write failed for '$LocalPath' - audit row not persisted: $($_.Exception.Message)"
+            Write-JanetWebLostRowSentinel -LocalPath $LocalPath -Line $Line
+        }
     } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
 }
 
@@ -554,12 +575,12 @@ function Write-JanetWebRun {
             $size = $members.Count
             foreach ($m in $members) {
                 $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
-                    $RowType, $Action, (ConvertTo-JanetWebMinField $m), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
+                    (ConvertTo-JanetWebMinField $RowType), (ConvertTo-JanetWebMinField $Action), (ConvertTo-JanetWebMinField $m), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
                     $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetWebMinField $Notes), (ConvertTo-JanetWebMinField $GroupKey), $size)
             }
         } else {
             $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
-                $RowType, $Action, (ConvertTo-JanetWebMinField $Scope), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
+                (ConvertTo-JanetWebMinField $RowType), (ConvertTo-JanetWebMinField $Action), (ConvertTo-JanetWebMinField $Scope), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
                 $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetWebMinField $Notes), (ConvertTo-JanetWebMinField $GroupKey), 1)
         }
         foreach ($r in $rows) {

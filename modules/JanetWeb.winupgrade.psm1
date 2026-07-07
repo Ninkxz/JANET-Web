@@ -292,6 +292,17 @@ function Get-WinUpgradeLocalIdentity {
         if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
     } catch {}
     try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # Also add every locally-BOUND unicast IPv4 (mgmt/OOB NICs, lagging DNS): a bound IP
+    # not registered under this box's own name would otherwise be missed by the DNS lookup
+    # above, letting a pasted IP-literal target slip past the self-guard (audit P3-1).
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
     $script:WinUpgradeLocalIdentity = $set
     return $set
 }
@@ -1793,19 +1804,26 @@ function Invoke-JanetToolAction {
             return @{ rows=@(); summary=@{ total=$targets.Count } }
         }
     }
-    # Self-guard: never DRIVE+REBOOT the JANET dispatcher box. When upgrade-drive is set
-    # to reboot staged hosts (and this is a real run), drop any target that IS this machine
-    # - a self-reboot would kill the HttpListener mid-dispatch. (Restart tool audit#10; the
-    # in-worker DNS guard does NOT catch self - our own name resolves to us so it passes.)
-    if ($op -eq 'UpgradeDrive' -and $rebootWhenStaged -and -not $dryRun) {
+    # Self-guard: never REBOOT the JANET dispatcher box mid-fan-out. Drop any target that IS
+    # this machine BEFORE dispatch - a self-reboot would kill the HttpListener mid-dispatch.
+    # (Restart tool audit#10; the in-worker DNS guard does NOT catch self - our own name
+    # resolves to us so it passes.) Every op that issues a remote reboot is guarded:
+    #   UpgradeDrive -> reboots a confirmed-staged host when $rebootWhenStaged
+    #   InstallCab   -> reboots after a successful DISM feature-update install when $reboot
+    #   SetPageFile  -> reboots to apply the page-file change when $reboot
+    $rebootIntent = ( ($op -eq 'UpgradeDrive' -and $rebootWhenStaged) -or `
+                      (($op -eq 'InstallCab' -or $op -eq 'SetPageFile') -and $reboot) )
+    if ($rebootIntent -and -not $dryRun) {
         $keptT = New-Object System.Collections.ArrayList
         $selfT = New-Object System.Collections.ArrayList
         foreach ($t in $targets) { if (Test-WinUpgradeHostIsSelf $t) { [void]$selfT.Add($t) } else { [void]$keptT.Add($t) } }
         if ($selfT.Count -gt 0) {
             $targets = $keptT
-            & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this drive wave ($($selfT -join ', ')) - a self-reboot would abort the dispatch." }
+            & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this reboot wave ($($selfT -join ', ')) - a self-reboot would abort the dispatch." }
+            # Surface a dropped row per self-target so it is visible in the grid, not just the log.
+            foreach ($s in $selfT) { & $send (@{ type='row' } + @{ Host=$s; Ping=''; Status='Skipped'; Detail='self-guard: dispatcher host - reboot suppressed' }) }
             if ($targets.Count -eq 0) {
-                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to drive.' }
+                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to do.' }
                 return @{ rows=@(); summary=@{ total=0; selfSkipped=$selfT.Count } }
             }
         }

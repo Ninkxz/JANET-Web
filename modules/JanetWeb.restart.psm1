@@ -180,6 +180,17 @@ function Get-JanetLocalIdentity {
         if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
     } catch {}
     try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # Also add every locally-BOUND unicast IPv4 (mgmt/OOB NICs, lagging DNS): a bound IP
+    # not registered under this box's own name would otherwise be missed by the DNS lookup
+    # above, letting a pasted IP-literal target slip past the self-guard (audit P3-1).
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
     $script:JanetLocalIdentity = $set
     return $set
 }
@@ -390,8 +401,11 @@ $script:DispatchWorker = {
                         $psi.RedirectStandardError  = $true
                         $psi.CreateNoWindow         = $true
                         # Strip CR/LF first (a newline in the message can break the /c token),
-                        # then quote-escape. Single-line messages are unaffected.
-                        $msgArg = '"' + ($m -replace '[\r\n]+',' ' -replace '"','\"') + '"'
+                        # then quote-escape. Also double any run of backslashes immediately
+                        # before the appended closing quote (CommandLineToArgvW rule) so a
+                        # message ending in '\' (e.g. a UNC path) can't escape the quote and
+                        # swallow the /f flag into the message text.
+                        $msgArg = '"' + (($m -replace '[\r\n]+',' ' -replace '"','\"') -replace '(\\+)$','$1$1') + '"'
                         $psi.Arguments = "/r /t $s /c $msgArg /f"
                         $p = [System.Diagnostics.Process]::Start($psi)
                         $stdout = $p.StandardOutput.ReadToEnd()
@@ -754,7 +768,7 @@ $script:DispatchWorker = {
 # WinRM pattern (mirrors $script:DispatchScriptBlock action='Abort' branch).
 # -----------------------------------------------------------------------------
 $script:AbortWorker = {
-    param($hostname, $cred)
+    param($hostname, $cred, $expected)
     $r = [ordered]@{ Host = $hostname; Status = 'Pending'; Success = $false; ExitCode = $null; Result = '' }
     try {
         $wsOpt = New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
@@ -763,8 +777,20 @@ $script:AbortWorker = {
             Authentication = 'Negotiate'
             SessionOption  = $wsOpt
             ErrorAction    = 'Stop'
+            # Same DNS-mismatch guard the dispatch worker uses (~378): '' for an IP-literal
+            # target skips the name-compare (an IP has no DNS indirection); a hostname passes
+            # its short name so a stale-DNS / reused-IP box isn't silently abort-cancelled.
+            ArgumentList   = @($expected)
             ScriptBlock    = {
+                param($expected)
                 $o = @{ ExitCode = $null; Output = ''; Error = '' }
+                # DNS-mismatch guard (HARD ABORT): the box that answered runs this block, so
+                # $env:COMPUTERNAME IS the real machine; if it isn't the one we dialed, do NOT
+                # cancel its pending shutdown (it may be a different, legitimately-scheduled box).
+                if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                    $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no 'shutdown /a' sent"
+                    return $o
+                }
                 try {
                     $psi = New-Object System.Diagnostics.ProcessStartInfo
                     $psi.FileName               = 'shutdown.exe'
@@ -911,8 +937,10 @@ function Invoke-RrsShutdownDirect {
                     $psi.RedirectStandardError  = $true
                     $psi.CreateNoWindow         = $true
                     # Strip CR/LF first (a newline in the message can break the /c token),
-                    # then quote-escape. Single-line messages are unaffected.
-                    $msgArg = '"' + ($msg -replace '[\r\n]+',' ' -replace '"','\"') + '"'
+                    # then quote-escape. Also double any run of backslashes immediately before
+                    # the appended closing quote (CommandLineToArgvW rule) so a message ending
+                    # in '\' (e.g. a UNC path) can't escape the quote and swallow the /f flag.
+                    $msgArg = '"' + (($msg -replace '[\r\n]+',' ' -replace '"','\"') -replace '(\\+)$','$1$1') + '"'
                     $psi.Arguments = "/r /t $sec /c $msgArg /f"
                     $p = [System.Diagnostics.Process]::Start($psi)
                     $stdout = $p.StandardOutput.ReadToEnd()
@@ -1584,7 +1612,9 @@ function Invoke-JanetToolAction {
             $threads = Get-RrsInt $Params['threads'] 32 1 128
             & $send @{ type='status'; text="Aborting scheduled restart on $($targets.Count) host(s) with $threads thread(s)..." }
 
-            $argFactory  = { param($h) ,@($h, $Credential) }
+            # Skip the name-compare guard for IP-literal targets (audit#9); an IP has no DNS
+            # indirection and its first dot-token can never match a COMPUTERNAME.
+            $argFactory  = { param($h) ,@($h, $Credential, $(if ($h -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($h -split '\.')[0] })) }
             $rowOf       = { param($res) [ordered]@{ Host=$res.Host; Status=[string]$res.Status; Result=[string]$res.Result } }
             $okOf        = { param($res) [bool]$res.Success }
             $auditDetail = { param($res) "shutdown /a rc=$($res.ExitCode)" }

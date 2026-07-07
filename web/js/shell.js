@@ -1014,8 +1014,31 @@
     armBtn.onclick = function () {
       if (!toolSel.value || !actSel.value) { armMsg.textContent = 'Pick a tool and action.'; return; }
       if (!whenInput.value) { armMsg.textContent = 'Pick a fire time.'; return; }
+      // Snapshot the params the fired wave will run with NOW, at arm time - the
+      // poller fires hours/days later with whatever was captured here, so an
+      // action that needs a host list (or another required input) must have it
+      // supplied here or the wave would fire with empty params: engine no-ops,
+      // yet the ledger would read "fired ok" (defect P2-2). Same source ctx.run()
+      // uses for a live run: sharedTargets.raw, and the manifest's declared
+      // required inputs (already carried on TOOLS from /api/tools).
+      var selTool = (TOOLS || []).filter(function (x) { return x.id === toolSel.value; })[0];
+      var selAct = ((selTool && selTool.actions) || []).filter(function (a) { return a.id === actSel.value; })[0];
+      var reqInputs = ((selAct && selAct.inputs) || []).filter(function (i) { return i && i.required; });
+      var hostInput = reqInputs.filter(function (i) { return i.type === 'hostlist'; })[0];
+      var otherReq = reqInputs.filter(function (i) { return i.type !== 'hostlist'; });
+      var armParams = {};
+      if (hostInput) {
+        if (!(sharedTargets.raw || '').trim()) { armMsg.textContent = 'This action needs a target host list - set the shared Target list (top of page) before arming this wave.'; return; }
+        armParams[hostInput.name] = sharedTargets.raw;
+      } else if (selAct && selAct.destructive && otherReq.length) {
+        // A destructive action whose other required inputs (e.g. an uploaded
+        // report file) the generic arm form cannot capture must never be armed
+        // with empty params - it would silently no-op at fire time.
+        armMsg.textContent = 'This destructive action also needs ' + otherReq.map(function (i) { return i.label || i.name; }).join(', ') + ' - the scheduler can\'t capture that yet, so run it live from the tool instead.';
+        return;
+      }
       armMsg.textContent = 'Arming…';
-      api('POST', '/schedule', { toolId: toolSel.value, actionId: actSel.value, fireAt: whenInput.value, recurrence: recSel.value, label: (toolSel.options[toolSel.selectedIndex].text + ' · ' + actSel.options[actSel.selectedIndex].text) })
+      api('POST', '/schedule', { toolId: toolSel.value, actionId: actSel.value, fireAt: whenInput.value, recurrence: recSel.value, label: (toolSel.options[toolSel.selectedIndex].text + ' · ' + actSel.options[actSel.selectedIndex].text), params: armParams })
         .then(function (r) { armMsg.textContent = r && r.id ? ('Armed for ' + fmtWhen(r.fireAtUtc) + (r.destructive ? ' (destructive)' : '')) : 'Armed.'; refresh(); })
         .catch(function (e) { armMsg.textContent = (e && e.message) ? e.message : 'Arm failed (destructive waves need an admin session).'; });
     };

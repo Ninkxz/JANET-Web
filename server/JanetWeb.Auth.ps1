@@ -98,7 +98,7 @@ function Prompt-JanetWebCredential {
         $usable = $true
         try {
             $probe = $cred.GetNetworkCredential()
-            $usable = [bool]($probe -and ($probe.Password -ne $null))
+            $usable = [bool]($probe -and (-not [string]::IsNullOrEmpty($probe.Password)))
             $probe  = $null
         } catch { $usable = $false }
         if (-not $usable) {

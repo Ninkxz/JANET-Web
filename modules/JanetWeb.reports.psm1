@@ -1209,7 +1209,10 @@ function Update-ReportsSlaLedger {
     foreach ($f in $Findings) {
         if ($null -eq $f) { continue }
         $seen++
-        $key = "$($f.Hostname)|$($f.PluginID)"
+        # Normalize the host portion (FQDN/NetBIOS/case all fold to one stable key)
+        # so the same physical host does not reset its firstSeen clock when a later
+        # scan exports it in a different name format. Reads below use the same key.
+        $key = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
         $sev = [string]$f.Severity
         $kev = [bool]$f.InKEV
         $ownFs = if ($f.PSObject.Properties['FirstSeen']) { [string]$f.FirstSeen } else { '' }
@@ -1465,24 +1468,26 @@ function Compare-AcasScans {
     # comparison store (AFTER). Ported from ReportsTool_2.14.5.ps1:6298-6334
     # (btnRunCompare): REMEDIATED = baseline-only, STILL OPEN = in both,
     # NEW = comparison-only. Comparison side = $script:ComparisonFindings (a
-    # separate AFTER-patching scan, NOT the import set). Keys/lookups are
-    # OrdinalIgnoreCase so a host exported as HOST1 in one file and host1.dom in
-    # another doesn't produce a phantom REMEDIATED+NEW pair, and the keyset and
-    # its lookup use the SAME comparer (a mixed comparer would mis-pair rows).
+    # separate AFTER-patching scan, NOT the import set). The host portion of every
+    # key is run through Get-ReportsAuditHostKey (IPv4-whole, else pre-dot short name
+    # upper-cased) so a host exported as HOST1 in one file and host1.dom in another
+    # collapses to ONE key and cannot produce a phantom REMEDIATED+NEW pair.
+    # OrdinalIgnoreCase alone only folds case (HOST1 vs host1) - it would NOT fold
+    # HOST1 vs host1.dom - so normalization, not the comparer, is what pairs them.
     $results = New-Object System.Collections.ArrayList
     $cmp = [System.StringComparer]::OrdinalIgnoreCase
 
     $baselineKeys   = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     $baselineLookup = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
     foreach ($f in $script:BaselineFindings) {
-        $key = "$($f.Hostname)|$($f.PluginID)"
+        $key = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
         [void]$baselineKeys.Add($key)
         $baselineLookup[$key] = $f
     }
     $comparisonKeys   = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     $comparisonLookup = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
     foreach ($f in $script:ComparisonFindings) {
-        $key = "$($f.Hostname)|$($f.PluginID)"
+        $key = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
         [void]$comparisonKeys.Add($key)
         $comparisonLookup[$key] = $f
     }
@@ -5203,7 +5208,9 @@ function Invoke-JanetToolAction {
                 $open++
                 $hn = [string]$f.Hostname
                 if ($hn) { [void]$hosts.Add($hn) }
-                [void]$keys.Add("$hn|$($f.PluginID)")
+                # Normalized key (FQDN/NetBIOS/case fold to one) so verify can pair the
+                # snapshot against a later scan that names the host differently.
+                [void]$keys.Add("$(Get-ReportsAuditHostKey $hn)|$($f.PluginID)")
                 switch ([string]$f.Severity) { 'Critical' { $crit++ } 'High' { $high++ } 'Medium' { $med++ } 'Low' { $low++ } }
                 if ([bool]$f.InKEV) { $kev++ }
                 $vn = ($f.VulnName -as [string]).ToLower(); $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
@@ -5281,53 +5288,73 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='No fresh scan loaded. Import the NEW scan (ACAS Import) before verifying.' }
                 return @{ rows=@(); summary=@{ total=0 } }
             }
-            # Set of keys still OPEN in the fresh scan, + a lookup for detail rows.
-            $openNow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            # Classify every fresh-scan finding by NORMALIZED key (host FQDN/NetBIOS/case
+            # fold to one - matches campaign-create's stored keys):
+            #   openNow      = present AND still an open finding  -> STILL-OPEN
+            #   attestedNow  = present BUT manually flagged Patched / NOT OUR PATCH
+            # A manual 'Patched' flag is set by acas-mark-status with ZERO verification,
+            # so it is NOT evidence the vuln is gone. Only physical ABSENCE from the
+            # fresh scan (key in neither set) counts as scan-confirmed REMEDIATED. This
+            # stops a campaign whose keys were all hand-flagged from auto-closing.
+            $openNow     = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $attestedNow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $detail = @{}
             foreach ($f in $script:AcasFindings) {
-                if ($f.Status -eq 'Patched') { continue }
-                $k = "$($f.Hostname)|$($f.PluginID)"
-                [void]$openNow.Add($k)
+                $k = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
+                $isFlagged = ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH')
+                if ($isFlagged) { [void]$attestedNow.Add($k) } else { [void]$openNow.Add($k) }
                 if (-not $detail.ContainsKey($k)) { $detail[$k] = $f }
             }
             $campKeys = @($cam.findingKeys)
             $rows = New-Object System.Collections.ArrayList
-            $remediated = 0; $stillOpen = 0; $idx = 0
+            $remediated = 0; $stillOpen = 0; $attested = 0; $idx = 0
             foreach ($k in $campKeys) {
                 $idx++
-                $isOpen = $openNow.Contains([string]$k)
-                if ($isOpen) {
+                $ks = [string]$k
+                $parts = ($ks -split '\|', 2)
+                $f = if ($detail.ContainsKey($ks)) { $detail[$ks] } else { $null }
+                if ($openNow.Contains($ks)) {
                     $stillOpen++
-                    $f = $detail[[string]$k]
-                    $parts = ([string]$k -split '\|', 2)
-                    $row = @{
-                        _rk=[string]$k
-                        Host=$(if ($f) { [string]$f.Hostname } else { $parts[0] })
-                        Plugin=$(if ($f) { [string]$f.PluginID } else { $(if ($parts.Count -gt 1) { $parts[1] } else { '' }) })
-                        VulnName=$(if ($f) { [string]$f.VulnName } else { '' })
-                        Severity=$(if ($f) { [string]$f.Severity } else { '' })
-                        KEV=$(if ($f -and [bool]$f.InKEV) { 'KEV' } else { '' })
-                        State='STILL-OPEN'
-                    }
-                    [void]$rows.Add($row)
-                    if ($stillOpen -le 800) { & $send (@{ type='row' } + $row) }
-                } else { $remediated++ }
+                    $state = 'STILL-OPEN'
+                } elseif ($attestedNow.Contains($ks)) {
+                    # Present but hand-flagged: attested, NOT scan-confirmed closed.
+                    $attested++
+                    $state = 'MANUAL-ATTESTED'
+                } else {
+                    $remediated++
+                    continue   # physically absent = scan-confirmed remediated (no row)
+                }
+                $row = @{
+                    _rk=$ks
+                    Host=$(if ($f) { [string]$f.Hostname } else { $parts[0] })
+                    Plugin=$(if ($f) { [string]$f.PluginID } else { $(if ($parts.Count -gt 1) { $parts[1] } else { '' }) })
+                    VulnName=$(if ($f) { [string]$f.VulnName } else { '' })
+                    Severity=$(if ($f) { [string]$f.Severity } else { '' })
+                    KEV=$(if ($f -and [bool]$f.InKEV) { 'KEV' } else { '' })
+                    State=$state
+                }
+                [void]$rows.Add($row)
+                if ($rows.Count -le 800) { & $send (@{ type='row' } + $row) }
             }
             $totalKeys = @($campKeys).Count
+            # Closed % = SCAN-CONFIRMED remediation only (manual attestations excluded).
             $closedPct = if ($totalKeys -gt 0) { [math]::Round(($remediated / $totalKeys) * 100, 1) } else { 0 }
-            $allClosed = ($stillOpen -eq 0 -and $totalKeys -gt 0)
-            $newStatus = if ($allClosed) { 'verified-closed' } elseif ($remediated -gt 0) { 'in-progress' } else { 'open' }
+            # verified-closed requires EVERY key physically absent - no still-open AND no
+            # merely-attested key. A campaign with only manual flags stays in-progress.
+            $allClosed = ($stillOpen -eq 0 -and $attested -eq 0 -and $totalKeys -gt 0)
+            $newStatus = if ($allClosed) { 'verified-closed' } elseif ($remediated -gt 0 -or $attested -gt 0) { 'in-progress' } else { 'open' }
 
             # Persist the verdict back onto the campaign object.
-            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; stillOpen=$stillOpen; total=$totalKeys; closedPct=$closedPct }
+            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; total=$totalKeys; closedPct=$closedPct }
             if ($cam.PSObject.Properties['verify']) { $cam.verify = $verify } else { $cam | Add-Member -NotePropertyName verify -NotePropertyValue $verify -Force }
             if ($cam.PSObject.Properties['status']) { $cam.status = $newStatus } else { $cam | Add-Member -NotePropertyName status -NotePropertyValue $newStatus -Force }
             $save = Save-ReportsCampaign -Campaign $cam
             if (-not $save.Written) { & $send @{ type='log'; level='warn'; text="Verify computed but the campaign file could not be updated: $($save.Error)" } }
 
-            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated remediated, $stillOpen still-open of $totalKeys ($closedPct% closed); status=$newStatus" }
-            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated remediated, $stillOpen still-open of $totalKeys - $closedPct% closed. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
-            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; stillOpen=$stillOpen; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
+            $attNote = if ($attested -gt 0) { " ($attested manually attested, NOT scan-confirmed)" } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated scan-confirmed, $stillOpen still-open, $attested attested of $totalKeys ($closedPct% closed); status=$newStatus" }
+            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated scan-confirmed remediated, $stillOpen still-open of $totalKeys - $closedPct% closed$attNote. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
+            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
         }
 
         # -------------------------------------------------------------------
@@ -5589,15 +5616,16 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             & $send @{ type='status'; text="Applying $($remediated.Count) remediated finding(s) to the loaded set..." }
-            # OrdinalIgnoreCase so a REMEDIATED key from a baseline exported as HOST1
-            # still matches the import set's host1 (baseline and the import set can be
-            # different file formats); consistent with the import dedup + compare keys.
+            # Host portion normalized via Get-ReportsAuditHostKey so a REMEDIATED key
+            # from a baseline exported as HOST1 still matches the import set's host1.dom
+            # (baseline and import set can be different file formats); consistent with
+            # the compare keys that produced these results.
             $remLookup = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($r in $remediated) { [void]$remLookup.Add("$($r.Hostname)|$($r.PluginID)") }
+            foreach ($r in $remediated) { [void]$remLookup.Add("$(Get-ReportsAuditHostKey $r.Hostname)|$($r.PluginID)") }
             $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm')
             $matchCount = 0
             foreach ($finding in $script:AcasFindings) {
-                $key = "$($finding.Hostname)|$($finding.PluginID)"
+                $key = "$(Get-ReportsAuditHostKey $finding.Hostname)|$($finding.PluginID)"
                 if ($remLookup.Contains($key) -and $finding.Status -ne 'Patched') {
                     $finding.Status      = 'Patched'
                     $finding.PatchedDate = $stamp
@@ -5912,7 +5940,7 @@ function Invoke-JanetToolAction {
                 $inKev = [bool]$f.InKEV
                 $fsRaw = if ($f.PSObject.Properties['FirstSeen']) { [string]$f.FirstSeen } else { '' }
                 if ([string]::IsNullOrWhiteSpace($fsRaw)) {
-                    $lk = "$hn|$($f.PluginID)"
+                    $lk = "$(Get-ReportsAuditHostKey $hn)|$($f.PluginID)"
                     if ($ledMap.ContainsKey($lk) -and -not [string]::IsNullOrWhiteSpace([string]$ledMap[$lk].firstSeen)) {
                         $fsRaw = [string]$ledMap[$lk].firstSeen; $cLedgerCarried++
                         # stamp the carried date back so the live object is tracked without a reload
@@ -6034,7 +6062,7 @@ function Invoke-JanetToolAction {
                 # firstSeen: live, else ledger-backfilled.
                 $fs = [string]$f.FirstSeen
                 if ([string]::IsNullOrWhiteSpace($fs)) {
-                    $key = "$hn|$($f.PluginID)"
+                    $key = "$(Get-ReportsAuditHostKey $hn)|$($f.PluginID)"
                     if ($ledMap.ContainsKey($key)) { $fs = [string]$ledMap[$key].firstSeen }
                 }
                 $schedDate = ''
@@ -6052,10 +6080,12 @@ function Invoke-JanetToolAction {
                 $iavaNote = if ($iava) { "IAVM: $iava." } else { '' }
                 $comments = (@($kevNote, $iavaNote) | Where-Object { $_ }) -join ' '
                 $vulnDesc = "$hn`: $([string]$f.VulnName)"
+                # CCI: left blank (the IAVA is NOT a CCI - it is surfaced in Comments).
+                # Raw Severity: the real Tenable/ACAS severity; Severity (mapped) = DISA CAT.
                 $cellVals = @(
-                    $vulnDesc, '', $iava, $operator,
+                    $vulnDesc, '', '', $operator,
                     [string]$f.PluginID, '', $schedDate, '',
-                    '', 'ACAS/Tenable scan (J.A.N.E.T.)', 'Ongoing', $comments, $cat,
+                    '', 'ACAS/Tenable scan (J.A.N.E.T.)', 'Ongoing', $comments, [string]$f.Severity,
                     '', $cat, '', [string]$f.VulnName, '', '',
                     '', '', [string]$f.Solution,
                     '', ("CVE(s): " + [string]$f.CVE), $hn, [string]$perHostCounter[$hn]
@@ -6089,7 +6119,9 @@ function Invoke-JanetToolAction {
                 'Patched*'       { $script:AcasFindings | Where-Object { $_.Status -eq 'Patched' }; break }
                 'Offline*'       {
                     if ($script:AcasHostOnline.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No ping data yet - run Ping Hosts on the Import tab first; nothing to export as Offline.' } }
-                    $script:AcasFindings | Where-Object { $script:AcasHostOnline.ContainsKey([string]$_.Hostname) -and -not $script:AcasHostOnline[[string]$_.Hostname] }; break
+                    # -eq $false: CONFIRMED offline only. An 'unresolved' sentinel (DNS
+                    # name did not resolve) is NOT a confirmed-offline host and is excluded.
+                    $script:AcasFindings | Where-Object { $script:AcasHostOnline.ContainsKey([string]$_.Hostname) -and ($script:AcasHostOnline[[string]$_.Hostname] -eq $false) }; break
                 }
                 default          { $script:AcasFindings }
             } )
@@ -6399,7 +6431,7 @@ function Invoke-JanetToolAction {
             $pool = $null
             $jobs = New-Object System.Collections.ArrayList
             $rows = New-Object System.Collections.ArrayList
-            $done = 0; $online = 0; $offline = 0; $cancelledCount = 0
+            $done = 0; $online = 0; $offline = 0; $unresolved = 0; $cancelledCount = 0
             $jobTimeout = [TimeSpan]::FromMilliseconds($timeoutMs + 20000)
             try {
                 $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
@@ -6425,10 +6457,18 @@ function Invoke-JanetToolAction {
                             try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = $null }
                             try { $j.PS.Dispose() } catch {}
                             $j.PS = $null; $running--
-                            $isOn = [bool]($res -and $res.Online)
-                            if ($isOn) { $online++ } else { $offline++ }
-                            $script:AcasHostOnline[[string]$j.Host] = $isOn
-                            $row = @{ Host=$j.Host; Online=$(if ($isOn) { 'Online' } else { 'Offline' }) }
+                            # Tri-state: a NAME that would not resolve (ResolveOk=false) is
+                            # NOT the same as a resolved-but-powered-off host. Store the
+                            # confirmed-offline hosts as $false, unresolved as 'unresolved'
+                            # (truthy sentinel) so the Offline export (== $false) skips them.
+                            if ($res -and $res.Online) {
+                                $online++; $script:AcasHostOnline[[string]$j.Host] = $true; $pStatus = 'Online'
+                            } elseif ($res -and $res.ResolveOk) {
+                                $offline++; $script:AcasHostOnline[[string]$j.Host] = $false; $pStatus = 'Offline'
+                            } else {
+                                $unresolved++; $script:AcasHostOnline[[string]$j.Host] = 'unresolved'; $pStatus = 'Unresolved'
+                            }
+                            $row = @{ Host=$j.Host; Online=$pStatus }
                             [void]$rows.Add($row); & $send (@{ type='row' } + $row)
                             $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                         }
@@ -6474,9 +6514,9 @@ function Invoke-JanetToolAction {
                 foreach ($j in $jobs) { if ($j.PS) { try { $j.PS.Dispose() } catch {} } }
                 if ($pool) { try { $pool.Close(); $pool.Dispose() } catch {} }
             }
-            & $send @{ type='audit'; action='TouchHost'; target="ACAS ping hosts ($($jobs.Count))"; result=$(if ($cancelledCount -gt 0) { 'Failure' } else { 'Success' }); itemCount=$online; detail="online $online, offline $offline, cancelled $cancelledCount" }
-            & $send @{ type='status'; text="Ping done. Online $online, offline $offline$(if ($cancelledCount) { ", cancelled $cancelledCount" }) of $($jobs.Count)." }
-            return @{ rows=@(); summary=@{ total=$jobs.Count; online=$online; offline=$offline; cancelled=$cancelledCount } }
+            & $send @{ type='audit'; action='TouchHost'; target="ACAS ping hosts ($($jobs.Count))"; result=$(if ($cancelledCount -gt 0) { 'Failure' } else { 'Success' }); itemCount=$online; detail="online $online, offline $offline, unresolved $unresolved, cancelled $cancelledCount" }
+            & $send @{ type='status'; text="Ping done. Online $online, offline $offline$(if ($unresolved) { ", unresolved $unresolved" })$(if ($cancelledCount) { ", cancelled $cancelledCount" }) of $($jobs.Count)." }
+            return @{ rows=@(); summary=@{ total=$jobs.Count; online=$online; offline=$offline; unresolved=$unresolved; cancelled=$cancelledCount } }
         }
 
         # -------------------------------------------------------------------
@@ -6788,7 +6828,7 @@ function Invoke-JanetToolAction {
                     $inKev = [bool]$f.InKEV
                     $fsRaw = if ($f.PSObject.Properties['FirstSeen']) { [string]$f.FirstSeen } else { '' }
                     if ([string]::IsNullOrWhiteSpace($fsRaw)) {
-                        $lk = "$([string]$f.Hostname)|$($f.PluginID)"
+                        $lk = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
                         if ($ledMap.ContainsKey($lk) -and -not [string]::IsNullOrWhiteSpace([string]$ledMap[$lk].firstSeen)) { $fsRaw = [string]$ledMap[$lk].firstSeen }
                     }
                     $fsDate = [datetime]::MinValue; $parsed = $false

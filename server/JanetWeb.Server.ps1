@@ -334,7 +334,12 @@ function Start-JanetWebServer {
 
                     $o.firedUtc = ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
                     if ($code -ge 200 -and $code -lt 300) {
-                        $o.note = "fired ok (HTTP $code)"
+                        # Record the actual engine job id alongside the HTTP acceptance code so
+                        # the ledger entry is traceable to a real dispatched job, not just "the
+                        # POST was accepted" (acceptance-vs-outcome).
+                        $fireJobId = ''
+                        try { $fireJobId = [string]((ConvertFrom-Json $respText).jobId) } catch {}
+                        $o.note = if ($fireJobId) { "fired ok (HTTP $code, job $fireJobId)" } else { "fired ok (HTTP $code)" }
                         if (([string]$o.recurrence) -eq 'daily' -or ([string]$o.recurrence) -eq 'weekly') {
                             # Advance to the NEXT FUTURE occurrence rather than a single increment,
                             # so a server/session outage spanning multiple periods can't cause a
