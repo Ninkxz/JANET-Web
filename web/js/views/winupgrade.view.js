@@ -374,7 +374,9 @@
       // --- Computers (TargetManager) --- moved to the TOP of the config column; bounded
       // height so Scenario / Operation / Options stay visible below (left column scrolls).
       var compCard = sectionCard('COMPUTERS');
-      compCard.style.cssText += ';flex:0 0 auto;min-height:150px;max-height:300px;display:flex;flex-direction:column;overflow:hidden';
+      // Auto height (no cap): the bar/group rows wrap at narrow widths, so a fixed
+      // max-height clips them - the left column scrolls instead.
+      compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
       var targets = C.TargetManager({
         model: ctx.util.targetModel(''),
         hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',
@@ -760,9 +762,9 @@
         panel.style.cssText = 'display:flex;gap:14px;height:100%;min-height:0;box-sizing:border-box;padding:12px 16px';
 
         // LEFT: targets + options + Scan Fleet
-        var fl = el('div'); fl.style.cssText = 'flex:0 0 400px;display:flex;flex-direction:column;gap:12px;min-height:0';
-        var compCard = ui.namedCard('COMPUTERS', 'One host per line - comma/space/semicolon ok; # starts a comment.');
-        compCard.style.cssText += ';flex:0 0 auto;min-height:160px;max-height:300px;display:flex;flex-direction:column;overflow:hidden';
+        var fl = el('div'); fl.style.cssText = 'flex:0 0 400px;display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto';
+        var compCard = ui.namedCard('COMPUTERS');   // hint comes from the TargetManager below
+        compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
         var fTargets = C.TargetManager({
           model: ctx.util.targetModel(''),
           hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',
@@ -909,8 +911,8 @@
         // LEFT: targets + options + Drive
         var dl = el('div'); dl.style.cssText = 'flex:0 0 420px;display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto';
 
-        var dCompCard = ui.namedCard('COMPUTERS', 'One host per line - comma/space/semicolon ok; # starts a comment.');
-        dCompCard.style.cssText += ';flex:0 0 auto;min-height:150px;max-height:260px;display:flex;flex-direction:column;overflow:hidden';
+        var dCompCard = ui.namedCard('COMPUTERS');   // hint comes from the TargetManager below
+        dCompCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
         var dTargets = C.TargetManager({
           model: ctx.util.targetModel(''),
           hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',

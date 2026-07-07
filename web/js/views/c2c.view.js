@@ -89,7 +89,9 @@
       // --- Computers (TargetManager) --- at the TOP of the config column; bounded
       // height so the info card / options / action bar stay visible below.
       var compCard = sectionCard('TARGET COMPUTERS');
-      compCard.style.cssText += ';flex:0 0 auto;min-height:150px;max-height:300px;display:flex;flex-direction:column;overflow:hidden';
+      // Auto height (no cap): the bar/group rows wrap at narrow widths, so a fixed
+      // max-height clips them - the left column scrolls instead.
+      compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
       var targets = C.TargetManager({
         model: ctx.util.targetModel(''),
         hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',

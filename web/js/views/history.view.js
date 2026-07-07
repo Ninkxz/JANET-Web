@@ -315,9 +315,9 @@
         panel.style.cssText = 'display:flex;gap:14px;height:100%;min-height:0;box-sizing:border-box;padding:12px';
 
         // LEFT: hosts + thresholds + run
-        var left = el('div'); left.style.cssText = 'flex:0 0 380px;display:flex;flex-direction:column;gap:12px;min-height:0';
-        var compCard = ui.namedCard('HOSTS', 'One host per line - comma/space/semicolon ok; # starts a comment.');
-        compCard.style.cssText += ';flex:0 0 auto;min-height:160px;max-height:320px;display:flex;flex-direction:column;overflow:hidden';
+        var left = el('div'); left.style.cssText = 'flex:0 0 380px;display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto';
+        var compCard = ui.namedCard('HOSTS');   // hint comes from the TargetManager below
+        compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
         var targets = C.TargetManager({
           model: ctx.util.targetModel(''),
           hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',
