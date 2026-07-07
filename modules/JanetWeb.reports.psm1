@@ -4001,7 +4001,8 @@ function Set-JanetNetworkDeviceCount {
 #  Squadron-level rollup helpers  -  read-only aggregation of the central JANET
 #  log share (same path conventions as server\JanetWeb.Logging.ps1, which we do
 #  NOT edit): the fleet usage rollup Logs\<YYYY-MM>_usage.csv (one SessionEnd row
-#  per tool + an aggregate JANET-TWO row per session, all operators/instances) and
+#  per tool + an aggregate JANET-WEB row per session - JANET-TWO on historical
+#  rows - all operators/instances) and
 #  the per-tool detail CSVs Logs\<Tool>\<userFolder>\<YYYY-MM>_detail.csv. The
 #  share is 445-gated up front (reusing Test-JanetUncReachable) so a dead share
 #  fails friendly instead of hanging. Nothing here writes to the share.
@@ -6557,7 +6558,8 @@ function Invoke-JanetToolAction {
             $filesRead  = 0
 
             # ---- Pass A: the monthly usage rollup at the share root -------------------
-            # SessionEnd + Tool=JANET-TWO aggregate rows: seeds operators (incl. those
+            # SessionEnd + aggregate rows (Tool=JANET-WEB, or the TWO-era JANET-TWO on
+            # historical rows): seeds operators (incl. those
             # whose sessions did only read-only work, so they never wrote a detail row)
             # and their session ids + last-active. One small file per month.
             foreach ($m in $months) {
@@ -6568,7 +6570,7 @@ function Invoke-JanetToolAction {
                 try {
                     Import-Csv -LiteralPath $usagePath -ErrorAction Stop | ForEach-Object {
                         if ([string]$_.RowType -ne 'SessionEnd') { return }
-                        if ([string]$_.Tool    -ne 'JANET-TWO')  { return }
+                        if ('JANET-WEB','JANET-TWO' -notcontains [string]$_.Tool) { return }
                         $opName = [string]$_.Operator
                         if ([string]::IsNullOrWhiteSpace($opName)) { return }
                         $op = $ops[$opName]

@@ -1,5 +1,5 @@
 /* ============================================================================
-   help-content.js  ->  window.JANET2_HELP
+   help-content.js  ->  window.JANETWEB_HELP
    Per-tool / per-tab "How to use" copy, shown in the noteworthy purple .j-howto
    box atop every tool by shell.js. Brief by design - one or two sentences:
    what to do, how to patch, and the read-only / DESTRUCTIVE flag.
@@ -17,7 +17,7 @@
    ========================================================================== */
 (function () {
   'use strict';
-  window.JANET2_HELP = {
+  window.JANETWEB_HELP = {
 
     /* ---- multi-tab tools (per-tab guidance, swapped by TabHost) ---------- */
 
@@ -104,10 +104,10 @@
     }
   };
 
-  /* ----- full per-tab guides (JANET2_GUIDE) -> the "How to" modal -------
+  /* ----- full per-tab guides (JANETWEB_GUIDE) -> the "How to" modal -------
      {what, steps[], patch, notes[], flag} per tab + tool overview. Generated
-     from JANET ONE help + the views; brief box copy is JANET2_HELP above. */
-  window.JANET2_GUIDE = {
+     from JANET ONE help + the views; brief box copy is JANETWEB_HELP above. */
+  window.JANETWEB_GUIDE = {
   "wpt": {
     "overview": {
       "what": "The Workstation Patching Tool (WPT) is the centerpiece of JANET Web\u2014a single-window fleet patch and remediation utility for Windows sysadmins. It scans, patches, uninstalls, repairs, and reboots hosts in parallel across a shared target list, with tabs for bulk operations (Bulk Scan & Patch), granular app/software management (Software Manager, Software Center, Unsupported Software), security updates (KB Scanner, Log4j Finder), app deployment (App Updater, Beta), disk/registry fixes (Cleanup, Reg Key Fixes), diagnostics and healing (Health & Healers), WinRM bootstrap, reboot scheduling, messaging, and telemetry reporting.",

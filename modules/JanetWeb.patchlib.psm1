@@ -69,7 +69,7 @@ function Get-JanetToolManifest {
 # The work share where the desktop suite stages package content. This is only
 # the DEFAULT share leg: the server's full $packagesDir resolution also honors an
 # explicit -PackagesRoot override (server\JanetWeb.Server.ps1). When the server is
-# launched with -PackagesRoot it exports the resolved path as JANET2_PACKAGES_ROOT
+# launched with -PackagesRoot it exports the resolved path as JANETWEB_PACKAGES_ROOT
 # (env), which Get-PatchlibRoots picks up below so the tool scans exactly the
 # folder the Remote Package Installer pushes from.
 $script:PatchlibShare = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages'
@@ -119,7 +119,9 @@ function Get-PatchlibRoots {
     # Server-resolved packages root (honors the launcher's -PackagesRoot override).
     # Included as a distinct leg only when it differs from the local + share legs
     # already added, so a plain launch never double-scans the same folder.
-    $srvRoot = [string]$env:JANET2_PACKAGES_ROOT
+    $srvRoot = [string]$env:JANETWEB_PACKAGES_ROOT
+    # TWO-era name kept as a read-only fallback: operator environments may still set it.
+    if ([string]::IsNullOrWhiteSpace($srvRoot)) { $srvRoot = [string]$env:JANET2_PACKAGES_ROOT }
     if (-not [string]::IsNullOrWhiteSpace($srvRoot)) {
         $sr = $srvRoot.Trim().Trim('"')
         $already = $false

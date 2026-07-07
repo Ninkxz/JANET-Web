@@ -13,7 +13,7 @@
 #  ambient session) so it dot-sources safely into the server AND worker runspaces.
 # =============================================================================
 
-# The production share the desktop tools log to (NOT a JANET-TWO subfolder).
+# The production share the desktop tools log to (NOT a JANET Web subfolder).
 $script:JanetWebShareRoot = '\\dm-tn-01\sh-usafe-automation$\JANET\Logs'
 
 # JANET Web tool id -> the desktop tool's JANET log folder name, so rows merge
@@ -36,7 +36,7 @@ $script:JanetWebToolMap = @{
     # log to the share yet, so we pick the convention-consistent underscore name.
     upr        = 'Unsupported_Product_Remediator'
     winupgrade = 'Windows_Upgrade'
-    # JANET-TWO-native tools with no desktop twin: convention-consistent
+    # JANET Web-native tools with no desktop twin: convention-consistent
     # underscore names (same rationale as winupgrade above). NOTE: this
     # convention is NOT retroactive - the three earlier native-only tools
     # (kev, c2c, biosfirmware) intentionally have no map entry, so
@@ -50,14 +50,14 @@ $script:JanetWebToolMap = @{
 function Resolve-JanetWebToolName {
     param([string]$ToolId)
     if ($ToolId -and $script:JanetWebToolMap.ContainsKey($ToolId)) { return $script:JanetWebToolMap[$ToolId] }
-    # 'JANET-TWO' is the frozen empty-id fallback (both return sites below): it is
-    # the existing log-folder/rollup-row name on the share, so renaming it would
-    # split an operator's log history across two folder names. Deliberate, not residue.
-    if ([string]::IsNullOrWhiteSpace($ToolId)) { return 'JANET-TWO' }
+    # 'JANET-WEB' is the empty-id fallback (both return sites below). Rows written
+    # under the TWO-era name stay in Logs\JANET-TWO on the share; readers
+    # (history/reports aggregate-row detection) accept both names.
+    if ([string]::IsNullOrWhiteSpace($ToolId)) { return 'JANET-WEB' }
     $clean = ($ToolId -replace '[\\/:*?"<>|]', '_')
     # A dot-only id ('.', '..') survives the char-strip but would resolve a path
     # segment AT or ABOVE the log root, so treat it as empty and fall back.
-    if ([string]::IsNullOrWhiteSpace($clean) -or $clean -match '^\.+$') { return 'JANET-TWO' }
+    if ([string]::IsNullOrWhiteSpace($clean) -or $clean -match '^\.+$') { return 'JANET-WEB' }
     return $clean
 }
 
@@ -189,14 +189,14 @@ function Test-JanetWebShareWritable {
         if (-not (Test-Path -LiteralPath $Root -ErrorAction SilentlyContinue)) {
             try { New-Item -ItemType Directory -Path $Root -Force -ErrorAction Stop | Out-Null } catch { return @{ Writable=$false; Reason='cannot create log root' } }
         }
-        $sentinel = Join-Path $Root (".janet-two-write-test-{0:N}.tmp" -f [guid]::NewGuid())
+        $sentinel = Join-Path $Root (".janet-web-write-test-{0:N}.tmp" -f [guid]::NewGuid())
         try {
             'ok' | Out-File -LiteralPath $sentinel -Encoding ASCII -ErrorAction Stop
             Remove-Item -LiteralPath $sentinel -Force -ErrorAction SilentlyContinue
         } catch { return @{ Writable=$false; Reason="write-probe failed: $($_.Exception.Message)" } }
         # Orphan sweep: sentinels older than 1h are unambiguously stale.
         try {
-            Get-ChildItem -LiteralPath $Root -Filter '.janet-two-write-test-*.tmp' -Force -ErrorAction SilentlyContinue |
+            Get-ChildItem -LiteralPath $Root -Filter '.janet-*-write-test-*.tmp' -Force -ErrorAction SilentlyContinue |
                 Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } |
                 ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {} }
         } catch {}
@@ -229,7 +229,13 @@ function New-JanetWebLogContext {
     # weren't given a usable JANET root, fall back to the user profile.
     $janetLocal = $null
     if (-not [string]::IsNullOrWhiteSpace($JanetRoot)) { $janetLocal = Join-Path $JanetRoot 'JanetLocal' }
-    if (-not $janetLocal) { $janetLocal = Join-Path $env:USERPROFILE 'Documents\JANET-TWO\JanetLocal' }
+    if (-not $janetLocal) {
+        # Keep using an existing TWO-era profile spool (it may hold unreplayed rows);
+        # fresh installs get the JANET-WEB name.
+        $oldSpool = Join-Path $env:USERPROFILE 'Documents\JANET-TWO\JanetLocal'
+        if (Test-Path -LiteralPath $oldSpool) { $janetLocal = $oldSpool }
+        else { $janetLocal = Join-Path $env:USERPROFILE 'Documents\JANET-WEB\JanetLocal' }
+    }
 
     $now = Get-Date
     $ctx = [hashtable]::Synchronized(@{
@@ -256,7 +262,7 @@ function New-JanetWebLogContext {
         RunFailed  = 0
         # Per-tool usage tallies (folderName -> @{Hosts;Vulns;Failures;First;Last}) so the
         # SessionEnd rollup emits one usage row PER TOOL used (desktop parity), not just one
-        # aggregate JANET-TWO row. Populated under $Lock by Write-JanetAction.
+        # aggregate JANET-WEB row. Populated under $Lock by Write-JanetAction.
         PerTool    = ([hashtable]::Synchronized(@{}))
         Lock       = (New-Object object)
     })
@@ -464,7 +470,8 @@ function Write-JanetWebRollup {
     # SessionEnd usage rows -> Logs\<YYYY-MM>_usage.csv (fleet rollup at the root).
     # Writes ONE row per tool used this session (Tool column = the desktop folder name,
     # so a lead sees "WPT touched 40 / ACAS_Nemesis patched 12" not just one blob) PLUS
-    # the aggregate JANET-TWO row (kept for backward compatibility + the ClosingNotes).
+    # the aggregate JANET-WEB row (carries the ClosingNotes; readers also accept the
+    # TWO-era 'JANET-TWO' name on historical rows).
     param([Parameter(Mandatory)] $Context, [string]$ClosingNotes = '')
     if (-not $Context) { return }
     try {
@@ -501,9 +508,9 @@ function Write-JanetWebRollup {
 
         foreach ($s in $snap) { & $addRow $s.Tool $s.Hosts $s.Vulns $s.Fails $s.DurMin '' }
 
-        # Aggregate JANET-TWO session row (carries the operator's closing notes).
+        # Aggregate JANET-WEB session row (carries the operator's closing notes).
         $durMin = [math]::Round(((Get-Date) - $Context.StartedAt).TotalMinutes, 1)
-        & $addRow 'JANET-TWO' $Context.Hosts.Count $Context.Vulns $Context.Failures $durMin $ClosingNotes
+        & $addRow 'JANET-WEB' $Context.Hosts.Count $Context.Vulns $Context.Failures $durMin $ClosingNotes
     } catch {}
 }
 

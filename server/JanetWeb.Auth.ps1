@@ -54,10 +54,9 @@ function Prompt-JanetWebCredential {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
         Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
         try {
-            # Namespace 'JTwo' is frozen (TWO-era): Add-Type compiles this into the
-            # AppDomain once per process, so renaming it risks a recompile/type-identity
-            # collision if anything else in this session already loaded the old name.
-            Add-Type -Namespace JTwo -Name FgWin -MemberDefinition @'
+            # Add-Type compiles this into the AppDomain once per process; all
+            # references live in this file, so rename namespace + call sites together.
+            Add-Type -Namespace JWeb -Name FgWin -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
@@ -75,17 +74,17 @@ function Prompt-JanetWebCredential {
         $fgOwner.Show(); $fgOwner.Activate(); $fgOwner.BringToFront()
         try {
             $h = $fgOwner.Handle
-            [JTwo.FgWin]::SystemParametersInfoW(0x2001, 0, [IntPtr]::Zero, 0) | Out-Null   # SPI_SETFOREGROUNDLOCKTIMEOUT = 0
-            $fg       = [JTwo.FgWin]::GetForegroundWindow()
+            [JWeb.FgWin]::SystemParametersInfoW(0x2001, 0, [IntPtr]::Zero, 0) | Out-Null   # SPI_SETFOREGROUNDLOCKTIMEOUT = 0
+            $fg       = [JWeb.FgWin]::GetForegroundWindow()
             $procId   = [uint32]0
-            $fgThread = [JTwo.FgWin]::GetWindowThreadProcessId($fg, [ref]$procId)
-            $myThread = [JTwo.FgWin]::GetCurrentThreadId()
+            $fgThread = [JWeb.FgWin]::GetWindowThreadProcessId($fg, [ref]$procId)
+            $myThread = [JWeb.FgWin]::GetCurrentThreadId()
             $attached = $false
-            if ($fgThread -ne 0 -and $fgThread -ne $myThread) { $attached = [JTwo.FgWin]::AttachThreadInput($myThread, $fgThread, $true) }
-            [JTwo.FgWin]::ShowWindow($h, 5)       | Out-Null   # SW_SHOW
-            [JTwo.FgWin]::BringWindowToTop($h)    | Out-Null
-            [JTwo.FgWin]::SetForegroundWindow($h) | Out-Null
-            if ($attached) { [JTwo.FgWin]::AttachThreadInput($myThread, $fgThread, $false) | Out-Null }
+            if ($fgThread -ne 0 -and $fgThread -ne $myThread) { $attached = [JWeb.FgWin]::AttachThreadInput($myThread, $fgThread, $true) }
+            [JWeb.FgWin]::ShowWindow($h, 5)       | Out-Null   # SW_SHOW
+            [JWeb.FgWin]::BringWindowToTop($h)    | Out-Null
+            [JWeb.FgWin]::SetForegroundWindow($h) | Out-Null
+            if ($attached) { [JWeb.FgWin]::AttachThreadInput($myThread, $fgThread, $false) | Out-Null }
         } catch {}
         [System.Windows.Forms.Application]::DoEvents()
     } catch {}

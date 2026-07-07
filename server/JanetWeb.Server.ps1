@@ -93,9 +93,9 @@ function Start-JanetWebServer {
     Write-Host ("  Packages: $packagesDir") -ForegroundColor DarkGray
     # Export the resolved packages root so worker runspaces (e.g. patchlib inventory,
     # which honors a -PackagesRoot override) inherit the same folder the server chose.
-    # Name is frozen (TWO-era): existing operator environments already set
-    # JANET2_PACKAGES_ROOT, so renaming it would silently break their override.
-    $env:JANET2_PACKAGES_ROOT = $packagesDir
+    # Operator environments that still set the TWO-era JANET2_PACKAGES_ROOT keep
+    # working: Get-PatchlibRoots falls back to the old name when this one is unset.
+    $env:JANETWEB_PACKAGES_ROOT = $packagesDir
     # Local Log4j staging folder (always seeded under the local .\Packages, even
     # when we READ packages from the share - the on-box default the ACAS Log4j
     # jar-replace falls back to; drop the jars here or point at the share).

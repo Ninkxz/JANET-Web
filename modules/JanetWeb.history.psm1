@@ -499,10 +499,11 @@ function Invoke-JanetToolAction {
             if ($r.TS -gt $a.Last) { $a.Last = $r.TS }
         }
         # Usage: dedupe SessionEnd rows by SessionId so each session counts ONCE.
-        # JANET Web writes one row per tool PLUS an aggregate 'JANET-TWO' row (all
-        # sharing one SessionId); the same shared *_usage.csv also holds the desktop
+        # JANET Web writes one row per tool PLUS an aggregate 'JANET-WEB' row (all
+        # sharing one SessionId; historical rows use the TWO-era 'JANET-TWO' name);
+        # the same shared *_usage.csv also holds the desktop
         # suite's SessionEnd rows (Tool = 'WPT'/'ACAS_Nemesis'/...). The old filter
-        # (Tool -eq 'JANET-TWO') dropped every desktop session, so an operator who
+        # (aggregate rows only) dropped every desktop session, so an operator who
         # works only in the desktop tools showed Sessions=0/HostsTouched=0. Group by
         # SessionId, count each once, and prefer the aggregate row's HostsTouched.
         $sessions = @{}   # sessionKey -> hashtable
@@ -510,7 +511,7 @@ function Invoke-JanetToolAction {
             if ([string]$u.RowType -ne 'SessionEnd') { continue }
             $op    = [string]$u.Operator
             $sid   = ([string]$u.SessionId).Trim()
-            $isAgg = ([string]$u.Tool -eq 'JANET-TWO')
+            $isAgg = ('JANET-WEB','JANET-TWO' -contains [string]$u.Tool)
             $hosts = (ConvertTo-HistInt ([string]$u.HostsTouched))
             # Blank SessionId (legacy rows): synthesize a per-row key so unrelated
             # sessions are not collapsed together.

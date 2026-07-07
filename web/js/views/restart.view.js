@@ -207,8 +207,16 @@
         // wrote JanetLocal\Remote_Restart\<user>\exceptions.txt; localStorage gives the same
         // "my never-restart list survives restarts" with no engine/server/file I/O. Upgrade
         // to a JanetLocal file (per-user, shared across machines) only if operators need that.
-        var EXC_KEY = 'janetTwo.restart.exceptions';
-        try { var savedEx = window.localStorage.getItem(EXC_KEY); if (savedEx) exTa.value = savedEx; } catch (e) {}
+        var EXC_KEY = 'janetWeb.restart.exceptions';
+        // One-time migrate from the TWO-era key so saved exception lists survive the rebrand.
+        try {
+          var savedEx = window.localStorage.getItem(EXC_KEY);
+          if (savedEx === null) {
+            savedEx = window.localStorage.getItem('janetTwo.restart.exceptions');
+            if (savedEx !== null) { window.localStorage.setItem(EXC_KEY, savedEx); window.localStorage.removeItem('janetTwo.restart.exceptions'); }
+          }
+          if (savedEx) exTa.value = savedEx;
+        } catch (e) {}
         function exSave() { try { window.localStorage.setItem(EXC_KEY, exTa.value); } catch (e) {} }
         exTa.addEventListener('input', exSave);
         exClear.onclick = function () { exTa.value = ''; exSave(); };

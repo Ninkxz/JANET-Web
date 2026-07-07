@@ -116,16 +116,16 @@ Describe 'FIX - Resolve-JanetWebToolName rejects dot-only ids (JanetWeb.Logging.
     . (Join-Path $script:Root 'server\JanetWeb.Logging.ps1')
 
     It "'..' does not climb above the log root - falls back to the default" {
-        Resolve-JanetWebToolName -ToolId '..' | Should Be 'JANET-TWO'
+        Resolve-JanetWebToolName -ToolId '..' | Should Be 'JANET-WEB'
     }
     It "'.' (current dir) falls back to the default" {
-        Resolve-JanetWebToolName -ToolId '.' | Should Be 'JANET-TWO'
+        Resolve-JanetWebToolName -ToolId '.' | Should Be 'JANET-WEB'
     }
     It "a longer dot run ('...') falls back to the default" {
-        Resolve-JanetWebToolName -ToolId '...' | Should Be 'JANET-TWO'
+        Resolve-JanetWebToolName -ToolId '...' | Should Be 'JANET-WEB'
     }
     It 'an empty id still falls back to the default (unchanged)' {
-        Resolve-JanetWebToolName -ToolId '' | Should Be 'JANET-TWO'
+        Resolve-JanetWebToolName -ToolId '' | Should Be 'JANET-WEB'
     }
     It 'a mapped id still resolves to its desktop folder (happy path unchanged)' {
         Resolve-JanetWebToolName -ToolId 'wpt' | Should Be 'WPT'

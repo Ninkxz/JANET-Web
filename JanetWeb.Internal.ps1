@@ -45,19 +45,19 @@ $ErrorActionPreference = 'Stop'
 # intended launcher "Launch JANET Web.cmd" pins conhost and sets the sentinel below.
 # This guard also self-heals a direct launch: if we are under Windows Terminal OR we
 # were spawned straight from Explorer (double-click / Run with PowerShell), relaunch
-# in a fresh conhost window and stop this instance. The JANETTWO_CONHOST sentinel
+# in a fresh conhost window and stop this instance. The JANETWEB_CONHOST sentinel
 # (set by the .cmd, and here before relaunch) prevents any relaunch loop, and the
 # UserInteractive gate keeps headless/automation launches from spawning a window.
-# JANETTWO_CONHOST is a frozen (TWO-era) name - "Launch JANET Web.cmd" and this
-# script must keep agreeing on it, so it is not renamed on its own.
+# "Launch JANET Web.cmd" and this script must keep agreeing on the sentinel name -
+# rename them together or not at all.
 $janetSpawnedByExplorer = $false
 try {
     $janetMeProc     = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
     $janetParentProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($janetMeProc.ParentProcessId)" -ErrorAction Stop
     $janetSpawnedByExplorer = ($janetParentProc.Name -eq 'explorer.exe')
 } catch {}
-if ([Environment]::UserInteractive -and -not $env:JANETTWO_CONHOST -and ($env:WT_SESSION -or $janetSpawnedByExplorer -or $PSVersionTable.PSEdition -eq 'Core')) {
-    $env:JANETTWO_CONHOST = '1'
+if ([Environment]::UserInteractive -and -not $env:JANETWEB_CONHOST -and ($env:WT_SESSION -or $janetSpawnedByExplorer -or $PSVersionTable.PSEdition -eq 'Core')) {
+    $env:JANETWEB_CONHOST = '1'
     $fwd = @('powershell.exe', '-NoExit', '-STA', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
     foreach ($kv in $PSBoundParameters.GetEnumerator()) {
         if ($kv.Value -is [System.Management.Automation.SwitchParameter]) {

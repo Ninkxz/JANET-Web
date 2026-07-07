@@ -499,9 +499,9 @@
     // sidebar: brand (-> home) + tool filter + grouped nav + session foot
     var side = el('nav'); side.id = 'j-sidebar'; side.setAttribute('aria-label', 'Tool navigation');
     var brand = el('button', 'j-side-brand'); brand.type = 'button'; brand.title = 'Home - all tools';
-    var mark = el('div', 'j-brand-mark'); mark.innerHTML = 'J<span>2</span>'; brand.appendChild(mark);
+    var mark = el('div', 'j-brand-mark'); mark.innerHTML = 'J<span>W</span>'; brand.appendChild(mark);
     var btitles = el('div', 'j-side-brand-t');
-    var t = el('div', 'j-brand-title'); t.innerHTML = 'J.A.N.E.T. <b>TWO</b>'; btitles.appendChild(t);
+    var t = el('div', 'j-brand-title'); t.innerHTML = 'J.A.N.E.T. <b>WEB</b>'; btitles.appendChild(t);
     btitles.appendChild(el('div', 'j-brand-sub', 'Admin console')); brand.appendChild(btitles);
     brand.onclick = backToHub;
     side.appendChild(brand);
@@ -551,7 +551,7 @@
     dom.thName = el('div', 'j-th-name'); dom.thSum = el('div', 'j-th-sum');
     thtext.appendChild(dom.thName); thtext.appendChild(dom.thSum); th.appendChild(thtext);
     dom.tool.appendChild(th);
-    // "How to use" callout - one per tool, populated by openTool from JANET2_HELP.
+    // "How to use" callout - one per tool, populated by openTool from JANETWEB_HELP.
     dom.howto = el('div', 'j-howto'); dom.howto.style.display = 'none'; dom.tool.appendChild(dom.howto);
     dom.viewHost = el('div'); dom.viewHost.id = 'j-view-host'; dom.tool.appendChild(dom.viewHost);
     body.appendChild(dom.tool);
@@ -1120,15 +1120,15 @@
   }
 
   /* --- "How to use" box + full guide modal ------------------------------------
-     The box shows a one-line blurb (JANET2_HELP); the "How to" button opens the
-     full per-tab guide (JANET2_GUIDE: what it does / how to run / how to patch /
+     The box shows a one-line blurb (JANETWEB_HELP); the "How to" button opens the
+     full per-tab guide (JANETWEB_GUIDE: what it does / how to run / how to patch /
      notes + safety flag) in a modal. Box updates per tab via Janet.howtoTab,
      called by TabHost on each tab switch. */
   var howtoCtx = { toolId: null, tabId: null, label: '' };
   var currentToolName = '';
 
   function guideFor(c) {
-    var G = (window.JANET2_GUIDE || {})[c.toolId];
+    var G = (window.JANETWEB_GUIDE || {})[c.toolId];
     if (!G) return null;
     if (c.tabId && G.tabs && G.tabs[c.tabId]) {
       var lbl = String(c.label || c.tabId).replace(/^\d+\s+/, '');
@@ -1186,7 +1186,7 @@
   // Called by TabHost on each tab switch (toolId from opts.helpId, tab id + label).
   Janet.howtoTab = function (toolId, tabId, label) {
     howtoCtx = { toolId: toolId, tabId: tabId, label: label || '' };
-    var h = (window.JANET2_HELP || {})[toolId];
+    var h = (window.JANETWEB_HELP || {})[toolId];
     renderHowto((h && typeof h === 'object') ? (h[tabId] || h._overview) : (typeof h === 'string' ? h : ''));
   };
 
@@ -1217,11 +1217,11 @@
     }
     setNavActive(tool.id);
     // "How to use" box: tool overview now; tab tools refine it via Janet.howtoTab
-    // (TabHost fires it on tab select). Brief copy in help-content.js (JANET2_HELP),
-    // the full "How to" modal in JANET2_GUIDE.
+    // (TabHost fires it on tab select). Brief copy in help-content.js (JANETWEB_HELP),
+    // the full "How to" modal in JANETWEB_GUIDE.
     currentToolName = tool.name;
     howtoCtx = { toolId: tool.id, tabId: null, label: tool.name };
-    var help = (window.JANET2_HELP || {})[tool.id];
+    var help = (window.JANETWEB_HELP || {})[tool.id];
     renderHowto(typeof help === 'string' ? help : (help && help._overview));
     dom.hub.classList.add('hidden');
     dom.tool.classList.remove('hidden');
@@ -1320,9 +1320,9 @@
     var gate = el('div'); gate.id = 'j-gate';
     var card = el('div', 'j-gate-card');
     var brand = el('div', 'j-gate-brand');
-    var mark = el('div', 'j-brand-mark'); mark.innerHTML = 'J<span>2</span>'; brand.appendChild(mark);
+    var mark = el('div', 'j-brand-mark'); mark.innerHTML = 'J<span>W</span>'; brand.appendChild(mark);
     var bt = el('div');
-    var ti = el('div', 'j-gate-title'); ti.innerHTML = 'J.A.N.E.T. <b>TWO</b>'; bt.appendChild(ti);
+    var ti = el('div', 'j-gate-title'); ti.innerHTML = 'J.A.N.E.T. <b>WEB</b>'; bt.appendChild(ti);
     bt.appendChild(el('div', 'j-gate-sub', 'Joint Administration and Network Execution Toolkit')); brand.appendChild(bt);
     card.appendChild(brand);
 
@@ -1428,7 +1428,7 @@
     buildGate();
   }
 
-  // Command-palette items: every tool, plus a deep-link per tab (from JANET2_HELP).
+  // Command-palette items: every tool, plus a deep-link per tab (from JANETWEB_HELP).
   var TAB_LABEL = { kb: 'KB', sccm: 'Software Center', dhcp: 'DHCP', os: 'OS', acas: 'ACAS', cora: 'CORA',
     appupd: 'App Updater', regkey: 'Reg Keys', winrm: 'WinRM', log4j: 'Log4j', dirty30: 'Dirty 30',
     future: 'Future IPs', bulk: 'Bulk Scan & Patch', wpt: 'WPT' };
@@ -1437,7 +1437,7 @@
     var items = [{ label: 'Audit log', sub: 'view', run: openAuditViewer }];
     (TOOLS || []).forEach(function (t) {
       items.push({ label: t.name, sub: t.category || 'Tool', run: function () { openTool(t); } });
-      var help = (window.JANET2_HELP || {})[t.id];
+      var help = (window.JANETWEB_HELP || {})[t.id];
       if (help && typeof help === 'object') {
         Object.keys(help).forEach(function (tab) {
           if (tab === '_overview') return;
