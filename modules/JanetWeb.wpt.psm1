@@ -23,7 +23,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.5.32'
+        version  = '6.5.33'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -424,7 +424,7 @@ function Get-JanetToolManifest {
                 columns=@('Host','Version','LastUpdated','Verified','Detail')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update','Microsoft Edge - Update','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)') },
+                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update (Software Center)','Google Chrome - Update (Internet - Google Update)','Microsoft Edge - Update','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)') },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
             },
@@ -434,7 +434,7 @@ function Get-JanetToolManifest {
                 columns=@('Host','Status','Detail')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update','Microsoft Edge - Update','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)','Custom Command') },
+                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update (Software Center)','Google Chrome - Update (Internet - Google Update)','Microsoft Edge - Update','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)','Custom Command') },
                     @{ name='customcommand'; label='Custom command (only for Custom Command)'; type='textarea'; required=$false },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
@@ -893,13 +893,143 @@ function Get-WptAppUpdateProfiles {
                 return @{ Version=$ver; LastUpdated=$when; Verified=$verified; Detail=$(if ($src) { "src: $src" } else { 'Trellix/McAfee not detected' }) }
             }
         }
-        'Google Chrome - Update' = @{
+        'Google Chrome - Update (Software Center)' = @{
+            # MECM-first Chrome update (the AFNET-proven path): install the deployed
+            # Chrome application via CCM_Application (same flow as the Java profile).
+            # If no Chrome app is in the catalog, fall back to triggering the MECM
+            # app-deployment + software-update cycles (same fallback as the Adobe
+            # profile) so a deployed update still lands on the next evaluation pass.
             Script = {
-                $exe = 'C:\Program Files (x86)\Google\Update\GoogleUpdate.exe'
-                if (-not (Test-Path $exe)) { $exe = 'C:\Program Files\Google\Update\GoogleUpdate.exe' }
-                if (-not (Test-Path $exe)) { return 'FAIL: GoogleUpdate.exe not found' }
-                $proc = Start-Process -FilePath $exe -ArgumentList '/ua /installsource scheduler' -Wait -PassThru -NoNewWindow
-                return "OK (Chrome update triggered, exit $($proc.ExitCode))"
+                try {
+                    $ns = 'ROOT\ccm\ClientSDK'
+                    if (-not (Get-CimClass -Namespace $ns -ClassName CCM_Application -ErrorAction SilentlyContinue)) {
+                        return 'FAIL: SCCM client (CCM_Application) not present on this host'
+                    }
+                    $apps = @(Get-CimInstance -Namespace $ns -ClassName CCM_Application -ErrorAction Stop)
+                    $patterns = @('*Google Chrome*','*Chrome*')
+                    # Chrome Remote Desktop is a different product; Canary/Beta/Dev are
+                    # side-channel builds - never what the vuln finding wants patched.
+                    $excludes = @('*Canary*','*Beta*','*Dev*','*Remote Desktop*')
+                    $candidates = @($apps | Where-Object {
+                        $n = "$($_.LocalizedDisplayName) $($_.Name)"
+                        $m = $false
+                        foreach ($p in $patterns) { if ($n -like $p) { $m = $true; break } }
+                        if (-not $m) { return $false }
+                        foreach ($x in $excludes) { if ($n -like $x) { return $false } }
+                        return $true
+                    })
+                    if ($candidates.Count -eq 0) {
+                        $cycles = @('{00000000-0000-0000-0000-000000000121}','{00000000-0000-0000-0000-000000000108}','{00000000-0000-0000-0000-000000000113}','{00000000-0000-0000-0000-000000000114}')
+                        $ok = 0
+                        foreach ($c in $cycles) { try { Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = $c } -ErrorAction Stop | Out-Null; $ok++ } catch {} }
+                        if ($ok -gt 0) { return 'OK (no Chrome app in Software Center catalog; MECM app-deployment + software-update cycles triggered - a deployed Chrome update installs on next cycle)' }
+                        return 'FAIL: no Chrome app in Software Center catalog and could not trigger MECM cycles (is the ConfigMgr client healthy?)'
+                    }
+                    $best = $candidates | Sort-Object `
+                        @{Expression={ if ($_.ApplicabilityState -eq 'Applicable') { 0 } else { 1 } }; Descending=$false}, `
+                        @{Expression={ [bool]$_.IsMachineTarget }; Descending=$true}, `
+                        @{Expression={ if ($_.InstallState -eq 'Installed') { 0 } else { 1 } }; Descending=$false} |
+                        Select-Object -First 1
+                    if ($best.ApplicabilityState -ne 'Applicable') {
+                        return "SKIP: '$($best.LocalizedDisplayName)' not Applicable (state=$($best.ApplicabilityState))"
+                    }
+                    $param = @{
+                        EnforcePreference = [UINT32]0
+                        Id                = "$($best.Id)"
+                        IsMachineTarget   = [System.Convert]::ToBoolean($best.IsMachineTarget)
+                        IsRebootIfNeeded  = $false
+                        Priority          = 'High'
+                        Revision          = "$($best.Revision)"
+                    }
+                    Invoke-CimMethod -Namespace 'root/ccm/clientSDK' -ClassName CCM_Application `
+                        -MethodName Install -Arguments $param -ErrorAction Stop | Out-Null
+                    return "OK (Software Center Install triggered: $($best.LocalizedDisplayName) v$($best.SoftwareVersion))"
+                } catch {
+                    return "FAIL: $($_.Exception.Message)"
+                }
+            }
+            Verify = New-WptUpdateClientVerify `
+                'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}' `
+                'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+        }
+        'Google Chrome - Update (Internet - Google Update)' = @{
+            # Direct Google Update trigger for internet-reachable hosts. Unlike the old
+            # profile (which returned OK on any GoogleUpdate.exe launch), this one
+            # pre-checks the known blockers (update policy, disabled services, updater
+            # migrated to GoogleUpdater), then PROVES the outcome: before/after version
+            # poll, staged-update detection, and never a bare OK for an unverified trigger.
+            Script = {
+                try {
+                    $ckeys = @(
+                        'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}',
+                        'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+                    )
+                    $getPv = {
+                        foreach ($k in $ckeys) {
+                            if (Test-Path $k) {
+                                $pp = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+                                if ($pp -and $pp.pv) { return "$($pp.pv)" }
+                            }
+                        }
+                        return $null
+                    }
+                    $before = & $getPv
+                    if (-not $before) { return 'SKIP: Chrome (machine-level) not installed' }
+
+                    # Blocker pre-check (read-only): an admin update policy of 0 means no
+                    # trigger can ever work - report it instead of pretending.
+                    $pol = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Google\Update' -ErrorAction SilentlyContinue
+                    if ($pol) {
+                        $appPol = $pol.'Update{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+                        if (($null -ne $pol.UpdateDefault -and [int]$pol.UpdateDefault -eq 0) -or ($null -ne $appPol -and [int]$appPol -eq 0)) {
+                            return 'FAIL: Chrome auto-update blocked by policy (HKLM\SOFTWARE\Policies\Google\Update) - use the Software Center profile'
+                        }
+                    }
+                    # Legacy Google Update services: note Disabled, but don't fail yet -
+                    # the modern GoogleUpdater (own task, no gupdate) may be present instead.
+                    $gup = Get-Service -Name 'gupdate' -ErrorAction SilentlyContinue
+                    $gupDisabled = ($gup -and "$($gup.StartType)" -eq 'Disabled')
+
+                    # Find a trigger, newest stack first. The modern GoogleUpdater's
+                    # documented trigger is its scheduled task (GoogleUpdaterTaskSystem*);
+                    # the updater.exe CLI is undocumented, so we never invoke it directly.
+                    $trigger = $null
+                    $tasks = @(Get-ScheduledTask -TaskName 'GoogleUpdaterTaskSystem*' -ErrorAction SilentlyContinue)
+                    if ($tasks.Count -gt 0) {
+                        $started = @()
+                        foreach ($t in $tasks) { try { Start-ScheduledTask -InputObject $t -ErrorAction Stop; $started += $t.TaskName.Trim() } catch {} }
+                        if ($started.Count -gt 0) { $trigger = 'GoogleUpdater task ' + ($started -join ', ') }
+                    }
+                    if (-not $trigger) {
+                        $exe = 'C:\Program Files (x86)\Google\Update\GoogleUpdate.exe'
+                        if (-not (Test-Path $exe)) { $exe = 'C:\Program Files\Google\Update\GoogleUpdate.exe' }
+                        if (Test-Path $exe) {
+                            if ($gupDisabled) { return 'FAIL: Google Update services disabled (gupdate/gupdatem) and no GoogleUpdater task - use the Software Center profile' }
+                            Start-Process -FilePath $exe -ArgumentList '/ua','/installsource scheduler' -WindowStyle Hidden -ErrorAction Stop
+                            $trigger = 'legacy GoogleUpdate.exe /ua'
+                        } elseif ($tasks.Count -gt 0) {
+                            return 'FAIL: GoogleUpdaterTaskSystem task(s) present but could not be started - use the Software Center profile'
+                        } else {
+                            return 'FAIL: no Google updater on this host (no GoogleUpdaterTaskSystem task, no GoogleUpdate.exe) - use the Software Center profile'
+                        }
+                    }
+
+                    # Poll for a real version bump: 90s ceiling (18 x 5s) - enough for a
+                    # small delta on a healthy link, short enough not to stall a fleet run.
+                    $after = $before
+                    for ($i = 0; $i -lt 18; $i++) {
+                        Start-Sleep -Seconds 5
+                        $cur = & $getPv
+                        if ($cur -and $cur -ne $before) { $after = $cur; break }
+                    }
+                    if ($after -ne $before) { return "OK (Chrome updated $before -> $after)" }
+                    foreach ($d in @('C:\Program Files\Google\Chrome\Application','C:\Program Files (x86)\Google\Chrome\Application')) {
+                        if (Test-Path (Join-Path $d 'new_chrome.exe')) {
+                            return "PENDING (update staged as new_chrome.exe - applies when Chrome is next relaunched; still v$before now)"
+                        }
+                    }
+                    return "PENDING (update triggered via $trigger; version still $before after 90s - internet/proxy reachability or a slow download; re-run Verify in a few minutes, and if it never moves use the Software Center profile)"
+                } catch { return "FAIL: $($_.Exception.Message)" }
             }
             Verify = New-WptUpdateClientVerify `
                 'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}' `

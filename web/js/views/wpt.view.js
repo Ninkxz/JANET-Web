@@ -1175,7 +1175,7 @@
 
       // ---- TAB: App Updater (verify + apply profiles) ----
       function buildAppUpdater(panel) {
-        var PROFILES = ['Microsoft 365 - Force Update', 'Windows Defender - Update Definitions', 'Trellix / McAfee - Update Definitions', 'Google Chrome - Update', 'Microsoft Edge - Update', 'Microsoft 365 - Update (User Visible)', 'Oracle Java - Software Center', 'Windows Unquoted Service Path - Remediate', 'MSXML 4.0 - Uninstall', 'Apache Log4j - Replace Vulnerable Jars', 'Office VBA Project Access - Disable (AccessVBOM)'];
+        var PROFILES = ['Microsoft 365 - Force Update', 'Windows Defender - Update Definitions', 'Trellix / McAfee - Update Definitions', 'Google Chrome - Update (Software Center)', 'Google Chrome - Update (Internet - Google Update)', 'Microsoft Edge - Update', 'Microsoft 365 - Update (User Visible)', 'Oracle Java - Software Center', 'Windows Unquoted Service Path - Remediate', 'MSXML 4.0 - Uninstall', 'Apache Log4j - Replace Vulnerable Jars', 'Office VBA Project Access - Disable (AccessVBOM)'];
         var profSel;
         var tab = makeRunTab(panel, {
           actionId: 'app-update-verify', runLabel: 'VERIFY PROFILE', cancelLabel: 'CANCEL VERIFY',
