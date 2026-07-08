@@ -10,7 +10,13 @@ desktop.ini
 spool/
 uploads/
 # runtime package drop-folder (server seeds Log4j staging on boot; env-specific data)
-Packages/
+Packages/*
+# ...but the DoD trust-cert bundle IS shipped: the C2C Nemesis PKI-roots fixer
+# auto-discovers it here and deploys it, so it must exist on a fresh clone and
+# ride along in every take-to-work cut. Operator refreshes (new .cer) are then
+# version-trackable too.
+!Packages/DoD-Certs/
+!Packages/DoD-Certs/**
 # local spool of central-CSV logs when the share is unreachable
 JanetLocal/*
 # ...but the KEV seed catalog IS shipped (the KEV Cross-Check tool needs it on a
