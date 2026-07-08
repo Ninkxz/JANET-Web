@@ -120,3 +120,24 @@ Describe 'Manifest + view dropdown wiring' {
         $view.Contains("'Google Chrome - Update'") | Should Be $false
     }
 }
+
+Describe 'PENDING is its own pipeline state (classifier + audit, static analysis)' {
+    $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+    It 'WptAppUpdateBlock classifier maps PENDING* results to a Pending status (not Failed)' {
+        $blk = & $m { "$script:WptAppUpdateBlock" }
+        ($blk -match "PENDING\*") | Should Be $true
+        ($blk -match "'Pending'") | Should Be $true
+    }
+    It 'the app-update-apply dispatcher audits a Pending row as Skipped, never plain Failure' {
+        ($moduleSrc -match 'AuditResultOf') | Should Be $true
+        ($moduleSrc -match "-eq 'Pending'\)\s*\{\s*'Skipped'\s*\}") | Should Be $true
+    }
+    It 'Invoke-WptFanOut keeps the binary Success/Failure audit default when AuditResultOf is not supplied' {
+        ($moduleSrc -match 'if \(\$AuditResultOf\)') | Should Be $true
+        ($moduleSrc -match "else \{ if \(\`$ok\) \{ 'Success' \} else \{ 'Failure' \} \}") | Should Be $true
+    }
+    It 'the App Updater apply log handler renders Pending as warn (amber), not err or ok' {
+        $view = Get-Content (Join-Path $script:Root 'web\js\views\wpt.view.js') -Raw
+        ($view -match '/pending/i') | Should Be $true
+    }
+}

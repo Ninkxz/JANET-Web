@@ -1238,7 +1238,7 @@
           track(run.subscribe({
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
-            row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : 'ok' }); },
+            row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : (/pending/i.test(String(r.Status)) ? 'warn' : 'ok') }); },
             log: function (l) { tab.log.append(l); },
             error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
             final: function () { tab.log.banner('Apply complete'); },
@@ -1359,7 +1359,7 @@
           track(run.subscribe({
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
-            row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : 'ok' }); },
+            row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : (/pending/i.test(String(r.Status)) ? 'warn' : 'ok') }); },
             log: function (l) { tab.log.append(l); },
             error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
             final: function () { tab.log.banner('Beta apply complete'); },

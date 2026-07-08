@@ -3103,7 +3103,10 @@ $script:WptAppUpdateBlock = {
             $r.Status = 'Verified'
         } else {
             $r.Detail = [string]$res
-            $r.Status = if ("$res" -like 'OK*') { 'OK' } elseif ("$res" -like 'SKIP*') { 'Skipped' } elseif ("$res" -like 'PARTIAL*') { 'Partial' } else { 'Failed' }
+            # PENDING = the trigger provably fired but the outcome isn't confirmed yet
+            # (staged new_chrome.exe / still downloading). Its own state: NOT booked as
+            # Failed, NOT counted as OK (unverified) - the operator re-verifies later.
+            $r.Status = if ("$res" -like 'OK*') { 'OK' } elseif ("$res" -like 'SKIP*') { 'Skipped' } elseif ("$res" -like 'PENDING*') { 'Pending' } elseif ("$res" -like 'PARTIAL*') { 'Partial' } else { 'Failed' }
         }
     } catch { $r.Status = 'Failed'; $r.Detail = $_.Exception.Message }
     return $r
@@ -4184,6 +4187,7 @@ function Invoke-WptFanOut {
     param(
         [string[]]$Targets, [int]$Threads, [scriptblock]$Work, [scriptblock]$ArgFactory,
         [scriptblock]$RowOf, [scriptblock]$OkOf, [scriptblock]$AuditDetail,
+        [scriptblock]$AuditResultOf,   # optional: maps (result, ok) -> audit result string when Success/Failure is too binary (e.g. app-update PENDING audits as Skipped: excluded from OK but not booked a failure)
         [scriptblock]$LogOf,   # optional: returns @{level;text} per host -> emits a per-host activity-log line (opt-in; other actions stay quiet)
         [string]$AuditAction, [scriptblock]$Send, [string]$ActionId,
         [scriptblock]$CancelCheck,   # returns $true when the operator pressed Cancel
@@ -4228,7 +4232,8 @@ function Invoke-WptFanOut {
                     $row = & $RowOf $res
                     [void]$rows.Add($row)
                     & $Send (@{ type='row' } + $row)
-                    & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$(if($ok){'Success'}else{'Failure'}); itemCount=$(if($ok){1}else{0}); detail=([string](& $AuditDetail $res)) }
+                    $auditResult = if ($AuditResultOf) { [string](& $AuditResultOf $res $ok) } else { if ($ok) { 'Success' } else { 'Failure' } }
+                    & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$auditResult; itemCount=$(if($ok){1}else{0}); detail=([string](& $AuditDetail $res)) }
                     # opt-in per-host activity-log line, so a clean run leaves evidence in
                     # the log (e.g. a "No change" patch shows "HOST: 0 updates, 0 apps").
                     if ($LogOf) { $lg = & $LogOf $res; if ($lg) { & $Send (@{ type='log' } + $lg) } }
@@ -5622,6 +5627,7 @@ function Invoke-JanetToolAction {
                 -Work $script:WptAppUpdateBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $false) } `
                 -OkOf { param($r) ($r.Status -eq 'OK') } `
+                -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ("$($r.Status)" -eq 'Pending') { 'Skipped' } else { 'Failure' } } `
                 -AuditDetail ({ param($r) "$($r.Detail)$cmdAuditTag" }.GetNewClosure()) `
                 -RowOf { param($r) @{ Host=$r.Host; Status=[string]$r.Status; Detail=[string]$r.Detail } }
         }
