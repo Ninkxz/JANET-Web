@@ -1183,21 +1183,20 @@
         };
       }
 
-      // ---- Posture Digest (self-contained nightly snapshot for the Scheduler) ----
+      // ---- Posture Digest (self-contained posture snapshot to disk) ----
       function buildPostureDigest(panel) {
         panelFlex(panel);
         panel.appendChild(sectionTitle('POSTURE DIGEST (NIGHTLY SNAPSHOT)', true));
-        panel.appendChild(hint('Renders the current vuln posture — severity + host totals, SLA aging posture, top KEV exposure, top third-party products, top KBs needed, and IAVA bulletins — to a self-contained HTML file + a CSV on disk. No email/infra needed: point Output Folder at a UNC audit share and arm this action (Reports / Posture Digest) on the off-hours Scheduler to drop a fresh snapshot every night.'));
+        panel.appendChild(hint('Renders the current vuln posture — severity + host totals, SLA aging posture, top KEV exposure, top third-party products, top KBs needed, and IAVA bulletins — to a self-contained HTML file + a CSV on disk. No email/infra needed: point Output Folder at a UNC audit share and the snapshot lands where the whole shop can read it.'));
 
         var row = btnRow();
-        var outInput = ui.input({ type: 'text', placeholder: 'JanetLocal\\digests (blank = default; can be \\\\server\\share\\Digests)', title: 'Folder the HTML + CSV are written to. Can be a UNC share so a nightly Scheduler run lands the snapshot where the shop can read it.' });
+        var outInput = ui.input({ type: 'text', placeholder: 'JanetLocal\\digests (blank = default; can be \\\\server\\share\\Digests)', title: 'Folder the HTML + CSV are written to. Can be a UNC share so the snapshot lands where the shop can read it.' });
         outInput.style.cssText = 'flex:1;min-width:260px';
         var titleInput = ui.input({ type: 'text', placeholder: 'Report title (optional)', title: 'Optional title shown on the HTML digest.' });
         titleInput.style.width = '200px';
         var runBtn = ui.button('Generate now', { variant: 'gold', size: 'sm', title: 'Build the digest from the currently loaded findings and write it to Output Folder.' });
         row.appendChild(ui.eyebrow('OUTPUT FOLDER')); row.appendChild(outInput); row.appendChild(titleInput); row.appendChild(runBtn);
         panel.appendChild(row);
-        panel.appendChild(hint('Tip: this action can be armed on the Scheduler (Scheduled Waves) — pick the Reports tool, the Posture Digest action, and set Output Folder to a share the whole shop can read, so a fresh digest lands every night with nobody at the keyboard.'));
 
         var cards = C.StatCards({ cards: [
           { key: 'total', label: 'OPEN FINDINGS', color: 'accent' },
@@ -1330,7 +1329,7 @@
       function buildBurndown(panel) {
         panelFlex(panel);
         panel.appendChild(sectionTitle('BURNDOWN (VULN-BACKLOG TREND)', true));
-        panel.appendChild(hint('Persists a point-in-time snapshot of the current vuln backlog (JanetLocal\\trend\\burndown.jsonl) — total open findings, severity mix, KEV, and host count — reusing the same tallies the Dashboard/CORA and Posture Digest use. Take a snapshot now, or arm Burndown: Snapshot Now on the off-hours Scheduler (Reports / Burndown: Snapshot Now) to capture one automatically every night, then watch the line trend down. Read-only.'));
+        panel.appendChild(hint('Persists a point-in-time snapshot of the current vuln backlog (JanetLocal\\trend\\burndown.jsonl) — total open findings, severity mix, KEV, and host count — reusing the same tallies the Dashboard/CORA and Posture Digest use. Take a snapshot after each scan import or remediation wave, then watch the line trend down. Read-only.'));
 
         var row = btnRow();
         var labelInput = ui.input({ placeholder: 'Snapshot label (optional)', title: 'Optional free-text label for this point (e.g. "post-wave-3").' });
@@ -1370,7 +1369,7 @@
           ]
         });
         var gh = gridHolder(grid, 160); gh.style.flex = '1'; gh.style.marginTop = '10px'; panel.appendChild(gh);
-        panel.appendChild(hint('Tip: arm this on the Scheduler — pick the Reports tool, the "Burndown: Snapshot Now" action, and schedule it nightly so the trend fills in with nobody at the keyboard.'));
+        panel.appendChild(hint('Tip: take a snapshot after every scan import or remediation wave so the trend fills in over time.'));
 
         function renderChart(series) {
           chartHolder.innerHTML = '';

@@ -2303,7 +2303,7 @@ $script:AcasKbInstallBlock = {
 # Read the CISA KEV catalog flat file (JanetLocal\KevCatalog.txt) into a case-
 # insensitive CVE set. acas.psm1 loads in its own runspace and can't import
 # JanetWeb.kev.psm1, so it reads the same flat file directly (same source the KEV
-# tool + /api/dashboard use). Missing/empty file -> empty set (no KEV badging,
+# tool uses). Missing/empty file -> empty set (no KEV badging,
 # never an error). Used to badge which remediation groups carry a known-exploited CVE.
 function Read-AcasKevSet {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)

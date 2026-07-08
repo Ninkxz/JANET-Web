@@ -134,7 +134,7 @@
   Janet.util = Object.assign(Janet.util || {}, {
     el: el, qs: qs, sleep: sleep, esc: esc, fileStamp: fileStamp,
     clockStr: clockStr, parseHosts: parseHosts, resolveTargets: resolveTargets, targetModel: targetModel, downloadBlob: downloadBlob,
-    parseCsv: parseCsv, toCsv: toCsv, sevBar: sevBar
+    parseCsv: parseCsv, toCsv: toCsv
   });
   /* ========================================================================
      api  (the ONLY fetch in the app, besides RunController which calls it)
@@ -625,41 +625,6 @@
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function html(markup) { var span = el('span'); span.innerHTML = markup; return span; }
-
-  // Reusable stacked 4-level severity meter (Critical|High|Med|Low). Returns a DOM
-  // node: a thin horizontal bar with proportional colored segments + a count label,
-  // so triage-by-proportion reads at a glance. counts = {crit,high,med,low}. opts:
-  // { total? (denominator; default sum), label? (bool, default true), height? }.
-  function sevBar(counts, opts) {
-    counts = counts || {}; opts = opts || {};
-    var c = Math.max(0, +counts.crit || 0), h = Math.max(0, +counts.high || 0),
-        m = Math.max(0, +counts.med || 0), l = Math.max(0, +counts.low || 0);
-    var sum = c + h + m + l;
-    var denom = opts.total != null ? Math.max(+opts.total, sum) : sum;
-    var wrap = el('div', 'j-sevbar-wrap');
-    var bar = el('div', 'j-sevbar'); if (opts.height) bar.style.height = opts.height + 'px';
-    [['crit', c], ['high', h], ['med', m], ['low', l]].forEach(function (seg) {
-      if (seg[1] <= 0) return;
-      var s = el('div', 'j-sevbar-seg sev-' + seg[0]);
-      s.style.width = (denom > 0 ? (100 * seg[1] / denom) : 0) + '%';
-      s.title = seg[0].toUpperCase() + ': ' + seg[1];
-      bar.appendChild(s);
-    });
-    if (sum === 0) { var empty = el('div', 'j-sevbar-seg sev-empty'); empty.style.width = '100%'; bar.appendChild(empty); }
-    wrap.appendChild(bar);
-    if (opts.label !== false) {
-      var lab = el('div', 'j-sevbar-label');
-      lab.appendChild(el('span', 'st-sev-crit', String(c)));
-      lab.appendChild(el('span', 'j-sevbar-sep', '/'));
-      lab.appendChild(el('span', 'st-sev-high', String(h)));
-      lab.appendChild(el('span', 'j-sevbar-sep', '/'));
-      lab.appendChild(el('span', 'st-sev-med', String(m)));
-      lab.appendChild(el('span', 'j-sevbar-sep', '/'));
-      lab.appendChild(el('span', 'st-sev-low', String(l)));
-      wrap.appendChild(lab);
-    }
-    return wrap;
-  }
 
   // Audit log viewer: two read-only views of THIS operator's logs for a chosen tool -
   //   "Audit rows"  = the structured current-month detail CSV (via /api/logs/tail), table.

@@ -168,18 +168,6 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .st-sev-med{color:var(--sev-med)}
 .st-sev-low{color:var(--sev-low)}
 
-/* Reusable stacked severity meter (Janet.util.sevBar) - triage-by-proportion. */
-.j-sevbar-wrap{display:flex;align-items:center;gap:8px;min-width:120px}
-.j-sevbar{display:flex;flex:1;height:12px;border-radius:3px;overflow:hidden;background:var(--panel-light,#17171f);border:1px solid var(--line,#2a2a33)}
-.j-sevbar-seg{height:100%;transition:width .3s ease}
-.j-sevbar-seg.sev-crit{background:var(--sev-crit)}
-.j-sevbar-seg.sev-high{background:var(--sev-high)}
-.j-sevbar-seg.sev-med{background:var(--sev-med)}
-.j-sevbar-seg.sev-low{background:var(--sev-low)}
-.j-sevbar-seg.sev-empty{background:transparent}
-.j-sevbar-label{font-family:var(--mono,Consolas,monospace);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
-.j-sevbar-sep{color:var(--muted,#6a6a75);margin:0 2px}
-
 
 .j-pill{display:inline-block;padding:1px 7px;border-radius:9px;font-family:var(--ui);font-size:11px;font-weight:600;border:1px solid currentColor}
 
