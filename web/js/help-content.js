@@ -459,6 +459,41 @@
         ],
         "flag": "read-only"
       },
+      "opencshare": {
+        "what": "<b>Open a machine's C$ administrative share in Windows Explorer</b> by computer name. JANET Web runs in your interactive session, so the Explorer window opens on YOUR own desktop. Read-only / non-destructive - JANET only launches the share; it reads and writes nothing. Needs no admin session.",
+        "steps": [
+          "Go to the Open C$ tab.",
+          "Type a single computer name in the Computer box (bare hostname or IPv4 only).",
+          "Click 'Open C$' (or press Enter). Explorer opens \\\\<computer>\\C$ on your session.",
+          "The result grid shows Computer, Path, Status (Opened / Opened (host was unreachable on 445) / Rejected / Failed), and Detail."
+        ],
+        "patch": "Validates the computer name against a strict pattern (bare hostname or IPv4 - no spaces, quotes, backslashes, or UNC), TCP-probes port 445 for a reachability hint, then runs Start-Process explorer.exe against \\\\<computer>\\C$. An invalid name is Rejected and nothing is launched. Every successful open is written to the audit trail (accessing an admin share is security-relevant). Non-destructive: JANET changes nothing on the target.",
+        "notes": [
+          "The share opens on the operator's own desktop because the tool runs in the operator's interactive session (loopback HttpListener), not a service.",
+          "An unreachable host still opens the Explorer window - Windows shows the error itself; Status notes the 445 probe failed.",
+          "Your current Windows credentials (or a mapped drive) govern access to the share; JANET does not pass a separate credential here."
+        ],
+        "flag": "read-only"
+      },
+      "runscript": {
+        "what": "<b>Run an operator-authored PowerShell script block on one or more hosts over WinRM</b> and stream each host's captured output. DESTRUCTIVE - it is arbitrary remote code, so it requires a live admin session, self-guards the JANET host out of the run, and records the exact script body to the audit trail by SHA256 hash before fanning out.",
+        "steps": [
+          "Set Credentials and Start Admin Session (top of the window) - Run Script is gated and will not run without both.",
+          "Go to the Run Script tab and load Targets (one host per line).",
+          "Type your PowerShell script block in the editor. It runs verbatim inside Invoke-Command on each target.",
+          "Set Max concurrent (1-32) and per-host Timeout (15-900s).",
+          "Click 'RUN SCRIPT', then type RUN in the confirmation dialog to acknowledge arbitrary remote execution.",
+          "Each host streams a row: Online, Status (Success / Failed / Offline / Timeout / Session error), captured Output, and Error."
+        ],
+        "patch": "Parses your block once up front (a syntax error fails fast and nothing runs), strict-parses targets (bare host / IPv4 only), and drops the JANET dispatcher host via the self-guard. It logs a SHA256 hash + a preview of the script and writes a pre-run audit record before any host is touched; the hash is stamped into every per-host audit entry. Then it fans one worker per host (TCP reachability -> New-PSSession -> Invoke-Command your block, all streams captured via 2>&1 | Out-String, truncated ~4000 chars). A terminating remote error marks the host Failed; a host past its timeout is abandoned as Timeout. Server-side the action is destructive=true, so it 403s without a live admin session.",
+        "notes": [
+          "Arbitrary code: JANET cannot preview or undo what your script does. The SHA256 audit record is the forensic trail of exactly what ran.",
+          "The JANET dispatcher host is always removed from the target list - an arbitrary block must never run against the box hosting this session.",
+          "Output is captured (including the error stream) and truncated server-side to ~4000 chars per host; a note marks truncation.",
+          "This is deliberately separate from the WPT App Updater 'Custom Command', which is scoped to the App Updater flow; Run Script is a general-purpose remote console."
+        ],
+        "flag": "destructive"
+      },
       "reports": {
         "what": "<b>Session telemetry: live statistics, action history grid, and CSV/text exports.</b> Tracks cumulative counts (Scanned, Updates, Installed, Uninstalled, Repaired, Reboots) and full action history (Time / Action / Target / Result / Detail) fed live by every WPT run on every tab.",
         "steps": [
