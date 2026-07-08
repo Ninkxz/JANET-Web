@@ -35,9 +35,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.5.0'
+        version  = '1.6.0'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - five individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE), Patches (kick the MECM cycle), and Encryption (resume/ENABLE BitLocker - FVE policy assert + Entra-first/AD-fallback recovery-key escrow, XtsAes256); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK. PkiRoots is a ROUTED pillar (DoD roots via GPO / desk-side - .sst import not available). Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker - FVE policy assert + Entra-first/AD-fallback recovery-key escrow, XtsAes256), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -141,9 +141,26 @@ function Get-JanetToolManifest {
                 )
             }
             @{
+                id          = 'fix-pki'
+                label       = 'Fix PKI Trust Roots'
+                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - nothing is ever removed. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                kind        = 'stream-table'
+                destructive = $true
+                confirm     = 'Fix the PKI Trust Roots pillar on the target host(s)? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
+                columns     = @('Host','Ping','Status','Detail')
+                inputs      = @(
+                    @{ name='targets';          label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='certBundleFolder'; label='DoD trust bundle folder (server-readable path, e.g. a UNC path with root\*.cer, Intermediate\*.cer, Untrusted\*.cer)'; type='text'; required=$true },
+                    @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
+                    @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
+                    @{ name='attemptOffline';   label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
+                )
+            }
+            @{
                 id          = 'run-all'
                 label       = 'RUN ALL - Fix Imported Non-Compliant Hosts'
-                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The "plan" input is the JSON array the Import action produced ([{host,pillars:[...]}, ...]); per host only its planned pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG / PkiRoots route elsewhere); a host left with zero fixable pillars is reported and never dialed. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
+                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The "plan" input is the JSON array the Import action produced ([{host,pillars:[...]}, ...]); per host only its planned pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If a host plans PkiRoots and a valid cert bundle folder was supplied it is installed; if PkiRoots is planned but no bundle was given it is SKIPPED for that host (info note) without aborting the run. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Run ALL fixes across the imported non-compliant hosts (each host, its own failed pillars)? This changes machines. Proceed?'
@@ -151,9 +168,27 @@ function Get-JanetToolManifest {
                 inputs      = @(
                     @{ name='plan';             label='Run-all plan (JSON: [{host,pillars:[...]}])'; type='textarea'; required=$true },
                     @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted OS volumes (only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
+                    @{ name='certBundleFolder'; label='DoD trust bundle folder (optional; needed only if a host plans PkiRoots)'; type='text'; required=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
+                    @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline';   label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
+                )
+            }
+            @{
+                id          = 'version-check'
+                label       = 'Version Check (read-only)'
+                description = 'READ-ONLY. Per host, TCP-probe reachability (5985 then 445) then read BOTH the 64-bit and 32-bit (WOW6432Node) uninstall registry hives for an installed product whose DisplayName CONTAINS the given substring, and report its DisplayVersion. If a target version is supplied the installed version is compared with System.Version when both parse (else an ordinal string compare): UP TO DATE / OUTDATED / NEWER; with no target it reports INSTALLED / NOT INSTALLED only; unreachable hosts are OFFLINE. Changes nothing on the target (unless the opt-in RPC WinRM-heal is ticked, which may start a stopped remote WinRM service). No admin session, no confirm word.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Ping','Installed','Version','Status','Detail')
+                inputs      = @(
+                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='productMatch';   label='Product DisplayName contains (e.g. Google Chrome)'; type='text'; required=$true },
+                    @{ name='targetVersion';  label='Target version (optional, e.g. 130.0.6723.117)'; type='text'; required=$false },
+                    @{ name='winrmHeal';      label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads';        label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
                 )
             }
         )
@@ -174,6 +209,13 @@ function Get-C2cBaselineDefaults {
 }
 
 function Get-C2cBaselinePath { Join-Path $PSScriptRoot '..\JanetLocal\c2c-baseline.json' }
+
+# Resolver for the SHIPPED DoD trust bundle (mirrors Get-C2cBaselinePath's $PSScriptRoot\..
+# form). The repo ships the base bundle at Packages\DoD-Certs (Root\ Intermediate\
+# Untrusted\ *.cer), so fix-pki / run-all can run with NO path typed - a blank
+# certBundleFolder auto-falls-back here when the folder exists and holds >=1 .cer
+# (see Resolve-C2cCertBundleFolder). Read-only: this module never writes the folder.
+function Get-C2cDefaultCertBundlePath { Join-Path $PSScriptRoot '..\Packages\DoD-Certs' }
 
 # Read the editable JanetLocal baseline fresh; returns @{ Config=@{...}; Source='...' }.
 # Any problem (missing/corrupt/empty) falls back to the embedded defaults - a bad
@@ -223,8 +265,18 @@ function Get-C2cBaseline {
 # registry for a DisplayName matching 'Tanium' (the endpoint-readable install signal
 # a Software Center / MECM deployment leaves behind) and returns
 # @{ Installed=$bool; DisplayName=''; Version='' }.
+#
+#  v1.6.0 generalizes this to Get-C2cInstalledProduct -Match <substr> (case-
+#  insensitive DisplayName substring) so the read-only Version Check, the Tanium
+#  Monitoring check and the Monitoring fixer all share ONE registry-probe
+#  implementation. Get-C2cTaniumInstalled is retained as a thin wrapper that calls
+#  Get-C2cInstalledProduct -Match 'Tanium' (so every existing call site + test that
+#  dot-sources this string and calls Get-C2cTaniumInstalled keeps working).
 $script:C2cTaniumInstalledSrc = @'
-function Get-C2cTaniumInstalled {
+function Get-C2cInstalledProduct {
+    param([string]$Match)
+    $needle = [string]$Match
+    if (-not $needle) { return [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' } }
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -233,7 +285,7 @@ function Get-C2cTaniumInstalled {
         try {
             foreach ($k in @(Get-ItemProperty -Path $p -ErrorAction SilentlyContinue)) {
                 $dn = [string]$k.DisplayName
-                if ($dn -match '(?i)Tanium') {
+                if ($dn -and ($dn -match [regex]::Escape($needle))) {
                     $ver = ''
                     try { $ver = [string]$k.DisplayVersion } catch { $ver = '' }
                     return [pscustomobject]@{ Installed=$true; DisplayName=$dn; Version=$ver }
@@ -243,7 +295,144 @@ function Get-C2cTaniumInstalled {
     }
     return [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' }
 }
+function Get-C2cTaniumInstalled {
+    return (Get-C2cInstalledProduct -Match 'Tanium')
+}
 '@
+# Better-named alias for the new Version Check call site (same one source string).
+$script:C2cInstalledProductSrc = $script:C2cTaniumInstalledSrc
+
+# --- Shared WinRM-heal source (opt-in, RPC-based, best-effort) -----------------
+# For a host whose TCP 5985 probe FAILS, attempt remote SCM recovery of the WinRM
+# service over RPC (Get-Service -ComputerName; Start-Service; Set-Service Automatic),
+# then re-probe 5985. Buckets: reachable | winrm-recovered | offline | winrm-failed.
+# Fully wrapped + non-fatal (a throw becomes 'offline'). The dispatcher self-guard is
+# applied by the CALLER (fix fan-out drops self via Test-JanetC2cHostIsSelf; version
+# check disables heal per host the same way), so this helper never acts on self.
+# $Probe is an injectable 5985 test (default = real TCP) so bucketing is unit-testable
+# without opening a real socket. Dot-sourced remotely by the workers AND at module
+# load (below) so it is directly callable in module scope for tests.
+$script:C2cWinrmHealSrc = @'
+function Invoke-JanetC2cWinrmHeal {
+    param([string]$Computer, [scriptblock]$Probe)
+    if (-not $Probe) {
+        $Probe = {
+            param($c)
+            $ok = $false; $tc = $null
+            try {
+                $tc = New-Object System.Net.Sockets.TcpClient
+                $iar = $tc.BeginConnect($c, 5985, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $ok = $true }
+            } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+            return $ok
+        }
+    }
+    if (& $Probe $Computer) { return @{ Bucket='reachable'; Detail='WinRM 5985 already reachable' } }
+    $svc = $null
+    try { $svc = Get-Service -ComputerName $Computer -Name 'WinRM' -ErrorAction Stop }
+    catch { return @{ Bucket='offline'; Detail=("WinRM not reachable via RPC: " + $_.Exception.Message) } }
+    if (-not $svc) { return @{ Bucket='offline'; Detail='WinRM service not found via RPC' } }
+    if ([string]$svc.Status -eq 'Running') { return @{ Bucket='winrm-failed'; Detail='WinRM service Running but 5985 not answering (firewall?)' } }
+    $acted = New-Object System.Collections.ArrayList
+    try { Start-Service -InputObject $svc -ErrorAction Stop; [void]$acted.Add('started') }
+    catch {
+        try { $s2 = Get-Service -ComputerName $Computer -Name 'WinRM' -ErrorAction Stop; Start-Service -InputObject $s2 -ErrorAction Stop; [void]$acted.Add('started') } catch {}
+    }
+    try { Set-Service -ComputerName $Computer -Name 'WinRM' -StartupType Automatic -ErrorAction Stop; [void]$acted.Add('Automatic') } catch {}
+    Start-Sleep -Milliseconds 500
+    if (& $Probe $Computer) { return @{ Bucket='winrm-recovered'; Detail=("WinRM recovered via RPC (" + ($acted -join ', ') + "); 5985 now reachable") } }
+    return @{ Bucket='winrm-failed'; Detail=("WinRM RPC heal attempted (" + ($acted -join ', ') + ") but 5985 still not answering") }
+}
+'@
+# --- Additive cert-store installer (fix-pki worker + unit test) ----------------
+# ADDITIVE by construction: for each store group, open the LocalMachine store
+# ReadWrite, add ONLY certs whose thumbprint is not already present, and NEVER
+# remove anything. $StoreOpener is injectable (default = a real X509Store) so the
+# additive-only guard is unit-testable against a fake store. Returns
+# @{ Added; Already; Total; PerStore=@('Root +N/M', ...); FailDetail }.
+$script:C2cAddCertsSrc = @'
+function Add-C2cBundleToStores {
+    param($Bundle, [scriptblock]$StoreOpener)
+    if (-not $StoreOpener) {
+        $StoreOpener = {
+            param($storeName)
+            $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+            $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            return $st
+        }
+    }
+    $added = 0; $already = 0; $total = 0; $failDetail = ''
+    $perStore = New-Object System.Collections.ArrayList
+    foreach ($sm in @(@{ Prop='Root'; Store='Root' }, @{ Prop='CA'; Store='CA' }, @{ Prop='Disallowed'; Store='Disallowed' })) {
+        $items = @()
+        try { $items = @($Bundle.($sm.Prop)) | Where-Object { $_ } } catch { $items = @() }
+        if ($items.Count -eq 0) { continue }
+        $st = $null
+        try {
+            $st = & $StoreOpener $sm.Store
+            $present = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($ec in $st.Certificates) { [void]$present.Add((([string]$ec.Thumbprint) -replace '[^0-9A-Fa-f]','')) }
+            $sAdd = 0
+            foreach ($it in $items) {
+                $total++
+                $tp = (([string]$it.t) -replace '[^0-9A-Fa-f]','')
+                if ($tp -and $present.Contains($tp)) { $already++; continue }
+                try {
+                    $raw  = [Convert]::FromBase64String([string]$it.b)
+                    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$raw)
+                    $st.Add($cert)
+                    if ($tp) { [void]$present.Add($tp) }
+                    $sAdd++; $added++
+                } catch { $failDetail += "add failed in $($sm.Store): $($_.Exception.Message); " }
+            }
+            [void]$perStore.Add("$($sm.Store) +$sAdd/$($items.Count)")
+        } catch {
+            $failDetail += "store $($sm.Store) open failed: $($_.Exception.Message); "
+        } finally { if ($st) { try { $st.Close() } catch {} } }
+    }
+    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail }
+}
+# Classify an Add-C2cBundleToStores result into the raw PkiRoots token the fix worker
+# emits (and the label map keys on): any .Add error -> FAIL; else 1+ added -> FIXED;
+# else nothing to add -> NOCHANGE. This is the SINGLE classifier both the remote fix
+# worker (fixSb) and the unit tests call, so a mis-classification fails a test.
+function Get-C2cPkiRootsResultToken {
+    param($AddResult)
+    if (-not $AddResult) { return 'FAIL' }
+    if ([string]$AddResult.FailDetail) { return 'FAIL' }
+    if ([int]$AddResult.Added -gt 0)   { return 'FIXED' }
+    return 'NOCHANGE'
+}
+# Per-pillar DISPLAY label map: pillar-flavoured names for the raw FIXED/NOCHANGE/
+# STARTED/KICKED tokens (SKIP/FAIL/IN PROGRESS pass through via the default arm). This
+# is the SINGLE label map the fix worker's admin-side rollup delegates to AND the unit
+# tests assert against, so a mis-wired label (e.g. a mistyped 'ROOTS INSTALLED') fails
+# a test. Defined in this shared source so worker + tests key off ONE definition.
+function Get-C2cPillarLabel {
+    param($Name, $Result)
+    switch ("$Name|$Result") {
+        'Monitoring|FIXED'     { 'MONITORED' }
+        'Monitoring|NOCHANGE'  { 'ALREADY MONITORED' }
+        'Firewall|FIXED'       { 'FIREWALL ENABLED' }
+        'Firewall|NOCHANGE'    { 'ALREADY ENABLED' }
+        'AntiMalware|FIXED'    { 'PROTECTED' }
+        'AntiMalware|NOCHANGE' { 'ALREADY PROTECTED' }
+        'Patches|KICKED'       { 'PATCH CYCLE KICKED' }
+        'Encryption|STARTED'   { 'ENCRYPTION STARTED' }
+        'Encryption|FIXED'     { 'PROTECTION RESUMED' }
+        'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
+        'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
+        'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
+        default                { [string]$Result }
+    }
+}
+'@
+
+# Define the heal + installed-product + cert-store helpers in MODULE scope too (for
+# admin-side use + direct unit testing). Worker runspaces dot-source them again.
+try { . ([scriptblock]::Create($script:C2cInstalledProductSrc)) } catch {}
+try { . ([scriptblock]::Create($script:C2cWinrmHealSrc)) } catch {}
+try { . ([scriptblock]::Create($script:C2cAddCertsSrc)) } catch {}
 
 # --- Per-host probe worker (runs in a pool runspace; no module scope here) ---
 # Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks }. All 11 checks run
@@ -541,15 +730,17 @@ $script:C2cPillarRouting = @{
     Encryption  = 'fixable HERE (Fix Encryption: resume / ENABLE BitLocker)'
     AntiMalware = 'fixable HERE (Fix AntiMalware: heal Defender / MDE)'
     Patches     = 'endpoint-kickable HERE (Fix Patches: trigger MECM scan / eval)'
-    PkiRoots    = 'DoD roots via GPO / desk-side (.sst import not available)'
+    PkiRoots    = 'fixable HERE (Fix PKI Trust Roots: install the DoD trust bundle .cer into Root/CA/Disallowed)'
     Vuln        = 'ACAS / Reports / KEV tools'
     OSVersion   = 'Windows Upgrade tool'
     STIG        = 'Reports / STIG'
 }
 # Endpoint-fixable pillars (each has a per-pillar fix action + is eligible for run-all).
-# PkiRoots is intentionally NOT here - it routes elsewhere (GPO / desk-side); the .sst
-# import path was dropped in v1.5.0, so no plan/action ever marks it fixable.
-$script:C2cFixablePillars = @('Monitoring','Firewall','Encryption','AntiMalware','Patches')
+# v1.6.0 brings PkiRoots BACK as fixable - the folder/.cer-bundle DoD-roots installer
+# (fix-pki) replaces the removed .sst mechanism. A run-all host that plans PkiRoots is
+# only actioned when a valid cert bundle folder is supplied (else it is skipped for
+# that host with an info note, never aborting the run).
+$script:C2cFixablePillars = @('Monitoring','Firewall','Encryption','AntiMalware','Patches','PkiRoots')
 # Stable display order for the summary; unknown pillars append alphabetically.
 $script:C2cPillarOrder = @('Monitoring','Firewall','Encryption','AntiMalware','PkiRoots','Patches','Vuln','OSVersion','STIG')
 
@@ -722,7 +913,7 @@ function Test-JanetC2cHostIsSelf {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
@@ -742,9 +933,23 @@ $script:C2cFixBlock = {
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
+    # Opt-in RPC WinRM-heal: only when the TCP probe failed AND the caller armed it
+    # (the caller already excluded the dispatcher host via Test-JanetC2cHostIsSelf).
+    $healNote = ''
+    if (-not $reachable -and $WinrmHeal) {
+        if ($WinrmHealSrc) { try { . ([scriptblock]::Create($WinrmHealSrc)) } catch {} }
+        if (Get-Command Invoke-JanetC2cWinrmHeal -ErrorAction SilentlyContinue) {
+            $hb = $null
+            try { $hb = Invoke-JanetC2cWinrmHeal -Computer $Computer } catch {}
+            if ($hb) {
+                $healNote = "winrm-heal: $($hb.Bucket)"
+                if ($hb.Bucket -eq 'reachable' -or $hb.Bucket -eq 'winrm-recovered') { $reachable = $true; $r.Ping = "TCP 5985 ($($hb.Bucket))" }
+            }
+        }
+    }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
-        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = (@('No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.', $healNote) | Where-Object { $_ }) -join ' | '; return $r }
     }
 
     $wsOpt = New-PSSessionOption -OperationTimeout 280000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
@@ -773,7 +978,7 @@ $script:C2cFixBlock = {
     $fixSb = {
         # Pillars cross as a '|'-delimited string (never an array) so no ArgumentList
         # flattening/serialization ambiguity over the WinRM boundary.
-        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc)
+        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc)
         $Pillars = @(($PillarCsv -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
@@ -1120,13 +1325,44 @@ $script:C2cFixBlock = {
             } catch { & $add 'Patches' 'error' 'FAIL' $_.Exception.Message }
         }
 
+        # P. PkiRoots - install the DoD trust bundle ADDITIVELY. The admin side already
+        #    read the folder and handed us base64 certs grouped by store as JSON. For each
+        #    store open X509Store(store, LocalMachine) ReadWrite and add ONLY certs whose
+        #    thumbprint is not already present (NEVER remove anything), then close.
+        if ($Pillars -contains 'PkiRoots') {
+            try {
+                $bundle = $null
+                if ($BundleJson) { try { $bundle = $BundleJson | ConvertFrom-Json } catch { $bundle = $null } }
+                if ($AddCertsSrc) { try { . ([scriptblock]::Create($AddCertsSrc)) } catch {} }
+                if (-not $bundle) {
+                    & $add 'PkiRoots' 'none' 'FAIL' 'no cert bundle delivered to the worker - nothing to install'
+                } elseif (-not (Get-Command Add-C2cBundleToStores -ErrorAction SilentlyContinue)) {
+                    & $add 'PkiRoots' 'none' 'FAIL' 'cert-store installer helper unavailable on target'
+                } else {
+                    $ar = Add-C2cBundleToStores -Bundle $bundle
+                    $storeTxt = (@($ar.PerStore) -join ', ')
+                    # Classify via the shared helper (dot-sourced from $AddCertsSrc above) -
+                    # the exact token the label map keys on. Inline fallback if unavailable.
+                    $tok = if (Get-Command Get-C2cPkiRootsResultToken -ErrorAction SilentlyContinue) { Get-C2cPkiRootsResultToken $ar }
+                           elseif ([string]$ar.FailDetail) { 'FAIL' } elseif ([int]$ar.Added -gt 0) { 'FIXED' } else { 'NOCHANGE' }
+                    if ($tok -eq 'FAIL') {
+                        & $add 'PkiRoots' 'addstore' 'FAIL' ("added $($ar.Added) of $($ar.Total); errors: " + ([string]$ar.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                    } elseif ($tok -eq 'FIXED') {
+                        & $add 'PkiRoots' 'addstore' 'FIXED' ("added $($ar.Added) of $($ar.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                    } else {
+                        & $add 'PkiRoots' 'none' 'NOCHANGE' ("all $($ar.Total) already present across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                    }
+                }
+            } catch { & $add 'PkiRoots' 'error' 'FAIL' $_.Exception.Message }
+        }
+
         return @{ RemoteName = $env:COMPUTERNAME; Pillars = @($results) }
     }
 
     try {
         # Pass the pillar set as a '|'-delimited string (all-scalar ArgumentList) so it
         # crosses the WinRM boundary intact; the remote block splits it back to an array.
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc -ErrorAction Stop
     } catch {
         $r.Status = 'FAILED'; $r.Detail = "Fix: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -1154,8 +1390,16 @@ $script:C2cFixBlock = {
     # STARTED/KICKED tokens. The rollup above uses the RAW tokens (stable); the label is
     # only what streams to the row Detail + the per-check report. SKIP/FAIL/IN PROGRESS
     # pass through unchanged (default arm).
+    #
+    # The label map itself lives in the shared cert/label source ($AddCertsSrc) as
+    # Get-C2cPillarLabel so the worker AND the unit tests key labels off ONE definition.
+    # Dot-source it here (admin-side, pool runspace) and delegate; when no AddCertsSrc was
+    # supplied (older 8-arg test callers) fall back to the identical inline switch so
+    # labels are never lost.
+    if ($AddCertsSrc) { try { . ([scriptblock]::Create($AddCertsSrc)) } catch {} }
     $labelOf = {
         param($n, $res)
+        if (Get-Command Get-C2cPillarLabel -ErrorAction SilentlyContinue) { return (Get-C2cPillarLabel $n $res) }
         switch ("$n|$res") {
             'Monitoring|FIXED'     { 'MONITORED' }
             'Monitoring|NOCHANGE'  { 'ALREADY MONITORED' }
@@ -1167,6 +1411,8 @@ $script:C2cFixBlock = {
             'Encryption|STARTED'   { 'ENCRYPTION STARTED' }
             'Encryption|FIXED'     { 'PROTECTION RESUMED' }
             'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
+            'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
+            'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
             default                { [string]$res }
         }
     }
@@ -1253,6 +1499,90 @@ $script:C2cPillarByAction = @{
     'fix-antimalware' = 'AntiMalware'
     'fix-patches'     = 'Patches'
     'fix-encryption'  = 'Encryption'
+    'fix-pki'         = 'PkiRoots'
+}
+
+# --- Admin-side cert-bundle reader (fix-pki) ---------------------------------
+# Reads a DoD trust bundle folder ONCE, before any host is dialed. Enumerates
+# (case-insensitive on Windows) <folder>\root\*.cer -> Root, <folder>\Intermediate\*.cer
+# -> CA, <folder>\Untrusted\*.cer -> Disallowed, and loose <folder>\*.cer -> Root.
+# Each .cer is loaded into an X509Certificate2 and captured as thumbprint + base64
+# (base64 crosses the WinRM boundary cleanly). Returns
+# @{ Ok; Error; Root=@(@{Thumbprint;B64;File}); CA=@(...); Disallowed=@(...); CertCount; FileCount; Folder }.
+# Ok=$false with a populated Error if the folder is missing or yields ZERO certs.
+function Get-C2cCertBundle {
+    param([string]$Folder)
+    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder='' }
+    $f = ([string]$Folder).Trim().Trim('"')
+    $res.Folder = $f
+    if (-not $f) { $res.Error = 'no cert bundle folder provided'; return $res }
+    if (-not (Test-Path -LiteralPath $f)) { $res.Error = "cert bundle folder not found: $f"; return $res }
+    $groups = @{
+        Root       = New-Object System.Collections.ArrayList
+        CA         = New-Object System.Collections.ArrayList
+        Disallowed = New-Object System.Collections.ArrayList
+    }
+    $loadCer = {
+        param($file, $store)
+        try {
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+            $cert.Import($file)
+            $b64  = [Convert]::ToBase64String($cert.RawData)
+            [void]$groups[$store].Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; B64=$b64; File=(Split-Path $file -Leaf) })
+            return $true
+        } catch { return $false }
+    }
+    $fileCount = 0
+    foreach ($m in @(@{ Sub='root'; Store='Root' }, @{ Sub='Intermediate'; Store='CA' }, @{ Sub='Untrusted'; Store='Disallowed' })) {
+        $sub = Join-Path $f $m.Sub
+        if (Test-Path -LiteralPath $sub) {
+            foreach ($cf in @(Get-ChildItem -LiteralPath $sub -Filter '*.cer' -File -ErrorAction SilentlyContinue)) {
+                if (& $loadCer $cf.FullName $m.Store) { $fileCount++ }
+            }
+        }
+    }
+    # Loose *.cer directly under the folder -> Root (non-recursive).
+    foreach ($cf in @(Get-ChildItem -LiteralPath $f -Filter '*.cer' -File -ErrorAction SilentlyContinue)) {
+        if (& $loadCer $cf.FullName 'Root') { $fileCount++ }
+    }
+    $total = $groups.Root.Count + $groups.CA.Count + $groups.Disallowed.Count
+    if ($total -eq 0) {
+        $res.Error = "no .cer certificates found under $f (expected root\*.cer, Intermediate\*.cer, Untrusted\*.cer, or loose *.cer)"
+        return $res
+    }
+    $res.Root = @($groups.Root); $res.CA = @($groups.CA); $res.Disallowed = @($groups.Disallowed)
+    $res.CertCount = $total; $res.FileCount = $fileCount; $res.Ok = $true
+    return $res
+}
+
+# Resolve the effective cert bundle folder for fix-pki / run-all. An operator-supplied
+# path (non-blank) ALWAYS wins; a blank/whitespace path AUTO-falls-back to the SHIPPED
+# default (Get-C2cDefaultCertBundlePath = Packages\DoD-Certs) ONLY when that folder
+# exists and holds >=1 .cer, so a one-click fix-pki works with nothing typed. Returns
+# @{ Folder; Source } where Source is 'operator-supplied' / 'shipped default' / '' and
+# Folder='' means NEITHER a path was given NOR a usable default was found.
+function Resolve-C2cCertBundleFolder {
+    param([string]$Supplied)
+    $s = ([string]$Supplied).Trim().Trim('"')
+    if (-not [string]::IsNullOrWhiteSpace($s)) { return @{ Folder = $s; Source = 'operator-supplied' } }
+    $def = Get-C2cDefaultCertBundlePath
+    if ($def -and (Test-Path -LiteralPath $def)) {
+        $cerCount = @(Get-ChildItem -LiteralPath $def -Filter '*.cer' -File -Recurse -ErrorAction SilentlyContinue).Count
+        if ($cerCount -gt 0) { return @{ Folder = $def; Source = 'shipped default' } }
+    }
+    return @{ Folder = ''; Source = '' }
+}
+
+# Serialize a bundle to the compact JSON the PkiRoots worker consumes (thumbprint + b64
+# per store). @()-wrapped so ConvertFrom-Json single-element arrays round-trip safely.
+function Convert-C2cBundleToJson {
+    param($Bundle)
+    $payload = @{
+        Root       = @(@($Bundle.Root)       | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        CA         = @(@($Bundle.CA)         | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        Disallowed = @(@($Bundle.Disallowed) | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+    }
+    return ($payload | ConvertTo-Json -Depth 5 -Compress)
 }
 
 # --- Action: per-pillar fixes + run-all (DESTRUCTIVE) ------------------------
@@ -1279,11 +1609,47 @@ function Invoke-C2cFixAction {
 
     $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
     $doEnable       = Get-C2cBool $Params['enableEncryption'] $false
+    $winrmHeal      = Get-C2cBool $Params['winrmHeal'] $false
 
     # Baseline (fresh) for the Tanium service name used by the Monitoring fixer.
     $baseline = Get-C2cBaseline
     $taniumService = [string]$baseline.Config['taniumService']
     if (-not $taniumService) { $taniumService = 'Tanium Client' }
+
+    # --- Cert bundle for the PkiRoots fixer -------------------------------------
+    # fix-pki: the bundle is REQUIRED - read it ADMIN-SIDE now; abort (dial nothing) if
+    # missing/empty. run-all: OPTIONAL - if absent/invalid, PkiRoots is dropped per host
+    # (info note) but the run continues for other pillars.
+    # Operator path wins; a BLANK path auto-falls-back to the SHIPPED default
+    # (Packages\DoD-Certs) when it exists + holds certs, so one-click fix-pki works with
+    # nothing typed. fix-pki with NEITHER a path NOR a usable default ABORTS (dials
+    # nothing); run-all with neither just SKIPS PkiRoots per host (other pillars run).
+    $bundleJson = ''
+    $bundleOk   = $false
+    if ($ActionId -eq 'fix-pki' -or $isRunAll) {
+        $resolved     = Resolve-C2cCertBundleFolder ([string]$Params['certBundleFolder'])
+        $bundleFolder = [string]$resolved.Folder
+        $bundleSource = [string]$resolved.Source
+        if ([string]::IsNullOrWhiteSpace($bundleFolder)) {
+            if ($ActionId -eq 'fix-pki') {
+                & $send @{ type='log'; level='err'; text="Fix PKI Trust Roots aborted: no cert bundle folder supplied and the shipped default ($(Get-C2cDefaultCertBundlePath)) is missing or has no .cer files. Nothing was dialed." }
+                return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+            }
+            & $send @{ type='log'; level='info'; text='Run-all: no cert bundle folder supplied and no usable shipped default - PkiRoots will be SKIPPED per host; other pillars still run.' }
+        } else {
+            $bundle = Get-C2cCertBundle -Folder $bundleFolder
+            if ($bundle.Ok) {
+                $bundleJson = Convert-C2cBundleToJson $bundle
+                $bundleOk   = $true
+                & $send @{ type='log'; level='info'; text="Cert bundle: $($bundle.CertCount) cert(s) [Root $(@($bundle.Root).Count)/CA $(@($bundle.CA).Count)/Disallowed $(@($bundle.Disallowed).Count)] from $($bundle.Folder) [$bundleSource]." }
+            } elseif ($ActionId -eq 'fix-pki') {
+                & $send @{ type='log'; level='err'; text="Fix PKI Trust Roots aborted: $($bundle.Error). Nothing was dialed." }
+                return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+            } else {
+                & $send @{ type='log'; level='warn'; text="Cert bundle invalid ($($bundle.Error)) - PkiRoots will be SKIPPED per host; other pillars still run." }
+            }
+        }
+    }
 
     $rows = New-Object System.Collections.ArrayList     # pre-rows (self-guard, zero-fixable info) + result rows
     $plan = New-Object System.Collections.ArrayList     # [ @{ Host; Pillars=@(...) } ] to dial (pre self-guard)
@@ -1317,6 +1683,11 @@ function Invoke-C2cFixAction {
             $unknown = @($rawPillars | Where-Object { $script:C2cFixablePillars -notcontains $_ })
             if ($unknown.Count -gt 0) {
                 & $send @{ type='log'; level='warn'; text="Run-all: $short - dropped non-endpoint-fixable pillar(s): $($unknown -join ', ') (route to ACAS / Windows Upgrade / Reports)." }
+            }
+            # PkiRoots needs a cert bundle; without one, skip it for this host (info note).
+            if (-not $bundleOk -and ($known -contains 'PkiRoots')) {
+                $known = @($known | Where-Object { $_ -ne 'PkiRoots' })
+                & $send @{ type='log'; level='info'; text="Run-all: $short - PkiRoots skipped (no valid cert bundle folder supplied); other pillars still run." }
             }
             if ($known.Count -eq 0) {
                 $row = @{ Host=$short; Ping=''; Status='SKIPPED'; Detail='nothing endpoint-fixable (Vuln/OSVersion/STIG route elsewhere)' }
@@ -1382,8 +1753,12 @@ function Invoke-C2cFixAction {
     foreach ($job in $dialPlan) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:C2cFixBlock)
+        # Per-host heal flag reuses Test-JanetC2cHostIsSelf so the RPC heal never targets
+        # the dispatcher (the self-guard already dropped self from $dialPlan; belt + braces).
+        $healThis = $winrmHeal -and -not (Test-JanetC2cHostIsSelf ([string]$job.Host))
         [void]$ps.AddArgument([string]$job.Host); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
         [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
+        [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cAddCertsSrc)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -1484,6 +1859,200 @@ function Invoke-C2cFixAction {
     return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; partial=$cPartial; failed=$cFailed; offline=$cOffline; skipped=$cSkipped; selfSkipped=$selfSkipped.Count; perPillar=$perPillar } }
 }
 
+# =============================================================================
+#  Version Check (READ-ONLY) - generalizes the field VersionCheckerFromListPS7.ps1
+#  (its PS7 ForEach-Object -parallel becomes the module runspace pool). Per host:
+#  TCP reachability (+ optional RPC WinRM-heal), then read BOTH uninstall hives via
+#  the shared Get-C2cInstalledProduct, compare DisplayVersion to an optional target.
+# =============================================================================
+$script:C2cVersionBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$ProductMatch, [string]$TargetVersion, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$InstalledProductSrc)
+
+    $r = @{ Host=$Computer; Ping=''; Installed=''; Version=''; Status=''; Detail='' }
+
+    $reachable = $false
+    foreach ($port in 5985,445) {
+        $tc = $null
+        try {
+            $tc = New-Object System.Net.Sockets.TcpClient
+            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        if ($reachable) { break }
+    }
+    $healNote = ''
+    if (-not $reachable -and $WinrmHeal) {
+        if ($WinrmHealSrc) { try { . ([scriptblock]::Create($WinrmHealSrc)) } catch {} }
+        if (Get-Command Invoke-JanetC2cWinrmHeal -ErrorAction SilentlyContinue) {
+            $hb = $null
+            try { $hb = Invoke-JanetC2cWinrmHeal -Computer $Computer } catch {}
+            if ($hb) {
+                $healNote = "winrm-heal: $($hb.Bucket)"
+                if ($hb.Bucket -eq 'reachable' -or $hb.Bucket -eq 'winrm-recovered') { $reachable = $true; $r.Ping = "TCP 5985 ($($hb.Bucket))" }
+            }
+        }
+    }
+    if (-not $reachable) {
+        $r.Ping = 'Unreachable'
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = (@('No TCP on 5985/445 (1.5s timeouts).', $healNote) | Where-Object { $_ }) -join ' | '; return $r }
+    }
+
+    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    $sess = $null
+    try { $sess = New-PSSession @splat } catch { $r.Status = 'OFFLINE'; $r.Detail = (@("Session: $($_.Exception.Message)", $healNote) | Where-Object { $_ }) -join ' | '; return $r }
+
+    $readSb = {
+        param($match, $src)
+        if ($src) { try { . ([scriptblock]::Create($src)) } catch {} }
+        if (Get-Command Get-C2cInstalledProduct -ErrorAction SilentlyContinue) { return (Get-C2cInstalledProduct -Match $match) }
+        return [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' }
+    }
+    $prod = $null
+    try { $prod = Invoke-Command -Session $sess -ScriptBlock $readSb -ArgumentList $ProductMatch, $InstalledProductSrc -ErrorAction Stop }
+    catch { $r.Status = 'ERROR'; $r.Detail = "Query: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
+    finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
+
+    $installed = [bool]$prod.Installed
+    $ver       = [string]$prod.Version
+    $dn        = [string]$prod.DisplayName
+    $tv        = ([string]$TargetVersion).Trim()
+    $r.Installed = if ($installed) { 'yes' } else { 'no' }
+    $r.Version   = $ver
+
+    if (-not $installed) {
+        $r.Status = 'NOT INSTALLED'; $r.Detail = "no DisplayName containing '$ProductMatch' in the uninstall registry"
+    } elseif (-not $tv) {
+        $r.Status = 'INSTALLED'; $r.Detail = (@($dn, $ver) | Where-Object { $_ }) -join ' '
+    } else {
+        $cmp = $null
+        $iv = $null; $tvv = $null
+        if ([System.Version]::TryParse($ver, [ref]$iv) -and [System.Version]::TryParse($tv, [ref]$tvv)) {
+            $cmp = $iv.CompareTo($tvv)
+        } else {
+            $cmp = [string]::CompareOrdinal($ver, $tv)
+        }
+        if     ($cmp -eq 0) { $r.Status = 'UP TO DATE' }
+        elseif ($cmp -lt 0) { $r.Status = 'OUTDATED' }
+        else                { $r.Status = 'NEWER' }
+        $r.Detail = "$dn installed $ver vs target $tv"
+    }
+    return $r
+}
+
+# --- Action: version-check (READ-ONLY) --------------------------------------
+function Invoke-C2cVersionCheckAction {
+    param([hashtable]$Params, [System.Management.Automation.PSCredential]$Credential, [scriptblock]$Emit)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $cancelJob = $null
+    if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
+    $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    $productMatch = ([string]$Params['productMatch']).Trim()
+    if ([string]::IsNullOrWhiteSpace($productMatch)) {
+        & $send @{ type='log'; level='warn'; text='No product match string. Enter a DisplayName substring (e.g. Google Chrome).' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+    $targetVersion = ([string]$Params['targetVersion']).Trim()
+
+    $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='No valid targets.' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
+    $winrmHeal      = Get-C2cBool $Params['winrmHeal'] $false
+    $threads = 16
+    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    $threads = [Math]::Max(1, [Math]::Min(32, $threads))
+    $perHostTimeout = 200
+    $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
+    $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
+
+    $verTxt = if ($targetVersion) { "target $targetVersion" } else { 'no target (installed/not-installed only)' }
+    & $send @{ type='status'; text="Version check '$productMatch' on $($targets.Count) host(s) with $threads thread(s)..." }
+    & $send @{ type='log'; level='info'; text="[$(Get-Date -Format 'HH:mm:ss')] START version-check '$productMatch' ($verTxt) on $($targets.Count) host(s) ($authLabel)$(if ($winrmHeal) { ' [WinRM-heal armed]' } else { '' })." }
+
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+    $pool.Open()
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Installed=''; Version=''; Status='Queued'; Detail='waiting for a runspace...' }) }
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($h in $targets) {
+        # Heal never targets self (reuse Test-JanetC2cHostIsSelf) - a read-only scan may
+        # still query the dispatcher, but the RPC heal (an action) must not.
+        $healThis = $winrmHeal -and -not (Test-JanetC2cHostIsSelf $h)
+        $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+        [void]$ps.AddScript($script:C2cVersionBlock)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
+        [void]$ps.AddArgument($productMatch); [void]$ps.AddArgument($targetVersion); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cInstalledProductSrc)
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    $emitResult = {
+        param($res)
+        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Installed=[string]$res.Installed; Version=[string]$res.Version; Status=[string]$res.Status; Detail=[string]$res.Detail }
+        if ($row.Status -eq 'ERROR') { $row.Status = 'OFFLINE' }   # session/query failure -> collapse to OFFLINE for the tally
+        [void]$rows.Add($row)
+        & $send (@{ type='row' } + $row)
+        $lvl = switch ($row.Status) { 'UP TO DATE' {'ok'} 'INSTALLED' {'ok'} 'NEWER' {'info'} 'OUTDATED' {'warn'} 'NOT INSTALLED' {'warn'} default {'error'} }
+        & $send @{ type='log'; level=$lvl; text=("[{0}] {1} - {2}" -f $row.Status, $row.Host, $row.Detail) }
+    }
+
+    $done = 0
+    try {
+        while ($done -lt $jobs.Count) {
+            foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = @{ Host=$j.Host; Ping=''; Installed=''; Version=''; Status='OFFLINE'; Detail="worker error: $($_.Exception.Message)" } }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Installed=''; Version=''; Status='OFFLINE'; Detail='worker returned no result' } }
+                    & $emitResult $res
+                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $emitResult @{ Host=$j.Host; Ping=''; Installed=''; Version=''; Status='OFFLINE'; Detail="per-host timeout (${perHostTimeout}s)" }
+                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                if ($cancelCheck -and (& $cancelCheck)) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $emitResult @{ Host=$j.Host; Ping=''; Installed=''; Version=''; Status='Cancelled'; Detail='cancelled by operator' }
+                            $done++
+                        }
+                    }
+                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight version reads stopped.' }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+
+    $counts = @{}
+    foreach ($st in @('UP TO DATE','OUTDATED','NEWER','INSTALLED','NOT INSTALLED','OFFLINE','Cancelled')) { $counts[$st] = @($rows | Where-Object { $_.Status -eq $st }).Count }
+    $ppTxt = (@('UP TO DATE','OUTDATED','NEWER','INSTALLED','NOT INSTALLED','OFFLINE') | Where-Object { $counts[$_] -gt 0 } | ForEach-Object { "$_ $($counts[$_])" }) -join ', '
+    & $send @{ type='log'; level='ok'; text="Version check done - $ppTxt (of $($targets.Count) host(s))." }
+    & $send @{ type='status'; text="Done. $($rows.Count) host(s): $ppTxt." }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; upToDate=$counts['UP TO DATE']; outdated=$counts['OUTDATED']; newer=$counts['NEWER']; installed=$counts['INSTALLED']; notInstalled=$counts['NOT INSTALLED']; offline=$counts['OFFLINE'] } }
+}
+
 function Invoke-JanetToolAction {
     param(
         [string]$ActionId,
@@ -1499,6 +2068,7 @@ function Invoke-JanetToolAction {
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
 
     if ($ActionId -eq 'import') { return (Invoke-C2cImportAction -Params $Params -Emit $Emit) }
+    if ($ActionId -eq 'version-check') { return (Invoke-C2cVersionCheckAction -Params $Params -Credential $Credential -Emit $Emit) }
     if ($ActionId -eq 'run-all' -or $script:C2cPillarByAction.ContainsKey($ActionId)) {
         return (Invoke-C2cFixAction -ActionId $ActionId -Params $Params -Credential $Credential -Emit $Emit)
     }

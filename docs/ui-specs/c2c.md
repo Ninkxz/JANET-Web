@@ -95,7 +95,7 @@ BeginInvoke fan-out with a per-host watchdog and the operator-cancel bridge
 DNS-mismatch guard (never a PTR lookup). Read-only: no audit rows are emitted
 (mirrors the Windows Upgrade Diagnose action).
 
-## Action side (v1.5.0) - Import-driven fix CARDS + Run All
+## Action side (v1.6.0) - Import-driven fix CARDS + Run All + Version Check
 
 Actions that extend the read-only scan with the ACTION half of Comply-to-Connect.
 The fix workflow is **import-driven and ACAS-styled**: importing the Tanium CSV
@@ -103,22 +103,52 @@ populates one **card per fixable pillar**, each carrying its OWN affected-host l
 (mirroring the ACAS Nemesis Updater's one-card-per-vulnerability idiom), with a
 **RUN ALL** over the checked cards.
 
-**v1.5.0 changes vs v1.4.0:**
-- The **`fix-pki` action was DROPPED** (the `.sst` DoD-roots import path is not
-  available). PkiRoots is now a **ROUTED** pillar - shown with its host count but
-  never dialed (routing "DoD roots via GPO / desk-side (.sst import not available)").
-  No plan or action ever marks PkiRoots fixable; `sstPath` is gone from every action.
-  Endpoint-fixable set is now **five**: Monitoring / Firewall / Encryption /
-  AntiMalware / Patches. **Action count is 8** (scan + import + 5 fix-* + run-all).
-- **Monitoring** (scan check #1 AND `fix-monitoring`) now also verifies the Tanium
-  **software is installed** via the uninstall registry (single-source helper
-  `Get-C2cTaniumInstalled`, dot-sourced remotely by both call sites). `fix-monitoring`:
-  service Running -> NOCHANGE (ALREADY MONITORED); service Stopped/not-Automatic ->
-  heal (MONITORED); service ABSENT but software installed -> FAIL "repair via Software
-  Center/MECM" (no service is created); NEITHER installed nor service -> FAIL "deploy
-  from Software Center/MECM".
+**v1.6.0 changes vs v1.5.0:**
+- **`fix-pki` is BACK** as a folder/`.cer`-bundle DoD-roots installer (replacing the
+  removed `.sst` mechanism). PkiRoots is a **fixable** pillar again - the import routes
+  it "fixable HERE" and it re-enters the run-all plan. The engine reads a cert bundle
+  folder **admin-side once** before dialing any host: `<folder>\root\*.cer` -> **Root**,
+  `<folder>\Intermediate\*.cer` -> **CA**, `<folder>\Untrusted\*.cer` -> **Disallowed**,
+  loose `<folder>\*.cer` -> **Root** (case-insensitive). Missing folder / zero certs ->
+  ABORT, nothing dialed. Per host the certs are added **ADDITIVELY** (only thumbprints
+  not already present; nothing is ever removed). Endpoint-fixable set is now **six**;
+  **action count is 10** (scan + import + 6 fix-* + run-all + version-check). `sstPath`
+  stays gone - `certBundleFolder` replaces it.
+- **Shipped DoD trust bundle + auto-default (finalized v1.6.0)** - the repo now ships the
+  base bundle at **`Packages\DoD-Certs`** (subfolders `Root\` `Intermediate\` `Untrusted\`,
+  89 `.cer`). Both `fix-pki` and `run-all` DEFAULT their cert-bundle path to it: when
+  `certBundleFolder` is blank/whitespace the engine falls back to
+  **`Get-C2cDefaultCertBundlePath`** (= `$PSScriptRoot\..\Packages\DoD-Certs`, mirroring
+  `Get-C2cBaselinePath`) **only when that folder exists and holds >=1 `.cer`**. An
+  operator-supplied path ALWAYS wins; the resolver **`Resolve-C2cCertBundleFolder`** tags
+  the source `operator-supplied` / `shipped default` and the engine logs which bundle was
+  used + its cert count. Only when BOTH the supplied path is blank AND the shipped default
+  is missing/empty does the prior behaviour hold: `fix-pki` **ABORTS** with a clear error,
+  `run-all` **SKIPS** PkiRoots per host. Net effect: one-click `fix-pki` (nothing typed)
+  just works against the shipped bundle.
+- **`version-check`** (read-only) - per host read BOTH uninstall hives for a product
+  DisplayName substring and compare the DisplayVersion to an optional target.
+- **WinRM-heal** (opt-in `winrmHeal`, default off, RPC-based, often blocked) - a shared
+  best-effort pre-step wired into the fix fan-out AND version-check that tries remote SCM
+  recovery of a stopped WinRM service for a host whose TCP 5985 probe failed, then
+  re-probes. Self-guarded (never acts on the dispatcher; reuses `Test-JanetC2cHostIsSelf`).
 
-(History: v1.4.0 split the old monolithic `fix` into per-pillar actions + `run-all`.)
+(History: v1.5.0 dropped the `.sst` fixer + made Monitoring verify Tanium is installed;
+v1.4.0 split the old monolithic `fix` into per-pillar actions + `run-all`. Monitoring
+still verifies the Tanium software is installed via the uninstall registry - the probe
+helper is now `Get-C2cInstalledProduct -Match <substr>` with `Get-C2cTaniumInstalled` a
+thin wrapper, so scan check #1, `fix-monitoring` and `version-check` share ONE probe.)
+
+### `version-check` - "Version Check (read-only)" (`destructive=false`)
+
+Columns `Host, Ping, Installed, Version, Status, Detail`. Inputs: `targets` (hostlist,
+required), `productMatch` (text, required - DisplayName substring), `targetVersion`
+(text, optional), `winrmHeal` (bool, default false), `threads` (int, default 16; 1-32),
+`attemptOffline` (bool, default false). Per host: TCP reachability (+ optional WinRM-heal),
+then `Invoke-Command` reads both the 64- and 32-bit uninstall hives via the shared
+`Get-C2cInstalledProduct`. Status = **UP TO DATE / OUTDATED / NEWER** (System.Version
+compare when both parse, else ordinal string compare) when a target is given, else
+**INSTALLED / NOT INSTALLED**; unreachable -> **OFFLINE**. No admin session, no confirm.
 
 ### `import` - "Import C2C Compliance CSV" (read-only, `destructive=false`)
 
@@ -139,7 +169,7 @@ canonical pillar (recording Failed vs Audit):
 | Endpoint Data At Rest Encryption, Bitlocker | **Encryption** | fixable HERE (Fix Encryption: resume / ENABLE BitLocker) |
 | Anti-malware, MDE Health | **AntiMalware** | fixable HERE (Fix AntiMalware: heal Defender / MDE) |
 | Patching Compliance, Patching | **Patches** | endpoint-kickable HERE (Fix Patches: MECM scan / eval) |
-| PKI Trust Roots | **PkiRoots** | **ROUTED** - DoD roots via GPO / desk-side (.sst import not available) |
+| PKI Trust Roots | **PkiRoots** | fixable HERE (Fix PKI Trust Roots: install the DoD trust bundle .cer into Root/CA/Disallowed) |
 | Vulnerability Compliance, Vulnerabilities | **Vuln** | ACAS / Reports / KEV tools |
 | OS Version | **OSVersion** | Windows Upgrade tool |
 | STIG Check | **STIG** | Reports / STIG |
@@ -150,10 +180,9 @@ host, worst row wins (Non-Compliant over Compliant; tie -> more failed pillars).
 Summary: `@{ total; compliant; nonCompliant; nonCompliantHosts=@(...);
 pillars=@(@{ name; failedCount; hosts=@(...); routing });
 runAllPlan=@(@{ host; pillars=@(...) }) }`. `runAllPlan` is each non-compliant host
-plus ONLY its endpoint-fixable failed pillars (PkiRoots is NOT fixable, so it never
-enters the plan) - the exact JSON the view intersects with the checked cards for the
-`run-all` action. Unknown rules are surfaced verbatim, never dropped; PkiRoots is still
-REPORTED as a routed pillar with its host count.
+plus ONLY its endpoint-fixable failed pillars (PkiRoots is fixable again in v1.6.0, so it
+DOES enter the plan) - the exact JSON the view intersects with the checked cards for the
+`run-all` action. Unknown rules are surfaced verbatim, never dropped.
 
 The view renders an **IMPORT C2C COMPLIANCE CSV** card (file picker + Import) below
 Target Computers, plus **hero StatCards** that populate after import: Total hosts /
@@ -184,9 +213,14 @@ host's OWN checked set. The worker takes the pillar list PER host job.
 | `fix-antimalware` | Fix AntiMalware (Defender) | - | WinDefend/Sense Automatic + Started; enable RTP; `Update-MpSignature` if age > 7d; re-read. PROTECTED / ALREADY PROTECTED / FAIL. Missing MDE Sense is a note. |
 | `fix-patches` | Fix Patches (MECM cycle) | - | `Invoke-CimMethod root\ccm SMS_Client TriggerSchedule` {..113} then {..108}. PATCH CYCLE KICKED / FAIL (root\ccm unreachable). |
 | `fix-encryption` | Fix Encryption (BitLocker) | `enableEncryption` (bool, default false) | Resume suspended protectors (PROTECTION RESUMED / ALREADY ENCRYPTED). If `enableEncryption` and FullyDecrypted: FVE policy assert -> reuse/add RecoveryPassword protector -> escrow Entra-first / AD fallback -> Enable-BitLocker XtsAes256 (ENCRYPTION STARTED). Escrow-first, fail-closed; TPM-ready + domain-joined only; recovery password never emitted. |
+| `fix-pki` | Fix PKI Trust Roots | `certBundleFolder` (text, optional - blank auto-uses the shipped `Packages\DoD-Certs` bundle) | Read the DoD trust bundle folder admin-side once (root\ -> Root, Intermediate\ -> CA, Untrusted\ -> Disallowed, loose *.cer -> Root); a BLANK path falls back to the shipped default (`Get-C2cDefaultCertBundlePath`). Only a supplied-blank AND missing/empty default ABORTS before any dial. Per host open each store ReadWrite and add ONLY thumbprints not already present (never remove). ROOTS INSTALLED / ROOTS ALREADY PRESENT / FAIL. |
 
-The **`fix-pki` action was removed** in v1.5.0 (no `.sst` import path). PkiRoots is a
-routed pillar only.
+All fix actions also carry the opt-in `winrmHeal` (bool, default false) toggle - the
+RPC-based best-effort WinRM-service recovery for hosts whose 5985 probe fails (often
+blocked; never targets the dispatcher). `fix-pki`'s `certBundleFolder` is the folder/`.cer`
+replacement for the removed `.sst` mechanism (base64 certs cross the WinRM boundary; the
+`X509Store` add is ADDITIVE by thumbprint). The installer is `Add-C2cBundleToStores` (an
+injectable store-opener makes the additive-only guard unit-testable against a fake store).
 
 **Result labels**: the underlying raw tokens (FIXED / NOCHANGE / STARTED / KICKED /
 SKIP / FAIL / IN PROGRESS) stay machine-stable and drive the host-status rollup; a
@@ -197,10 +231,15 @@ error, `SKIP` -> warn, `ALREADY*` / `IN PROGRESS` -> info, everything else -> ok
 ### `run-all` - "RUN ALL - Fix Imported Non-Compliant Hosts"
 
 Inputs: `plan` (type `textarea`, the import's `runAllPlan` JSON, required);
-`enableEncryption` (bool, default false); `confirm`; `threads`; `attemptOffline`.
-(There is **no `sstPath`** input anymore.) The engine validates the plan JSON:
-non-endpoint-fixable pillar names are dropped per host with a warn log line (PkiRoots /
-Vuln / OSVersion / STIG); a host left with zero fixable pillars gets an info/SKIPPED row
+`enableEncryption` (bool, default false); `certBundleFolder` (text, **optional** - only
+needed if a host plans PkiRoots, and a BLANK value auto-uses the shipped
+`Packages\DoD-Certs` default); `winrmHeal` (bool, default false); `confirm`; `threads`;
+`attemptOffline`. (There is **no `sstPath`** input anymore.) The engine validates the plan
+JSON: non-endpoint-fixable pillar names are dropped per host with a warn log line (Vuln /
+OSVersion / STIG); if a host plans **PkiRoots but no valid cert bundle** could be resolved
+(none supplied AND the shipped `Packages\DoD-Certs` default missing/empty), PkiRoots is
+skipped for that host with an info note (the run continues); a host left with
+zero fixable pillars gets an info/SKIPPED row
 `nothing endpoint-fixable (Vuln/OSVersion/STIG route elsewhere)` and is never dialed;
 each dialed host runs ONLY its planned pillars. Self-guard + wrong-box + watchdog +
 cancel exactly like the per-pillar fixes. Summary adds per-pillar `fixed/nochange/fail`
@@ -214,16 +253,23 @@ tallies (`perPillar`) alongside the per-status host counts.
 
 After a successful import the view renders, under a **FIXABLE HERE** section, one
 compact card per fixable pillar present (Monitoring / Firewall / Encryption /
-AntiMalware / Patches). Each card = a checkbox (checked by default) + the pillar title
-+ its affected-host count (click to review the host list in a dialog) + a per-card
-**Fix on N** button that dispatches `fix-<pillar>` with `targets` = that pillar's
-imported hosts. The **Encryption** card carries the ENABLE-BitLocker toggle. Under a
-**ROUTED ELSEWHERE** section, non-runnable info cards show Vuln / OSVersion / STIG /
-PkiRoots with their host counts (never dialed). A **Select all / Select none** pair, a
-single shared `FIX` confirm input + threads / attempt-offline / CANCEL RUN, and a
-prominent **RUN ALL** button live in the fix-card header. RUN ALL builds the plan from
-the CHECKED fixable cards (each host mapped to only its own checked failed pillars,
-intersected with the imported `runAllPlan`) and arms a `ctx.arm` dialog listing the
-per-pillar host counts (encryption only STARTS if the Encryption card's ENABLE toggle
-is ticked). All fix runs stream into the shared Results grid + Activity log; Export CSV
-is retained. The read-only Scan keeps its own Target Computers list.
+AntiMalware / Patches / **PKI Trust Roots**). Each card = a checkbox (checked by default)
++ the pillar title + its affected-host count (click to review the host list in a dialog)
++ a per-card **Fix on N** button that dispatches `fix-<pillar>` with `targets` = that
+pillar's imported hosts. The **Encryption** card carries the ENABLE-BitLocker toggle; the
+**PKI Trust Roots** card uses the shared **PKI cert bundle folder** path input in the
+fix-card header, which now DEFAULTS to the shipped bundle - its placeholder/hint reads
+"leave blank -> shipped DoD bundle (Packages\DoD-Certs)", so one-click fix-pki works with
+nothing typed; type a folder only to override (applies to the PKI card and RUN ALL). Under a **ROUTED
+ELSEWHERE** section, non-runnable info cards show Vuln / OSVersion / STIG with their host
+counts (never dialed). A **Select all / Select none** pair, a single shared `FIX` confirm
+input + threads / attempt-offline / a shared **Recover WinRM (RPC)** toggle + the PKI
+cert bundle path + CANCEL RUN, and a prominent **RUN ALL** button live in the fix-card
+header. RUN ALL builds the plan from the CHECKED fixable cards (each host mapped to only
+its own checked failed pillars, intersected with the imported `runAllPlan`) and arms a
+`ctx.arm` dialog listing the per-pillar host counts (encryption only STARTS if the
+Encryption card's ENABLE toggle is ticked; PkiRoots is skipped per host if no bundle
+folder is set). A separate read-only **VERSION CHECK** card (productMatch + optional
+targetVersion + a WinRM-heal toggle) runs `version-check` across the Target Computers
+list. Credentials stay universal (no per-tool cred control). All runs stream into the
+shared Results grid + Activity log; Export CSV is retained.

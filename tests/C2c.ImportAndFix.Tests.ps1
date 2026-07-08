@@ -1,8 +1,8 @@
 ﻿# =============================================================================
 #  C2c.ImportAndFix.Tests.ps1 - Pester 3.4 tests for the C2C action side
-#  (v1.5.0): the Tanium "C2C Compliance Status" CSV IMPORT parser (incl. the
-#  runAllPlan + PkiRoots now ROUTED, not fixable) and the destructive PER-PILLAR
-#  fix guards (fix-monitoring / fix-firewall / fix-antimalware, etc.).
+#  (v1.6.0): the Tanium "C2C Compliance Status" CSV IMPORT parser (incl. the
+#  runAllPlan + PkiRoots BACK as a fixable pillar) and the destructive PER-PILLAR
+#  fix guards (fix-monitoring / fix-firewall / fix-antimalware / fix-pki, etc.).
 #
 #  All tests exercise the PUBLIC contract (Invoke-JanetToolAction) so no
 #  internal helper is shimmed and NO WinRM call ever leaves this box:
@@ -103,11 +103,11 @@ Failed Rule - Host Firewall",,,HOSTD.area52.afnoapps.usaf.mil,1
         $summary.compliant    | Should Be 1
     }
 
-    It 'surfaces PkiRoots as a ROUTED pillar (GPO / desk-side), never fixable' {
+    It 'surfaces PkiRoots as a FIXABLE pillar (DoD trust bundle .cer), v1.6.0' {
         $pki = @($summary.pillars | Where-Object { $_.name -eq 'PkiRoots' })[0]
         $pki | Should Not BeNullOrEmpty
-        $pki.routing | Should Match '(?i)GPO'
-        $pki.routing | Should Not Match '(?i)fixable HERE'
+        $pki.routing | Should Match '(?i)fixable HERE'
+        $pki.routing | Should Match '(?i)\.cer'
         # HOSTD failed PkiRoots + Firewall - the failing-host count includes HOSTD.
         @($pki.hosts) -contains 'HOSTD' | Should Be $true
     }
@@ -121,8 +121,8 @@ Failed Rule - Host Firewall",,,HOSTD.area52.afnoapps.usaf.mil,1
     It 'emits a runAllPlan of each host + ONLY its endpoint-fixable failed pillars (verbatim for run-all)' {
         $plan = @($summary.runAllPlan)
         # HOSTA has fixable failed pillars (Encryption + AntiMalware); HOSTD has Firewall
-        # (fixable) but NOT PkiRoots (routed); HOSTB fails only Vuln (routes off-tool) so it
-        # is omitted; the unknown rule is not fixable either.
+        # AND PkiRoots (both fixable in v1.6.0); HOSTB fails only Vuln (routes off-tool) so
+        # it is omitted; the unknown rule is not fixable either.
         $plan.Count | Should Be 2
         $pa = @($plan | Where-Object { $_.host -eq 'HOSTA' })[0]
         $pa | Should Not BeNullOrEmpty
@@ -132,7 +132,7 @@ Failed Rule - Host Firewall",,,HOSTD.area52.afnoapps.usaf.mil,1
         $pd = @($plan | Where-Object { $_.host -eq 'HOSTD' })[0]
         $pd | Should Not BeNullOrEmpty
         @($pd.pillars) -contains 'Firewall'    | Should Be $true
-        @($pd.pillars) -contains 'PkiRoots'    | Should Be $false
+        @($pd.pillars) -contains 'PkiRoots'    | Should Be $true
         @($plan | Where-Object { $_.host -eq 'HOSTB' }).Count | Should Be 0
     }
 
@@ -175,18 +175,26 @@ Describe 'C2C per-pillar fix - self-guard drops the dispatcher host' {
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C fix-pki - the PKI-roots fixer was REMOVED in v1.5.0' {
+Describe 'C2C fix-pki - the DoD trust-bundle installer is BACK in v1.6.0' {
 
-    It 'no longer routes fix-pki to a fixer (unknown action - nothing dialed, no rows)' {
-        $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'FIX' }
-        @($out.Rows).Count | Should Be 0
-        # unknown action: the dispatcher returns an empty result (no fix ran).
-        @($out.Result.rows).Count | Should Be 0
+    It 'the manifest exposes a destructive fix-pki action with a certBundleFolder input' {
+        $man = Get-JanetToolManifest
+        $a = @($man.actions | Where-Object { $_.id -eq 'fix-pki' })[0]
+        $a | Should Not BeNullOrEmpty
+        [bool]$a.destructive | Should Be $true
+        @($a.inputs | Where-Object { $_.name -eq 'certBundleFolder' }).Count | Should Be 1
     }
 
-    It 'the manifest exposes no fix-pki action' {
-        $man = Get-JanetToolManifest
-        @($man.actions | Where-Object { $_.id -eq 'fix-pki' }).Count | Should Be 0
+    It 'ABORTS fix-pki when the cert bundle folder is missing/empty (nothing dialed, no rows)' {
+        $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'FIX'; certBundleFolder = 'X:\no\such\bundle\folder' }
+        @($out.Rows).Count | Should Be 0
+        $out.Result.summary.rejected | Should Be $true
+    }
+
+    It 'still enforces the confirm-word gate FIRST (bad confirm rejects before any bundle read)' {
+        $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'nope'; certBundleFolder = 'X:\whatever' }
+        $out.Result.summary.rejected | Should Be $true
+        @($out.Rows).Count | Should Be 0
     }
 }
 

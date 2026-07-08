@@ -275,13 +275,13 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - C2C Nemesis v1.5.0, per-pillar fix actions + run-all (no PKI fixer)' {
+Describe 'C2C manifest - C2C Nemesis v1.6.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
 
     $man = Get-JanetToolManifest
     $fix = @($man.actions | Where-Object { $_.id -eq 'fix-encryption' })[0]
     $inp = @($fix.inputs | Where-Object { $_.name -eq 'enableEncryption' })[0]
     $mon = @($man.actions | Where-Object { $_.id -eq 'fix-monitoring' })[0]
-    $fixIds  = @('fix-monitoring','fix-firewall','fix-antimalware','fix-patches','fix-encryption')
+    $fixIds  = @('fix-monitoring','fix-firewall','fix-antimalware','fix-patches','fix-encryption','fix-pki')
     $destIds = @($fixIds + 'run-all')
 
     It 'reports the display name C2C Nemesis' {
@@ -290,15 +290,21 @@ Describe 'C2C manifest - C2C Nemesis v1.5.0, per-pillar fix actions + run-all (n
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.5.0' {
-        $man.version | Should Be '1.5.0'
+    It 'reports tool version 1.6.0' {
+        $man.version | Should Be '1.6.0'
     }
-    It 'exposes 8 actions: scan + import + five per-pillar fixes + run-all' {
-        @($man.actions).Count | Should Be 8
+    It 'exposes 10 actions: scan + import + six per-pillar fixes + run-all + version-check' {
+        @($man.actions).Count | Should Be 10
     }
-    It 'has scan + import (read-only) and all fix-* + run-all (destructive)' {
-        (@($man.actions | Where-Object { $_.id -eq 'scan' })[0].destructive)   | Should Be $false
-        (@($man.actions | Where-Object { $_.id -eq 'import' })[0].destructive) | Should Be $false
+    It 'has the exact action id set' {
+        $ids = @($man.actions | ForEach-Object { $_.id } | Sort-Object)
+        $expect = @('fix-antimalware','fix-encryption','fix-firewall','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
+        ($ids -join ',') | Should Be ($expect -join ',')
+    }
+    It 'has scan + import + version-check (read-only) and all fix-* + run-all (destructive)' {
+        (@($man.actions | Where-Object { $_.id -eq 'scan' })[0].destructive)          | Should Be $false
+        (@($man.actions | Where-Object { $_.id -eq 'import' })[0].destructive)        | Should Be $false
+        (@($man.actions | Where-Object { $_.id -eq 'version-check' })[0].destructive) | Should Be $false
         foreach ($id in $destIds) {
             $a = @($man.actions | Where-Object { $_.id -eq $id })[0]
             $a | Should Not BeNullOrEmpty
@@ -308,12 +314,25 @@ Describe 'C2C manifest - C2C Nemesis v1.5.0, per-pillar fix actions + run-all (n
     It 'the legacy monolithic "fix" action id is REMOVED (clean break)' {
         @($man.actions | Where-Object { $_.id -eq 'fix' }).Count | Should Be 0
     }
-    It 'the fix-pki action is REMOVED (v1.5.0 dropped the PKI-roots fixer)' {
-        @($man.actions | Where-Object { $_.id -eq 'fix-pki' }).Count | Should Be 0
+    It 'the fix-pki action is BACK, with the certBundleFolder input (folder/.cer bundle, not .sst)' {
+        $pki = @($man.actions | Where-Object { $_.id -eq 'fix-pki' })[0]
+        $pki | Should Not BeNullOrEmpty
+        @($pki.inputs | Where-Object { $_.name -eq 'certBundleFolder' }).Count | Should Be 1
     }
-    It 'no action declares an sstPath input anymore (run-all included)' {
+    It 'no action declares an sstPath input (the .sst path stays gone; certBundleFolder replaces it)' {
         $withSst = @($man.actions | Where-Object { @($_.inputs | Where-Object { $_.name -eq 'sstPath' }).Count -gt 0 })
         @($withSst).Count | Should Be 0
+    }
+    It 'version-check declares productMatch (text) + targetVersion (text) + winrmHeal (bool)' {
+        $vc = @($man.actions | Where-Object { $_.id -eq 'version-check' })[0]
+        @($vc.inputs | Where-Object { $_.name -eq 'productMatch' })[0].type  | Should Be 'text'
+        @($vc.inputs | Where-Object { $_.name -eq 'targetVersion' })[0].type | Should Be 'text'
+        @($vc.inputs | Where-Object { $_.name -eq 'winrmHeal' })[0].type      | Should Be 'bool'
+    }
+    It 'run-all declares an optional certBundleFolder + a winrmHeal input' {
+        $ra = @($man.actions | Where-Object { $_.id -eq 'run-all' })[0]
+        @($ra.inputs | Where-Object { $_.name -eq 'certBundleFolder' }).Count | Should Be 1
+        @($ra.inputs | Where-Object { $_.name -eq 'winrmHeal' }).Count        | Should Be 1
     }
     It 'the fix-encryption action declares the enableEncryption input (bool)' {
         $inp | Should Not BeNullOrEmpty

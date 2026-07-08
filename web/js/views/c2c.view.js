@@ -10,16 +10,17 @@
       report to the log, and emits one verdict row per host. Changes NOTHING and
       is NOT gated on an admin session.
 
-   2. IMPORT-DRIVEN FIX (v1.5.0, destructive, admin-session gated) - mirrors the
+   2. IMPORT-DRIVEN FIX (v1.6.0, destructive, admin-session gated) - mirrors the
       ACAS Nemesis Updater idiom: IMPORT the Tanium C2C Compliance CSV, and the
       import populates one CARD PER FIXABLE PILLAR (Monitoring / Firewall /
-      Encryption / AntiMalware / Patches), each carrying its OWN affected-host
-      list. Each card = checkbox (checked by default) + affected-host count +
-      View hosts + a per-card Fix; the Encryption card carries the ENABLE
+      Encryption / AntiMalware / Patches / PKI Trust Roots), each carrying its OWN
+      affected-host list. Each card = checkbox (checked by default) + affected-host
+      count + View hosts + a per-card Fix; the Encryption card carries the ENABLE
       BitLocker toggle. RUN ALL fixes every CHECKED card's hosts (each host, its
-      own checked failed pillars) in one pass. PkiRoots / Vuln / OSVersion / STIG
-      are shown as ROUTED-ELSEWHERE info cards (never dialed). The .sst PKI fixer
-      was dropped in v1.5.0.
+      own checked failed pillars) in one pass. Vuln / OSVersion / STIG are shown as
+      ROUTED-ELSEWHERE info cards (never dialed). fix-pki is a folder/.cer DoD-roots
+      installer (the .sst mechanism was dropped in v1.5.0); its cert-bundle folder
+      DEFAULTS to the shipped Packages\DoD-Certs bundle when left blank (one-click).
 
    Credentials are UNIVERSAL (shell header top-right) - this view renders NO
    per-tool credential control; it only READS ctx.session.state.credSet.
@@ -47,8 +48,9 @@
   ];
 
   // Endpoint-fixable pillars (drive the import-built FIX cards + RUN ALL). Must
-  // match the engine's $script:C2cFixablePillars (v1.5.0 - PkiRoots dropped).
-  var FIXABLE = ['Monitoring', 'Firewall', 'Encryption', 'AntiMalware', 'Patches'];
+  // match the engine's $script:C2cFixablePillars (v1.6.0 - PkiRoots back as the
+  // folder/.cer-bundle DoD-roots installer).
+  var FIXABLE = ['Monitoring', 'Firewall', 'Encryption', 'AntiMalware', 'Patches', 'PkiRoots'];
 
   // Per-fixable-pillar card metadata: canonical key -> action id + display + blurb.
   var FIX_META = {
@@ -56,38 +58,46 @@
     Firewall:    { action: 'fix-firewall',    label: 'Firewall',               desc: 'Enable any disabled Domain / Private / Public firewall profile.' },
     Encryption:  { action: 'fix-encryption',  label: 'Encryption (BitLocker)', desc: 'Resume suspended protectors; opt-in ENABLE on FullyDecrypted OS volumes.' },
     AntiMalware: { action: 'fix-antimalware', label: 'AntiMalware (Defender)', desc: 'Start WinDefend / Sense (Automatic), enable RTP, update stale signatures.' },
-    Patches:     { action: 'fix-patches',     label: 'Patches (MECM cycle)',   desc: 'Trigger the MECM SUM scan (113) + eval (108); installs run async.' }
+    Patches:     { action: 'fix-patches',     label: 'Patches (MECM cycle)',   desc: 'Trigger the MECM SUM scan (113) + eval (108); installs run async.' },
+    PkiRoots:    { action: 'fix-pki',         label: 'PKI Trust Roots',        desc: 'Install the DoD trust bundle .cer ADDITIVELY into Root/CA/Disallowed (needs the cert bundle folder below).' }
   };
 
   // Routed-elsewhere pillars: shown as non-runnable info cards (host counts only).
   var ROUTED = [
     { key: 'Vuln',      label: 'Vuln (ACAS / KEV)',   route: 'ACAS / Reports / KEV tools' },
     { key: 'OSVersion', label: 'OS Version',          route: 'Windows Upgrade tool' },
-    { key: 'STIG',      label: 'STIG',                route: 'Reports / STIG' },
-    { key: 'PkiRoots',  label: 'PKI Trust Roots',     route: 'DoD roots via GPO / desk-side (.sst import not available)' }
+    { key: 'STIG',      label: 'STIG',                route: 'Reports / STIG' }
   ];
 
   function statusCellCls(v) {
     switch (String(v)) {
-      // green: no failing pillars (scan) / at least one pillar fixed or encryption started (fix).
+      // green: no failing pillars (scan) / at least one pillar fixed or encryption started (fix)
+      // / version at-or-installed.
       case 'READY':
       case 'FIXED':
-      case 'STARTED': return 'st-ok';
-      // red: at least one scored pillar failed -> predicted quarantine; or unreachable; or the fix failed.
+      case 'STARTED':
+      case 'UP TO DATE':
+      case 'INSTALLED': return 'st-ok';
+      // red: at least one scored pillar failed -> predicted quarantine; or unreachable; the fix
+      // failed; or an outdated product version.
       case 'QUARANTINE RISK':
       case 'OFFLINE':
+      case 'OUTDATED':
       case 'FAILED': return 'st-bad';
       // amber: no fail but a check errored, the host couldn't be evaluated, operator cancel,
-      // a partial fix, or a self/DNS skip.
+      // a partial fix, a self/DNS skip, or product not installed.
       case 'CHECK ERRORS':
       case 'Cancelled':
       case 'ERROR':
       case 'DNS MISMATCH':
       case 'PARTIAL':
+      case 'NOT INSTALLED':
       case 'SKIPPED': return 'st-warn';
-      // blue: nothing changed (fix), encryption already running, or live in-progress phases streamed by the engine.
+      // blue: nothing changed (fix), encryption already running, a newer-than-target version,
+      // or live in-progress phases streamed by the engine.
       case 'NO CHANGE':
       case 'IN PROGRESS':
+      case 'NEWER':
       case 'Scanning':
       case 'Probing':
       case 'Working': return 'st-info';
@@ -202,6 +212,22 @@
 
       var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/445 probe fails.' });
       fixOffline.style.margin = '0'; fixControls.appendChild(fixOffline);
+
+      var fixWinrmHeal = ui.checkbox('Recover WinRM via RPC if 5985 is down (best-effort; often blocked - default off)', { title: 'Opt-in. For a host whose TCP 5985 probe fails, try remote SCM recovery over RPC (Get-Service / Start-Service / Set-Service Automatic against the target) then re-probe. RPC is frequently blocked on AFNET, so leave this off unless you know it is allowed. Never acts on the dispatcher host.' });
+      fixWinrmHeal.style.margin = '0'; fixControls.appendChild(fixWinrmHeal);
+
+      // Shared DoD trust-bundle folder path (used by the PKI Trust Roots card + RUN ALL).
+      var pkiRow = el('div'); pkiRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+      pkiRow.appendChild(ui.label('PKI cert bundle folder:'));
+      var pkiBundleInput = ui.input({ title: 'Server-readable path (e.g. a UNC path) to the DoD trust bundle folder holding root\\*.cer, Intermediate\\*.cer, Untrusted\\*.cer (and/or loose *.cer -> Root). Read admin-side once; certs are added ADDITIVELY to LocalMachine Root/CA/Disallowed. LEAVE BLANK to use the SHIPPED DoD bundle (Packages\\DoD-Certs) - one-click fix-pki. Type a folder to override with your own.' });
+      pkiBundleInput.placeholder = 'leave blank -> shipped DoD bundle (Packages\\DoD-Certs)';
+      pkiBundleInput.style.cssText += ';flex:1;min-width:220px;font-size:11.5px';
+      pkiRow.appendChild(pkiBundleInput);
+      fixControls.appendChild(pkiRow);
+      var pkiHint = el('div', 'muted', 'Default: the shipped DoD trust bundle (Packages\\DoD-Certs) - leave blank to use it, or type a folder to override.');
+      pkiHint.style.cssText = 'font-size:11px;line-height:1.35;margin:-2px 0 0 2px';
+      fixControls.appendChild(pkiHint);
+
       fixCard.appendChild(fixControls);
 
       // fixable-card body + routed-card body (populated on import)
@@ -219,9 +245,9 @@
         + 'Predicts whether each host would be QUARANTINED. 9 checks are scored on the endpoint; '
         + '2 are EXT (external / server-side) - reported but never scored. '
         + 'This tool also IMPORTS the Tanium C2C Compliance report (above) and FIXES the '
-        + 'endpoint-fixable pillars - Monitoring, Firewall, Encryption, AntiMalware and Patches - '
+        + 'endpoint-fixable pillars - Monitoring, Firewall, Encryption, AntiMalware, Patches and PKI Trust Roots - '
         + 'per card or all at once (RUN ALL). '
-        + 'PKI roots route to GPO / desk-side, Vuln to ACAS / Reports / KEV, OS Version to Windows Upgrade, STIG to Reports.';
+        + 'Vuln routes to ACAS / Reports / KEV, OS Version to Windows Upgrade, STIG to Reports.';
       infoCard.appendChild(intro);
       var list = el('ol'); list.style.cssText = 'margin:0 0 8px 18px;padding:0;font-size:12px;line-height:1.5;color:var(--text)';
       CHECKS.forEach(function (c) {
@@ -250,6 +276,32 @@
       threadsRow.appendChild(threadsInput);
       optCard.appendChild(threadsRow);
       left.appendChild(optCard);
+
+      // --- VERSION CHECK (read-only; uses the Target Computers list above) ---
+      var verCard = sectionCard('VERSION CHECK (read-only)', 'cyan');
+      var verIntro = el('div'); verIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
+      verIntro.textContent = 'Read the 64/32-bit uninstall registry on each Target Computer for a product whose DisplayName contains the string below, and (optionally) compare its version to a target. Changes nothing. Streams into the same Results grid.';
+      verCard.appendChild(verIntro);
+      var verMatchRow = el('div'); verMatchRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap';
+      verMatchRow.appendChild(ui.label('DisplayName contains:'));
+      var verMatchInput = ui.input({ title: 'Substring matched (case-insensitive) against each installed product DisplayName, e.g. "Google Chrome".' });
+      verMatchInput.placeholder = 'Google Chrome';
+      verMatchInput.style.cssText += ';flex:1;min-width:140px';
+      verMatchRow.appendChild(verMatchInput);
+      verCard.appendChild(verMatchRow);
+      var verTgtRow = el('div'); verTgtRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap';
+      verTgtRow.appendChild(ui.label('Target version (optional):'));
+      var verTgtInput = ui.input({ title: 'Optional. When set, the installed version is compared with System.Version (else an ordinal string compare) -> UP TO DATE / OUTDATED / NEWER. Leave blank for INSTALLED / NOT INSTALLED only.' });
+      verTgtInput.placeholder = '130.0.6723.117';
+      verTgtInput.style.cssText += ';flex:1;min-width:140px';
+      verTgtRow.appendChild(verTgtInput);
+      verCard.appendChild(verTgtRow);
+      var verHeal = ui.checkbox('Recover WinRM via RPC if 5985 is down (best-effort; often blocked - default off)', { title: 'Opt-in. For a host whose TCP 5985 probe fails, try remote SCM recovery over RPC then re-probe before reading. RPC is frequently blocked on AFNET. Never acts on the dispatcher host.' });
+      verHeal.style.margin = '0 0 8px'; verCard.appendChild(verHeal);
+      var verBtn = ui.button('VERSION CHECK', { variant: 'cyan', size: 'sm', title: 'Read-only version check across the Target Computers list.' });
+      verBtn.onclick = function () { doVersionCheck(); };
+      verCard.appendChild(verBtn);
+      left.appendChild(verCard);
 
       // --- Action bar (single Scan button via RunBar; read-only, NO admin-session guard) ---
       var actionCard = ui.card({}); actionCard.style.cssText += ';display:flex;flex-direction:column;gap:8px';
@@ -284,9 +336,9 @@
         ],
         rowClass: function (r) {
           var s = String(r.Status);
-          if (s === 'READY' || s === 'FIXED' || s === 'STARTED') return 'row-ok';
-          if (s === 'QUARANTINE RISK' || s === 'OFFLINE' || s === 'FAILED') return 'row-bad';
-          if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH' || s === 'PARTIAL' || s === 'SKIPPED') return 'row-warn';
+          if (s === 'READY' || s === 'FIXED' || s === 'STARTED' || s === 'UP TO DATE' || s === 'INSTALLED') return 'row-ok';
+          if (s === 'QUARANTINE RISK' || s === 'OFFLINE' || s === 'FAILED' || s === 'OUTDATED') return 'row-bad';
+          if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH' || s === 'PARTIAL' || s === 'SKIPPED' || s === 'NOT INSTALLED') return 'row-warn';
           return '';
         }
       });
@@ -353,8 +405,10 @@
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsInput.disabled = on; clearBtn.disabled = on;
         importBtn.disabled = on;
+        verBtn.disabled = on; verMatchInput.disabled = on; verTgtInput.disabled = on; verHeal._cb.disabled = on;
         selAllBtn.disabled = on; selNoneBtn.disabled = on; runAllBtn.disabled = on;
         fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
+        fixWinrmHeal._cb.disabled = on; pkiBundleInput.disabled = on;
         if (encEnableCb) encEnableCb._cb.disabled = on;
         // per-card Fix buttons
         Array.prototype.forEach.call(fixBody.querySelectorAll('[data-fixbtn]'), function (b) { b.disabled = on; });
@@ -412,6 +466,66 @@
           threads: threads()
         }, { keyOf: keyByHost, destructive: false });
         bindRun('C2C Readiness Scan');
+      }
+
+      // ---- Version Check (read-only; no admin session, no confirm) ----
+      function doVersionCheck() {
+        if (isRunning()) return;
+        var hosts = targets.hosts();
+        if (!hosts.length) { alertDialog('No Computers', 'Add at least one computer to the Target Computers list before a version check.'); return; }
+        var match = String(verMatchInput.value || '').trim();
+        if (!match) { alertDialog('No product', 'Enter a DisplayName substring (e.g. Google Chrome) to check.'); return; }
+        var tgt = String(verTgtInput.value || '').trim();
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C Version Check "' + match + '"' + (tgt ? ' vs ' + tgt : '') + ' on ' + hosts.length + ' computer(s)');
+        lockInputs(true);
+        run = ctx.run('version-check', {
+          targets: hosts.join('\n'),
+          productMatch: match,
+          targetVersion: tgt,
+          winrmHeal: verHeal._cb.checked,
+          attemptOffline: offlineCb._cb.checked,
+          threads: threads()
+        }, { keyOf: keyByHost, destructive: false });
+        bindVersionRun(match, tgt);
+      }
+
+      function bindVersionRun(match, tgt) {
+        if (unsub) unsub();
+        unsub = run.subscribe({
+          status: function (t) { prog.setPhase(t); runbar.setStatus(t, 'st-info'); },
+          progress: function (p) { prog.setProgress(p.done, p.total); countLine.textContent = p.done + ' / ' + p.total; },
+          row: function (r) { grid.upsert(r); },
+          log: function (l) { log.append(l); },
+          error: function (e) { log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' }); },
+          active: function (a) {
+            runbar.setActive(a);
+            if (!a) {
+              lockInputs(false);
+              var c = verTally();
+              countLine.textContent = c.total + ' / ' + c.total;
+              var bad = c.outdated + c.offline;
+              log.append({ text: '[' + ts() + '] FINISHED version check "' + match + '"' + (tgt ? ' vs ' + tgt : '') + '. UP TO DATE=' + c.upToDate + '  OUTDATED=' + c.outdated + '  NEWER=' + c.newer + '  INSTALLED=' + c.installed + '  NOT INSTALLED=' + c.notInstalled + '  OFFLINE=' + c.offline, level: bad ? 'warn' : 'ok' });
+              runbar.setStatus('Version check done - ' + (tgt ? ('UpToDate ' + c.upToDate + ' / Outdated ' + c.outdated + ' / Newer ' + c.newer) : ('Installed ' + c.installed + ' / Not ' + c.notInstalled)) + ' / Offline ' + c.offline, bad ? 'st-bad' : 'st-ok');
+            }
+          }
+        });
+      }
+
+      function verTally() {
+        var t = { upToDate: 0, outdated: 0, newer: 0, installed: 0, notInstalled: 0, offline: 0, total: 0 };
+        grid.rows().forEach(function (r) {
+          var s = String(r.Status);
+          if (s === 'UP TO DATE') t.upToDate++;
+          else if (s === 'OUTDATED') t.outdated++;
+          else if (s === 'NEWER') t.newer++;
+          else if (s === 'INSTALLED') t.installed++;
+          else if (s === 'NOT INSTALLED') t.notInstalled++;
+          else if (s === 'OFFLINE') t.offline++;
+        });
+        t.total = grid.rows().length;
+        return t;
       }
 
       // ---- Import C2C Compliance CSV (read-only; no admin session, no confirm) ----
@@ -596,6 +710,10 @@
         if (!hosts.length) { alertDialog('No affected hosts', 'No affected hosts resolved for ' + meta.label + '. Re-import the C2C CSV.'); return; }
         if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
         if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
+        // Cert bundle is OPTIONAL now: a blank folder auto-falls-back to the shipped DoD
+        // bundle (Packages\DoD-Certs) engine-side, so one-click fix-pki works. Type a
+        // folder only to override. (If neither exists the engine aborts with a clear log.)
+        var bundleFolder = String(pkiBundleInput.value || '').trim();
         var enableEnc = key === 'Encryption' && encEnableCb && encEnableCb._cb.checked;
 
         var pf = [
@@ -603,6 +721,8 @@
           { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet }
         ];
         if (key === 'Encryption') pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start encryption on decrypted OS volumes' : 'Resume-only (ENABLE not ticked)', ok: true });
+        if (key === 'PkiRoots') pf.push({ label: 'Cert bundle: ' + (bundleFolder || 'shipped DoD default (Packages\\DoD-Certs)'), ok: true });
+        if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
         var ok = await ctx.arm({
           title: 'Arm Fix ' + meta.label,
@@ -617,8 +737,9 @@
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
         log.banner('C2C Fix ' + meta.label + ' on ' + hosts.length + ' host(s)');
         lockInputs(true);
-        var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked };
+        var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked };
         if (key === 'Encryption') params.enableEncryption = enableEnc;
+        if (key === 'PkiRoots') params.certBundleFolder = bundleFolder;
         run = ctx.run(meta.action, params, { keyOf: keyByHost, destructive: true });
         bindFixRun();
       }
@@ -643,9 +764,14 @@
         plan.forEach(function (e) { (e.pillars || []).forEach(function (p) { pcount[p] = (pcount[p] || 0) + 1; totalFixes++; }); });
         var enableEnc = !!(encEnableCb && encEnableCb._cb.checked && checkedPillars.indexOf('Encryption') >= 0);
 
+        var bundleFolder = String(pkiBundleInput.value || '').trim();
+        var pkiChecked = checkedPillars.indexOf('PkiRoots') >= 0;
+
         var pf = Object.keys(pcount).sort().map(function (p) { return { label: p + ': ' + pcount[p] + ' host(s)', ok: true }; });
         pf.unshift({ label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet });
         pf.push({ label: enableEnc ? 'ENABLE BitLocker: checked Encryption hosts WILL start encryption' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
+        if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs) - leave blank to use it', ok: true });
+        if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
         var ok = await ctx.arm({
           title: 'Arm RUN ALL',
@@ -665,6 +791,8 @@
         run = ctx.run('run-all', {
           plan: JSON.stringify(plan),
           enableEncryption: enableEnc,
+          certBundleFolder: bundleFolder,
+          winrmHeal: fixWinrmHeal._cb.checked,
           confirm: confirmInput.value,
           threads: threadsFix(),
           attemptOffline: fixOffline._cb.checked

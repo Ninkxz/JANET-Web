@@ -20,7 +20,13 @@ $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force 
 # Run the 'run-all' action with the per-host worker swapped for an ECHO shim that
 # reports the EXACT pillar set each host was dialed with (Detail 'PILLARS=a+b').
 function Invoke-C2cRunAll {
-    param([string]$Plan, [string]$Confirm = 'FIX', [string]$SstPath = '', [bool]$Enable = $false, [bool]$Shim = $true)
+    # -DefaultBundleOverride shims Get-C2cDefaultCertBundlePath (the shipped-bundle
+    # resolver) for the duration so the auto-default behaviour is tested hermetically
+    # WITHOUT depending on the real Packages\DoD-Certs folder: pass a missing path to
+    # exercise the "no usable bundle -> PkiRoots skipped" path, or a real temp bundle to
+    # exercise the "blank path auto-uses the shipped default" path. Restored via the
+    # save/restore idiom (never Remove-Item, which would delete the module's real fn).
+    param([string]$Plan, [string]$Confirm = 'FIX', [string]$CertBundleFolder = '', [bool]$Enable = $false, [bool]$Shim = $true, [string]$DefaultBundleOverride)
     $script:__rows = New-Object System.Collections.ArrayList
     $script:__logs = New-Object System.Collections.ArrayList
     $emit = {
@@ -28,11 +34,16 @@ function Invoke-C2cRunAll {
         if     ($e -and $e.type -eq 'row') { [void]$script:__rows.Add($e) }
         elseif ($e -and $e.type -eq 'log') { [void]$script:__logs.Add($e) }
     }
+    $overrideDefault = $PSBoundParameters.ContainsKey('DefaultBundleOverride')
+    if ($overrideDefault) {
+        & $cm { param($p) $script:__origGDBP = ${function:Get-C2cDefaultCertBundlePath}; ${function:Get-C2cDefaultCertBundlePath} = { $p }.GetNewClosure() } $DefaultBundleOverride
+    }
     if ($Shim) {
         & $cm {
             $script:__origFixBlock = $script:C2cFixBlock
+            # v1.6.0 worker signature grows: + BundleJson, WinrmHeal, WinrmHealSrc (echoed/ignored here).
             $script:C2cFixBlock = {
-                param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc)
+                param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc)
                 $ps = @(@($Pillars) | ForEach-Object { [string]$_ })
                 @{ Host = $Computer; Ping = 'shim'; Status = 'FIXED'; Detail = ('PILLARS=' + ($ps -join '+'));
                    Report = ''; Pillars = @($ps | ForEach-Object { [pscustomobject]@{ Name = $_; Action = 'shim'; Result = 'FIXED'; Detail = 'shim' } }) }
@@ -41,11 +52,12 @@ function Invoke-C2cRunAll {
     }
     try {
         $params = @{ plan = $Plan; confirm = $Confirm; attemptOffline = $true; threads = 4 }
-        if ($SstPath) { $params['sstPath'] = $SstPath }
+        if ($CertBundleFolder) { $params['certBundleFolder'] = $CertBundleFolder }
         if ($Enable)  { $params['enableEncryption'] = $true }
         $res = Invoke-JanetToolAction -ActionId 'run-all' -Params $params -Credential $null -Emit $emit
     } finally {
         if ($Shim) { & $cm { $script:C2cFixBlock = $script:__origFixBlock; Remove-Variable -Name __origFixBlock -Scope Script -ErrorAction SilentlyContinue } }
+        if ($overrideDefault) { & $cm { ${function:Get-C2cDefaultCertBundlePath} = $script:__origGDBP; Remove-Variable -Name __origGDBP -Scope Script -ErrorAction SilentlyContinue } }
     }
     [pscustomobject]@{ Result = $res; Rows = @($script:__rows); Logs = @($script:__logs) }
 }
@@ -191,23 +203,67 @@ Describe 'C2C run-all - plan JSON parse, unknown-pillar drop, zero-fixable info 
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C run-all - PkiRoots is no longer fixable (dropped per host, run continues)' {
+Describe 'C2C run-all - PkiRoots needs a cert bundle (auto-defaults to the shipped bundle; skipped only when neither is present)' {
 
-    It '(b) a plan with PkiRoots drops it per host (like Vuln); a PkiRoots-only host is a zero-fixable info row; other hosts still run' {
+    It '(b) with NEITHER a bundle NOR a usable shipped default, PkiRoots is skipped per host (info); a PkiRoots-only host is a zero-fixable row; other hosts still run' {
         $plan = '[{"host":"RB1","pillars":["PkiRoots"]},{"host":"RB2","pillars":["PkiRoots","AntiMalware"]}]'
-        $out = Invoke-C2cRunAll -Plan $plan   # no sstPath needed anymore
-        # RB1 (PkiRoots only) -> zero endpoint-fixable -> info/SKIPPED row, never dialed.
+        # No certBundleFolder AND the shipped default shimmed to a missing path -> no usable bundle.
+        $out = Invoke-C2cRunAll -Plan $plan -DefaultBundleOverride 'X:\no\such\shipped\default\bundle'
+        # RB1 (PkiRoots only, no bundle) -> zero endpoint-fixable -> info/SKIPPED row, never dialed.
         $rb1 = @($out.Rows | Where-Object { $_.Host -eq 'RB1' })[0]
         $rb1 | Should Not BeNullOrEmpty
         ($rb1.Detail) | Should Match 'nothing endpoint-fixable'
-        # RB2 keeps only AntiMalware (PkiRoots dropped).
+        # RB2 keeps only AntiMalware (PkiRoots skipped for lack of a bundle).
         $rb2 = @($out.Rows | Where-Object { $_.Host -eq 'RB2' -and $_.Status -eq 'FIXED' })[0]
         $rb2 | Should Not BeNullOrEmpty
         $rb2.Detail | Should Be 'PILLARS=AntiMalware'
         $rb2.Detail | Should Not Match 'PkiRoots'
-        # a non-endpoint-fixable drop is logged as a warn.
-        @($out.Logs | Where-Object { $_.level -eq 'warn' -and $_.text -match 'RB2' -and $_.text -match 'PkiRoots' }).Count | Should Not Be 0
+        # the PkiRoots skip is logged (info) and names the host + PkiRoots.
+        @($out.Logs | Where-Object { $_.text -match 'RB2' -and $_.text -match 'PkiRoots' }).Count | Should Not Be 0
         $out.Result.summary.rejected | Should BeNullOrEmpty
+    }
+
+    It '(b2) WITH a valid cert bundle folder, PkiRoots STAYS in the dialed set' {
+        # Build a throwaway bundle folder with one self-signed .cer under root\.
+        $bundleRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("c2c_bundle_{0}" -f ([guid]::NewGuid().ToString('N')))
+        $rootDir = Join-Path $bundleRoot 'root'
+        New-Item -ItemType Directory -Path $rootDir -Force | Out-Null
+        $cert = New-SelfSignedCertificate -Subject 'CN=C2C-Test-Root' -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
+        [System.IO.File]::WriteAllBytes((Join-Path $rootDir 'testroot.cer'), $cert.RawData)
+        Remove-Item ("Cert:\CurrentUser\My\{0}" -f $cert.Thumbprint) -Force -ErrorAction SilentlyContinue
+        try {
+            $plan = '[{"host":"RB3","pillars":["PkiRoots","AntiMalware"]}]'
+            $out = Invoke-C2cRunAll -Plan $plan -CertBundleFolder $bundleRoot
+            $rb3 = @($out.Rows | Where-Object { $_.Host -eq 'RB3' -and $_.Status -eq 'FIXED' })[0]
+            $rb3 | Should Not BeNullOrEmpty
+            $rb3.Detail | Should Match 'PkiRoots'
+            $rb3.Detail | Should Match 'AntiMalware'
+        } finally {
+            Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '(b3) with a BLANK certBundleFolder, PkiRoots AUTO-uses the shipped default and STAYS in the dialed set' {
+        # A real temp bundle stands in for the shipped Packages\DoD-Certs default (shimmed).
+        $bundleRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("c2c_default_{0}" -f ([guid]::NewGuid().ToString('N')))
+        $rootDir = Join-Path $bundleRoot 'root'
+        New-Item -ItemType Directory -Path $rootDir -Force | Out-Null
+        $cert = New-SelfSignedCertificate -Subject 'CN=C2C-Shipped-Default' -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
+        [System.IO.File]::WriteAllBytes((Join-Path $rootDir 'defaultroot.cer'), $cert.RawData)
+        Remove-Item ("Cert:\CurrentUser\My\{0}" -f $cert.Thumbprint) -Force -ErrorAction SilentlyContinue
+        try {
+            $plan = '[{"host":"RB4","pillars":["PkiRoots","AntiMalware"]}]'
+            # NO certBundleFolder supplied; the shipped default is shimmed to the temp bundle.
+            $out = Invoke-C2cRunAll -Plan $plan -DefaultBundleOverride $bundleRoot
+            $rb4 = @($out.Rows | Where-Object { $_.Host -eq 'RB4' -and $_.Status -eq 'FIXED' })[0]
+            $rb4 | Should Not BeNullOrEmpty
+            $rb4.Detail | Should Match 'PkiRoots'          # auto-default kept PkiRoots in the set
+            $rb4.Detail | Should Match 'AntiMalware'
+            # the cert-bundle log names the shipped-default source.
+            @($out.Logs | Where-Object { $_.text -match '(?i)shipped default' }).Count | Should Not Be 0
+        } finally {
+            Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
