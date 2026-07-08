@@ -41,10 +41,7 @@ gated server-side, not just in the browser: **Set Credentials** (stores a
 `PSCredential` for the session) plus **Start Admin Session** (an explicit
 responsibility acknowledgement) must both be live, or the server rejects the
 action with a 403. Read-only actions (scans, queries, AD search, reporting) never
-require a session. The off-hours scheduler requires a live admin session to arm
-*any* wave, non-destructive waves are one-shot (no recurrence), and destructive
-waves are re-checked at fire time - if the admin session is gone when a
-scheduled wave is due, it is blocked, not run.
+require a session.
 
 ## Logs
 
@@ -75,7 +72,7 @@ JANET Web\
                    logging bridge (JanetWeb.Logging.ps1), tool-registry.json
   web\            The static SPA (index.html, js\components, js\views) - no build step
   JanetLocal\     Seed catalogs (KEV, C2C baseline, SLA baseline, IAVM map, BIOS
-                   firmware baseline) and runtime state (campaigns, schedule, sessions)
+                   firmware baseline) and runtime state (campaigns, sessions)
   tests\          Pester test suite
   docs\           Current review notes + per-tool UI specs (ui-specs\)
   Packages\       Local staging for patch content (PSADT / MSI / MSU / CAB / EXE)

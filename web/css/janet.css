@@ -180,16 +180,6 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .j-sevbar-label{font-family:var(--mono,Consolas,monospace);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .j-sevbar-sep{color:var(--muted,#6a6a75);margin:0 2px}
 
-/* Network Posture panel (Mission Board) */
-.j-posture{margin-top:12px;padding-top:10px;border-top:1px solid var(--line,#2a2a33)}
-.j-posture-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
-.j-posture-title{font-family:var(--mono,Consolas,monospace);font-size:11px;letter-spacing:.08em;color:var(--accent,#DAB452)}
-.j-posture-row{display:flex;align-items:center;gap:10px;margin:5px 0}
-.j-posture-lbl{font-size:11px;color:var(--muted,#8a8a95);width:78px;flex:none}
-.j-posture-chips{display:flex;gap:6px;flex-wrap:wrap}
-.j-posture-chip{font-family:var(--mono,Consolas,monospace);font-size:11px;padding:1px 8px;border-radius:9px;border:1px solid currentColor;font-variant-numeric:tabular-nums}
-/* let the severity meter stretch across the posture row instead of pinning to min-width */
-.j-posture-row .j-sevbar-wrap{flex:1;max-width:360px}
 
 .j-pill{display:inline-block;padding:1px 7px;border-radius:9px;font-family:var(--ui);font-size:11px;font-weight:600;border:1px solid currentColor}
 
@@ -214,13 +204,6 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .j-hub-inner{width:100%;max-width:1120px;margin:0 auto;padding:0 var(--s5);display:flex;flex-direction:column;min-height:0}
 .j-hub-lede{flex:0 0 auto;color:var(--text-dim);margin:0 0 var(--s4);font-size:13px}
 .j-hub-lede code{font-family:var(--mono);color:var(--gold)}
-/* fleet snapshot strip on the hub */
-.j-snapshot{flex:0 0 auto;margin:0 0 var(--s4);background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--info);border-radius:var(--r-card);padding:var(--s3)}
-.j-snap-bar{display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap}
-.j-snap-title{font-family:var(--ui);font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--info)}
-.j-snap-group{height:28px;padding:2px 8px;font-size:12px;max-width:220px}
-.j-snap-out{font-size:12.5px;margin-left:auto}
-.j-snap-out b{font-weight:700}
 .j-hub-scroll{flex:1;min-height:0;overflow:auto;padding-bottom:var(--s4)}
 .j-launchpad{display:grid;grid-template-columns:repeat(auto-fill,minmax(208px,1fr));gap:var(--s4);align-content:start}
 .j-toolcard{
@@ -566,16 +549,6 @@ table.j-grid .j-cell-bar{display:block;height:3px;margin-top:3px;border-radius:2
 /* topbar help affordance (opens the shortcut cheatsheet) */
 .j-help-btn{width:22px;height:22px;border-radius:50%;border:1px solid var(--edge,#2a2a33);background:var(--panel-light,#17171f);color:var(--muted,#8a8a95);font-family:var(--mono,Consolas,monospace);font-size:12px;font-weight:700;cursor:pointer;line-height:1;padding:0;margin:0 4px}
 .j-help-btn:hover{color:var(--gold,#DAB452);border-color:var(--gold,#DAB452)}
-/* Scheduled Waves panel (hub off-hours scheduler) */
-.j-sched-list{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
-.j-sched-row{display:flex;align-items:center;gap:10px;padding:3px 0;border-bottom:1px solid var(--line-faint,#20202a);flex-wrap:wrap}
-.j-sched-lbl{font-family:var(--mono,Consolas,monospace);font-size:12px;color:var(--text,#c8c8d0)}
-.j-sched-when{font-family:var(--mono,Consolas,monospace);font-size:11px;color:var(--muted,#8a8a95);margin-left:auto}
-.j-sched-status{font-family:var(--mono,Consolas,monospace);font-size:10.5px;font-weight:700;letter-spacing:.04em;min-width:66px;text-align:right}
-.j-sched-cancel{background:transparent;border:1px solid var(--line,#2a2a33);color:var(--muted,#8a8a95);font-size:11px;padding:1px 8px;border-radius:4px;cursor:pointer}
-.j-sched-cancel:hover{color:var(--sev-crit,#E0505A);border-color:var(--sev-crit,#E0505A)}
-.j-sched-form{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--line,#2a2a33)}
-.j-sched-form .j-select,.j-sched-form .j-input{font-size:11.5px;padding:3px 6px}
 .j-modal-banner{background:rgba(224,80,90,.12);border:1px solid var(--danger-edge);color:var(--bad);font-family:var(--ui);font-weight:600;padding:8px 10px;border-radius:var(--r-chip);margin-bottom:var(--s3)}
 .j-modal-body{font-size:13px;color:var(--text-dim);line-height:1.55}
 .j-modal-body b{color:var(--text)}
