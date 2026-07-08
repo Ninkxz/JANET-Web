@@ -35,9 +35,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.6.0'
+        version  = '1.7.0'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker - FVE policy assert + Entra-first/AD-fallback recovery-key escrow, XtsAes256), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -97,7 +97,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-antimalware'
                 label       = 'Fix AntiMalware (Defender)'
-                description = 'DESTRUCTIVE (Defender state). Heal Microsoft Defender on each target: set WinDefend/Sense to Automatic + Started, enable Real-Time Protection if it is off, and Update-MpSignature if signatures are older than 7 days, then re-read. Result PROTECTED (something healed) / ALREADY PROTECTED (RTP on + signatures fresh) / FAIL. A missing MDE Sense service is a note, not a failure, when Defender itself is healthy. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (Defender state). Heal Microsoft Defender on each target using Get-MpComputerStatus.AMRunningMode: always set WinDefend/Sense to Automatic + Started; force Real-Time Protection on (Set-MpPreference) ONLY when AMRunningMode is Active - NEVER in Passive / EDR Block Mode (there MDE/Sense is primary and RTP off is correct, so forcing it would fight the MDE config); Update-MpSignature when the signature age exceeds sigMaxAgeHours (default 24h). A Passive/EDR box with Sense onboarded + fresh signatures reports NOCHANGE (already protected via MDE). The detail reports RunningMode / product+engine versions / last-update / age-hours. A missing MDE Sense service is a note, not a failure, when Defender itself is healthy. Result PROTECTED (something healed) / ALREADY PROTECTED / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the AntiMalware (Defender) pillar on the target host(s)? This changes Defender state. Proceed?'
@@ -127,14 +127,14 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-encryption'
                 label       = 'Fix Encryption (BitLocker)'
-                description = 'DESTRUCTIVE (BitLocker). By default RESUME suspended BitLocker protectors on the OS volume only (re-read: PROTECTION RESUMED if now On; ALREADY ENCRYPTED if it was already On). If "ENABLE BitLocker" is ticked, a FullyDecrypted OS volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED, mirroring the enterprise USAF enable script: assert the FVE BitLocker policy (recovery-key escrow + XtsAes256 method), reuse-or-add a RecoveryPassword protector, escrow it Entra-first (BackupToAAD-BitLockerKeyProtector) with on-prem AD fallback (Backup-BitLockerKeyProtector) BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector and XtsAes256 full-volume encryption (Result ENCRYPTION STARTED). If BOTH escrow paths fail, a RecoveryPassword protector we added is removed and encryption is NEVER started; the recovery password is never emitted. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (BitLocker). Iterates EVERY FIXED VOLUME (C:, D:, E:, ...) - removable/USB (BitLocker To Go), network and optical volumes are NEVER touched. Per fixed volume: On -> ALREADY ENCRYPTED; suspended (Off + FullyEncrypted) -> RESUME -> PROTECTION RESUMED; EncryptionInProgress -> IN PROGRESS(percent); FullyDecrypted with "ENABLE BitLocker" NOT ticked -> SKIP (route desk-side). With "ENABLE BitLocker" ticked, a FullyDecrypted fixed volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED. OS volume (VolumeType OperatingSystem): mirror the enterprise USAF enable script - assert the FVE BitLocker policy once per host (recovery-key escrow + XtsAes256), reuse-or-add a RecoveryPassword protector, escrow Entra-first (BackupToAAD-BitLockerKeyProtector) with on-prem AD fallback (Backup-BitLockerKeyProtector) BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector + XtsAes256 full-volume. Fixed DATA volume (VolumeType Data): the OS volume must be BitLocker-on first (else SKIP - auto-unlock needs it), then escrow-first exactly like the OS path (Add RecoveryPassword protector -> escrow Entra-first / AD-fallback BEFORE Enable) with NO TPM protector, Enable-BitLocker XtsAes256 full-volume, dedup to exactly one escrowed recovery protector, and best-effort Enable-BitLockerAutoUnlock. If BOTH escrow paths fail for a volume, a protector we added is removed and that volume is NEVER encrypted; the recovery password is never emitted. Host rollup: any volume FAIL -> PARTIAL (all-fail -> FAILED), any FIXED/STARTED with no FAIL -> FIXED, all NOCHANGE -> NO CHANGE. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the Encryption (BitLocker) pillar on the target host(s)? This changes BitLocker state. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
                     @{ name='targets';          label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted OS volumes (TPM+RecoveryPassword->escrow, XtsAes256)'; type='bool'; required=$false; default=$false },
+                    @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted FIXED volumes (OS: TPM; DATA: auto-unlock; RecoveryPassword->escrow, XtsAes256; removable never touched)'; type='bool'; required=$false; default=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline';   label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
@@ -167,7 +167,7 @@ function Get-JanetToolManifest {
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
                     @{ name='plan';             label='Run-all plan (JSON: [{host,pillars:[...]}])'; type='textarea'; required=$true },
-                    @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted OS volumes (only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
+                    @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted FIXED volumes (OS + data; only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
                     @{ name='certBundleFolder'; label='DoD trust bundle folder (optional; needed only if a host plans PkiRoots)'; type='text'; required=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
@@ -201,6 +201,7 @@ function Get-JanetToolManifest {
 function Get-C2cBaselineDefaults {
     @{
         sigMaxAgeDays         = 7
+        sigMaxAgeHours        = 24
         taniumService         = 'Tanium Client'
         securityAgentServices = @('masvc','mfemms','macmnsvc','WinDefend','Sense')
         hostnamePatterns      = @('^MSEKL','^MSEKW')
@@ -234,6 +235,14 @@ function Get-C2cBaseline {
         $has = { param($n) $null -ne $obj.PSObject.Properties[$n] }
         if ((& $has 'sigMaxAgeDays') -and $null -ne $obj.sigMaxAgeDays) {
             $n = 0; if ([int]::TryParse([string]$obj.sigMaxAgeDays, [ref]$n)) { $cfg.sigMaxAgeDays = $n }
+        }
+        # sigMaxAgeHours (v1.7.0): the fleet-standard signature-freshness budget in HOURS
+        # (default 24). If the operator omits it, fall back to sigMaxAgeDays * 24 so an
+        # older baseline that only set days keeps its effective threshold.
+        if ((& $has 'sigMaxAgeHours') -and $null -ne $obj.sigMaxAgeHours) {
+            $nh = 0; if ([int]::TryParse([string]$obj.sigMaxAgeHours, [ref]$nh)) { $cfg.sigMaxAgeHours = $nh }
+        } else {
+            $cfg.sigMaxAgeHours = [int]$cfg.sigMaxAgeDays * 24
         }
         if ((& $has 'taniumService') -and -not [string]::IsNullOrWhiteSpace([string]$obj.taniumService)) {
             $cfg.taniumService = [string]$obj.taniumService
@@ -466,6 +475,10 @@ $script:C2cProbeBlock = {
     # plain typed values into the remote scriptblock's ArgumentList.
     $taniumService = [string]$Config['taniumService']; if (-not $taniumService) { $taniumService = 'Tanium Client' }
     $sigMaxAge     = 7; if ($Config.ContainsKey('sigMaxAgeDays')) { $tmp = 0; if ([int]::TryParse([string]$Config['sigMaxAgeDays'], [ref]$tmp)) { $sigMaxAge = $tmp } }
+    # sigMaxAgeHours (v1.7.0): prefer the explicit hours budget; else derive from days.
+    $sigMaxHours = 0
+    if ($Config.ContainsKey('sigMaxAgeHours')) { $tmph = 0; if ([int]::TryParse([string]$Config['sigMaxAgeHours'], [ref]$tmph)) { $sigMaxHours = $tmph } }
+    if ($sigMaxHours -le 0) { $sigMaxHours = $sigMaxAge * 24 }
     $secAgents     = @($Config['securityAgentServices'])
     $hostPatterns  = @($Config['hostnamePatterns'])
     $dodRoots      = @($Config['dodRootThumbprints'])
@@ -478,7 +491,7 @@ $script:C2cProbeBlock = {
 
     # ---- The consolidated read-only probe: all 11 C2C checks in one round-trip. ----
     $probeSb = {
-        param($taniumService, $sigMaxAge, $secAgents, $hostPatterns, $dodRoots, $taniumInstalledSrc)
+        param($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $hostPatterns, $dodRoots, $taniumInstalledSrc)
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
         if ($taniumInstalledSrc) { try { . ([scriptblock]::Create($taniumInstalledSrc)) } catch {} }
         # Normalize the array args: an empty collection can cross the WinRM ArgumentList
@@ -525,20 +538,63 @@ $script:C2cProbeBlock = {
             }
         } catch { & $mk 'Firewall' 'ERROR' $_.Exception.Message }
 
-        # 3. AntiMalware - Defender RTP on AND signatures fresh (fallback SecurityCenter2).
+        # 3. AntiMalware - honour Get-MpComputerStatus.AMRunningMode. PASS = Defender
+        #    installed AND ( (Active AND RTP on) OR (Passive / EDR Block Mode AND MDE
+        #    Sense onboarded) ) AND signatures fresh (age <= sigMaxHours). On MDE-managed
+        #    boxes Defender runs Passive/EDR with RTP off - that is CORRECT, not a fail.
+        #    FAIL when AMRunningMode is null/empty (Disabled/Not Running), Active-but-RTP-off,
+        #    or signatures stale. Fallback: root\SecurityCenter2 for non-Defender AV.
         try {
             if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
-                $mp  = Get-MpComputerStatus -ErrorAction Stop
-                $rtp = [bool]$mp.RealTimeProtectionEnabled
-                $age = [int]$mp.AntivirusSignatureAge
-                $ver = [string]$mp.AntivirusSignatureVersion
-                if ($rtp -and $age -le $sigMaxAge) {
-                    & $mk 'AntiMalware' 'PASS' "RTP on; sig age ${age}d (<= ${sigMaxAge}d); ver $ver"
+                $mp     = Get-MpComputerStatus -ErrorAction Stop
+                $mode   = [string]$mp.AMRunningMode
+                $rtp    = [bool]$mp.RealTimeProtectionEnabled
+                $amProd = [string]$mp.AMProductVersion
+                $amEng  = [string]$mp.AMEngineVersion
+                # Signature age in HOURS from AntivirusSignatureLastUpdated (fall back to
+                # AntivirusSignatureAge days * 24 when the timestamp is missing).
+                $lastUpd = $null; try { $lastUpd = $mp.AntivirusSignatureLastUpdated } catch { $lastUpd = $null }
+                $ageHours = $null
+                if ($lastUpd -is [datetime]) { $ageHours = [math]::Round(((Get-Date) - $lastUpd).TotalHours, 1) }
+                elseif ($lastUpd -and ($lastUpd -as [datetime])) { $ageHours = [math]::Round(((Get-Date) - ([datetime]$lastUpd)).TotalHours, 1) }
+                else { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
+                $sigFresh = ($null -ne $ageHours) -and ($ageHours -le $sigMaxHours)
+                # MDE Sense onboarded: Sense service Running OR OnboardingState reg = 1.
+                $senseOnboarded = $false
+                try { $ss = Get-Service -Name 'Sense' -ErrorAction SilentlyContinue; if ($ss -and $ss.Status -eq 'Running') { $senseOnboarded = $true } } catch {}
+                if (-not $senseOnboarded) {
+                    try {
+                        $ob = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name 'OnboardingState' -ErrorAction SilentlyContinue
+                        if ($ob -and [int]$ob.OnboardingState -eq 1) { $senseOnboarded = $true }
+                    } catch {}
+                }
+                $isPassive = ($mode -match '(?i)passive|edr')
+                $isActive  = ($mode) -and (-not $isPassive)
+                $lastTxt = if ($lastUpd) { [string]$lastUpd } else { 'unknown' }
+                $ageTxt  = if ($null -ne $ageHours) { "${ageHours}h" } else { 'unknown' }
+                $modeTxt = if ($mode) { $mode } else { 'null (Disabled/Not Running)' }
+                $baseDet = "RunningMode $modeTxt; RTP $rtp; prod $amProd; engine $amEng; sig last $lastTxt (age $ageTxt, budget ${sigMaxHours}h)"
+                if (-not $mode) {
+                    & $mk 'AntiMalware' 'FAIL' "Defender AMRunningMode empty (Disabled/Not Running); $baseDet"
+                } elseif ($isPassive) {
+                    if ($senseOnboarded -and $sigFresh) {
+                        & $mk 'AntiMalware' 'PASS' "Passive/EDR Block Mode - MDE Sense primary (onboarded), signatures fresh; $baseDet"
+                    } else {
+                        $why = New-Object System.Collections.ArrayList
+                        if (-not $senseOnboarded) { [void]$why.Add('MDE Sense not onboarded') }
+                        if (-not $sigFresh)       { [void]$why.Add("sig age $ageTxt > ${sigMaxHours}h") }
+                        & $mk 'AntiMalware' 'FAIL' "Passive/EDR but $($why -join '; '); $baseDet"
+                    }
                 } else {
-                    $why = New-Object System.Collections.ArrayList
-                    if (-not $rtp)          { [void]$why.Add('RTP off') }
-                    if ($age -gt $sigMaxAge){ [void]$why.Add("sig age ${age}d > ${sigMaxAge}d") }
-                    & $mk 'AntiMalware' 'FAIL' "$($why -join '; ') (ver $ver)"
+                    # Active - Defender is the primary AV: needs RTP on + fresh signatures.
+                    if ($rtp -and $sigFresh) {
+                        & $mk 'AntiMalware' 'PASS' "Active - RTP on, signatures fresh; $baseDet"
+                    } else {
+                        $why = New-Object System.Collections.ArrayList
+                        if (-not $rtp)      { [void]$why.Add('RTP off') }
+                        if (-not $sigFresh) { [void]$why.Add("sig age $ageTxt > ${sigMaxHours}h") }
+                        & $mk 'AntiMalware' 'FAIL' "Active but $($why -join '; '); $baseDet"
+                    }
                 }
             } else {
                 # Fallback: root\SecurityCenter2 AntiVirusProduct (productState bitmask).
@@ -573,18 +629,86 @@ $script:C2cProbeBlock = {
         # 5. Vuln threshold - server-side (ARAD/ACAS), not endpoint-determinable -> EXT.
         & $mk 'Vuln' 'EXT' 'Scored server-side (ARAD/ACAS) - remediate via ACAS / Reports / KEV / UPR'
 
-        # 6. Encryption - BitLocker protection On for the system drive (fallback manage-bde).
+        # 6. Encryption - EVERY FIXED VOLUME (C:, D:, ...) must be ProtectionStatus On
+        #    AND VolumeStatus FullyEncrypted. Removable/USB (BitLocker To Go), network
+        #    and optical volumes are excluded; letterless system/EFI/recovery partitions
+        #    that Get-BitLockerVolume omits never fabricate a failure. Fallback: manage-bde
+        #    on the system drive (noted limitation) when Get-BitLockerVolume is unavailable.
         try {
             $sysDrive = $env:SystemDrive
             if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
-                $bl = Get-BitLockerVolume -MountPoint $sysDrive -ErrorAction Stop
-                $ps = [string]$bl.ProtectionStatus; $vs = [string]$bl.VolumeStatus
-                if ($ps -eq 'On') { & $mk 'Encryption' 'PASS' "$sysDrive protection $ps; $vs" }
-                else              { & $mk 'Encryption' 'FAIL' "$sysDrive protection $ps; $vs" }
+                # Fixed drive-letter set: Get-Volume DriveType Fixed, else Win32_Volume DriveType=3.
+                $fixedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                $haveFixedSrc = $false
+                try {
+                    if (Get-Command Get-Volume -ErrorAction SilentlyContinue) {
+                        foreach ($v in @(Get-Volume -ErrorAction Stop)) {
+                            if (([string]$v.DriveType -eq 'Fixed') -and [string]$v.DriveLetter) { [void]$fixedSet.Add((([string]$v.DriveLetter).Substring(0,1) + ':')) }
+                        }
+                        $haveFixedSrc = $true
+                    }
+                } catch {}
+                if (-not $haveFixedSrc) {
+                    try {
+                        foreach ($v in @(Get-CimInstance -ClassName Win32_Volume -ErrorAction Stop)) {
+                            if (([int]$v.DriveType -eq 3) -and [string]$v.DriveLetter) { [void]$fixedSet.Add((([string]$v.DriveLetter).Substring(0,1) + ':')) }
+                        }
+                        $haveFixedSrc = $true
+                    } catch {}
+                }
+                $allBl = @()
+                try { $allBl = @(Get-BitLockerVolume -ErrorAction Stop) } catch { $allBl = @() }
+                $fixedVols = New-Object System.Collections.ArrayList
+                foreach ($b in $allBl) {
+                    $mpB = ([string]$b.MountPoint).TrimEnd('\')
+                    $isLetter = ($mpB -match '^[A-Za-z]:$')
+                    if ([string]$b.VolumeType -eq 'OperatingSystem') { [void]$fixedVols.Add($b); continue }
+                    if (-not $isLetter) { continue }                       # letterless (EFI/recovery) - skip, never fail
+                    if ($haveFixedSrc -and $fixedSet.Contains($mpB)) { [void]$fixedVols.Add($b) }
+                }
+                if ($fixedVols.Count -eq 0) {
+                    $blSys = $null
+                    try { $blSys = Get-BitLockerVolume -MountPoint $sysDrive -ErrorAction Stop } catch {}
+                    if ($blSys) { [void]$fixedVols.Add($blSys) }
+                }
+                if ($fixedVols.Count -eq 0) {
+                    & $mk 'Encryption' 'ERROR' 'no fixed BitLocker volumes could be enumerated'
+                } else {
+                    $srcNote = if (-not $haveFixedSrc) { ' [no fixed-drive source available; OS volume only]' } else { '' }
+                    $bad    = New-Object System.Collections.ArrayList
+                    $allTxt = New-Object System.Collections.ArrayList
+                    foreach ($b in $fixedVols) {
+                        $mpB = ([string]$b.MountPoint).TrimEnd('\'); if (-not $mpB) { $mpB = '(no letter)' }
+                        $psB = [string]$b.ProtectionStatus; $vsB = [string]$b.VolumeStatus
+                        $pctB = ''; try { $pctB = [string]$b.EncryptionPercentage } catch {}
+                        $vsTxt = if (($vsB -match '(?i)EncryptionInProgress') -and $pctB) { "$vsB($pctB%)" } else { $vsB }
+                        [void]$allTxt.Add("$mpB $psB/$vsTxt")
+                        if (-not (($psB -eq 'On') -and ($vsB -match '(?i)FullyEncrypted'))) { [void]$bad.Add("$mpB $psB/$vsTxt") }
+                    }
+                    if ($bad.Count -eq 0) { & $mk 'Encryption' 'PASS' ("all $($fixedVols.Count) fixed volume(s) encrypted: $($allTxt -join '; ')$srcNote") }
+                    else                  { & $mk 'Encryption' 'FAIL' ("non-compliant: $($bad -join '; ') [all: $($allTxt -join '; ')]$srcNote") }
+                }
             } else {
+                # Fallback: manage-bde -status on the system drive (Get-BitLockerVolume
+                # unavailable). The C2C compliance bar is FULLY ENCRYPTED, not merely
+                # Protection On - so PASS only when BOTH 'Protection Status: Protection On'
+                # AND the volume is fully encrypted ('Conversion Status: Fully Encrypted',
+                # or 'Percentage Encrypted: 100%' as the equivalent). Otherwise FAIL and
+                # name the gap (e.g. Protection On but Conversion Status Encryption in Progress).
                 $out = (& manage-bde -status $sysDrive 2>&1 | Out-String)
-                if ($out -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $mk 'Encryption' 'PASS' "$sysDrive Protection On (manage-bde)" }
-                else                                                          { & $mk 'Encryption' 'FAIL' "$sysDrive Protection Off/unknown (manage-bde)" }
+                $protOn  = ($out -match '(?i)Protection\s+Status:\s*Protection\s+On')
+                $fullEnc = ($out -match '(?i)Conversion\s+Status:\s*Fully\s+Encrypted') -or ($out -match '(?i)Percentage\s+Encrypted:\s*100(\.0+)?\s*%')
+                $fbNote  = '(manage-bde; system-drive only - Get-BitLockerVolume unavailable, other fixed volumes NOT verified)'
+                if ($protOn -and $fullEnc) {
+                    & $mk 'Encryption' 'PASS' "$sysDrive Protection On + Fully Encrypted $fbNote"
+                } elseif ($protOn) {
+                    $cs = ''
+                    if ($out -match '(?i)Conversion\s+Status:\s*([^\r\n]+)') { $cs = ([string]$Matches[1]).Trim() }
+                    $csTxt = if ($cs) { "Conversion Status $cs" } else { 'not Fully Encrypted' }
+                    & $mk 'Encryption' 'FAIL' "$sysDrive Protection On but $csTxt (not Fully Encrypted) $fbNote"
+                } else {
+                    & $mk 'Encryption' 'FAIL' "$sysDrive Protection Off/unknown (manage-bde; system-drive only - Get-BitLockerVolume unavailable)"
+                }
             }
         } catch { & $mk 'Encryption' 'ERROR' $_.Exception.Message }
 
@@ -670,7 +794,7 @@ $script:C2cProbeBlock = {
     }
 
     try {
-        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $secAgents, $hostPatterns, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
+        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $hostPatterns, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
     } catch {
         $r.Status = 'ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -913,12 +1037,13 @@ function Test-JanetC2cHostIsSelf {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
     $Pillars = @(@($Pillars) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
     if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
+    if ($SigMaxAgeHours -le 0) { $SigMaxAgeHours = 24 }   # signature-freshness budget (hours) for the AntiMalware fixer
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Report=''; Pillars=@() }
 
@@ -978,7 +1103,8 @@ $script:C2cFixBlock = {
     $fixSb = {
         # Pillars cross as a '|'-delimited string (never an array) so no ArgumentList
         # flattening/serialization ambiguity over the WinRM boundary.
-        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc)
+        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours)
+        if ($SigMaxAgeHours -le 0) { $SigMaxAgeHours = 24 }
         $Pillars = @(($PillarCsv -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
@@ -1065,214 +1191,307 @@ $script:C2cFixBlock = {
             } catch { & $add 'Firewall' 'error' 'FAIL' $_.Exception.Message }
         }
 
-        # 1. Encryption - by default RESUME suspended protectors only. When the
-        #    operator opts in (DoEnable) and the OS volume is FullyDecrypted, ENABLE
-        #    BitLocker mirroring the enterprise USAF script, escrow-first / fail-closed
-        #    (FVE policy assert -> reuse/add RecoveryPassword protector -> Entra-first /
-        #    AD-fallback escrow BEFORE Enable-BitLocker; TPM-gated + domain-joined;
-        #    XtsAes256; recovery password NEVER emitted).
+        # 1. Encryption - iterate EVERY FIXED VOLUME. By default RESUME suspended
+        #    protectors; when the operator opts in (DoEnable) a FullyDecrypted fixed
+        #    volume is ENABLED escrow-first / fail-closed. The OS volume mirrors the
+        #    enterprise USAF script (FVE policy assert ONCE per host -> reuse/add a
+        #    RecoveryPassword protector -> Entra-first / AD-fallback escrow BEFORE
+        #    Enable-BitLocker; TPM-gated + domain-joined; XtsAes256 + TPM protector).
+        #    Fixed DATA volumes enable escrow-first too but with NO TPM protector, require
+        #    the OS volume BitLocker-on first (for auto-unlock), dedup to exactly one
+        #    escrowed recovery protector, then best-effort Enable-BitLockerAutoUnlock.
+        #    Removable/USB (BitLocker To Go), network and optical volumes are NEVER
+        #    touched; the recovery password is never emitted. One 'Encryption' result is
+        #    emitted PER volume so the host rollup naturally yields FIXED / PARTIAL /
+        #    FAILED / NO CHANGE.
         if ($Pillars -contains 'Encryption') {
             try {
                 $sys = $env:SystemDrive
                 if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
-                    $bl = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
-                    $ps = [string]$bl.ProtectionStatus; $vs = [string]$bl.VolumeStatus
-                    if ($ps -eq 'On') {
-                        & $add 'Encryption' 'none' 'NOCHANGE' "$sys protection already On; $vs"
-                    } elseif ($vs -match '(?i)EncryptionInProgress') {
-                        $pctIP = ''
-                        try { $pctIP = [string]$bl.EncryptionPercentage } catch {}
-                        & $add 'Encryption' 'none' 'IN PROGRESS' "encryption already in progress ($pctIP% done); protection activates on completion - no action taken"
-                    } elseif ($vs -match '(?i)FullyDecrypted') {
-                        if (-not $DoEnable) {
-                            & $add 'Encryption' 'none' 'SKIP' "not encrypted ($vs) - BitLocker enable needs TPM+recovery-key escrow policy; route to MECM/desk-side"
-                        } else {
-                            # ENABLE path - each precondition failing => SKIP, nothing changed.
-                            $volType = ''
-                            try { $volType = [string]$bl.VolumeType } catch {}
-                            if ($volType -and ($volType -ne 'OperatingSystem')) {
-                                & $add 'Encryption' 'none' 'SKIP' "$sys is not the OS volume (VolumeType=$volType) - enable only targets the OS volume"
-                            } else {
-                                $tpmOk = $false; $tpmWhy = 'TPM not ready - initialize via desk-side/MECM'
-                                try {
-                                    if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
-                                        $tp = Get-Tpm -ErrorAction Stop
-                                        if ([bool]$tp.TpmPresent -and [bool]$tp.TpmReady) { $tpmOk = $true }
-                                        elseif (-not [bool]$tp.TpmPresent) { $tpmWhy = 'TPM not present - cannot enable BitLocker (route to desk-side)' }
-                                    } else {
-                                        $tpmWhy = 'Get-Tpm unavailable - cannot confirm TPM readiness (route to desk-side/MECM)'
-                                    }
-                                } catch { $tpmWhy = "TPM not ready - initialize via desk-side/MECM ($($_.Exception.Message))" }
-                                if (-not $tpmOk) {
-                                    & $add 'Encryption' 'none' 'SKIP' $tpmWhy
+                    # ---- Enumerate FIXED volumes (Get-Volume DriveType Fixed, else Win32_Volume DriveType=3). ----
+                    $fixedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $haveFixedSrc = $false
+                    try {
+                        if (Get-Command Get-Volume -ErrorAction SilentlyContinue) {
+                            foreach ($v in @(Get-Volume -ErrorAction Stop)) {
+                                if (([string]$v.DriveType -eq 'Fixed') -and [string]$v.DriveLetter) { [void]$fixedSet.Add((([string]$v.DriveLetter).Substring(0,1) + ':')) }
+                            }
+                            $haveFixedSrc = $true
+                        }
+                    } catch {}
+                    if (-not $haveFixedSrc) {
+                        try {
+                            foreach ($v in @(Get-CimInstance -ClassName Win32_Volume -ErrorAction Stop)) {
+                                if (([int]$v.DriveType -eq 3) -and [string]$v.DriveLetter) { [void]$fixedSet.Add((([string]$v.DriveLetter).Substring(0,1) + ':')) }
+                            }
+                            $haveFixedSrc = $true
+                        } catch {}
+                    }
+                    $allBl = @()
+                    try { $allBl = @(Get-BitLockerVolume -ErrorAction Stop) } catch { $allBl = @() }
+                    $fixedVols = New-Object System.Collections.ArrayList
+                    foreach ($b in $allBl) {
+                        $mpB = ([string]$b.MountPoint).TrimEnd('\')
+                        $isLetter = ($mpB -match '^[A-Za-z]:$')
+                        if ([string]$b.VolumeType -eq 'OperatingSystem') { [void]$fixedVols.Add($b); continue }
+                        if (-not $isLetter) { continue }                       # letterless (EFI/recovery) - never touch
+                        if ($haveFixedSrc -and $fixedSet.Contains($mpB)) { [void]$fixedVols.Add($b) }
+                    }
+                    if ($fixedVols.Count -eq 0) {
+                        $blSys = $null
+                        try { $blSys = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop } catch {}
+                        if ($blSys) { [void]$fixedVols.Add($blSys) }
+                    }
+                    if ($fixedVols.Count -eq 0) {
+                        & $add 'Encryption' 'none' 'FAIL' 'no fixed BitLocker volumes could be enumerated'
+                    } else {
+                        # OS volume first so a data volume can see it encrypted/started for auto-unlock.
+                        $ordered = @($fixedVols | Sort-Object @{ Expression = { if ([string]$_.VolumeType -eq 'OperatingSystem') { 0 } else { 1 } } })
+                        $osEncOrPlanned = $false
+
+                        # FVE policy asserted at most ONCE per host (memoized in $fve). Policy is what
+                        # enforces recovery-key escrow + XtsAes256 - never encrypt without it. A write
+                        # failure marks $fve.Ok=$false and the calling volume FAILs (enable NOT attempted).
+                        $fve = @{ Done = $false; Ok = $false; Err = ''; Txt = '' }
+                        $assertFve = {
+                            if ($fve.Done) { return }
+                            $fve.Done = $true
+                            $fveKey = 'HKLM:\SOFTWARE\Policies\Microsoft\FVE'
+                            $recMsg = 'Your device is locked and will require a Bitlocker Recovery Key. For key retrieval, you can use another government funded device or if teleworking, the Desktop Anywhere application for key recovery. There are two ways to access your key.   Option 1: Navigate to https://myaccount.azure.us and select your device under the managed device option. Instructions can be found under "How can I get my Bitlocker Recovery Key?" at https://usaf.dps.mil/teams/EnterpriseBitLockerActivation.   Option 2: If the bitlockered device is not listed, you''ll need to contact your local CST or submit a vESD ticket.'
+                            $polDwords = @(
+                                [pscustomobject]@{ Name='EnableBDEWithNoTPM';              Value=0 }
+                                [pscustomobject]@{ Name='EncryptionMethodWithXtsFdv';      Value=7 }
+                                [pscustomobject]@{ Name='EncryptionMethodWithXtsOs';       Value=7 }
+                                [pscustomobject]@{ Name='EncryptionMethodWithXtsRdv';      Value=7 }
+                                [pscustomobject]@{ Name='FDVActiveDirectoryBackup';        Value=1 }
+                                [pscustomobject]@{ Name='FDVActiveDirectoryInfoToStore';   Value=2 }
+                                [pscustomobject]@{ Name='FDVHideRecoveryPage';             Value=1 }
+                                [pscustomobject]@{ Name='FDVManageDRA';                    Value=1 }
+                                [pscustomobject]@{ Name='FDVRecovery';                     Value=1 }
+                                [pscustomobject]@{ Name='FDVRecoveryKey';                  Value=2 }
+                                [pscustomobject]@{ Name='FDVRecoveryPassword';             Value=1 }
+                                [pscustomobject]@{ Name='FDVRequireActiveDirectoryBackup'; Value=1 }
+                                [pscustomobject]@{ Name='OSActiveDirectoryBackup';         Value=1 }
+                                [pscustomobject]@{ Name='OSActiveDirectoryInfoToStore';    Value=2 }
+                                [pscustomobject]@{ Name='OSHideRecoveryPage';              Value=1 }
+                                [pscustomobject]@{ Name='OSManageDRA';                     Value=1 }
+                                [pscustomobject]@{ Name='OSRecovery';                      Value=1 }
+                                [pscustomobject]@{ Name='OSRecoveryKey';                   Value=0 }
+                                [pscustomobject]@{ Name='OSRecoveryPassword';              Value=2 }
+                                [pscustomobject]@{ Name='OSRequireActiveDirectoryBackup';  Value=2 }
+                                [pscustomobject]@{ Name='RecoveryKeyMessageSource';        Value=2 }
+                                [pscustomobject]@{ Name='UseAdvancedStartup';              Value=1 }
+                                [pscustomobject]@{ Name='UseTPM';                          Value=1 }
+                            )
+                            $polSet = 0; $polOk = 0; $polErr = ''
+                            try {
+                                $keyItem = $null
+                                try { $keyItem = Get-Item -LiteralPath $fveKey -ErrorAction Stop } catch { $keyItem = $null }
+                                if (-not $keyItem) {
+                                    New-Item -Path $fveKey -Force -ErrorAction Stop | Out-Null
+                                    try { $keyItem = Get-Item -LiteralPath $fveKey -ErrorAction Stop } catch { $keyItem = $null }
+                                }
+                                foreach ($pv in $polDwords) {
+                                    $cur = $null
+                                    if ($keyItem) { try { $cur = $keyItem.GetValue($pv.Name, $null) } catch { $cur = $null } }
+                                    if (($null -ne $cur) -and ([int]$cur -eq [int]$pv.Value)) { $polOk++ }
+                                    else { New-ItemProperty -Path $fveKey -Name $pv.Name -PropertyType DWord -Value ([int]$pv.Value) -Force -ErrorAction Stop | Out-Null; $polSet++ }
+                                }
+                                $curMsg = $null
+                                if ($keyItem) { try { $curMsg = $keyItem.GetValue('RecoveryKeyMessage', $null) } catch { $curMsg = $null } }
+                                if (($null -ne $curMsg) -and ([string]$curMsg -eq $recMsg)) { $polOk++ }
+                                else { New-ItemProperty -Path $fveKey -Name 'RecoveryKeyMessage' -PropertyType String -Value $recMsg -Force -ErrorAction Stop | Out-Null; $polSet++ }
+                            } catch { $polErr = $_.Exception.Message }
+                            $fve.Err = $polErr
+                            $fve.Ok  = (-not $polErr)
+                            $fve.Txt = "FVE policy: $polSet set/corrected, $polOk already-correct"
+                        }
+
+                        # Shared escrow-first / fail-closed protector+escrow step for a given mount
+                        # point ($vol) and its BitLocker object ($blObj). Returns
+                        # @{ Ok; KpId; Target; Detail }: Ok=$false means escrow failed (a protector WE
+                        # added has been removed) and Enable must NOT run. Never reads .RecoveryPassword.
+                        $escrowFirst = {
+                            param($vol, $blObj)
+                            $weAdded = $false; $newKpId = ''
+                            try {
+                                $existingRp = @()
+                                try { $existingRp = @($blObj.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' }) } catch { $existingRp = @() }
+                                if ($existingRp.Count -gt 0) {
+                                    $newKpId = [string]$existingRp[0].KeyProtectorId
                                 } else {
+                                    $beforeIds = @()
+                                    try { foreach ($k in @($blObj.KeyProtector)) { $beforeIds += [string]$k.KeyProtectorId } } catch {}
+                                    $addRet = Add-BitLockerKeyProtector -MountPoint $vol -RecoveryPasswordProtector -ErrorAction Stop
+                                    $weAdded = $true
+                                    try {
+                                        foreach ($k in @($addRet.KeyProtector)) {
+                                            if (([string]$k.KeyProtectorType -match '(?i)RecoveryPassword') -and ($beforeIds -notcontains [string]$k.KeyProtectorId)) { $newKpId = [string]$k.KeyProtectorId; break }
+                                        }
+                                        if (-not $newKpId) {
+                                            $rp = @($addRet.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' })
+                                            if ($rp.Count -gt 0) { $newKpId = [string]$rp[$rp.Count - 1].KeyProtectorId }
+                                        }
+                                    } catch {}
+                                }
+                            } catch {
+                                return @{ Ok = $false; KpId = ''; Target = ''; Detail = "recovery-password protector add failed - encryption NOT started: $($_.Exception.Message)" }
+                            }
+                            $escrowOk = $false; $escrowTarget = ''
+                            try {
+                                if (Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue) {
+                                    try {
+                                        BackupToAAD-BitLockerKeyProtector -MountPoint $vol -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
+                                        $escrowOk = $true; $escrowTarget = 'Entra'
+                                    } catch { $escrowOk = $false }
+                                }
+                                if (-not $escrowOk) {
+                                    Backup-BitLockerKeyProtector -MountPoint $vol -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
+                                    $escrowOk = $true; $escrowTarget = 'AD'
+                                }
+                            } catch { $escrowOk = $false }
+                            if (-not $escrowOk) {
+                                if ($weAdded) { try { if ($newKpId) { Remove-BitLockerKeyProtector -MountPoint $vol -KeyProtectorId $newKpId -ErrorAction SilentlyContinue | Out-Null } } catch {} }
+                                return @{ Ok = $false; KpId = $newKpId; Target = ''; Detail = 'escrow failed (Entra + AD) - encryption NOT started' }
+                            }
+                            return @{ Ok = $true; KpId = $newKpId; Target = $escrowTarget; Detail = '' }
+                        }
+
+                        foreach ($bv in $ordered) {
+                            $mp  = ([string]$bv.MountPoint).TrimEnd('\'); if (-not $mp) { $mp = $sys }
+                            $psv = [string]$bv.ProtectionStatus; $vsv = [string]$bv.VolumeStatus
+                            $isOsVol = ([string]$bv.VolumeType -eq 'OperatingSystem')
+                            $pctv = ''; try { $pctv = [string]$bv.EncryptionPercentage } catch {}
+
+                            if ($psv -eq 'On') {
+                                & $add 'Encryption' 'none' 'NOCHANGE' "$mp protection already On; $vsv"
+                                if ($isOsVol) { $osEncOrPlanned = $true }
+                                continue
+                            }
+                            if ($vsv -match '(?i)EncryptionInProgress') {
+                                & $add 'Encryption' 'none' 'IN PROGRESS' "$mp encryption already in progress ($pctv% done); protection activates on completion - no action taken"
+                                if ($isOsVol) { $osEncOrPlanned = $true }
+                                continue
+                            }
+                            if ($vsv -match '(?i)FullyDecrypted') {
+                                if (-not $DoEnable) {
+                                    & $add 'Encryption' 'none' 'SKIP' "$mp not encrypted ($vsv) - BitLocker enable needs TPM+recovery-key escrow policy; route to MECM/desk-side"
+                                    continue
+                                }
+                                if ($isOsVol) {
+                                    # ---- OS volume ENABLE (USAF-aligned; TPM protector; each precondition => SKIP) ----
+                                    $tpmOk = $false; $tpmWhy = 'TPM not ready - initialize via desk-side/MECM'
+                                    try {
+                                        if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
+                                            $tp = Get-Tpm -ErrorAction Stop
+                                            if ([bool]$tp.TpmPresent -and [bool]$tp.TpmReady) { $tpmOk = $true }
+                                            elseif (-not [bool]$tp.TpmPresent) { $tpmWhy = 'TPM not present - cannot enable BitLocker (route to desk-side)' }
+                                        } else {
+                                            $tpmWhy = 'Get-Tpm unavailable - cannot confirm TPM readiness (route to desk-side/MECM)'
+                                        }
+                                    } catch { $tpmWhy = "TPM not ready - initialize via desk-side/MECM ($($_.Exception.Message))" }
+                                    if (-not $tpmOk) { & $add 'Encryption' 'none' 'SKIP' "$mp $tpmWhy"; continue }
                                     $domainJoined = $false
                                     try { $domainJoined = [bool](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain } catch { $domainJoined = $false }
-                                    if (-not $domainJoined) {
-                                        & $add 'Encryption' 'none' 'SKIP' 'machine not domain-joined - AD recovery-password escrow unavailable; route to desk-side/MECM'
-                                    } else {
-                                        # Mirror the enterprise USAF enable script (fail-closed by our design):
-                                        #   1. assert FVE policy  2. reuse-or-add a RecoveryPassword protector
-                                        #   3. escrow Entra-first, AD fallback  4. Enable-BitLocker.
-                                        # Never emit/return the recovery password - do not touch .RecoveryPassword.
-
-                                        # ---- Step 1: assert FVE policy (idempotent). Policy is what enforces the
-                                        #      recovery-key escrow + XtsAes256 method - never encrypt without it. A write
-                                        #      failure FAILs the pillar and enable is NOT attempted.
-                                        $fveKey = 'HKLM:\SOFTWARE\Policies\Microsoft\FVE'
-                                        $recMsg = 'Your device is locked and will require a Bitlocker Recovery Key. For key retrieval, you can use another government funded device or if teleworking, the Desktop Anywhere application for key recovery. There are two ways to access your key.   Option 1: Navigate to https://myaccount.azure.us and select your device under the managed device option. Instructions can be found under "How can I get my Bitlocker Recovery Key?" at https://usaf.dps.mil/teams/EnterpriseBitLockerActivation.   Option 2: If the bitlockered device is not listed, you''ll need to contact your local CST or submit a vESD ticket.'
-                                        $polDwords = @(
-                                            [pscustomobject]@{ Name='EnableBDEWithNoTPM';              Value=0 }
-                                            [pscustomobject]@{ Name='EncryptionMethodWithXtsFdv';      Value=7 }
-                                            [pscustomobject]@{ Name='EncryptionMethodWithXtsOs';       Value=7 }
-                                            [pscustomobject]@{ Name='EncryptionMethodWithXtsRdv';      Value=7 }
-                                            [pscustomobject]@{ Name='FDVActiveDirectoryBackup';        Value=1 }
-                                            [pscustomobject]@{ Name='FDVActiveDirectoryInfoToStore';   Value=2 }
-                                            [pscustomobject]@{ Name='FDVHideRecoveryPage';             Value=1 }
-                                            [pscustomobject]@{ Name='FDVManageDRA';                    Value=1 }
-                                            [pscustomobject]@{ Name='FDVRecovery';                     Value=1 }
-                                            [pscustomobject]@{ Name='FDVRecoveryKey';                  Value=2 }
-                                            [pscustomobject]@{ Name='FDVRecoveryPassword';             Value=1 }
-                                            [pscustomobject]@{ Name='FDVRequireActiveDirectoryBackup'; Value=1 }
-                                            [pscustomobject]@{ Name='OSActiveDirectoryBackup';         Value=1 }
-                                            [pscustomobject]@{ Name='OSActiveDirectoryInfoToStore';    Value=2 }
-                                            [pscustomobject]@{ Name='OSHideRecoveryPage';              Value=1 }
-                                            [pscustomobject]@{ Name='OSManageDRA';                     Value=1 }
-                                            [pscustomobject]@{ Name='OSRecovery';                      Value=1 }
-                                            [pscustomobject]@{ Name='OSRecoveryKey';                   Value=0 }
-                                            [pscustomobject]@{ Name='OSRecoveryPassword';              Value=2 }
-                                            [pscustomobject]@{ Name='OSRequireActiveDirectoryBackup';  Value=2 }
-                                            [pscustomobject]@{ Name='RecoveryKeyMessageSource';        Value=2 }
-                                            [pscustomobject]@{ Name='UseAdvancedStartup';              Value=1 }
-                                            [pscustomobject]@{ Name='UseTPM';                          Value=1 }
-                                        )
-                                        $polSet = 0; $polOk = 0; $polErr = ''
-                                        try {
-                                            $keyItem = $null
-                                            try { $keyItem = Get-Item -LiteralPath $fveKey -ErrorAction Stop } catch { $keyItem = $null }
-                                            if (-not $keyItem) {
-                                                New-Item -Path $fveKey -Force -ErrorAction Stop | Out-Null
-                                                try { $keyItem = Get-Item -LiteralPath $fveKey -ErrorAction Stop } catch { $keyItem = $null }
-                                            }
-                                            foreach ($pv in $polDwords) {
-                                                $cur = $null
-                                                if ($keyItem) { try { $cur = $keyItem.GetValue($pv.Name, $null) } catch { $cur = $null } }
-                                                if (($null -ne $cur) -and ([int]$cur -eq [int]$pv.Value)) { $polOk++ }
-                                                else { New-ItemProperty -Path $fveKey -Name $pv.Name -PropertyType DWord -Value ([int]$pv.Value) -Force -ErrorAction Stop | Out-Null; $polSet++ }
-                                            }
-                                            $curMsg = $null
-                                            if ($keyItem) { try { $curMsg = $keyItem.GetValue('RecoveryKeyMessage', $null) } catch { $curMsg = $null } }
-                                            if (($null -ne $curMsg) -and ([string]$curMsg -eq $recMsg)) { $polOk++ }
-                                            else { New-ItemProperty -Path $fveKey -Name 'RecoveryKeyMessage' -PropertyType String -Value $recMsg -Force -ErrorAction Stop | Out-Null; $polSet++ }
-                                        } catch { $polErr = $_.Exception.Message }
-
-                                        if ($polErr) {
-                                            & $add 'Encryption' 'enable' 'FAIL' "FVE policy assert failed: $polErr"
+                                    if (-not $domainJoined) { & $add 'Encryption' 'none' 'SKIP' "$mp machine not domain-joined - AD recovery-password escrow unavailable; route to desk-side/MECM"; continue }
+                                    & $assertFve
+                                    if (-not $fve.Ok) { & $add 'Encryption' 'enable' 'FAIL' "$mp FVE policy assert failed: $($fve.Err)"; continue }
+                                    $polTxt = $fve.Txt
+                                    $ef = & $escrowFirst $mp $bv
+                                    if (-not $ef.Ok) { & $add 'Encryption' 'enable' 'FAIL' "$mp $($ef.Detail)"; continue }
+                                    $escrowTarget = [string]$ef.Target
+                                    try {
+                                        Enable-BitLocker -MountPoint $mp -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
+                                        Start-Sleep -Milliseconds 500
+                                        $blE = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
+                                        $vsE = [string]$blE.VolumeStatus
+                                        $pctE = ''; try { $pctE = [string]$blE.EncryptionPercentage } catch {}
+                                        if ($vsE -match '(?i)FullyDecrypted') {
+                                            & $add 'Encryption' 'enable' 'FAIL' "$mp Enable-BitLocker returned but volume still FullyDecrypted - encryption did not start"
                                         } else {
-                                            $polTxt = "FVE policy: $polSet set/corrected, $polOk already-correct"
-                                            # ---- Step 2: REUSE an existing RecoveryPassword protector if one exists;
-                                            #      only Add one when none is present (track whether WE added it).
-                                            $weAdded = $false; $newKpId = ''; $encFail = ''
-                                            try {
-                                                $existingRp = @()
-                                                try { $existingRp = @($bl.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' }) } catch { $existingRp = @() }
-                                                if ($existingRp.Count -gt 0) {
-                                                    $newKpId = [string]$existingRp[0].KeyProtectorId
-                                                } else {
-                                                    $beforeIds = @()
-                                                    try { foreach ($k in @($bl.KeyProtector)) { $beforeIds += [string]$k.KeyProtectorId } } catch {}
-                                                    $addRet = Add-BitLockerKeyProtector -MountPoint $sys -RecoveryPasswordProtector -ErrorAction Stop
-                                                    $weAdded = $true
-                                                    try {
-                                                        foreach ($k in @($addRet.KeyProtector)) {
-                                                            if (([string]$k.KeyProtectorType -match '(?i)RecoveryPassword') -and ($beforeIds -notcontains [string]$k.KeyProtectorId)) { $newKpId = [string]$k.KeyProtectorId; break }
-                                                        }
-                                                        if (-not $newKpId) {
-                                                            $rp = @($addRet.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' })
-                                                            if ($rp.Count -gt 0) { $newKpId = [string]$rp[$rp.Count - 1].KeyProtectorId }
-                                                        }
-                                                    } catch {}
-                                                }
-                                            } catch {
-                                                $encFail = "recovery-password protector add failed - encryption NOT started: $($_.Exception.Message)"
-                                            }
-
-                                            if ($encFail) {
-                                                & $add 'Encryption' 'enable' 'FAIL' $encFail
-                                            } else {
-                                                # ---- Step 3: escrow FAIL-CLOSED, Entra first then on-prem AD. Record which
-                                                #      target took the key. If BOTH fail: remove the protector only if WE added
-                                                #      it this run (a pre-existing protector is never removed), then FAIL.
-                                                $escrowOk = $false; $escrowTarget = ''
-                                                try {
-                                                    if (Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue) {
-                                                        try {
-                                                            BackupToAAD-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
-                                                            $escrowOk = $true; $escrowTarget = 'Entra'
-                                                        } catch { $escrowOk = $false }
-                                                    }
-                                                    if (-not $escrowOk) {
-                                                        Backup-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
-                                                        $escrowOk = $true; $escrowTarget = 'AD'
-                                                    }
-                                                } catch { $escrowOk = $false }
-
-                                                if (-not $escrowOk) {
-                                                    if ($weAdded) { try { if ($newKpId) { Remove-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction SilentlyContinue | Out-Null } } catch {} }
-                                                    & $add 'Encryption' 'enable' 'FAIL' 'escrow failed (Entra + AD) - encryption NOT started'
-                                                } else {
-                                                    # ---- Step 4: escrow confirmed -> start FULL-volume encryption (TPM protector, XtsAes256).
-                                                    try {
-                                                        Enable-BitLocker -MountPoint $sys -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
-                                                        Start-Sleep -Milliseconds 500
-                                                        $blE = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
-                                                        $vsE = [string]$blE.VolumeStatus
-                                                        $pctE = ''
-                                                        try { $pctE = [string]$blE.EncryptionPercentage } catch {}
-                                                        if ($vsE -match '(?i)FullyDecrypted') {
-                                                            & $add 'Encryption' 'enable' 'FAIL' 'Enable-BitLocker returned but volume still FullyDecrypted - encryption did not start'
-                                                        } else {
-                                                            & $add 'Encryption' 'enable' 'STARTED' "encryption started (XtsAes256, TPM+RecoveryPassword escrowed to $escrowTarget) - $pctE% done; $polTxt; protection activates on completion; Tanium clears after next scan"
-                                                        }
-                                                    } catch {
-                                                        & $add 'Encryption' 'enable' 'FAIL' "escrow succeeded but Enable-BitLocker failed: $($_.Exception.Message)"
-                                                    }
-                                                }
-                                            }
+                                            $osEncOrPlanned = $true
+                                            & $add 'Encryption' 'enable' 'STARTED' "$mp encryption started (XtsAes256, TPM+RecoveryPassword escrowed to $escrowTarget) - $pctE% done; $polTxt; protection activates on completion; Tanium clears after next scan"
                                         }
+                                    } catch {
+                                        & $add 'Encryption' 'enable' 'FAIL' "$mp escrow succeeded but Enable-BitLocker failed: $($_.Exception.Message)"
                                     }
+                                    continue
+                                } else {
+                                    # ---- Fixed DATA volume ENABLE (no TPM; needs OS BitLocker-on; auto-unlock) ----
+                                    if (-not $osEncOrPlanned) {
+                                        & $add 'Encryption' 'none' 'SKIP' "$mp OS volume must be encrypted first - data-volume auto-unlock requires the OS volume BitLocker-on; route to MECM/desk-side"
+                                        continue
+                                    }
+                                    & $assertFve
+                                    if (-not $fve.Ok) { & $add 'Encryption' 'enable' 'FAIL' "$mp FVE policy assert failed: $($fve.Err)"; continue }
+                                    $polTxt = $fve.Txt
+                                    $ef = & $escrowFirst $mp $bv
+                                    if (-not $ef.Ok) { & $add 'Encryption' 'enable' 'FAIL' "$mp $($ef.Detail)"; continue }
+                                    $newKpId = [string]$ef.KpId; $escrowTarget = [string]$ef.Target
+                                    try {
+                                        Enable-BitLocker -MountPoint $mp -RecoveryPasswordProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
+                                        Start-Sleep -Milliseconds 500
+                                        # Dedup: keep ONLY the escrowed recovery protector; drop any extra the cmdlet added.
+                                        try {
+                                            $blDd = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
+                                            foreach ($k in @($blDd.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' })) {
+                                                $kid = [string]$k.KeyProtectorId
+                                                if ($kid -and $newKpId -and ($kid -ne $newKpId)) { try { Remove-BitLockerKeyProtector -MountPoint $mp -KeyProtectorId $kid -ErrorAction SilentlyContinue | Out-Null } catch {} }
+                                            }
+                                        } catch {}
+                                        # Best-effort auto-unlock (requires the OS volume encrypted; note when deferred).
+                                        $auNote = 'auto-unlock enabled'
+                                        try { Enable-BitLockerAutoUnlock -MountPoint $mp -ErrorAction Stop | Out-Null }
+                                        catch { $auNote = "auto-unlock deferred ($($_.Exception.Message))" }
+                                        $blE = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
+                                        $vsE = [string]$blE.VolumeStatus
+                                        $pctE = ''; try { $pctE = [string]$blE.EncryptionPercentage } catch {}
+                                        if ($vsE -match '(?i)FullyDecrypted') {
+                                            & $add 'Encryption' 'enable' 'FAIL' "$mp Enable-BitLocker returned but volume still FullyDecrypted - encryption did not start"
+                                        } else {
+                                            & $add 'Encryption' 'enable' 'STARTED' "$mp data-volume encryption started (XtsAes256, RecoveryPassword escrowed to $escrowTarget; $auNote) - $pctE% done; $polTxt; protection activates on completion; Tanium clears after next scan"
+                                        }
+                                    } catch {
+                                        & $add 'Encryption' 'enable' 'FAIL' "$mp escrow succeeded but Enable-BitLocker failed: $($_.Exception.Message)"
+                                    }
+                                    continue
                                 }
                             }
+                            if ($vsv -match '(?i)Decrypt') {
+                                & $add 'Encryption' 'none' 'SKIP' "$mp not encrypted ($vsv) - route to MECM/desk-side"
+                                continue
+                            }
+                            # Off + FullyEncrypted (classic post-firmware suspended-protectors) -> resume.
+                            $act = 'Resume-BitLocker'
+                            try { Resume-BitLocker -MountPoint $mp -ErrorAction Stop | Out-Null }
+                            catch { $act = 'manage-bde -protectors -enable'; & manage-bde -protectors -enable $mp 2>&1 | Out-Null }
+                            Start-Sleep -Milliseconds 500
+                            $bl2 = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
+                            if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "$mp protection resumed -> On; $($bl2.VolumeStatus)"; if ($isOsVol) { $osEncOrPlanned = $true } }
+                            elseif ($vsv -match '(?i)FullyEncrypted')     { & $add 'Encryption' $act 'FAIL' "$mp resume attempted but protection still $($bl2.ProtectionStatus)" }
+                            else { & $add 'Encryption' $act 'SKIP' "$mp protection $($bl2.ProtectionStatus); volume $($bl2.VolumeStatus) - not a resumable state; route to MECM/desk-side" }
                         }
-                    } elseif ($vs -match '(?i)Decrypt') {
-                        & $add 'Encryption' 'none' 'SKIP' "not encrypted ($vs) - route to MECM/desk-side"
-                    } else {
-                        # Off + FullyEncrypted (classic post-firmware suspended-protectors) -> resume.
-                        $act = 'Resume-BitLocker'
-                        try { Resume-BitLocker -MountPoint $sys -ErrorAction Stop | Out-Null }
-                        catch { $act = 'manage-bde -protectors -enable'; & manage-bde -protectors -enable $sys 2>&1 | Out-Null }
-                        Start-Sleep -Milliseconds 500
-                        $bl2 = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
-                        if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "protection resumed -> On; $($bl2.VolumeStatus)" }
-                        elseif ($vs -match '(?i)FullyEncrypted')     { & $add 'Encryption' $act 'FAIL' "resume attempted but protection still $($bl2.ProtectionStatus)" }
-                        else { & $add 'Encryption' $act 'SKIP' "protection $($bl2.ProtectionStatus); volume $($bl2.VolumeStatus) - not a resumable state; route to MECM/desk-side" }
                     }
                 } else {
                     $out = (& manage-bde -status $sys 2>&1 | Out-String)
-                    if ($out -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $add 'Encryption' 'none' 'NOCHANGE' 'protection already On (manage-bde)' }
+                    if ($out -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $add 'Encryption' 'none' 'NOCHANGE' "$sys protection already On (manage-bde; system-drive only - Get-BitLockerVolume unavailable, other fixed volumes not checked)" }
                     elseif ($out -match '(?i)Fully\s+Encrypted') {
                         & manage-bde -protectors -enable $sys 2>&1 | Out-Null
                         Start-Sleep -Milliseconds 500
                         $out2 = (& manage-bde -status $sys 2>&1 | Out-String)
-                        if ($out2 -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $add 'Encryption' 'manage-bde -protectors -enable' 'FIXED' 'protectors enabled -> On (manage-bde)' }
-                        else { & $add 'Encryption' 'manage-bde -protectors -enable' 'FAIL' 'enable attempted but still Off (manage-bde)' }
-                    } else { & $add 'Encryption' 'none' 'SKIP' 'not FullyEncrypted - route to MECM/desk-side (manage-bde)' }
+                        if ($out2 -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $add 'Encryption' 'manage-bde -protectors -enable' 'FIXED' "$sys protectors enabled -> On (manage-bde; system-drive only)" }
+                        else { & $add 'Encryption' 'manage-bde -protectors -enable' 'FAIL' "$sys enable attempted but still Off (manage-bde)" }
+                    } else { & $add 'Encryption' 'none' 'SKIP' "$sys not FullyEncrypted - route to MECM/desk-side (manage-bde; system-drive only - Get-BitLockerVolume unavailable)" }
                 }
             } catch { & $add 'Encryption' 'error' 'FAIL' $_.Exception.Message }
         }
 
-        # 2. AntiMalware - heal Defender services / RTP / signatures. Missing MDE
-        #    Sense is a note, not a failure, when Defender itself is healthy.
+        # 2. AntiMalware - heal Defender honouring Get-MpComputerStatus.AMRunningMode.
+        #    Always heal WinDefend/Sense services. Force RTP on (Set-MpPreference) ONLY when
+        #    AMRunningMode is Active - NEVER in Passive / EDR Block Mode, where MDE Sense is
+        #    primary and RTP off is correct (forcing it would fight the MDE config).
+        #    Update-MpSignature when the signature age exceeds SigMaxAgeHours. A Passive/EDR
+        #    box with Sense onboarded + fresh signatures reports NOCHANGE (protected via MDE).
         if ($Pillars -contains 'AntiMalware') {
             try {
                 $changed = New-Object System.Collections.ArrayList
@@ -1288,23 +1507,71 @@ $script:C2cFixBlock = {
                 }
                 $failDet = ''
                 if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
-                    $mp = Get-MpComputerStatus -ErrorAction Stop
-                    if (-not $mp.RealTimeProtectionEnabled) {
+                    $mp     = Get-MpComputerStatus -ErrorAction Stop
+                    $mode   = [string]$mp.AMRunningMode
+                    $amProd = [string]$mp.AMProductVersion; $amEng = [string]$mp.AMEngineVersion
+                    $lastUpd = $null; try { $lastUpd = $mp.AntivirusSignatureLastUpdated } catch { $lastUpd = $null }
+                    $ageHours = $null
+                    if ($lastUpd -is [datetime]) { $ageHours = [math]::Round(((Get-Date) - $lastUpd).TotalHours, 1) }
+                    elseif ($lastUpd -and ($lastUpd -as [datetime])) { $ageHours = [math]::Round(((Get-Date) - ([datetime]$lastUpd)).TotalHours, 1) }
+                    else { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
+                    $isPassive = ($mode -match '(?i)passive|edr')
+                    $isActive  = ($mode) -and (-not $isPassive)
+                    # Force RTP ONLY when Active (never fight the MDE passive/EDR config).
+                    if ($isActive -and (-not $mp.RealTimeProtectionEnabled)) {
                         try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop; [void]$changed.Add('RTP enabled') }
                         catch { $failDet += "RTP enable failed: $($_.Exception.Message); " }
                     }
-                    if ([int]$mp.AntivirusSignatureAge -gt 7) {
+                    # Update stale signatures (age budget in HOURS) regardless of running mode.
+                    if (($null -ne $ageHours) -and ($ageHours -gt $SigMaxAgeHours)) {
                         try { Update-MpSignature -ErrorAction Stop; [void]$changed.Add('signatures updated') }
                         catch { $failDet += "sig update failed: $($_.Exception.Message); " }
                     }
                     Start-Sleep -Milliseconds 300
                     $mp2 = Get-MpComputerStatus -ErrorAction SilentlyContinue
-                    $rtpNow = if ($mp2) { [bool]$mp2.RealTimeProtectionEnabled } else { [bool]$mp.RealTimeProtectionEnabled }
-                    $ageNow = if ($mp2) { [int]$mp2.AntivirusSignatureAge } else { [int]$mp.AntivirusSignatureAge }
-                    $noteTxt = if ($notes.Count -gt 0) { '; ' + ($notes -join '; ') } else { '' }
-                    if ($failDet)               { & $add 'AntiMalware' 'heal' 'FAIL' ($failDet.TrimEnd('; ') + $noteTxt) }
-                    elseif ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + "; RTP=$rtpNow sigAge=${ageNow}d" + $noteTxt) }
-                    else                        { & $add 'AntiMalware' 'none' 'NOCHANGE' ("RTP on; sig age ${ageNow}d" + $noteTxt) }
+                    $modeNow = if ($mp2) { [string]$mp2.AMRunningMode } else { $mode }
+                    $rtpNow  = if ($mp2) { [bool]$mp2.RealTimeProtectionEnabled } else { [bool]$mp.RealTimeProtectionEnabled }
+                    # Re-evaluate the running mode from the RE-READ, not the pre-heal snapshot:
+                    # a box that started Disabled (empty AMRunningMode) can transition to Active
+                    # once WinDefend is started, and Get-MpComputerStatus taken right after the
+                    # start can lag behind that transition. If it now reads Active with RTP still
+                    # off, force RTP HERE and re-verify. Never force RTP in Passive / EDR Block
+                    # Mode (MDE Sense is primary there - RTP off is correct).
+                    $isPassiveNow = ($modeNow -match '(?i)passive|edr')
+                    $isActiveNow  = ($modeNow) -and (-not $isPassiveNow)
+                    if ($isActiveNow -and (-not $rtpNow)) {
+                        try {
+                            Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
+                            [void]$changed.Add('RTP enabled (post-heal Active)')
+                            Start-Sleep -Milliseconds 300
+                            $mp3 = Get-MpComputerStatus -ErrorAction SilentlyContinue
+                            if ($mp3) { $mp2 = $mp3; $modeNow = [string]$mp3.AMRunningMode; $rtpNow = [bool]$mp3.RealTimeProtectionEnabled }
+                            $isPassiveNow = ($modeNow -match '(?i)passive|edr')
+                            $isActiveNow  = ($modeNow) -and (-not $isPassiveNow)
+                        } catch { $failDet += "RTP enable failed: $($_.Exception.Message); " }
+                    }
+                    $lastNow = $lastUpd; if ($mp2) { try { $lastNow = $mp2.AntivirusSignatureLastUpdated } catch {} }
+                    $ageNow  = $ageHours
+                    if ($mp2) {
+                        if ($lastNow -is [datetime]) { $ageNow = [math]::Round(((Get-Date) - $lastNow).TotalHours, 1) }
+                        elseif ($lastNow -and ($lastNow -as [datetime])) { $ageNow = [math]::Round(((Get-Date) - ([datetime]$lastNow)).TotalHours, 1) }
+                    }
+                    $ageTxt  = if ($null -ne $ageNow) { "${ageNow}h" } else { 'unknown' }
+                    $lastTxt = if ($lastNow) { [string]$lastNow } else { 'unknown' }
+                    $modeTxt = if ($modeNow) { $modeNow } else { 'null (Disabled/Not Running)' }
+                    $stateTxt = "RunningMode $modeTxt; RTP $rtpNow; prod $amProd; engine $amEng; sig last $lastTxt (age $ageTxt, budget ${SigMaxAgeHours}h)"
+                    $noteTxt  = if ($notes.Count -gt 0) { '; ' + ($notes -join '; ') } else { '' }
+                    # A box that ENDS Active-but-RTP-off is NOT protected - never report FIXED;
+                    # reflect the true state (FAIL). RTP-on Active or a compliant Passive/EDR box
+                    # can still report FIXED / NOCHANGE below.
+                    $rtpStillOff = ($isActiveNow -and (-not $rtpNow))
+                    if ($failDet -or $rtpStillOff) {
+                        $why = $failDet.TrimEnd('; ')
+                        if ($rtpStillOff) { if ($why) { $why += '; ' }; $why += 'Active but RTP still off after heal' }
+                        & $add 'AntiMalware' 'heal' 'FAIL' ($why + '; ' + $stateTxt + $noteTxt)
+                    }
+                    elseif ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + '; ' + $stateTxt + $noteTxt) }
+                    else                          { & $add 'AntiMalware' 'none' 'NOCHANGE' ($(if ($isPassiveNow) { 'already protected via MDE (Passive/EDR - RTP not forced); ' } else { 'already protected; ' }) + $stateTxt + $noteTxt) }
                 } else {
                     if ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + '; Get-MpComputerStatus unavailable') }
                     else { & $add 'AntiMalware' 'none' 'SKIP' ('Get-MpComputerStatus unavailable (non-Defender AV?)' + $(if ($notes.Count) { '; ' + ($notes -join '; ') } else { '' })) }
@@ -1362,7 +1629,7 @@ $script:C2cFixBlock = {
     try {
         # Pass the pillar set as a '|'-delimited string (all-scalar ArgumentList) so it
         # crosses the WinRM boundary intact; the remote block splits it back to an array.
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours -ErrorAction Stop
     } catch {
         $r.Status = 'FAILED'; $r.Detail = "Fix: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -1615,6 +1882,10 @@ function Invoke-C2cFixAction {
     $baseline = Get-C2cBaseline
     $taniumService = [string]$baseline.Config['taniumService']
     if (-not $taniumService) { $taniumService = 'Tanium Client' }
+    # Signature-freshness budget (hours) for the AntiMalware fixer: explicit hours, else days*24.
+    $sigMaxHours = 24
+    if ($baseline.Config.ContainsKey('sigMaxAgeHours')) { $tmph = 0; if ([int]::TryParse([string]$baseline.Config['sigMaxAgeHours'], [ref]$tmph) -and $tmph -gt 0) { $sigMaxHours = $tmph } }
+    elseif ($baseline.Config.ContainsKey('sigMaxAgeDays')) { $tmpd = 0; if ([int]::TryParse([string]$baseline.Config['sigMaxAgeDays'], [ref]$tmpd) -and $tmpd -gt 0) { $sigMaxHours = $tmpd * 24 } }
 
     # --- Cert bundle for the PkiRoots fixer -------------------------------------
     # fix-pki: the bundle is REQUIRED - read it ADMIN-SIDE now; abort (dial nothing) if
@@ -1759,6 +2030,7 @@ function Invoke-C2cFixAction {
         [void]$ps.AddArgument([string]$job.Host); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
         [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cAddCertsSrc)
+        [void]$ps.AddArgument([int]$sigMaxHours)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 

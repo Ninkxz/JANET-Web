@@ -4,6 +4,26 @@
 > is unchanged - routes, registry keys, view registration and log/export names all
 > stay `c2c` / "C2C Readiness Scan").
 
+> **v1.7.0 (2026-07-08) - two pillar-correctness fixes (real fleet evidence):**
+> (1) **Encryption covers ALL FIXED VOLUMES**, not just the system drive. The scan
+> check FAILs if any fixed volume is decrypted (removable/USB excluded); the fixer
+> iterates every fixed volume - the OS volume keeps the TPM + escrow-first enable
+> flow, fixed DATA volumes enable escrow-first with NO TPM protector + auto-unlock.
+> (2) **AntiMalware honours `AMRunningMode`** - a Passive / EDR Block Mode box that is
+> primary-managed by MDE Sense (RTP off is CORRECT) now PASSes and the fixer no
+> longer force-enables RTP against the MDE config. New baseline key `sigMaxAgeHours`
+> (default 24; falls back to `sigMaxAgeDays * 24`).
+
+> **v1.7.0 hardening (same version, same feature - correctness only):**
+> (a) the Encryption ENABLE consent (checkbox label + tooltip, per-card preflight, and
+> both the fix-encryption + RUN ALL arm dialogs) now discloses that ticking enable starts
+> full-volume encryption on the OS **and** fixed DATA volumes, not just the OS drive;
+> (b) the AntiMalware fixer re-evaluates the running mode after the WinDefend/Sense heal +
+> re-read and forces RTP for a box that transitioned Disabled->Active - a box that ends
+> Active-but-RTP-off is FAIL, never FIXED; (c) the scan-check `manage-bde` fallback PASSes
+> only on Fully Encrypted (Protection On + Conversion Status Fully Encrypted / 100%), not
+> Protection On alone.
+
 > Net-new JANET Web tool (no desktop twin). Read-only Comply-to-Connect quarantine
 > predictor. This is a standard `stream-table` tool: paste targets, run one action,
 > watch per-host verdict rows stream in and the full per-check report fill the
@@ -39,10 +59,10 @@ EXT** (external - reported, never scored).
 |---|--------|--------------------------------------|-----------|
 | 1 | Monitoring | `Get-C2cTaniumInstalled` (scan the 64- and 32-bit HKLM Uninstall keys for a DisplayName matching "Tanium") AND `Get-Service` the Tanium client service (`taniumService`, default "Tanium Client") | software installed AND service Running. Detail states BOTH facts, e.g. `Tanium installed (v...); service Running` / `Tanium not installed; service not installed` / `Tanium installed (v...); service Stopped` |
 | 2 | Firewall | `Get-NetFirewallProfile` (Domain/Private/Public); fallback `netsh advfirewall show allprofiles state` | all three profiles Enabled (else FAIL lists the disabled ones) |
-| 3 | AntiMalware | `Get-MpComputerStatus` (Defender, NIPR); fallback `root\SecurityCenter2` AntiVirusProduct | RealTimeProtectionEnabled AND AntivirusSignatureAge <= `sigMaxAgeDays` (default 7); Detail carries RTP + sig age + sig version |
+| 3 | AntiMalware | `Get-MpComputerStatus.AMRunningMode` (Defender, NIPR); Sense onboarding via `Get-Service Sense` / `OnboardingState` reg; fallback `root\SecurityCenter2` AntiVirusProduct | Defender installed AND ( (**Active** AND RealTimeProtectionEnabled) OR (**Passive / EDR Block Mode** AND MDE Sense onboarded) ) AND signatures fresh (age <= `sigMaxAgeHours`, default 24). FAIL when AMRunningMode is null/empty (Disabled/Not Running), Active-but-RTP-off, or signatures stale. Detail carries RunningMode + AMProductVersion + AMEngineVersion + AntivirusSignatureLastUpdated + age in HOURS |
 | 4 | Patches | `CCM_SoftwareUpdate` in `root\ccm\ClientSDK` (`InstallState != Installed` AND `ApplicabilityState != NotApplicable`) - the exact wpt query | 0 pending (else FAIL count). CCM absent -> ERROR "MECM/CCM not queryable" |
 | 5 | Vuln | **EXT** - not endpoint-determinable | n/a - "Scored server-side (ARAD/ACAS) - remediate via ACAS / Reports / KEV / UPR" |
-| 6 | Encryption | `Get-BitLockerVolume` for `$env:SystemDrive`; fallback `manage-bde -status` | ProtectionStatus On; Detail carries ProtectionStatus + VolumeStatus |
+| 6 | Encryption | Enumerate ALL FIXED volumes: `Get-BitLockerVolume` correlated with fixed drive type (`Get-Volume` DriveType Fixed, else `Win32_Volume` DriveType=3); removable/USB/network/optical excluded, letterless system/EFI/recovery partitions skipped (never a false fail); fallback `manage-bde -status` on the system drive (noted limitation) - the fallback PASSes only when the output shows BOTH `Protection Status: Protection On` AND the volume is fully encrypted (`Conversion Status: Fully Encrypted`, or `Percentage Encrypted: 100%` as the equivalent); Protection On with an in-progress conversion FAILs and the Detail names the gap | EVERY fixed volume ProtectionStatus On AND VolumeStatus FullyEncrypted. FAIL lists each non-compliant volume + status, e.g. `C: On/FullyEncrypted; D: Off/FullyDecrypted; E: On/EncryptionInProgress(47%)` |
 | 7 | AppWhitelist | AppLocker via `Get-AppLockerPolicy -Effective` (any RuleCollection EnforcementMode=Enabled); else WDAC via `Win32_DeviceGuard` (`CodeIntegrityPolicyEnforcementStatus >= 2`) | either enforcing (audit-only -> FAIL with a note; neither -> FAIL) |
 | 8 | Agents | patch agent `Get-Service CcmExec` Running AND >=1 `securityAgentServices` Running | both true; Detail names both states |
 | 9 | PkiRoots | compare `Cert:\LocalMachine\Root` thumbprints against `dodRootThumbprints` | every required thumbprint present (else FAIL lists how many/which). **Empty baseline -> EXT** "configure DoD root thumbprints in c2c-baseline.json" |
@@ -74,12 +94,16 @@ overlays the file if present, so it works even if the file is missing. Defaults:
 ```json
 {
   "sigMaxAgeDays": 7,
+  "sigMaxAgeHours": 24,
   "taniumService": "Tanium Client",
   "securityAgentServices": ["masvc", "mfemms", "macmnsvc", "WinDefend", "Sense"],
   "hostnamePatterns": ["^MSEKL", "^MSEKW"],
   "dodRootThumbprints": []
 }
 ```
+
+`sigMaxAgeHours` (v1.7.0, default 24) is the signature-freshness budget in HOURS used
+by the AntiMalware scan check and fixer; if omitted it falls back to `sigMaxAgeDays * 24`.
 
 The tool **never writes** this file (no SMB atomic-write hazard) - operators edit
 the JSON by hand and re-run. Leaving `dodRootThumbprints` empty is intentional: the
@@ -210,9 +234,9 @@ host's OWN checked set. The worker takes the pillar list PER host job.
 |---|---|---|---|
 | `fix-monitoring` | Fix Monitoring (Tanium) | - | Verify Tanium software installed (uninstall registry, `Get-C2cTaniumInstalled`); heal the client service (name from `taniumService`) -> Automatic + Started; verify. Result MONITORED / ALREADY MONITORED / FAIL. FAIL cases: service ABSENT but installed -> "repair via Software Center/MECM"; neither installed nor service -> "deploy from Software Center/MECM". No service is ever created. |
 | `fix-firewall` | Fix Firewall | - | `Set-NetFirewallProfile -Enabled True` on any disabled profile (netsh fallback); verify all 3 on. FIREWALL ENABLED / ALREADY ENABLED / FAIL. |
-| `fix-antimalware` | Fix AntiMalware (Defender) | - | WinDefend/Sense Automatic + Started; enable RTP; `Update-MpSignature` if age > 7d; re-read. PROTECTED / ALREADY PROTECTED / FAIL. Missing MDE Sense is a note. |
+| `fix-antimalware` | Fix AntiMalware (Defender) | - | WinDefend/Sense Automatic + Started; force RTP (`Set-MpPreference`) ONLY when `AMRunningMode` is Active - never in Passive / EDR Block Mode (MDE Sense primary); `Update-MpSignature` when sig age > `sigMaxAgeHours` (default 24); re-read. The running mode is RE-EVALUATED from the re-read (a box that starts Disabled and transitions to Active once WinDefend is started - the first status read can lag - has RTP forced there and re-verified); a box that ENDS Active-but-RTP-off is reported FAIL, never FIXED. Only an Active-with-RTP-on or a compliant Passive/EDR end-state reports PROTECTED / ALREADY PROTECTED (a Passive/EDR box with Sense + fresh sigs -> NOCHANGE). Detail reports RunningMode + versions + last-update + age-hours. Missing MDE Sense is a note. |
 | `fix-patches` | Fix Patches (MECM cycle) | - | `Invoke-CimMethod root\ccm SMS_Client TriggerSchedule` {..113} then {..108}. PATCH CYCLE KICKED / FAIL (root\ccm unreachable). |
-| `fix-encryption` | Fix Encryption (BitLocker) | `enableEncryption` (bool, default false) | Resume suspended protectors (PROTECTION RESUMED / ALREADY ENCRYPTED). If `enableEncryption` and FullyDecrypted: FVE policy assert -> reuse/add RecoveryPassword protector -> escrow Entra-first / AD fallback -> Enable-BitLocker XtsAes256 (ENCRYPTION STARTED). Escrow-first, fail-closed; TPM-ready + domain-joined only; recovery password never emitted. |
+| `fix-encryption` | Fix Encryption (BitLocker) | `enableEncryption` (bool, default false) | Iterates EVERY FIXED volume (removable/USB never touched; one `Encryption` result per volume so the host rolls up FIXED / PARTIAL / FAILED / NO CHANGE). Per volume: On -> ALREADY ENCRYPTED; suspended -> RESUME (PROTECTION RESUMED); EncryptionInProgress -> IN PROGRESS(%); FullyDecrypted -> SKIP unless `enableEncryption`. ENABLE, **OS volume**: FVE policy assert (once/host) -> reuse/add RecoveryPassword protector -> escrow Entra-first / AD fallback -> Enable-BitLocker TPM + XtsAes256 (ENCRYPTION STARTED); TPM-ready + domain-joined only. ENABLE, **fixed DATA volume**: requires the OS volume BitLocker-on first (else SKIP); escrow-first exactly like OS but NO TPM protector; Enable-BitLocker XtsAes256 full-volume; dedup to one escrowed recovery protector; best-effort `Enable-BitLockerAutoUnlock`. Escrow-first, fail-closed; recovery password never emitted. |
 | `fix-pki` | Fix PKI Trust Roots | `certBundleFolder` (text, optional - blank auto-uses the shipped `Packages\DoD-Certs` bundle) | Read the DoD trust bundle folder admin-side once (root\ -> Root, Intermediate\ -> CA, Untrusted\ -> Disallowed, loose *.cer -> Root); a BLANK path falls back to the shipped default (`Get-C2cDefaultCertBundlePath`). Only a supplied-blank AND missing/empty default ABORTS before any dial. Per host open each store ReadWrite and add ONLY thumbprints not already present (never remove). ROOTS INSTALLED / ROOTS ALREADY PRESENT / FAIL. |
 
 All fix actions also carry the opt-in `winrmHeal` (bool, default false) toggle - the
@@ -256,7 +280,12 @@ compact card per fixable pillar present (Monitoring / Firewall / Encryption /
 AntiMalware / Patches / **PKI Trust Roots**). Each card = a checkbox (checked by default)
 + the pillar title + its affected-host count (click to review the host list in a dialog)
 + a per-card **Fix on N** button that dispatches `fix-<pillar>` with `targets` = that
-pillar's imported hosts. The **Encryption** card carries the ENABLE-BitLocker toggle; the
+pillar's imported hosts. The **Encryption** card carries the ENABLE-BitLocker toggle -
+its label + tooltip and the per-card / RUN ALL preflight + arm dialogs DISCLOSE that
+ticking it starts XtsAes256 FULL-VOLUME encryption on EVERY FullyDecrypted FIXED volume:
+the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra
+escrow + auto-unlock), an hours-long background operation; removable / USB drives are
+never touched. The
 **PKI Trust Roots** card uses the shared **PKI cert bundle folder** path input in the
 fix-card header, which now DEFAULTS to the shipped bundle - its placeholder/hint reads
 "leave blank -> shipped DoD bundle (Packages\DoD-Certs)", so one-click fix-pki works with

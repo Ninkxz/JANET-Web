@@ -275,7 +275,7 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - C2C Nemesis v1.6.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
+Describe 'C2C manifest - C2C Nemesis v1.7.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
 
     $man = Get-JanetToolManifest
     $fix = @($man.actions | Where-Object { $_.id -eq 'fix-encryption' })[0]
@@ -290,8 +290,8 @@ Describe 'C2C manifest - C2C Nemesis v1.6.0, per-pillar fix actions (incl. fix-p
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.6.0' {
-        $man.version | Should Be '1.6.0'
+    It 'reports tool version 1.7.0' {
+        $man.version | Should Be '1.7.0'
     }
     It 'exposes 10 actions: scan + import + six per-pillar fixes + run-all + version-check' {
         @($man.actions).Count | Should Be 10
@@ -356,6 +356,19 @@ Describe 'C2C manifest - C2C Nemesis v1.6.0, per-pillar fix actions (incl. fix-p
         $fix.description | Should Match 'Entra-first'
         $fix.description | Should Match 'ESCROW-FIRST'
         $fix.description | Should Match 'XtsAes256'
-        $fix.description | Should Match 'never started'
+        $fix.description | Should Match 'NEVER encrypted'
+    }
+    It 'the fix-encryption description states the multi-volume (all fixed volumes) + data-volume behaviour' {
+        $fix.description | Should Match '(?i)EVERY FIXED VOLUME'
+        $fix.description | Should Match '(?i)DATA volume'
+        $fix.description | Should Match '(?i)auto-unlock'
+        $fix.description | Should Match '(?i)removable'
+    }
+    It 'the fix-antimalware description states the AMRunningMode / Passive / EDR Block Mode behaviour' {
+        $am = @($man.actions | Where-Object { $_.id -eq 'fix-antimalware' })[0]
+        $am.description | Should Match 'AMRunningMode'
+        $am.description | Should Match '(?i)Passive'
+        $am.description | Should Match '(?i)EDR Block Mode'
+        $am.description | Should Match '(?i)sigMaxAgeHours'
     }
 }

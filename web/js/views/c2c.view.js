@@ -36,10 +36,10 @@
   var CHECKS = [
     ['Monitoring', 'Endpoint monitoring installed (Tanium SOFTWARE installed + client service running)'],
     ['Firewall', 'Endpoint firewall active (Domain + Private + Public profiles enabled)'],
-    ['AntiMalware', 'Anti-malware installed + signatures up to date (Defender RTP + sig age)'],
+    ['AntiMalware', 'Anti-malware active + signatures fresh (Defender AMRunningMode: Active needs RTP; Passive / EDR Block Mode needs MDE Sense onboarded)'],
     ['Patches', 'All requisite patches installed (0 pending MECM/CCM updates)'],
     ['VulnThreshold', 'Below the vulnerability threshold  [EXT - scored server-side (ARAD/ACAS)]'],
-    ['Encryption', 'Data-at-rest encryption active (BitLocker On for the system drive)'],
+    ['Encryption', 'Data-at-rest encryption active (BitLocker On + FullyEncrypted for EVERY fixed volume; removable/USB excluded)'],
     ['AppWhitelist', 'Application whitelist active (AppLocker or WDAC enforcing)'],
     ['Agents', 'Patching + security agents installed and active (CcmExec + a security agent)'],
     ['PkiRoots', 'PKI trust roots baseline present (DoD roots in LocalMachine\\Root)'],
@@ -56,8 +56,8 @@
   var FIX_META = {
     Monitoring:  { action: 'fix-monitoring',  label: 'Monitoring (Tanium)',    desc: 'Verify Tanium SOFTWARE installed (uninstall registry) + heal the client service (Automatic + start).' },
     Firewall:    { action: 'fix-firewall',    label: 'Firewall',               desc: 'Enable any disabled Domain / Private / Public firewall profile.' },
-    Encryption:  { action: 'fix-encryption',  label: 'Encryption (BitLocker)', desc: 'Resume suspended protectors; opt-in ENABLE on FullyDecrypted OS volumes.' },
-    AntiMalware: { action: 'fix-antimalware', label: 'AntiMalware (Defender)', desc: 'Start WinDefend / Sense (Automatic), enable RTP, update stale signatures.' },
+    Encryption:  { action: 'fix-encryption',  label: 'Encryption (BitLocker)', desc: 'Resume suspended protectors on EVERY fixed volume; opt-in ENABLE decrypted fixed volumes (OS: TPM; data: auto-unlock). Removable/USB never touched.' },
+    AntiMalware: { action: 'fix-antimalware', label: 'AntiMalware (Defender)', desc: 'Start WinDefend / Sense (Automatic); force RTP only in Active mode (never Passive / EDR Block Mode); update stale signatures.' },
     Patches:     { action: 'fix-patches',     label: 'Patches (MECM cycle)',   desc: 'Trigger the MECM SUM scan (113) + eval (108); installs run async.' },
     PkiRoots:    { action: 'fix-pki',         label: 'PKI Trust Roots',        desc: 'Install the DoD trust bundle .cer ADDITIVELY into Root/CA/Disallowed (needs the cert bundle folder below).' }
   };
@@ -655,7 +655,7 @@
 
         // Encryption card: the ENABLE-BitLocker opt-in toggle
         if (key === 'Encryption') {
-          encEnableCb = ui.checkbox('ENABLE BitLocker on FullyDecrypted OS volumes (XtsAes256)', { title: 'Opt-in. On a FullyDecrypted OS volume: add a RecoveryPassword protector and escrow it (Entra-first, AD fallback) FIRST - fail-closed: if escrow fails, the protector is removed and encryption is NEVER started - then add a TPM protector and start XtsAes256 full-disk encryption. Requires a TPM-ready + domain-joined host. Applies to this card and to RUN ALL.' });
+          encEnableCb = ui.checkbox('ENABLE BitLocker on ALL FullyDecrypted FIXED volumes - OS + DATA (XtsAes256)', { title: 'Opt-in. Starts XtsAes256 FULL-VOLUME encryption on EVERY FullyDecrypted FIXED volume: the OS volume (TPM protector) AND fixed DATA volumes such as D:, E: (recovery-password protector, NO TPM, plus BitLocker auto-unlock). Every volume escrows its recovery key FIRST (Entra-first, AD fallback) and is fail-closed - if escrow fails the protector is removed and encryption is NEVER started. Removable / USB drives are never touched. The OS volume needs a TPM-ready + domain-joined host; a DATA volume only enables once the OS volume is BitLocker-on. Runs for hours in the background. Applies to this card and to RUN ALL.' });
           encEnableCb._cb.checked = false;
           encEnableCb.style.margin = '6px 0 2px 22px';
           box.appendChild(encEnableCb);
@@ -720,7 +720,7 @@
           { label: hosts.length + ' affected host(s) queued', ok: hosts.length > 0 },
           { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet }
         ];
-        if (key === 'Encryption') pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start encryption on decrypted OS volumes' : 'Resume-only (ENABLE not ticked)', ok: true });
+        if (key === 'Encryption') pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Resume-only (ENABLE not ticked)', ok: true });
         if (key === 'PkiRoots') pf.push({ label: 'Cert bundle: ' + (bundleFolder || 'shipped DoD default (Packages\\DoD-Certs)'), ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
@@ -728,7 +728,7 @@
           title: 'Arm Fix ' + meta.label,
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
           body: 'About to run <b>Fix ' + esc(meta.label) + '</b> on <b>' + hosts.length + '</b> affected host(s).'
-            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START full-disk encryption (XtsAes256) on any of the <b>' + hosts.length + '</b> host(s) whose OS volume is FullyDecrypted - escrow-first, TPM-ready + domain-joined only. Encryption runs for hours in the background.' : ''),
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START XtsAes256 FULL-VOLUME encryption on <b>every FullyDecrypted FIXED volume</b> of the <b>' + hosts.length + '</b> host(s) - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock). Removable / USB drives are never touched. Escrow-first, fail-closed; the OS volume needs TPM-ready + domain-joined. Encryption runs for hours in the background.' : ''),
           preflight: pf, okText: 'Run Fix ' + meta.label, cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: '[' + ts() + '] Fix ' + meta.label + ' cancelled at the arming dialog.', level: 'warn' }); return; }
@@ -769,7 +769,7 @@
 
         var pf = Object.keys(pcount).sort().map(function (p) { return { label: p + ': ' + pcount[p] + ' host(s)', ok: true }; });
         pf.unshift({ label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet });
-        pf.push({ label: enableEnc ? 'ENABLE BitLocker: checked Encryption hosts WILL start encryption' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
+        pf.push({ label: enableEnc ? 'ENABLE BitLocker: checked Encryption hosts WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
         if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs) - leave blank to use it', ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
@@ -778,7 +778,7 @@
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
           body: 'About to fix <b>' + plan.length + '</b> host(s) - each its OWN checked failed pillars (<b>' + totalFixes + '</b> fix(es) total).'
             + '<br>Per-pillar host counts: <b>' + esc(Object.keys(pcount).sort().map(function (p) { return p + ' ' + pcount[p]; }).join(', ')) + '</b>'
-            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> checked Encryption hosts will START encryption on FullyDecrypted OS volumes.' : '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).'),
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> checked Encryption hosts will START XtsAes256 full-volume encryption on <b>every FullyDecrypted FIXED volume</b> - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock); removable / USB drives are never touched. Runs for hours in the background.' : '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).'),
           preflight: pf, okText: 'RUN ALL', cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: '[' + ts() + '] RUN ALL cancelled at the arming dialog.', level: 'warn' }); return; }
