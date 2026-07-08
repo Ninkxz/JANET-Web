@@ -40,19 +40,29 @@
     ['Hostname', 'AFNET/AFNS valid hostname (matches the naming convention)']
   ];
 
+  // Mass-Fix pillars that are remediated on the endpoint (drives the import chips
+  // + the per-pillar "Load X hosts" buttons).
+  var FIXABLE = ['Encryption', 'AntiMalware', 'PkiRoots', 'Patches'];
+
   function statusCellCls(v) {
     switch (String(v)) {
-      // green: no failing pillars.
-      case 'READY': return 'st-ok';
-      // red: at least one scored pillar failed -> predicted quarantine; or unreachable.
+      // green: no failing pillars (scan) / at least one pillar fixed (fix).
+      case 'READY':
+      case 'FIXED': return 'st-ok';
+      // red: at least one scored pillar failed -> predicted quarantine; or unreachable; or the fix failed.
       case 'QUARANTINE RISK':
-      case 'OFFLINE': return 'st-bad';
-      // amber: no fail but a check errored, the host couldn't be evaluated, or operator cancel.
+      case 'OFFLINE':
+      case 'FAILED': return 'st-bad';
+      // amber: no fail but a check errored, the host couldn't be evaluated, operator cancel,
+      // a partial fix, or a self/DNS skip.
       case 'CHECK ERRORS':
       case 'Cancelled':
       case 'ERROR':
-      case 'DNS MISMATCH': return 'st-warn';
-      // live in-progress phases streamed by the engine per host.
+      case 'DNS MISMATCH':
+      case 'PARTIAL':
+      case 'SKIPPED': return 'st-warn';
+      // blue: nothing changed (fix) or live in-progress phases streamed by the engine.
+      case 'NO CHANGE':
       case 'Scanning':
       case 'Probing':
       case 'Working': return 'st-info';
@@ -104,12 +114,96 @@
       compCard.appendChild(tgHolder);
       left.appendChild(compCard);
 
+      // --- IMPORT C2C COMPLIANCE CSV (Tanium export; local parse, no admin gate) ---
+      var lastImport = null;             // last import summary (pillars + host lists)
+      var importCard = sectionCard('IMPORT C2C COMPLIANCE CSV', 'cyan');
+      var importIntro = el('div'); importIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
+      importIntro.textContent = 'Import the Tanium "C2C Compliance Status" CSV export, then load a pillar\'s failing hosts into the target list above to scan or Mass Fix.';
+      importCard.appendChild(importIntro);
+      var importFileInput = el('input'); importFileInput.type = 'file'; importFileInput.accept = '.csv,.txt'; importFileInput.style.display = 'none';
+      var importBtn = ui.ctaButton('IMPORT C2C CSV', { title: 'Choose the Tanium C2C Compliance Status CSV export, upload it to the JANET Web host, and parse it (per-host pillar routing).' });
+      importBtn.style.maxWidth = '260px';
+      var importRow = el('div'); importRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap'; importRow.appendChild(importBtn);
+      importCard.appendChild(importRow); importCard.appendChild(importFileInput);
+      var importStatus = el('div', 'muted', 'Idle.'); importStatus.style.cssText = 'margin-top:8px;font-size:12px';
+      importCard.appendChild(importStatus);
+      var chipsWrap = el('div'); chipsWrap.style.cssText = 'margin-top:8px;line-height:2';
+      importCard.appendChild(chipsWrap);
+      var loadBtnsWrap = el('div'); loadBtnsWrap.style.cssText = 'margin-top:6px;display:flex;gap:6px;flex-wrap:wrap';
+      importCard.appendChild(loadBtnsWrap);
+      importFileInput.addEventListener('change', function () { if (importFileInput.files && importFileInput.files.length) doImport(); });
+      importBtn.onclick = function () { if (isRunning()) return; importFileInput.value = ''; importFileInput.click(); };
+      left.appendChild(importCard);
+
+      // --- MASS FIX (destructive; admin session required) ---
+      var sstPath = '';                  // uploaded .sst server path (blank until chosen)
+      var fixCard = sectionCard('MASS FIX - remediate endpoint-fixable pillars', 'cyan');
+      var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
+      fixIntro.textContent = 'DESTRUCTIVE. Fixes the target list above. Resume BitLocker, heal Defender/MDE, add DoD PKI roots, kick the MECM patch cycle. Requires an admin session; type FIX to confirm.';
+      fixCard.appendChild(fixIntro);
+      var cbEnc = ui.checkbox('Encryption - resume suspended BitLocker', { title: 'Resume suspended BitLocker protectors on the system drive. Never STARTS encryption.' });
+      var cbDef = ui.checkbox('AntiMalware - heal Defender / MDE', { title: 'Start WinDefend/Sense, enable RTP, update signatures if stale.' });
+      var cbPki = ui.checkbox('PKI roots - add DoD roots from .sst', { title: 'Add DoD root certs from an operator .sst to LocalMachine\\Root (additive only).' });
+      var cbPatch = ui.checkbox('Patches - kick MECM cycle (scan + eval)', { title: 'Trigger the MECM Software Updates scan (113) + eval (108). Installs run async.' });
+      cbEnc._cb.checked = true; cbDef._cb.checked = true; cbPatch._cb.checked = true;
+      [cbEnc, cbDef, cbPki, cbPatch].forEach(function (c) { c.style.margin = '3px 0'; fixCard.appendChild(c); });
+      // .sst picker row (disabled unless PKI ticked)
+      var sstRow = el('div'); sstRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin:4px 0 8px 22px';
+      var sstFileInput = el('input'); sstFileInput.type = 'file'; sstFileInput.accept = '.sst,.p7b'; sstFileInput.style.display = 'none';
+      var sstBtn = ui.button('Choose .sst', { size: 'sm', title: 'Pick the DoD root bundle (.sst) to push.' }); sstBtn.disabled = true;
+      var sstLabel = el('span', 'muted', 'no .sst chosen'); sstLabel.style.fontSize = '11.5px';
+      sstRow.appendChild(sstBtn); sstRow.appendChild(sstLabel); sstRow.appendChild(sstFileInput);
+      fixCard.appendChild(sstRow);
+      cbPki._cb.addEventListener('change', function () { sstBtn.disabled = !cbPki._cb.checked; });
+      sstBtn.onclick = function () { sstFileInput.value = ''; sstFileInput.click(); };
+      sstFileInput.addEventListener('change', function () {
+        var f = sstFileInput.files && sstFileInput.files[0]; if (!f) return;
+        sstLabel.textContent = 'uploading ' + f.name + ' ...'; sstLabel.className = 'st-info';
+        ctx.uploadFile(f, 'c2c-sst').then(function (p) { sstPath = p; sstLabel.textContent = f.name; sstLabel.className = 'st-ok'; log.append({ text: '[' + ts() + '] .sst staged: ' + p, level: 'dim' }); })
+          .catch(function (e) { sstPath = ''; sstLabel.textContent = 'upload failed'; sstLabel.className = 'st-bad'; log.append({ text: 'sst upload failed: ' + (e && e.message), level: 'err' }); });
+      });
+      // threads + attempt-offline
+      var fixOptRow = el('div'); fixOptRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin:4px 0';
+      fixOptRow.appendChild(ui.label('Max concurrent:'));
+      var fixThreads = ui.number({ value: 8, min: 1, max: 16, title: 'Parallel hosts (1-16).' }); fixThreads.style.width = '72px';
+      fixOptRow.appendChild(fixThreads);
+      fixCard.appendChild(fixOptRow);
+      var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/445 probe fails.' });
+      fixOffline.style.margin = '2px 0'; fixCard.appendChild(fixOffline);
+      // confirm word
+      var confirmRow = el('div'); confirmRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin:8px 0';
+      confirmRow.appendChild(ui.label('Confirm:'));
+      var confirmInput = ui.input({ title: 'Type FIX (exactly) to arm the destructive mass fix.' }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '120px';
+      confirmRow.appendChild(confirmInput);
+      fixCard.appendChild(confirmRow);
+      // destructive RunBar
+      var fixRunbar = C.RunBar({
+        label: 'RUN MASS FIX', cancelLabel: 'CANCEL MASS FIX', morphToCancel: true,
+        title: 'Destructive: remediate the endpoint-fixable C2C pillars across the target list.',
+        guards: [
+          function () { return targets.count() ? null : 'No Computers|Add at least one computer (or Load a pillar\'s hosts from an import) before running the mass fix.'; },
+          function () { return (cbEnc._cb.checked || cbDef._cb.checked || cbPki._cb.checked || cbPatch._cb.checked) ? null : 'No Pillars|Tick at least one fix pillar (Encryption / AntiMalware / PKI roots / Patches).'; },
+          function () { return (cbPki._cb.checked && !sstPath) ? 'PKI Roots Need a .sst|PKI roots is ticked but no .sst bundle is attached. Choose a .sst, or untick PKI roots.' : null; },
+          function () { return (confirmInput.value === 'FIX') ? null : 'Type FIX to Confirm|Type FIX (exactly, uppercase) in the Confirm box to arm the destructive mass fix.'; },
+          function () { return ctx.session.state.credSet ? null : 'Admin session required|Set ADW credentials (top-right) and start an admin session before running the mass fix - it changes machines.'; }
+        ],
+        onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
+        onRun: doFix,
+        onCancel: function () { if (run) { run.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued targets will skip; in-flight fixes finish.', level: 'warn' }); } }
+      });
+      var fixRbWrap = el('div'); fixRbWrap.style.marginTop = '4px'; fixRbWrap.appendChild(fixRunbar.el);
+      fixCard.appendChild(fixRbWrap);
+      left.appendChild(fixCard);
+
       // --- What this scans (read-only info) ---
       var infoCard = sectionCard('WHAT THIS SCANS - Comply-to-Connect (rule 3.B.2.B)', 'cyan');
       var intro = el('div'); intro.style.cssText = 'font-size:12.5px;line-height:1.45;color:var(--text);margin-bottom:8px';
       intro.textContent = 'One consolidated READ-ONLY probe per host (changes nothing) over WinRM. '
         + 'Predicts whether each host would be QUARANTINED. 9 checks are scored on the endpoint; '
-        + '2 are EXT (external / server-side) - reported but never scored.';
+        + '2 are EXT (external / server-side) - reported but never scored. '
+        + 'This tool also IMPORTS the Tanium C2C Compliance report (above) and can MASS FIX the '
+        + 'endpoint-fixable pillars - Encryption, AntiMalware, PkiRoots and Patches. '
+        + 'Vuln routes to ACAS / Reports / KEV, OS Version to Windows Upgrade, STIG to Reports.';
       infoCard.appendChild(intro);
       var list = el('ol'); list.style.cssText = 'margin:0 0 8px 18px;padding:0;font-size:12px;line-height:1.5;color:var(--text)';
       CHECKS.forEach(function (c) {
@@ -172,9 +266,9 @@
         ],
         rowClass: function (r) {
           var s = String(r.Status);
-          if (s === 'READY') return 'row-ok';
-          if (s === 'QUARANTINE RISK' || s === 'OFFLINE') return 'row-bad';
-          if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH') return 'row-warn';
+          if (s === 'READY' || s === 'FIXED') return 'row-ok';
+          if (s === 'QUARANTINE RISK' || s === 'OFFLINE' || s === 'FAILED') return 'row-bad';
+          if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH' || s === 'PARTIAL' || s === 'SKIPPED') return 'row-warn';
           return '';
         }
       });
@@ -223,7 +317,13 @@
 
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsInput.disabled = on; clearBtn.disabled = on;
+        // lock the import + mass-fix controls too, so nothing can be re-fired mid-run.
+        importBtn.disabled = on;
+        cbEnc._cb.disabled = on; cbDef._cb.disabled = on; cbPki._cb.disabled = on; cbPatch._cb.disabled = on;
+        sstBtn.disabled = on || !cbPki._cb.checked; fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
       }
+
+      function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
       function summarize() {
         var ready = 0, risk = 0, offline = 0;
@@ -283,6 +383,159 @@
       }
 
       function keyByHost(ev) { return ev.Host != null ? String(ev.Host) : (ev.host != null ? String(ev.host) : null); }
+
+      // ---- Import C2C Compliance CSV (read-only; no admin session, no confirm) ----
+      function doImport() {
+        if (isRunning()) return;
+        var files = importFileInput.files ? Array.prototype.slice.call(importFileInput.files) : [];
+        if (!files.length) { ctx.confirm({ title: 'No file', body: 'Choose the Tanium C2C Compliance Status CSV export first.', okText: 'OK', cancelText: null }); return; }
+        var f = files[0];
+        if (/\.(xlsx|xlsm|xlsb|xls)$/i.test(f.name || '')) {
+          ctx.confirm({ title: 'Excel workbook - not a CSV', body: esc(f.name) + ' is an Excel workbook. The C2C import must be a CSV - re-export from Tanium (or Save As -> CSV UTF-8), then import that.', okText: 'OK', cancelText: null });
+          return;
+        }
+        importStatus.textContent = 'Uploading ' + f.name + ' ...'; importStatus.className = 'st-info';
+        chipsWrap.innerHTML = ''; loadBtnsWrap.innerHTML = ''; lastImport = null;
+        log.banner('Import C2C Compliance CSV: ' + f.name);
+        ctx.uploadFile(f).then(function (p) {
+          log.append({ text: 'Uploaded to host: ' + p, level: 'dim' });
+          importStatus.textContent = 'Parsing ' + f.name + ' ...'; importStatus.className = 'st-info';
+          run = ctx.run('import', { csvPath: p });
+          if (unsub) unsub();
+          unsub = run.subscribe({
+            status: function (t) { importStatus.textContent = t; },
+            // import rows have a different shape (Host/Compliance/Failed/Audit/Fqdn) than the
+            // scan/fix grid (Host/Ping/Status/Detail), so they drive chips + the log, not the grid.
+            row: function () {},
+            log: function (l) { log.append(l); },
+            error: function (e) { importStatus.textContent = 'Import failed'; importStatus.className = 'st-bad'; log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' }); },
+            active: function (a) { importBtn.disabled = a; if (!a && !lastImport) { /* no summary => nothing loaded */ } },
+            final: function (res) { renderImportSummary((res && res.summary) || {}); }
+          });
+        }).catch(function (e) {
+          importStatus.textContent = 'Upload failed: ' + (e && e.message); importStatus.className = 'st-bad';
+          log.append({ text: 'Upload failed: ' + (e && e.message), level: 'err' });
+        });
+      }
+
+      function renderImportSummary(s) {
+        lastImport = s;
+        var pillars = s.pillars || [];
+        importStatus.textContent = 'Imported ' + (s.total || 0) + ' host(s): ' + (s.compliant || 0) + ' compliant, ' + (s.nonCompliant || 0) + ' non-compliant.';
+        importStatus.className = 'st-ok';
+        chipsWrap.innerHTML = ''; loadBtnsWrap.innerHTML = '';
+        pillars.forEach(function (p) {
+          var fix = FIXABLE.indexOf(p.name) >= 0;
+          var chip = el('span'); chip.textContent = p.name + ': ' + p.failedCount; chip.title = p.routing;
+          chip.style.cssText = 'display:inline-block;margin:2px 6px 2px 0;padding:2px 9px;border-radius:11px;font-size:11.5px;background:var(--panel2);color:var(--text);border:1px solid ' + (fix ? 'var(--accent)' : 'var(--border)');
+          chipsWrap.appendChild(chip);
+        });
+        // Load ALL non-compliant (uses the engine's exact non-compliant host list).
+        var allHosts = (s.nonCompliantHosts && s.nonCompliantHosts.length) ? s.nonCompliantHosts : unionPillarHosts(pillars);
+        var allBtn = ui.button('Load ALL non-compliant (' + allHosts.length + ') -> targets', { variant: 'gold', size: 'sm', title: 'Replace the target list with every non-compliant host.' });
+        allBtn.onclick = function () { loadHosts(allHosts, 'all non-compliant'); };
+        loadBtnsWrap.appendChild(allBtn);
+        // One small button per FIXABLE pillar with failing hosts.
+        pillars.forEach(function (p) {
+          if (FIXABLE.indexOf(p.name) < 0 || !p.failedCount) return;
+          var b = ui.ghostButton('Load ' + p.name + ' (' + p.failedCount + ')', { size: 'sm', title: p.routing });
+          b.onclick = function () { loadHosts(p.hosts || [], p.name + ' hosts'); };
+          loadBtnsWrap.appendChild(b);
+        });
+      }
+
+      function unionPillarHosts(pillars) {
+        var seen = {}, out = [];
+        (pillars || []).forEach(function (p) { (p.hosts || []).forEach(function (h) { if (!seen[h]) { seen[h] = 1; out.push(h); } }); });
+        return out;
+      }
+
+      // Replace the TargetManager contents with a pillar's host list.
+      function loadHosts(hosts, label) {
+        if (isRunning()) return;
+        hosts = hosts || [];
+        if (!hosts.length) { ctx.confirm({ title: 'No hosts', body: 'There are no hosts for ' + esc(label) + '.', okText: 'OK', cancelText: null }); return; }
+        targets.setText(hosts.join('\n'));
+        log.append({ text: '[' + ts() + '] Loaded ' + hosts.length + ' ' + label + ' into the target list.', level: 'accent' });
+      }
+
+      // ---- C2C Mass Fix (DESTRUCTIVE; admin session + FIX confirm required) ----
+      async function doFix() {
+        if (isRunning()) return;
+        var hosts = targets.hosts();
+        var pillars = [];
+        if (cbEnc._cb.checked) pillars.push('Encryption');
+        if (cbDef._cb.checked) pillars.push('AntiMalware');
+        if (cbPki._cb.checked) pillars.push('PkiRoots');
+        if (cbPatch._cb.checked) pillars.push('Patches');
+        var ok = await ctx.arm({
+          title: 'Arm C2C Mass Fix',
+          banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
+          body: 'About to mass-fix <b>' + hosts.length + '</b> host(s).<br>Pillars: <b>' + esc(pillars.join(', ')) + '</b>' + (cbPki._cb.checked ? '<br>PKI bundle: <b>' + esc(sstPath ? sstPath.split(/[\\/]/).pop() : '(none)') + '</b>' : ''),
+          preflight: [
+            { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
+            { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+            { label: pillars.length + ' fix pillar(s) selected', ok: pillars.length > 0 },
+            { label: cbPki._cb.checked ? 'DoD root .sst attached' : 'PKI roots not selected', ok: !cbPki._cb.checked || !!sstPath }
+          ],
+          okText: 'Run Mass Fix', cancelText: 'Cancel'
+        });
+        if (!ok) { log.append({ text: '[' + ts() + '] Mass fix cancelled at the arming dialog.', level: 'warn' }); return; }
+
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C Mass Fix on ' + hosts.length + ' host(s) [' + pillars.join(', ') + ']');
+        lockInputs(true);
+        run = ctx.run('fix', {
+          targets: hosts.join('\n'),
+          fixEncryption: cbEnc._cb.checked,
+          fixDefender: cbDef._cb.checked,
+          fixPki: cbPki._cb.checked,
+          sstPath: sstPath || '',
+          kickPatchCycle: cbPatch._cb.checked,
+          confirm: confirmInput.value,
+          threads: Math.max(1, Math.min(16, parseInt(fixThreads.value, 10) || 8)),
+          attemptOffline: fixOffline._cb.checked
+        }, { keyOf: keyByHost, destructive: true });
+        bindFixRun();
+      }
+
+      function bindFixRun() {
+        if (unsub) unsub();
+        unsub = run.subscribe({
+          status: function (t) { prog.setPhase(t); fixRunbar.setStatus(t, 'st-info'); },
+          progress: function (p) { prog.setProgress(p.done, p.total); countLine.textContent = p.done + ' / ' + p.total; },
+          row: function (r) { grid.upsert(r); },
+          log: function (l) { log.append(l); },
+          error: function (e) { log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' }); },
+          active: function (a) {
+            fixRunbar.setActive(a);
+            if (!a) {
+              lockInputs(false);
+              var c = fixTally();
+              countLine.textContent = c.total + ' / ' + c.total;
+              var bad = c.failed + c.partial;
+              log.append({ text: '[' + ts() + '] FINISHED C2C Mass Fix. FIXED=' + c.fixed + '  NO CHANGE=' + c.noChange + '  PARTIAL=' + c.partial + '  FAILED=' + c.failed + '  OFFLINE=' + c.offline + '  SKIPPED=' + c.skipped, level: bad ? 'warn' : 'ok' });
+              fixRunbar.setStatus('Done - Fixed ' + c.fixed + ' / Partial ' + c.partial + ' / NoChange ' + c.noChange + ' / Failed ' + c.failed, bad ? 'st-bad' : 'st-ok');
+            }
+          }
+        });
+      }
+
+      function fixTally() {
+        var t = { fixed: 0, noChange: 0, partial: 0, failed: 0, offline: 0, skipped: 0, total: 0 };
+        grid.rows().forEach(function (r) {
+          var s = String(r.Status);
+          if (s === 'FIXED') t.fixed++;
+          else if (s === 'NO CHANGE') t.noChange++;
+          else if (s === 'PARTIAL') t.partial++;
+          else if (s === 'FAILED') t.failed++;
+          else if (s === 'OFFLINE') t.offline++;
+          else if (s === 'SKIPPED') t.skipped++;
+        });
+        t.total = grid.rows().length;
+        return t;
+      }
 
       function doExport() {
         var rows = grid.rows();

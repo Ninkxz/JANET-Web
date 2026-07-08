@@ -35,9 +35,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Readiness'
-        version  = '1.0.0'
+        version  = '1.1.0'
         category = 'Reporting'
-        summary  = 'Read-only Comply-to-Connect (AFI/MPTO rule 3.B.2.B) quarantine predictor: fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), and flag each host READY or QUARANTINE RISK. Streams the full per-check report to the activity log. Changes nothing.'
+        summary  = 'Comply-to-Connect (AFI/MPTO rule 3.B.2.B) tool: (1) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (2) IMPORT the Tanium "C2C Compliance Status" CSV export and route each failing pillar; (3) MASS FIX (destructive) that remediates the endpoint-fixable pillars - resume BitLocker, heal Defender/MDE, add DoD PKI roots from an operator .sst, and kick the MECM patch cycle. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -50,6 +50,38 @@ function Get-JanetToolManifest {
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
+                )
+            }
+            @{
+                id          = 'import'
+                label       = 'Import C2C Compliance CSV'
+                description = 'Parse the Tanium "C2C Compliance Status" CSV export (the multiline Compliance cell per host), de-duplicate by host (worst row wins - Non-Compliant over Compliant), map each rule to a canonical pillar (Encryption / AntiMalware / PkiRoots / Patches / Vuln / OSVersion / STIG, unknown rules surfaced verbatim), and summarize per pillar with a routing hint (fixable HERE via Mass Fix, or route to ACAS / Windows Upgrade / Reports). Read-only - local parse, no WinRM, no credential.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Compliance','Failed','Audit','Fqdn')
+                inputs      = @(
+                    @{ name='csvPath'; label='C2C Compliance CSV file'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
+                    @{ name='csvText'; label='...or paste CSV text'; type='textarea'; required=$false }
+                )
+            }
+            @{
+                id          = 'fix'
+                label       = 'C2C Mass Fix'
+                description = 'DESTRUCTIVE. Remediate the endpoint-fixable failing pillars across the targets in one WinRM round-trip per host, fix-then-verify: Encryption (resume suspended BitLocker protectors - never START encryption from here), AntiMalware (heal Defender services/RTP/signatures; note missing MDE Sense), PkiRoots (add DoD roots from an operator .sst - additive only, never removes), and Patches (kick the MECM Software Updates scan + eval cycles). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                kind        = 'stream-table'
+                destructive = $true
+                confirm     = 'Run the C2C Mass Fix on the target host(s)? This changes machines. Proceed?'
+                columns     = @('Host','Ping','Status','Detail')
+                inputs      = @(
+                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='fixEncryption';  label='Encryption: resume suspended BitLocker'; type='bool'; required=$false; default=$true },
+                    @{ name='fixDefender';    label='AntiMalware: heal Defender / MDE'; type='bool'; required=$false; default=$true },
+                    @{ name='fixPki';         label='PKI roots: add DoD roots from .sst'; type='bool'; required=$false; default=$false },
+                    @{ name='sstPath';        label='DoD root bundle (.sst) - required if PKI roots is ticked'; type='file'; filter='SST files (*.sst)|*.sst|Cert bundles (*.sst;*.p7b)|*.sst;*.p7b|All files (*.*)|*.*'; required=$false },
+                    @{ name='kickPatchCycle'; label='Patches: kick the MECM patch cycle (scan + eval)'; type='bool'; required=$false; default=$true },
+                    @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
+                    @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
                 )
             }
         )
@@ -383,6 +415,625 @@ $script:C2cProbeBlock = {
     return $r
 }
 
+# =============================================================================
+#  C2C ACTION SIDE - Import (Tanium C2C Compliance CSV) + Mass Fix (destructive)
+#  Added in v1.1.0. The read-only 'scan' path above is untouched.
+# =============================================================================
+
+# --- Canonical pillar mapping ------------------------------------------------
+# Routing hint per canonical pillar. Endpoint-fixable pillars point at the Mass
+# Fix; the rest route to the owning tool. Unknown rule names fall through to
+# 'review manually' (never silently dropped).
+$script:C2cPillarRouting = @{
+    Encryption  = 'fixable HERE (Mass Fix: resume BitLocker)'
+    AntiMalware = 'fixable HERE (Mass Fix: heal Defender / MDE)'
+    PkiRoots    = 'fixable HERE (Mass Fix: add DoD roots from operator .sst)'
+    Patches     = 'endpoint-kickable HERE (Mass Fix: trigger MECM scan / eval)'
+    Vuln        = 'ACAS / Reports / KEV tools'
+    OSVersion   = 'Windows Upgrade tool'
+    STIG        = 'Reports / STIG'
+}
+$script:C2cFixablePillars = @('Encryption','AntiMalware','PkiRoots','Patches')
+# Stable display order for the summary; unknown pillars append alphabetically.
+$script:C2cPillarOrder = @('Encryption','AntiMalware','PkiRoots','Patches','Vuln','OSVersion','STIG')
+
+# Map a rule name (already stripped of its "Failed/Audit Rule[ N] - " prefix) to a
+# canonical pillar. Unknown names return verbatim (their own stripped name).
+function Get-C2cCanonicalPillar {
+    param([string]$Stripped)
+    $s = ([string]$Stripped).Trim()
+    switch -Regex ($s) {
+        '^(?i)Endpoint Data At Rest Encryption$' { return 'Encryption' }
+        '^(?i)Bitlocker$'                        { return 'Encryption' }
+        '^(?i)Anti-?malware$'                    { return 'AntiMalware' }
+        '^(?i)MDE Health$'                       { return 'AntiMalware' }
+        '^(?i)PKI Trust Roots$'                  { return 'PkiRoots' }
+        '^(?i)Patching( Compliance)?$'           { return 'Patches' }
+        '^(?i)Vulnerabilit(y Compliance|ies)$'   { return 'Vuln' }
+        '^(?i)OS Version$'                       { return 'OSVersion' }
+        '^(?i)STIG Check$'                        { return 'STIG' }
+        default                                  { return $s }
+    }
+}
+
+function Get-C2cPillarRouting {
+    param([string]$Pillar)
+    if ($script:C2cPillarRouting.ContainsKey($Pillar)) { return $script:C2cPillarRouting[$Pillar] }
+    return 'review manually'
+}
+
+# --- Parse the Tanium "C2C Compliance Status" CSV export ---------------------
+# The Compliance field is MULTILINE inside one quoted cell: first line
+# Compliant/Non-Compliant, following lines are rule names. Import-Csv handles the
+# quoting. Returns @{ Records=@(@{Short;Fqdn;Compliance;Failed=@();Audit=@()}); RowCount=int }.
+# Dedup by short host name: the worst row wins (Non-Compliant over Compliant; on a
+# tie, more failed pillars).
+function ConvertFrom-C2cComplianceCsv {
+    param([string[]]$Paths, [string]$Text, [scriptblock]$Send)
+
+    $allRows = New-Object System.Collections.ArrayList
+    foreach ($path in @($Paths | Where-Object { $_ })) {
+        $pp = ([string]$path).Trim().Trim('"')
+        if (-not $pp) { continue }
+        if (-not (Test-Path -LiteralPath $pp)) {
+            if ($Send) { & $Send @{ type='log'; level='warn'; text="File not found: $pp" } }
+            continue
+        }
+        try {
+            foreach ($r in (Import-Csv -LiteralPath $pp -Encoding UTF8 -ErrorAction Stop)) { [void]$allRows.Add($r) }
+        } catch {
+            if ($Send) { & $Send @{ type='log'; level='err'; text="Failed to parse '$pp': $($_.Exception.Message)" } }
+        }
+    }
+    if ($Text -and -not [string]::IsNullOrWhiteSpace($Text)) {
+        try { foreach ($r in (ConvertFrom-Csv $Text)) { [void]$allRows.Add($r) } }
+        catch { if ($Send) { & $Send @{ type='log'; level='err'; text="Failed to parse pasted CSV: $($_.Exception.Message)" } } }
+    }
+
+    # Locate the Compliance + Computer Name columns (tolerate header variants).
+    $complCol = $null; $hostCol = $null
+    if ($allRows.Count -gt 0) {
+        foreach ($p in $allRows[0].PSObject.Properties.Name) {
+            if (-not $complCol -and $p -match '(?i)Compliance$')     { $complCol = $p }
+            if (-not $hostCol  -and $p -match '(?i)Computer Name$')  { $hostCol  = $p }
+        }
+    }
+    if (-not $complCol) { $complCol = 'C2C Compliance Status:Compliance' }
+    if (-not $hostCol)  { $hostCol  = 'Computer Name' }
+
+    $recs = New-Object System.Collections.ArrayList
+    foreach ($r in $allRows) {
+        $cp = $r.PSObject.Properties[$complCol]
+        $hp = $r.PSObject.Properties[$hostCol]
+        $complVal = if ($cp) { [string]$cp.Value } else { '' }
+        $fqdn     = if ($hp) { ([string]$hp.Value).Trim() } else { '' }
+        if (-not $fqdn) { continue }
+        $short = ($fqdn -split '\.')[0]
+        # Whitelist the short token before it can become a remote target.
+        if ($short -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') { continue }
+
+        $lines = @([regex]::Split($complVal, '\r\n|\n|\r') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($lines.Count -eq 0) { continue }
+        $compliance = if     ($lines[0] -match '(?i)^Non-?Compliant') { 'Non-Compliant' }
+                      elseif ($lines[0] -match '(?i)^Compliant')      { 'Compliant' }
+                      else                                            { [string]$lines[0] }
+
+        $failed = New-Object System.Collections.ArrayList
+        $audit  = New-Object System.Collections.ArrayList
+        foreach ($ln in (@($lines) | Select-Object -Skip 1)) {
+            $kind = 'Failed'; $stripped = $ln
+            if ($ln -match '(?i)^Failed\s+Rule(\s+\d+)?\s*-\s*(.+)$')     { $kind = 'Failed'; $stripped = $Matches[2].Trim() }
+            elseif ($ln -match '(?i)^Audit\s+Rule(\s+\d+)?\s*-\s*(.+)$')  { $kind = 'Audit';  $stripped = $Matches[2].Trim() }
+            else { $kind = 'Failed'; $stripped = $ln.Trim() }   # no recognizable prefix -> surface as failing, verbatim
+            if (-not $stripped) { continue }
+            $canon = Get-C2cCanonicalPillar $stripped
+            if ($kind -eq 'Audit') { if (-not $audit.Contains($canon))  { [void]$audit.Add($canon) } }
+            else                    { if (-not $failed.Contains($canon)) { [void]$failed.Add($canon) } }
+        }
+        [void]$recs.Add([pscustomobject]@{
+            Short=$short; Fqdn=$fqdn; Compliance=$compliance; Failed=@($failed); Audit=@($audit)
+        })
+    }
+
+    # Dedup by short host - worst row wins.
+    $byHost = @{}
+    foreach ($rec in $recs) {
+        $key = $rec.Short.ToUpperInvariant()
+        if (-not $byHost.ContainsKey($key)) { $byHost[$key] = $rec; continue }
+        $ex     = $byHost[$key]
+        $recBad = ($rec.Compliance -match '(?i)Non-?Compliant')
+        $exBad  = ($ex.Compliance  -match '(?i)Non-?Compliant')
+        if ($recBad -and -not $exBad) { $byHost[$key] = $rec }
+        elseif (($recBad -eq $exBad) -and (@($rec.Failed).Count -gt @($ex.Failed).Count)) { $byHost[$key] = $rec }
+    }
+    return @{ Records=@($byHost.Values); RowCount=$allRows.Count }
+}
+
+# --- Bool coercion (view sends real bools; CLI/tests may send strings) --------
+function Get-C2cBool {
+    param($Value, [bool]$Default)
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ("$Value" -eq '') { return $Default }
+    return (@('true','1','yes','on') -contains ([string]$Value).Trim().ToLowerInvariant())
+}
+
+# --- Self-guard (mirrors JanetWeb.secureboot / restart) ----------------------
+# Set of identities that resolve to THIS dispatcher host. A Mass Fix that resumed
+# BitLocker / restarted Defender on the box running JANET could disrupt the server
+# mid-run, so the dispatcher is dropped from every fix run.
+function Get-JanetC2cLocalIdentity {
+    if ($script:C2cLocalIdentity) { return $script:C2cLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
+    $script:C2cLocalIdentity = $set
+    return $set
+}
+
+function Test-JanetC2cHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-JanetC2cLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }
+    if ($Target -match '^::1$')  { return $true }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }
+    }
+    return $false
+}
+
+# --- Per-host Mass Fix worker (runs in a pool runspace) ----------------------
+# Returns @{ Host; Ping; Status; Detail; Report; Pillars }. All enabled pillar
+# fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
+# status is computed here (admin-side).
+$script:C2cFixBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [bool]$DoEnc, [bool]$DoDef, [bool]$DoPki, [bool]$DoPatch, [string]$SstB64)
+
+    $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Report=''; Pillars=@() }
+
+    # TCP reachability (WinRM 5985 then SMB 445, 1.5s). Never ICMP.
+    $reachable = $false
+    foreach ($port in 5985,445) {
+        $tc = $null
+        try {
+            $tc = New-Object System.Net.Sockets.TcpClient
+            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        if ($reachable) { break }
+    }
+    if (-not $reachable) {
+        $r.Ping = 'Unreachable'
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
+    }
+
+    $wsOpt = New-PSSessionOption -OperationTimeout 280000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    $sess = $null
+    try { $sess = New-PSSession @splat } catch { $r.Status = 'FAILED'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
+
+    # Wrong-box guard (HARD ABORT, before any change): compare the answering box's
+    # name to the dialed short name. IP-literal targets have no DNS indirection.
+    try {
+        $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+        if ($expectedShort) {
+            $answering = Invoke-Command -Session $sess -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop
+            if (([string]$answering).Trim().ToUpper() -ne $expectedShort.Trim().ToUpper()) {
+                Remove-PSSession $sess -ErrorAction SilentlyContinue
+                $r.Status = 'SKIPPED'; $r.Detail = "DNS MISMATCH: dialed '$expectedShort' but remote is '$answering' - ABORTED, nothing changed"
+                return $r
+            }
+        }
+    } catch {
+        Remove-PSSession $sess -ErrorAction SilentlyContinue
+        $r.Status = 'FAILED'; $r.Detail = "wrong-box guard probe failed: $($_.Exception.Message)"; return $r
+    }
+
+    $fixSb = {
+        param([bool]$DoEnc, [bool]$DoDef, [bool]$DoPki, [bool]$DoPatch, [string]$SstB64)
+        $results = New-Object System.Collections.ArrayList
+        $add = { param($n,$a,$res,$d) [void]$results.Add([pscustomobject]@{ Name=$n; Action=[string]$a; Result=[string]$res; Detail=[string]$d }) }
+
+        # 1. Encryption - resume SUSPENDED protectors only. Never START encryption.
+        if ($DoEnc) {
+            try {
+                $sys = $env:SystemDrive
+                if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+                    $bl = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
+                    $ps = [string]$bl.ProtectionStatus; $vs = [string]$bl.VolumeStatus
+                    if ($ps -eq 'On') {
+                        & $add 'Encryption' 'none' 'NOCHANGE' "$sys protection already On; $vs"
+                    } elseif ($vs -match '(?i)Decrypt|EncryptionInProgress') {
+                        & $add 'Encryption' 'none' 'SKIP' "not encrypted ($vs) - BitLocker enable needs TPM+recovery-key escrow policy; route to MECM/desk-side"
+                    } else {
+                        # Off + FullyEncrypted (classic post-firmware suspended-protectors) -> resume.
+                        $act = 'Resume-BitLocker'
+                        try { Resume-BitLocker -MountPoint $sys -ErrorAction Stop | Out-Null }
+                        catch { $act = 'manage-bde -protectors -enable'; & manage-bde -protectors -enable $sys 2>&1 | Out-Null }
+                        Start-Sleep -Milliseconds 500
+                        $bl2 = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
+                        if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "protection resumed -> On; $($bl2.VolumeStatus)" }
+                        elseif ($vs -match '(?i)FullyEncrypted')     { & $add 'Encryption' $act 'FAIL' "resume attempted but protection still $($bl2.ProtectionStatus)" }
+                        else { & $add 'Encryption' $act 'SKIP' "protection $($bl2.ProtectionStatus); volume $($bl2.VolumeStatus) - not a resumable state; route to MECM/desk-side" }
+                    }
+                } else {
+                    $out = (& manage-bde -status $sys 2>&1 | Out-String)
+                    if ($out -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $add 'Encryption' 'none' 'NOCHANGE' 'protection already On (manage-bde)' }
+                    elseif ($out -match '(?i)Fully\s+Encrypted') {
+                        & manage-bde -protectors -enable $sys 2>&1 | Out-Null
+                        Start-Sleep -Milliseconds 500
+                        $out2 = (& manage-bde -status $sys 2>&1 | Out-String)
+                        if ($out2 -match '(?i)Protection\s+Status:\s*Protection\s+On') { & $add 'Encryption' 'manage-bde -protectors -enable' 'FIXED' 'protectors enabled -> On (manage-bde)' }
+                        else { & $add 'Encryption' 'manage-bde -protectors -enable' 'FAIL' 'enable attempted but still Off (manage-bde)' }
+                    } else { & $add 'Encryption' 'none' 'SKIP' 'not FullyEncrypted - route to MECM/desk-side (manage-bde)' }
+                }
+            } catch { & $add 'Encryption' 'error' 'FAIL' $_.Exception.Message }
+        }
+
+        # 2. AntiMalware - heal Defender services / RTP / signatures. Missing MDE
+        #    Sense is a note, not a failure, when Defender itself is healthy.
+        if ($DoDef) {
+            try {
+                $changed = New-Object System.Collections.ArrayList
+                $notes   = New-Object System.Collections.ArrayList
+                foreach ($svcName in @('WinDefend','Sense')) {
+                    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+                    if (-not $svc) {
+                        if ($svcName -eq 'Sense') { [void]$notes.Add('Sense (MDE) not installed') } else { [void]$notes.Add('WinDefend not installed') }
+                        continue
+                    }
+                    if ([string]$svc.StartType -ne 'Automatic') { try { Set-Service -Name $svcName -StartupType Automatic -ErrorAction Stop; [void]$changed.Add("$svcName->Automatic") } catch {} }
+                    if ($svc.Status -ne 'Running') { try { Start-Service -Name $svcName -ErrorAction Stop; [void]$changed.Add("$svcName started") } catch { [void]$notes.Add("$svcName start failed") } }
+                }
+                $failDet = ''
+                if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
+                    $mp = Get-MpComputerStatus -ErrorAction Stop
+                    if (-not $mp.RealTimeProtectionEnabled) {
+                        try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop; [void]$changed.Add('RTP enabled') }
+                        catch { $failDet += "RTP enable failed: $($_.Exception.Message); " }
+                    }
+                    if ([int]$mp.AntivirusSignatureAge -gt 7) {
+                        try { Update-MpSignature -ErrorAction Stop; [void]$changed.Add('signatures updated') }
+                        catch { $failDet += "sig update failed: $($_.Exception.Message); " }
+                    }
+                    Start-Sleep -Milliseconds 300
+                    $mp2 = Get-MpComputerStatus -ErrorAction SilentlyContinue
+                    $rtpNow = if ($mp2) { [bool]$mp2.RealTimeProtectionEnabled } else { [bool]$mp.RealTimeProtectionEnabled }
+                    $ageNow = if ($mp2) { [int]$mp2.AntivirusSignatureAge } else { [int]$mp.AntivirusSignatureAge }
+                    $noteTxt = if ($notes.Count -gt 0) { '; ' + ($notes -join '; ') } else { '' }
+                    if ($failDet)               { & $add 'AntiMalware' 'heal' 'FAIL' ($failDet.TrimEnd('; ') + $noteTxt) }
+                    elseif ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + "; RTP=$rtpNow sigAge=${ageNow}d" + $noteTxt) }
+                    else                        { & $add 'AntiMalware' 'none' 'NOCHANGE' ("RTP on; sig age ${ageNow}d" + $noteTxt) }
+                } else {
+                    if ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + '; Get-MpComputerStatus unavailable') }
+                    else { & $add 'AntiMalware' 'none' 'SKIP' ('Get-MpComputerStatus unavailable (non-Defender AV?)' + $(if ($notes.Count) { '; ' + ($notes -join '; ') } else { '' })) }
+                }
+            } catch { & $add 'AntiMalware' 'error' 'FAIL' $_.Exception.Message }
+        }
+
+        # 3. PkiRoots - add DoD roots from the operator .sst. Additive only.
+        if ($DoPki -and $SstB64) {
+            $store = $null
+            try {
+                $bytes = [Convert]::FromBase64String($SstB64)
+                $col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+                $col.Import($bytes)
+                $total = $col.Count
+                $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'Root','LocalMachine'
+                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                $present = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($c in $store.Certificates) { [void]$present.Add([string]$c.Thumbprint) }
+                $added = 0
+                foreach ($c in $col) { if (-not $present.Contains([string]$c.Thumbprint)) { $store.Add($c); $added++ } }
+                $store.Close(); $store = $null
+                if ($added -gt 0) { & $add 'PkiRoots' 'add-roots' 'FIXED' "added $added of $total root(s) to LocalMachine\Root" }
+                else              { & $add 'PkiRoots' 'none' 'NOCHANGE' "all $total root(s) already present" }
+            } catch { if ($store) { try { $store.Close() } catch {} }; & $add 'PkiRoots' 'error' 'FAIL' $_.Exception.Message }
+        }
+
+        # 4. Patches - kick the MECM Software Updates scan (113) then eval (108).
+        if ($DoPatch) {
+            try {
+                $ok = $true; $err = ''
+                foreach ($sched in @('{00000000-0000-0000-0000-000000000113}','{00000000-0000-0000-0000-000000000108}')) {
+                    try { Invoke-CimMethod -Namespace 'root\ccm' -ClassName 'SMS_Client' -MethodName 'TriggerSchedule' -Arguments @{ sScheduleID = $sched } -ErrorAction Stop | Out-Null }
+                    catch { $ok = $false; $err = $_.Exception.Message; break }
+                }
+                if ($ok) { & $add 'Patches' 'trigger' 'KICKED' 'triggered SUM scan (113) + eval (108); installs run async, Tanium updates after its next scan' }
+                else     { & $add 'Patches' 'trigger' 'FAIL' "CCM trigger failed (MECM client namespace root\ccm unreachable?): $err" }
+            } catch { & $add 'Patches' 'error' 'FAIL' $_.Exception.Message }
+        }
+
+        return @{ RemoteName = $env:COMPUTERNAME; Pillars = @($results) }
+    }
+
+    try {
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList @($DoEnc, $DoDef, $DoPki, $DoPatch, $SstB64) -ErrorAction Stop
+    } catch {
+        $r.Status = 'FAILED'; $r.Detail = "Fix: $($_.Exception.Message)"
+        Remove-PSSession $sess -ErrorAction SilentlyContinue
+        return $r
+    } finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
+
+    $pillars = @($fix.Pillars)
+    $r.Pillars = $pillars
+    if ($pillars.Count -eq 0) { $r.Status = 'NO CHANGE'; $r.Detail = 'no enabled pillars returned a result'; return $r }
+
+    $fixed  = @($pillars | Where-Object { $_.Result -eq 'FIXED'  }).Count
+    $failed = @($pillars | Where-Object { $_.Result -eq 'FAIL'   }).Count
+    $tot    = $pillars.Count
+    if     ($fixed -ge 1 -and $failed -eq 0)   { $r.Status = 'FIXED' }
+    elseif ($failed -ge 1 -and $failed -eq $tot) { $r.Status = 'FAILED' }
+    elseif ($failed -ge 1)                     { $r.Status = 'PARTIAL' }
+    else                                       { $r.Status = 'NO CHANGE' }
+
+    $r.Detail = (@($pillars | ForEach-Object { "$($_.Name): $($_.Result)" }) -join '; ')
+    $rptLines = foreach ($p in $pillars) { '[{0}] {1}: {2}' -f ([string]$p.Result), ('{0,-12}' -f [string]$p.Name), ([string]$p.Detail) }
+    $r.Report = ($rptLines -join "`r`n")
+    return $r
+}
+
+# --- Action: import ----------------------------------------------------------
+function Invoke-C2cImportAction {
+    param([hashtable]$Params, [scriptblock]$Emit)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $csvPath = [string]$Params['csvPath']
+    $csvText = [string]$Params['csvText']
+    $paths = @()
+    if ($csvPath) { $paths = @($csvPath -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    if ($paths.Count -eq 0 -and [string]::IsNullOrWhiteSpace($csvText)) {
+        & $send @{ type='log'; level='warn'; text='No CSV file selected and no CSV text pasted.' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    & $send @{ type='status'; text='Parsing C2C Compliance CSV...' }
+    $parsed = ConvertFrom-C2cComplianceCsv -Paths $paths -Text $csvText -Send $send
+    $recs = @($parsed.Records)
+    if ($recs.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text="Parsed $($parsed.RowCount) row(s) but resolved no hosts - check the CSV headers (a 'Compliance' column and a 'Computer Name' column)." }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($rec in ($recs | Sort-Object { $_.Short })) {
+        $row = @{ Host=$rec.Short; Compliance=$rec.Compliance; Failed=(@($rec.Failed) -join ', '); Audit=(@($rec.Audit) -join ', '); Fqdn=$rec.Fqdn }
+        [void]$rows.Add($row)
+        & $send (@{ type='row' } + $row)
+    }
+
+    $total            = $recs.Count
+    $nonCompliantRecs = @($recs | Where-Object { $_.Compliance -match '(?i)^Non-?Compliant' })
+    $nonCompliant     = $nonCompliantRecs.Count
+    $compliant        = $total - $nonCompliant
+    $nonCompliantHosts = @($nonCompliantRecs | ForEach-Object { $_.Short } | Sort-Object -Unique)
+
+    # Aggregate FAILED pillars -> host lists.
+    $pillarHosts = @{}
+    foreach ($rec in $recs) {
+        foreach ($p in @($rec.Failed)) {
+            if (-not $pillarHosts.ContainsKey($p)) { $pillarHosts[$p] = New-Object System.Collections.ArrayList }
+            if (-not $pillarHosts[$p].Contains($rec.Short)) { [void]$pillarHosts[$p].Add($rec.Short) }
+        }
+    }
+    $ordered = @()
+    foreach ($n in $script:C2cPillarOrder) { if ($pillarHosts.ContainsKey($n)) { $ordered += $n } }
+    foreach ($n in ($pillarHosts.Keys | Sort-Object)) { if ($ordered -notcontains $n) { $ordered += $n } }
+
+    & $send @{ type='log'; level='ok'; text="Imported $total host(s): $compliant Compliant, $nonCompliant Non-Compliant." }
+    $pillars = New-Object System.Collections.ArrayList
+    foreach ($p in $ordered) {
+        $hosts = @($pillarHosts[$p])
+        $route = Get-C2cPillarRouting $p
+        [void]$pillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route })
+        & $send @{ type='log'; level='info'; text=("{0}: {1} host(s) -> {2}" -f $p, $hosts.Count, $route) }
+    }
+
+    & $send @{ type='status'; text="Done. $total host(s) imported ($nonCompliant non-compliant)." }
+    return @{ rows=@($rows); summary=@{ total=$total; compliant=$compliant; nonCompliant=$nonCompliant; nonCompliantHosts=@($nonCompliantHosts); pillars=@($pillars) } }
+}
+
+# --- Action: fix (DESTRUCTIVE) ----------------------------------------------
+function Invoke-C2cFixAction {
+    param([hashtable]$Params, [System.Management.Automation.PSCredential]$Credential, [scriptblock]$Emit)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $cancelJob = $null
+    if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
+    $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    # Confirm word - exact 'FIX' (case-sensitive), matching the suite idiom.
+    $confirm = ([string]$Params['confirm']).Trim()
+    if ($confirm -cne 'FIX') {
+        & $send @{ type='log'; level='err'; text="Confirm word mismatch: type FIX (exactly) to run the mass fix. Nothing was changed." }
+        return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+    }
+
+    # Targets: bare host/IPv4 tokens only (same regex as scan).
+    $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='No valid targets.' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    $fixEnc    = Get-C2cBool $Params['fixEncryption'] $true
+    $fixDef    = Get-C2cBool $Params['fixDefender']   $true
+    $fixPki    = Get-C2cBool $Params['fixPki']        $false
+    $kickPatch = Get-C2cBool $Params['kickPatchCycle'] $true
+    $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
+    if (-not ($fixEnc -or $fixDef -or $fixPki -or $kickPatch)) {
+        & $send @{ type='log'; level='err'; text='No fix pillars enabled - tick at least one (Encryption / AntiMalware / PKI roots / Patches). Nothing was changed.' }
+        return @{ rows=@(); summary=@{ total=$targets.Count; rejected=$true } }
+    }
+
+    # PKI: read + validate the .sst ADMIN-SIDE, ONCE, before any host is dialed.
+    $sstB64 = ''
+    if ($fixPki) {
+        $sstPath = ([string]$Params['sstPath']).Trim().Trim('"')
+        if (-not $sstPath) {
+            & $send @{ type='log'; level='err'; text='PKI roots selected but no .sst file provided. Untick PKI or attach a DoD root bundle (.sst). Nothing was changed.' }
+            return @{ rows=@(); summary=@{ total=$targets.Count; rejected=$true } }
+        }
+        if (-not (Test-Path -LiteralPath $sstPath)) {
+            & $send @{ type='log'; level='err'; text="PKI .sst not found: $sstPath. Nothing was changed." }
+            return @{ rows=@(); summary=@{ total=$targets.Count; rejected=$true } }
+        }
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($sstPath)
+            $col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+            $col.Import($bytes)
+            if ($col.Count -eq 0) { throw 'no certificates found in the file' }
+            $sstB64 = [Convert]::ToBase64String($bytes)
+            & $send @{ type='log'; level='info'; text="PKI: loaded $($col.Count) certificate(s) from $(Split-Path -Leaf $sstPath)." }
+        } catch {
+            & $send @{ type='log'; level='err'; text="PKI .sst failed to load ($($_.Exception.Message)) - ABORTED before any host was touched." }
+            return @{ rows=@(); summary=@{ total=$targets.Count; rejected=$true } }
+        }
+    }
+
+    # Self-guard: drop the dispatcher host, log a SKIPPED row for each.
+    $rows = New-Object System.Collections.ArrayList
+    $selfSkipped = New-Object System.Collections.ArrayList
+    $nonSelf     = New-Object System.Collections.ArrayList
+    foreach ($t in $targets) { if (Test-JanetC2cHostIsSelf $t) { [void]$selfSkipped.Add($t) } else { [void]$nonSelf.Add($t) } }
+    foreach ($s in $selfSkipped) {
+        $row = @{ Host=$s; Ping=''; Status='SKIPPED'; Detail='self-guard: dispatcher/local host - refused (a self-fix could disrupt the JANET server mid-run)' }
+        [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+    }
+    if ($selfSkipped.Count -gt 0) {
+        & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host ($($selfSkipped -join ', '))." }
+    }
+    $targets = @($nonSelf.ToArray())
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to run.' }
+        return @{ rows=@($rows); summary=@{ total=0; selfSkipped=$selfSkipped.Count } }
+    }
+
+    $threads = 8
+    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    $threads = [Math]::Max(1, [Math]::Min(16, $threads))
+    $perHostTimeout = 300
+    $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
+    $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
+    $enabledList = @()
+    if ($fixEnc)    { $enabledList += 'Encryption' }
+    if ($fixDef)    { $enabledList += 'AntiMalware' }
+    if ($fixPki)    { $enabledList += 'PkiRoots' }
+    if ($kickPatch) { $enabledList += 'Patches' }
+
+    & $send @{ type='status'; text="C2C Mass Fix on $($targets.Count) host(s) with $threads thread(s): $($enabledList -join ', ')..." }
+    & $send @{ type='log'; level='info'; text="[$(Get-Date -Format 'HH:mm:ss')] START C2C Mass Fix on $($targets.Count) host(s) ($authLabel), pillars: $($enabledList -join ', ')." }
+
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+    $pool.Open()
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Detail='waiting for a runspace...' }) }
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($h in $targets) {
+        $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+        [void]$ps.AddScript($script:C2cFixBlock)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
+        [void]$ps.AddArgument($fixEnc); [void]$ps.AddArgument($fixDef); [void]$ps.AddArgument($fixPki); [void]$ps.AddArgument($kickPatch); [void]$ps.AddArgument($sstB64)
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
+    }
+
+    $emitResult = {
+        param($res)
+        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail }
+        [void]$rows.Add($row)
+        & $send (@{ type='row' } + $row)
+        # JANET audit: a Mass Fix is a security-state change.
+        $auditResult = switch ($row.Status) { 'FIXED' {'Success'} 'PARTIAL' {'Success'} 'NO CHANGE' {'Skipped'} 'SKIPPED' {'Skipped'} 'OFFLINE' {'Skipped'} default {'Failure'} }
+        $itemCount   = if ($row.Status -eq 'FIXED' -or $row.Status -eq 'PARTIAL') { 1 } else { 0 }
+        & $send @{ type='audit'; action='VulnPatched'; target=$row.Host; result=$auditResult; itemCount=$itemCount; detail=$row.Detail }
+        $rpt = ''
+        try { $rpt = [string]$res.Report } catch { $rpt = '' }
+        if ($rpt) {
+            & $send @{ type='log'; level='info'; text="----- $([string]$res.Host) : $([string]$res.Status) -----" }
+            foreach ($ln in ($rpt -split "`r?`n")) {
+                if ([string]::IsNullOrWhiteSpace($ln)) { continue }
+                $lvl = 'info'
+                if     ($ln -match '^\s*\[FIXED\]')    { $lvl = 'ok' }
+                elseif ($ln -match '^\s*\[NOCHANGE\]') { $lvl = 'info' }
+                elseif ($ln -match '^\s*\[KICKED\]')   { $lvl = 'info' }
+                elseif ($ln -match '^\s*\[SKIP\]')     { $lvl = 'warn' }
+                elseif ($ln -match '^\s*\[FAIL\]')     { $lvl = 'error' }
+                & $send @{ type='log'; level=$lvl; text=$ln }
+            }
+        }
+    }
+
+    $done = 0
+    try {
+        while ($done -lt $jobs.Count) {
+            foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = @{ Host=$j.Host; Ping=''; Status='FAILED'; Detail="worker error: $($_.Exception.Message)"; Report='' } }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Status='FAILED'; Detail='worker returned no result'; Report='' } }
+                    & $emitResult $res
+                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $emitResult @{ Host=$j.Host; Ping=''; Status='FAILED'; Detail="per-host timeout (${perHostTimeout}s) - possible remote hang"; Report='' }
+                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                if ($cancelCheck -and (& $cancelCheck)) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $emitResult @{ Host=$j.Host; Ping=''; Status='SKIPPED'; Detail='cancelled by operator'; Report='' }
+                            $done++
+                        }
+                    }
+                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight fixes stopped.' }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+
+    $cFixed   = @($rows | Where-Object { $_.Status -eq 'FIXED' }).Count
+    $cNoChange= @($rows | Where-Object { $_.Status -eq 'NO CHANGE' }).Count
+    $cPartial = @($rows | Where-Object { $_.Status -eq 'PARTIAL' }).Count
+    $cFailed  = @($rows | Where-Object { $_.Status -eq 'FAILED' }).Count
+    $cOffline = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
+    $cSkipped = @($rows | Where-Object { $_.Status -eq 'SKIPPED' }).Count
+
+    & $send @{ type='log'; level='ok'; text="C2C Mass Fix done - FIXED: $cFixed, NO CHANGE: $cNoChange, PARTIAL: $cPartial, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped." }
+    & $send @{ type='status'; text="Done. $cFixed fixed, $cPartial partial, $cNoChange no-change, $cFailed failed of $($rows.Count) row(s)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; partial=$cPartial; failed=$cFailed; offline=$cOffline; skipped=$cSkipped } }
+}
+
 function Invoke-JanetToolAction {
     param(
         [string]$ActionId,
@@ -396,6 +1047,9 @@ function Invoke-JanetToolAction {
     $cancelJob = $null
     if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    if ($ActionId -eq 'import') { return (Invoke-C2cImportAction -Params $Params -Emit $Emit) }
+    if ($ActionId -eq 'fix')    { return (Invoke-C2cFixAction -Params $Params -Credential $Credential -Emit $Emit) }
 
     if ($ActionId -ne 'scan') {
         & $send @{ type='error'; text="Unknown action '$ActionId'." }

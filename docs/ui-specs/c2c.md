@@ -90,3 +90,84 @@ BeginInvoke fan-out with a per-host watchdog and the operator-cancel bridge
 (`$Params['__job']`), a single-round-trip probe, and the session-based
 DNS-mismatch guard (never a PTR lookup). Read-only: no audit rows are emitted
 (mirrors the Windows Upgrade Diagnose action).
+
+## Action side (v1.1.0) - Import + Mass Fix
+
+Two actions extend the tool with the ACTION half of Comply-to-Connect.
+
+### `import` - "Import C2C Compliance CSV" (read-only, `destructive=false`)
+
+Columns `Host, Compliance, Failed, Audit, Fqdn`. Inputs: `csvPath`
+(type `file`, CSV) and/or `csvText` (type `textarea`, pasted CSV). Local parse -
+**no WinRM, no credential**.
+
+Parses the Tanium **"C2C Compliance Status"** export. The `Compliance` cell is
+multiline inside one quoted CSV cell: the first line is `Compliant` /
+`Non-Compliant`, following lines are rule names (`Failed Rule[ N] - <name>` /
+`Audit Rule[ N] - <name>`). Each rule is stripped of its prefix and mapped to a
+canonical pillar (recording Failed vs Audit):
+
+| Rule name (stripped) | Canonical pillar | Routing |
+|---|---|---|
+| Endpoint Data At Rest Encryption, Bitlocker | **Encryption** | fixable HERE (Mass Fix: resume BitLocker) |
+| Anti-malware, MDE Health | **AntiMalware** | fixable HERE (Mass Fix: heal Defender / MDE) |
+| PKI Trust Roots | **PkiRoots** | fixable HERE (Mass Fix: add DoD roots from .sst) |
+| Patching Compliance, Patching | **Patches** | endpoint-kickable HERE (Mass Fix: MECM scan / eval) |
+| Vulnerability Compliance, Vulnerabilities | **Vuln** | ACAS / Reports / KEV tools |
+| OS Version | **OSVersion** | Windows Upgrade tool |
+| STIG Check | **STIG** | Reports / STIG |
+| *(anything else)* | *verbatim stripped name* | review manually |
+
+FQDN -> short name for targeting (FQDN kept for display/export). De-duplicates by
+host, worst row wins (Non-Compliant over Compliant; tie -> more failed pillars).
+Summary: `@{ total; compliant; nonCompliant; nonCompliantHosts=@(...);
+pillars=@(@{ name; failedCount; hosts=@(...); routing }) }` so the view can load a
+pillar's failing hosts straight into the target list. Unknown rules are surfaced
+verbatim, never dropped.
+
+The view renders an **IMPORT C2C COMPLIANCE CSV** card (file picker + Import) below
+Target Computers: after import it shows per-pillar count chips and buttons -
+"Load ALL non-compliant -> targets" plus one "Load `<Pillar>` hosts" button per
+endpoint-fixable pillar - each replacing the Target Computers list.
+
+### `fix` - "C2C Mass Fix" (**destructive**, `destructive=true`)
+
+Columns `Host, Ping, Status, Detail`. Server admin-session gate applies. Inputs:
+`targets` (hostlist, required); `fixEncryption` (default true); `fixDefender`
+(default true); `fixPki` (default false); `sstPath` (type `file`, `.sst` - required
+if `fixPki`); `kickPatchCycle` (default true); `confirm` (must be the exact word
+`FIX`); `threads` (default 8, clamped 1-16); `attemptOffline` (default false).
+
+Safety: rejects 0 valid targets (same token regex as scan); **self-guard** drops any
+dispatcher-local target (short/FQDN/`localhost`/`127.*`/`::1`) with a `SKIPPED` row;
+**wrong-box guard** compares the answering box's name to the dialed short name and
+aborts with `SKIPPED` "DNS MISMATCH" changing nothing; 300s per-host watchdog;
+operator-cancel bridge. If `fixPki`, the `.sst` is read + validated into an
+`X509Certificate2Collection` **admin-side, once, before any host is dialed** (a bad
+bundle aborts the whole run); the base64 rides into the remote scriptblock.
+
+Per host, ONE `Invoke-Command` round-trip does fix-then-verify per enabled pillar:
+
+- **Encryption** - `Get-BitLockerVolume` on `$env:SystemDrive` (manage-bde fallback).
+  On + FullyEncrypted-but-suspended -> `Resume-BitLocker` (re-read: FIXED if now On).
+  Already On -> NOCHANGE. Decrypted / EncryptionInProgress -> SKIP (never STARTS
+  encryption from here - route to MECM/desk-side).
+- **AntiMalware** - ensure WinDefend/Sense Automatic + Started; enable RTP if off;
+  `Update-MpSignature` if sig age > 7d; re-read. Missing MDE Sense is a note, not a
+  failure, when Defender itself is healthy.
+- **PkiRoots** - load the base64 bundle, open `X509Store('Root','LocalMachine')`
+  ReadWrite, add only thumbprints not already present (FIXED "added N of M" /
+  NOCHANGE "all M present"). Never removes anything.
+- **Patches** - `Invoke-CimMethod` `root\ccm SMS_Client TriggerSchedule` for
+  `{...113}` (SUM scan) then `{...108}` (SUM eval). Result KICKED (installs async;
+  Tanium updates after its next scan) or FAIL if `root\ccm` is unreachable.
+
+Host Status = FIXED (>=1 FIXED, 0 FAIL) / NO CHANGE (all NOCHANGE/KICKED/SKIP) /
+PARTIAL (mix with FAIL) / FAILED (all failed or session error) / OFFLINE / SKIPPED.
+The full `[FIXED]`/`[NOCHANGE]`/`[SKIP]`/`[FAIL]`/`[KICKED]` per-pillar report streams
+to the activity log (coloured like the scan report). Emits a `VulnPatched` audit row
+per host. Summary: counts per status.
+
+The view's **MASS FIX** card carries the four pillar checkboxes (PKI enables its
+`.sst` picker), threads, attempt-offline, and a `FIX` confirm text input, gated by a
+destructive RunBar (admin-session guard) + an arming dialog restating host count.
