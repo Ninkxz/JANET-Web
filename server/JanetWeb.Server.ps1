@@ -802,7 +802,7 @@ function Start-JanetWebServer {
                             # changes can land in either order.
                             # Tools whose audit target IS a machine -> they get a per-host TouchedHosts
                             # CSV. Excludes reports (filenames), dhcp (scope names), adsearch (directory objects).
-                            $hostTouchingTool = @('wpt','acas','pkginstall','winupgrade','upr','secureboot','restart','message') -contains $toolId
+                            $hostTouchingTool = @('wpt','acas','pkginstall','winupgrade','upr','secureboot','restart','message','remoteadmin') -contains $toolId
                             $emit = {
                                 param($e)
                                 [void]$job.Events.Add($e)

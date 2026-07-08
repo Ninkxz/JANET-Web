@@ -124,12 +124,21 @@ function Get-RemoteAdminTruncatedOutput {
 }
 
 # --- Dispatcher self-guard (Wpt-local mirror, re-implemented not cross-imported) --
-# Set of identities that resolve to THIS dispatcher host: shortname, FQDN, all NIC
-# IPs, loopback. Used to drop the JANET box from a run-script wave - an arbitrary
-# operator block hitting our own host could kill the HttpListener mid-dispatch and
-# abandon every other host. Computed once and cached.
+# Set of identities that resolve to THIS dispatcher host: shortname, FQDN, the
+# hostname's DNS-registered addresses, EVERY locally-bound NIC IPv4, and loopback.
+# Used to drop the JANET box from a run-script wave - an arbitrary operator block
+# hitting our own host could kill the HttpListener mid-dispatch and abandon every
+# other host. The bound-NIC enumeration (mirrors the c2c Mass Fix self-guard) is
+# the belt to DNS's suspenders: on a multi-homed dispatcher a live interface IP may
+# not be registered under the box's hostname in DNS, so a DNS-only set would let
+# that IP slip the guard. Computed once and cached; try/catch so an odd network
+# stack still loads.
 function Get-RemoteAdminLocalIdentity {
-    if ($script:RemoteAdminLocalIdentity) { return $script:RemoteAdminLocalIdentity }
+    # NOTE the unary comma on both returns: without it PowerShell UNROLLS the
+    # HashSet into the output stream and the caller gets an Object[] - whose
+    # .Contains is case-SENSITIVE, silently defeating the OrdinalIgnoreCase
+    # comparer for hostname matching. ',$set' returns the HashSet intact.
+    if ($script:RemoteAdminLocalIdentity) { return ,$script:RemoteAdminLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -137,9 +146,19 @@ function Get-RemoteAdminLocalIdentity {
         $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
         if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
     } catch {}
+    # DNS forward-lookup of the hostname (can miss an unregistered interface IP)...
     try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # ...and every ACTUALLY-BOUND local IPv4, which DNS can't miss (mirrors c2c).
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
     $script:RemoteAdminLocalIdentity = $set
-    return $set
+    return ,$set
 }
 
 # True if a target token names this dispatcher host (short/FQDN/IP/loopback).

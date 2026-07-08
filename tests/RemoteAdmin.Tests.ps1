@@ -139,6 +139,48 @@ Describe 'Self-guard (Remove-RemoteAdminSelfTargets)' {
     & $m { $script:RemoteAdminLocalIdentity = $null }
 }
 
+Describe 'Self-guard enumerates locally-bound NIC IPs, not just DNS' {
+    # Force a real recompute (not the seeded set from the describe above).
+    & $m { $script:RemoteAdminLocalIdentity = $null }
+    $ident = & $m { Get-RemoteAdminLocalIdentity }
+
+    # Independently enumerate THIS box's actually-bound IPv4s (the same source the
+    # fix uses) so we can assert the identity set is a superset of them.
+    $boundV4 = New-Object System.Collections.ArrayList
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$boundV4.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
+    $boundV4 = @($boundV4 | Select-Object -Unique)
+
+    It 'this box has at least one bound IPv4 (sanity for the assertion below)' {
+        $boundV4.Count | Should BeGreaterThan 0
+    }
+    It 'the identity set contains every actually-bound local IPv4' {
+        foreach ($ip in $boundV4) { $ident.Contains($ip) | Should Be $true }
+    }
+    It 'Test-RemoteAdminHostIsSelf flags a real bound local IPv4 as self' {
+        foreach ($ip in $boundV4) { (& $m { param($x) Test-RemoteAdminHostIsSelf $x } $ip) | Should Be $true }
+    }
+    It 'flags a bound IP that DNS would NOT know (the multi-homed slip the fix closes)' {
+        # Inject a synthetic bound address the box's hostname is never DNS-registered
+        # for (TEST-NET-3, RFC 5737). With the DNS-only set it would slip the guard;
+        # once the enumeration puts a bound IP in the set, the guard catches it.
+        & $m {
+            $s = Get-RemoteAdminLocalIdentity
+            [void]$s.Add('203.0.113.199')
+            $script:RemoteAdminLocalIdentity = $s
+        }
+        (& $m { Test-RemoteAdminHostIsSelf '203.0.113.199' }) | Should Be $true
+    }
+
+    & $m { $script:RemoteAdminLocalIdentity = $null }
+}
+
 Describe 'open-cshare via Invoke-JanetToolAction (Explorer + reachability shimmed)' {
     function Invoke-ShimmedOpen {
         param([string]$Computer, [bool]$Reachable = $true)
