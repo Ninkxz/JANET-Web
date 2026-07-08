@@ -82,7 +82,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Without it, a copied/extracted deployment trips a security prompt per script and
 # loads in Constrained Language Mode (which breaks the .NET calls in some engines,
 # e.g. ACAS analyze -> "AuthorizationManager check failed"). The launcher .cmd also
-# does this before we start; this covers a direct `-File JanetWeb.Internal.ps1` launch.
+# does this before we start; this covers a direct -File launch of this internal script.
 # Unblock-File is a built-in signed cmdlet, so it runs even under lockdown. Silent.
 try { Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch {}
 
@@ -96,6 +96,31 @@ if (-not [Environment]::UserInteractive) {
     Write-Warning 'JANET Web was started in a NON-INTERACTIVE session. "Set Credentials" (the ADW smartcard picker) and the file pickers will NOT work. Launch it from your own PowerShell console - or double-click "Launch JANET Web.cmd" - for full functionality.'
 }
 
+# --- resolve a bindable loopback port ------------------------------------------
+# The browser-opener, the printed URL and the server must all agree on ONE port. If the
+# requested port is already taken (a stale JANET instance still holding it, or another
+# app), silently advance to the next free one so the GUI still comes up instead of the
+# listener failing to bind and nothing opening. This probes a RAW TCP bind; a
+# urlacl / Access-Denied HttpListener failure is a different problem and is still
+# surfaced with guidance by the server itself.
+function Resolve-JanetFreePort {
+    param([int]$Start)
+    for ($p = $Start; $p -lt ($Start + 12); $p++) {
+        $l = $null
+        try {
+            $l = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback, $p)
+            $l.Start(); $l.Stop(); return $p
+        } catch { } finally { if ($l) { try { $l.Stop() } catch {} } }
+    }
+    return $Start   # ponytail: none free in range -> let the server bind + report the real error
+}
+$resolvedPort = Resolve-JanetFreePort -Start $Port
+if ($resolvedPort -ne $Port) {
+    Write-Host "  Port $Port was busy - using $resolvedPort instead." -ForegroundColor Yellow
+    $Port = $resolvedPort
+}
+# ponytail: tiny TOCTOU between this probe and the server's bind; harmless on single-user loopback.
+
 # --- session token (per launch) ------------------------------------------------
 $token = [guid]::NewGuid().ToString('N')
 $url   = "http://127.0.0.1:$Port/?t=$token"
@@ -103,22 +128,39 @@ $url   = "http://127.0.0.1:$Port/?t=$token"
 Write-Host ""
 Write-Host "  JANET Web" -ForegroundColor Yellow
 Write-Host "  pure PowerShell (no modules)  |  http://127.0.0.1:$Port  (loopback only)" -ForegroundColor DarkGray
-Write-Host "  Open: $url" -ForegroundColor Cyan
+Write-Host "  If your browser does not open on its own, click or paste this:" -ForegroundColor DarkGray
+Write-Host "  $url" -ForegroundColor Cyan
 Write-Host "  (Ctrl+C in this window stops the server.)" -ForegroundColor DarkGray
 Write-Host ""
 
 # --- open the browser shortly after the listener comes up ----------------------
+# Runs on a background runspace: poll the loopback port until the listener is up, then
+# open the default browser. Two robustness fixes for locked-down boxes: (1) wait up to
+# ~60s, not 10s - a copied deployment's first run does an Unblock-File sweep + module
+# load + AV scan before the listener binds; (2) try THREE ways to open the URL, because
+# a plain Start-Process <url> silently no-ops on machines with no http:// default-browser
+# association (common on freshly imaged/managed hosts), whereas explorer / cmd start
+# resolve it. The tokenized URL is also printed above, so a total miss is still one click.
 if (-not $NoBrowser) {
     $opener = [powershell]::Create()
     [void]$opener.AddScript({
         param($u, $p)
-        for ($i = 0; $i -lt 40; $i++) {
+        $up = $false
+        for ($i = 0; $i -lt 240; $i++) {
             Start-Sleep -Milliseconds 250
             try {
                 $c = New-Object System.Net.Sockets.TcpClient
                 $c.Connect('127.0.0.1', [int]$p); $c.Close()
-                Start-Process $u; break
+                $up = $true; break
             } catch {}
+        }
+        if (-not $up) { return }
+        foreach ($opn in @(
+            { Start-Process $u -ErrorAction Stop },
+            { Start-Process 'explorer.exe' -ArgumentList $u -ErrorAction Stop },
+            { Start-Process 'cmd.exe' -ArgumentList '/c','start','""',$u -ErrorAction Stop }
+        )) {
+            try { & $opn; break } catch {}
         }
     }).AddArgument($url).AddArgument($Port)
     [void]$opener.BeginInvoke()

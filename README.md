@@ -24,12 +24,13 @@ Double-click **`Launch JANET Web.cmd`**. It:
    because the server-side "Set Credentials" smartcard picker
    (`Get-Credential`) does not reliably surface under Windows Terminal's ConPTY
    host.
-3. Runs `JanetWeb.Internal.ps1`, which mints a per-launch session token, starts
-   the server, and opens your browser to the tokenized URL.
+3. Runs `DO NOT RUN - JanetWeb.Internal.ps1`, which mints a per-launch session
+   token, starts the server, and opens your browser to the tokenized URL.
 
-`Ctrl+C` in that console window stops the server. Running `JanetWeb.Internal.ps1`
-directly (double-click, IDE terminal, PowerShell 7) is self-healing - it detects
-it's not in conhost and relaunches itself there.
+`Ctrl+C` in that console window stops the server. The internal script is prefixed
+`DO NOT RUN - ` because **`Launch JANET Web.cmd` is the only supported entry point** -
+but if it is run directly anyway (double-click, IDE terminal, PowerShell 7) it is
+self-healing: it detects it's not in conhost and relaunches itself there.
 
 Everything runs as YOU, on localhost, the same security model as the desktop
 WinForms tools - no elevation, no service account.
@@ -76,8 +77,9 @@ JANET Web\
   tests\          Pester test suite
   docs\           Current review notes + per-tool UI specs (ui-specs\)
   Packages\       Local staging for patch content (PSADT / MSI / MSU / CAB / EXE)
-  JanetWeb.Internal.ps1     Session/token bootstrap + server start (do not run directly)
-  Launch JANET Web.cmd      The actual entry point - double-click this
+                  + Packages\DoD-Certs\ (shipped DoD trust bundle for the C2C PKI fixer)
+  DO NOT RUN - JanetWeb.Internal.ps1   Session/token bootstrap + server start (do NOT run directly)
+  Launch JANET Web.cmd                 The actual entry point - double-click this
 ```
 
 Tool registry (id, name, category, icon, summary) is `server\tool-registry.json`.

@@ -28,8 +28,10 @@ rem  Windows PowerShell 5.1 window. On Win11 the default terminal is often Windo
 rem  Terminal (the dark icon), which hosts the console via ConPTY - and there the
 rem  server-side Get-Credential smartcard picker can fail to surface. The classic
 rem  conhost host pops the picker reliably, so we pin it explicitly. The sentinel
-rem  tells JanetWeb.Internal.ps1 we are ALREADY in conhost, so its own Windows-Terminal
-rem  guard does not relaunch a second window. This .cmd and JanetWeb.Internal.ps1
-rem  must keep agreeing on the sentinel name - rename them together or not at all.
+rem  tells the internal launcher we are ALREADY in conhost, so its own Windows-Terminal
+rem  guard does not relaunch a second window. This .cmd and the internal .ps1 must keep
+rem  agreeing on both the sentinel name AND the internal script's filename - rename
+rem  together or not at all. (The internal script is prefixed "DO NOT RUN - " so nobody
+rem  double-clicks it directly; THIS .cmd is the only supported entry point.)
 set "JANETWEB_CONHOST=1"
-start "JANET Web" conhost.exe powershell.exe -NoExit -STA -ExecutionPolicy Bypass -File "%~dp0JanetWeb.Internal.ps1" %*
+start "JANET Web" conhost.exe powershell.exe -NoExit -STA -ExecutionPolicy Bypass -File "%~dp0DO NOT RUN - JanetWeb.Internal.ps1" %*

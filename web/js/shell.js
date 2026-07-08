@@ -21,7 +21,7 @@
   Janet.components = Janet.components || {};
   var BOOT_NONCE = Date.now();   // per-session cache-bust for lazy-loaded view scripts
 
-  /* --- session token (minted by JanetWeb.Internal.ps1, passed as ?t=) ------- */
+  /* --- session token (minted by the internal launcher, passed as ?t=) ------- */
   var _qsTok = new URLSearchParams(location.search).get('t');
   var TOKEN = '';
   if (_qsTok) {
