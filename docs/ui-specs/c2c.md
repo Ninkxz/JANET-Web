@@ -37,7 +37,7 @@ EXT** (external - reported, never scored).
 
 | # | Pillar | Mechanism (read-only, on the target) | PASS when |
 |---|--------|--------------------------------------|-----------|
-| 1 | Monitoring | `Get-Service` the Tanium client service (`taniumService`, default "Tanium Client") | service Running (not found/stopped -> FAIL) |
+| 1 | Monitoring | `Get-C2cTaniumInstalled` (scan the 64- and 32-bit HKLM Uninstall keys for a DisplayName matching "Tanium") AND `Get-Service` the Tanium client service (`taniumService`, default "Tanium Client") | software installed AND service Running. Detail states BOTH facts, e.g. `Tanium installed (v...); service Running` / `Tanium not installed; service not installed` / `Tanium installed (v...); service Stopped` |
 | 2 | Firewall | `Get-NetFirewallProfile` (Domain/Private/Public); fallback `netsh advfirewall show allprofiles state` | all three profiles Enabled (else FAIL lists the disabled ones) |
 | 3 | AntiMalware | `Get-MpComputerStatus` (Defender, NIPR); fallback `root\SecurityCenter2` AntiVirusProduct | RealTimeProtectionEnabled AND AntivirusSignatureAge <= `sigMaxAgeDays` (default 7); Detail carries RTP + sig age + sig version |
 | 4 | Patches | `CCM_SoftwareUpdate` in `root\ccm\ClientSDK` (`InstallState != Installed` AND `ApplicabilityState != NotApplicable`) - the exact wpt query | 0 pending (else FAIL count). CCM absent -> ERROR "MECM/CCM not queryable" |
@@ -95,10 +95,30 @@ BeginInvoke fan-out with a per-host watchdog and the operator-cancel bridge
 DNS-mismatch guard (never a PTR lookup). Read-only: no audit rows are emitted
 (mirrors the Windows Upgrade Diagnose action).
 
-## Action side (v1.4.0) - Import + per-pillar fixes + Run All
+## Action side (v1.5.0) - Import-driven fix CARDS + Run All
 
 Actions that extend the read-only scan with the ACTION half of Comply-to-Connect.
-(v1.4.0 split the old monolithic `fix` into six per-pillar actions + `run-all`.)
+The fix workflow is **import-driven and ACAS-styled**: importing the Tanium CSV
+populates one **card per fixable pillar**, each carrying its OWN affected-host list
+(mirroring the ACAS Nemesis Updater's one-card-per-vulnerability idiom), with a
+**RUN ALL** over the checked cards.
+
+**v1.5.0 changes vs v1.4.0:**
+- The **`fix-pki` action was DROPPED** (the `.sst` DoD-roots import path is not
+  available). PkiRoots is now a **ROUTED** pillar - shown with its host count but
+  never dialed (routing "DoD roots via GPO / desk-side (.sst import not available)").
+  No plan or action ever marks PkiRoots fixable; `sstPath` is gone from every action.
+  Endpoint-fixable set is now **five**: Monitoring / Firewall / Encryption /
+  AntiMalware / Patches. **Action count is 8** (scan + import + 5 fix-* + run-all).
+- **Monitoring** (scan check #1 AND `fix-monitoring`) now also verifies the Tanium
+  **software is installed** via the uninstall registry (single-source helper
+  `Get-C2cTaniumInstalled`, dot-sourced remotely by both call sites). `fix-monitoring`:
+  service Running -> NOCHANGE (ALREADY MONITORED); service Stopped/not-Automatic ->
+  heal (MONITORED); service ABSENT but software installed -> FAIL "repair via Software
+  Center/MECM" (no service is created); NEITHER installed nor service -> FAIL "deploy
+  from Software Center/MECM".
+
+(History: v1.4.0 split the old monolithic `fix` into per-pillar actions + `run-all`.)
 
 ### `import` - "Import C2C Compliance CSV" (read-only, `destructive=false`)
 
@@ -114,12 +134,12 @@ canonical pillar (recording Failed vs Audit):
 
 | Rule name (stripped) | Canonical pillar | Routing |
 |---|---|---|
-| Continuous / Endpoint Monitoring, Tanium | **Monitoring** | fixable HERE (Fix Monitoring: heal Tanium client service) |
+| Continuous / Endpoint Monitoring, Tanium | **Monitoring** | fixable HERE (Fix Monitoring: verify Tanium installed + heal client service) |
 | Host / Endpoint Firewall, Firewall | **Firewall** | fixable HERE (Fix Firewall: enable disabled profiles) |
 | Endpoint Data At Rest Encryption, Bitlocker | **Encryption** | fixable HERE (Fix Encryption: resume / ENABLE BitLocker) |
 | Anti-malware, MDE Health | **AntiMalware** | fixable HERE (Fix AntiMalware: heal Defender / MDE) |
-| PKI Trust Roots | **PkiRoots** | fixable HERE (Fix PKI Roots: add DoD roots from .sst) |
 | Patching Compliance, Patching | **Patches** | endpoint-kickable HERE (Fix Patches: MECM scan / eval) |
+| PKI Trust Roots | **PkiRoots** | **ROUTED** - DoD roots via GPO / desk-side (.sst import not available) |
 | Vulnerability Compliance, Vulnerabilities | **Vuln** | ACAS / Reports / KEV tools |
 | OS Version | **OSVersion** | Windows Upgrade tool |
 | STIG Check | **STIG** | Reports / STIG |
@@ -130,41 +150,43 @@ host, worst row wins (Non-Compliant over Compliant; tie -> more failed pillars).
 Summary: `@{ total; compliant; nonCompliant; nonCompliantHosts=@(...);
 pillars=@(@{ name; failedCount; hosts=@(...); routing });
 runAllPlan=@(@{ host; pillars=@(...) }) }`. `runAllPlan` is each non-compliant host
-plus ONLY its endpoint-fixable failed pillars - the exact JSON the view hands the
-`run-all` action verbatim. The view can also load a pillar's failing hosts straight
-into the target list. Unknown rules are surfaced verbatim, never dropped.
+plus ONLY its endpoint-fixable failed pillars (PkiRoots is NOT fixable, so it never
+enters the plan) - the exact JSON the view intersects with the checked cards for the
+`run-all` action. Unknown rules are surfaced verbatim, never dropped; PkiRoots is still
+REPORTED as a routed pillar with its host count.
 
 The view renders an **IMPORT C2C COMPLIANCE CSV** card (file picker + Import) below
-Target Computers: after import it shows per-pillar count chips and buttons -
-"Load ALL non-compliant -> targets" plus one "Load `<Pillar>` hosts" button per
-endpoint-fixable pillar - each replacing the Target Computers list - and a
-**RUN ALL (N hosts, M fixes)** button (only when `runAllPlan` is non-empty).
+Target Computers, plus **hero StatCards** that populate after import: Total hosts /
+Non-Compliant / Fixable hosts (distinct hosts with >=1 fixable pillar = `runAllPlan`
+length) / Routed-only (non-compliant minus fixable). After import the view builds one
+**FIX CARD per fixable pillar** present (see below).
 
-### Per-pillar fixes + `run-all` (**destructive**, `destructive=true`)
+### Import-driven fix CARDS + `run-all` (**destructive**, `destructive=true`)
 
-The monolithic `fix` action was split (v1.4.0, clean break - the `fix` id is
-removed). There are now **six per-pillar actions** plus **run-all**. All are
-`destructive=true`, columns `Host, Ping, Status, Detail`, server admin-session gate,
-and require `confirm` == exact `FIX`. Shared safety on every one: rejects 0 valid
-targets (same token regex as scan); **self-guard** drops any dispatcher-local target
+There are **five per-pillar actions** plus **run-all**. All are `destructive=true`,
+columns `Host, Ping, Status, Detail`, server admin-session gate, and require
+`confirm` == exact `FIX`. Shared safety on every one: rejects 0 valid targets (same
+token regex as scan); **self-guard** drops any dispatcher-local target
 (short/FQDN/`localhost`/`127.*`/`::1`) with a `SKIPPED` row; **wrong-box guard**
 compares the answering box's name to the dialed short name and aborts that host with
 `SKIPPED` "DNS MISMATCH"; 300s per-host watchdog; operator-cancel bridge. A single
-per-host worker (`C2cFixBlock`) and a single fan-out are shared - the per-pillar
-actions pass a one-pillar set applied to every target; run-all passes each host's OWN
-set. The worker takes the pillar list PER host job (the set may differ per host).
+per-host worker (`C2cFixBlock`) and a single fan-out are shared - the per-card fix
+passes a one-pillar set applied to that pillar's imported hosts; run-all passes each
+host's OWN checked set. The worker takes the pillar list PER host job.
 
 **Per-pillar action ids / labels / inputs** (each: `targets` hostlist required;
 `confirm`; `threads` default 8 clamped 1-16; `attemptOffline` default false):
 
 | Action id | Label | Extra inputs | What changes on the endpoint |
 |---|---|---|---|
-| `fix-monitoring` | Fix Monitoring (Tanium) | - | Tanium client service (name from `taniumService`) -> Automatic + Started; verify. Result MONITORED / ALREADY MONITORED / FAIL (not installed). |
+| `fix-monitoring` | Fix Monitoring (Tanium) | - | Verify Tanium software installed (uninstall registry, `Get-C2cTaniumInstalled`); heal the client service (name from `taniumService`) -> Automatic + Started; verify. Result MONITORED / ALREADY MONITORED / FAIL. FAIL cases: service ABSENT but installed -> "repair via Software Center/MECM"; neither installed nor service -> "deploy from Software Center/MECM". No service is ever created. |
 | `fix-firewall` | Fix Firewall | - | `Set-NetFirewallProfile -Enabled True` on any disabled profile (netsh fallback); verify all 3 on. FIREWALL ENABLED / ALREADY ENABLED / FAIL. |
 | `fix-antimalware` | Fix AntiMalware (Defender) | - | WinDefend/Sense Automatic + Started; enable RTP; `Update-MpSignature` if age > 7d; re-read. PROTECTED / ALREADY PROTECTED / FAIL. Missing MDE Sense is a note. |
 | `fix-patches` | Fix Patches (MECM cycle) | - | `Invoke-CimMethod root\ccm SMS_Client TriggerSchedule` {..113} then {..108}. PATCH CYCLE KICKED / FAIL (root\ccm unreachable). |
 | `fix-encryption` | Fix Encryption (BitLocker) | `enableEncryption` (bool, default false) | Resume suspended protectors (PROTECTION RESUMED / ALREADY ENCRYPTED). If `enableEncryption` and FullyDecrypted: FVE policy assert -> reuse/add RecoveryPassword protector -> escrow Entra-first / AD fallback -> Enable-BitLocker XtsAes256 (ENCRYPTION STARTED). Escrow-first, fail-closed; TPM-ready + domain-joined only; recovery password never emitted. |
-| `fix-pki` | Fix PKI Roots | `sstPath` (file, **required**) | Add DoD roots from the .sst to `X509Store('Root','LocalMachine')` - additive only. ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT / FAIL. The .sst is read + validated `X509Certificate2Collection` **admin-side, once, before any host is dialed** (bad bundle aborts). |
+
+The **`fix-pki` action was removed** in v1.5.0 (no `.sst` import path). PkiRoots is a
+routed pillar only.
 
 **Result labels**: the underlying raw tokens (FIXED / NOCHANGE / STARTED / KICKED /
 SKIP / FAIL / IN PROGRESS) stay machine-stable and drive the host-status rollup; a
@@ -175,11 +197,10 @@ error, `SKIP` -> warn, `ALREADY*` / `IN PROGRESS` -> info, everything else -> ok
 ### `run-all` - "RUN ALL - Fix Imported Non-Compliant Hosts"
 
 Inputs: `plan` (type `textarea`, the import's `runAllPlan` JSON, required);
-`enableEncryption` (bool, default false); `sstPath` (file, **required only if a
-planned host includes PkiRoots** - validated up front, missing/invalid aborts the
-whole run, nothing dialed); `confirm`; `threads`; `attemptOffline`. The engine
-validates the plan JSON: unknown pillar names are dropped per host with a warn log
-line; a host left with zero fixable pillars gets an info row
+`enableEncryption` (bool, default false); `confirm`; `threads`; `attemptOffline`.
+(There is **no `sstPath`** input anymore.) The engine validates the plan JSON:
+non-endpoint-fixable pillar names are dropped per host with a warn log line (PkiRoots /
+Vuln / OSVersion / STIG); a host left with zero fixable pillars gets an info/SKIPPED row
 `nothing endpoint-fixable (Vuln/OSVersion/STIG route elsewhere)` and is never dialed;
 each dialed host runs ONLY its planned pillars. Self-guard + wrong-box + watchdog +
 cancel exactly like the per-pillar fixes. Summary adds per-pillar `fixed/nochange/fail`
@@ -189,10 +210,20 @@ tallies (`perPillar`) alongside the per-status host counts.
 (all NOCHANGE/SKIP) / PARTIAL (mix with FAIL) / FAILED (all failed or session error)
 / OFFLINE / SKIPPED. Emits a `VulnPatched` audit row per host.
 
-The view's **FIX ACTIONS (per pillar)** card carries one Run button per pillar
-(Encryption row has the indented ENABLE-BitLocker checkbox; PKI Roots row has the
-`.sst` picker), plus one shared threads / attempt-offline / `FIX` confirm input and a
-CANCEL RUN button. Each row arms via its own `ctx.arm` preflight dialog then sends its
-own action id. The **RUN ALL** button (in the Import card) arms a dialog listing the
-per-pillar host counts, states encryption only STARTS if the enable box is ticked, and
-passes the plan JSON plus the card's `enableEncryption` / `sstPath` settings.
+### View - the fix cards (ACAS Updater idiom)
+
+After a successful import the view renders, under a **FIXABLE HERE** section, one
+compact card per fixable pillar present (Monitoring / Firewall / Encryption /
+AntiMalware / Patches). Each card = a checkbox (checked by default) + the pillar title
++ its affected-host count (click to review the host list in a dialog) + a per-card
+**Fix on N** button that dispatches `fix-<pillar>` with `targets` = that pillar's
+imported hosts. The **Encryption** card carries the ENABLE-BitLocker toggle. Under a
+**ROUTED ELSEWHERE** section, non-runnable info cards show Vuln / OSVersion / STIG /
+PkiRoots with their host counts (never dialed). A **Select all / Select none** pair, a
+single shared `FIX` confirm input + threads / attempt-offline / CANCEL RUN, and a
+prominent **RUN ALL** button live in the fix-card header. RUN ALL builds the plan from
+the CHECKED fixable cards (each host mapped to only its own checked failed pillars,
+intersected with the imported `runAllPlan`) and arms a `ctx.arm` dialog listing the
+per-pillar host counts (encryption only STARTS if the Encryption card's ENABLE toggle
+is ticked). All fix runs stream into the shared Results grid + Activity log; Export CSV
+is retained. The read-only Scan keeps its own Target Computers list.

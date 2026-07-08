@@ -32,7 +32,7 @@ function Invoke-C2cRunAll {
         & $cm {
             $script:__origFixBlock = $script:C2cFixBlock
             $script:C2cFixBlock = {
-                param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$SstB64, [string]$TaniumService)
+                param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc)
                 $ps = @(@($Pillars) | ForEach-Object { [string]$_ })
                 @{ Host = $Computer; Ping = 'shim'; Status = 'FIXED'; Detail = ('PILLARS=' + ($ps -join '+'));
                    Report = ''; Pillars = @($ps | ForEach-Object { [pscustomobject]@{ Name = $_; Action = 'shim'; Result = 'FIXED'; Detail = 'shim' } }) }
@@ -50,9 +50,14 @@ function Invoke-C2cRunAll {
     [pscustomobject]@{ Result = $res; Rows = @($script:__rows); Logs = @($script:__logs) }
 }
 
-# Run the REAL Monitoring fixer LOCALLY (Enable-test shim idiom) so the pillar
-# label map is exercised end-to-end. $Scenario: 'healthy' (already Running) or
-# 'healed' (Stopped/Manual -> started + Automatic).
+# Run the REAL fix-monitoring worker LOCALLY (Enable-test shim idiom) so the
+# installed-registry probe + pillar label map are exercised end-to-end. Scenarios:
+#   healthy      - installed + service Running/Automatic  -> NOCHANGE (ALREADY MONITORED)
+#   healed       - installed + service Stopped/Manual->run -> FIXED (MONITORED)
+#   notinstalled - NOT installed + service absent          -> FAIL (deploy from Software Center)
+#   svcabsent    - installed + service ABSENT              -> FAIL (repair via Software Center)
+# The uninstall-registry probe (Get-ItemProperty) and Get-Service are shimmed IN
+# MODULE SCOPE so nothing touches the real registry / SCM and no WinRM leaves the box.
 function Invoke-C2cMonitoring {
     param([string]$Scenario)
     & $cm {
@@ -66,28 +71,83 @@ function Invoke-C2cMonitoring {
         }
         $script:__svcCalls = 0
         $script:__scn = $Scenario
+        $script:__installed = ($Scenario -eq 'healthy' -or $Scenario -eq 'healed' -or $Scenario -eq 'svcabsent')
+        # Uninstall-registry probe fake: one 'Tanium Client' DisplayName when installed.
+        function script:Get-ItemProperty {
+            param($Path, $LiteralPath, $ErrorAction)
+            if ($script:__installed) { return [pscustomobject]@{ DisplayName = 'Tanium Client'; DisplayVersion = '7.4.5.1234' } }
+            return @()
+        }
         function script:Get-Service {
             param($Name, $ErrorAction)
             $script:__svcCalls++
             if ($script:__scn -eq 'healthy') { return [pscustomobject]@{ Name = $Name; Status = 'Running'; StartType = 'Automatic' } }
-            if ($script:__svcCalls -le 1)    { return [pscustomobject]@{ Name = $Name; Status = 'Stopped'; StartType = 'Manual' } }
-            return [pscustomobject]@{ Name = $Name; Status = 'Running'; StartType = 'Automatic' }
+            if ($script:__scn -eq 'healed') {
+                if ($script:__svcCalls -le 1) { return [pscustomobject]@{ Name = $Name; Status = 'Stopped'; StartType = 'Manual' } }
+                return [pscustomobject]@{ Name = $Name; Status = 'Running'; StartType = 'Automatic' }
+            }
+            # notinstalled / svcabsent -> the Tanium client service is not present.
+            return $null
         }
         function script:Set-Service { param($Name, $StartupType, $ErrorAction) }
         function script:Start-Service { param($Name, $ErrorAction) }
         try {
             # target = self so the wrong-box guard passes; Pillars = Monitoring only.
-            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Monitoring') $false '' 'Tanium Client'
+            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Monitoring') $false 'Tanium Client' $script:C2cTaniumInstalledSrc
             $mon = @(@($res.Pillars) | Where-Object { $_.Name -eq 'Monitoring' })[0]
             [pscustomobject]@{
                 Status    = [string]$res.Status
                 Detail    = [string]$res.Detail
                 Report    = [string]$res.Report
                 MonResult = $(if ($mon) { [string]$mon.Result } else { '' })
+                MonDetail = $(if ($mon) { [string]$mon.Detail } else { '' })
             }
         } finally {
             Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
-                function:script:Get-Service, function:script:Set-Service, function:script:Start-Service -ErrorAction SilentlyContinue
+                function:script:Get-ItemProperty, function:script:Get-Service, function:script:Set-Service, function:script:Start-Service -ErrorAction SilentlyContinue
+        }
+    } $Scenario
+}
+
+# Drive the READ-ONLY scan probe's Monitoring check (check #1) LOCALLY. Get-Service +
+# the uninstall-registry probe are shimmed; other checks run against the real (read-only)
+# cmdlets on this box but we only assert the Monitoring check's Status.
+#   installedRunning - installed + service Running -> PASS
+#   notinstalled     - not installed + service absent -> FAIL
+function Invoke-C2cScanMonitoring {
+    param([string]$Scenario)
+    & $cm {
+        param($Scenario)
+        function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
+        function script:Remove-PSSession { param($Session, $ErrorAction) }
+        function script:Invoke-Command {
+            param($Session, $ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
+            if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $env:COMPUTERNAME }
+            return (& $ScriptBlock @ArgumentList)
+        }
+        $script:__inst = ($Scenario -eq 'installedRunning')
+        function script:Get-ItemProperty {
+            param($Path, $LiteralPath, $ErrorAction)
+            if ($script:__inst) { return [pscustomobject]@{ DisplayName = 'Tanium Client'; DisplayVersion = '7.4.5.1234' } }
+            return @()
+        }
+        function script:Get-Service {
+            param($Name, $ErrorAction)
+            if ($script:__inst) { return [pscustomobject]@{ Name = $Name; Status = 'Running'; StartType = 'Automatic' } }
+            return $null
+        }
+        try {
+            $cfg = Get-C2cBaselineDefaults
+            # AttemptOffline = $true so the TCP short-circuit is skipped; target = self.
+            $res = & $script:C2cProbeBlock $env:COMPUTERNAME $null 'Default' $true $cfg $script:C2cTaniumInstalledSrc
+            $mon = @(@($res.Checks) | Where-Object { $_.Name -eq 'Monitoring' })[0]
+            [pscustomobject]@{
+                MonStatus = $(if ($mon) { [string]$mon.Status } else { '' })
+                MonDetail = $(if ($mon) { [string]$mon.Detail } else { '' })
+            }
+        } finally {
+            Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
+                function:script:Get-ItemProperty, function:script:Get-Service -ErrorAction SilentlyContinue
         }
     } $Scenario
 }
@@ -131,14 +191,23 @@ Describe 'C2C run-all - plan JSON parse, unknown-pillar drop, zero-fixable info 
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C run-all - PkiRoots planned without a .sst aborts before any host' {
+Describe 'C2C run-all - PkiRoots is no longer fixable (dropped per host, run continues)' {
 
-    It '(b) aborts the whole run (nothing dialed) with a clear PKI error' {
-        $plan = '[{"host":"RB1","pillars":["PkiRoots"]},{"host":"RB2","pillars":["AntiMalware"]}]'
-        $out = Invoke-C2cRunAll -Plan $plan   # no sstPath
-        $out.Result.summary.rejected | Should Be $true
-        @($out.Rows | Where-Object { $_.Status -eq 'FIXED' }).Count | Should Be 0
-        @($out.Logs | Where-Object { $_.level -eq 'err' -and $_.text -match 'PkiRoots' -and $_.text -match 'ABORTED' }).Count | Should Not Be 0
+    It '(b) a plan with PkiRoots drops it per host (like Vuln); a PkiRoots-only host is a zero-fixable info row; other hosts still run' {
+        $plan = '[{"host":"RB1","pillars":["PkiRoots"]},{"host":"RB2","pillars":["PkiRoots","AntiMalware"]}]'
+        $out = Invoke-C2cRunAll -Plan $plan   # no sstPath needed anymore
+        # RB1 (PkiRoots only) -> zero endpoint-fixable -> info/SKIPPED row, never dialed.
+        $rb1 = @($out.Rows | Where-Object { $_.Host -eq 'RB1' })[0]
+        $rb1 | Should Not BeNullOrEmpty
+        ($rb1.Detail) | Should Match 'nothing endpoint-fixable'
+        # RB2 keeps only AntiMalware (PkiRoots dropped).
+        $rb2 = @($out.Rows | Where-Object { $_.Host -eq 'RB2' -and $_.Status -eq 'FIXED' })[0]
+        $rb2 | Should Not BeNullOrEmpty
+        $rb2.Detail | Should Be 'PILLARS=AntiMalware'
+        $rb2.Detail | Should Not Match 'PkiRoots'
+        # a non-endpoint-fixable drop is logged as a warn.
+        @($out.Logs | Where-Object { $_.level -eq 'warn' -and $_.text -match 'RB2' -and $_.text -match 'PkiRoots' }).Count | Should Not Be 0
+        $out.Result.summary.rejected | Should BeNullOrEmpty
     }
 }
 
@@ -199,5 +268,97 @@ Describe 'C2C label map - pillar-flavoured result labels' {
         $r.Detail    | Should Match 'MONITORED'
         $r.Detail    | Should Not Match 'ALREADY'
         $r.Status    | Should Be 'FIXED'
+    }
+}
+
+# -----------------------------------------------------------------------------
+Describe 'C2C Monitoring - Tanium installed-software + service matrix (fix-monitoring)' {
+
+    It '(a) installed + service Running -> NOCHANGE MONITORED; detail notes installed + running' {
+        $r = Invoke-C2cMonitoring -Scenario 'healthy'
+        $r.MonResult | Should Be 'NOCHANGE'
+        $r.MonDetail | Should Match '(?i)Tanium installed'
+        $r.MonDetail | Should Match '(?i)already Running'
+    }
+
+    It '(b) installed + service Stopped -> heal starts it -> FIXED MONITORED' {
+        $r = Invoke-C2cMonitoring -Scenario 'healed'
+        $r.MonResult | Should Be 'FIXED'
+        $r.MonDetail | Should Match '(?i)Tanium installed'
+        $r.MonDetail | Should Match '(?i)healed'
+    }
+
+    It '(c) NOT installed + service absent -> FAIL, deploy from Software Center/MECM' {
+        $r = Invoke-C2cMonitoring -Scenario 'notinstalled'
+        $r.MonResult | Should Be 'FAIL'
+        $r.MonDetail | Should Match '(?i)not installed'
+        $r.MonDetail | Should Match '(?i)deploy from Software Center'
+    }
+
+    It '(d) installed + service ABSENT -> FAIL, repair via Software Center/MECM (no service created)' {
+        $r = Invoke-C2cMonitoring -Scenario 'svcabsent'
+        $r.MonResult | Should Be 'FAIL'
+        $r.MonDetail | Should Match '(?i)Tanium installed'
+        $r.MonDetail | Should Match '(?i)repair via Software Center'
+    }
+}
+
+# -----------------------------------------------------------------------------
+Describe 'C2C Monitoring - read-only scan check #1 (installed AND service running)' {
+
+    It '(a) installed + service Running -> scan PASS, detail states BOTH facts' {
+        $r = Invoke-C2cScanMonitoring -Scenario 'installedRunning'
+        $r.MonStatus | Should Be 'PASS'
+        $r.MonDetail | Should Match '(?i)Tanium installed'
+        $r.MonDetail | Should Match '(?i)service Running'
+    }
+
+    It '(c) NOT installed + service absent -> scan FAIL, detail states BOTH facts' {
+        $r = Invoke-C2cScanMonitoring -Scenario 'notinstalled'
+        $r.MonStatus | Should Be 'FAIL'
+        $r.MonDetail | Should Match '(?i)not installed'
+        $r.MonDetail | Should Match '(?i)service not installed'
+    }
+}
+
+# -----------------------------------------------------------------------------
+Describe 'C2C Tanium-installed probe - the single-source uninstall-registry helper' {
+
+    # Dot-source the shared source string (the exact text both call sites run) and
+    # shim Get-ItemProperty so the 64- and 32-bit uninstall-key scan is deterministic.
+    function Invoke-C2cInstalledProbe {
+        param([bool]$Installed, [string]$DisplayName = 'Tanium Client', [string]$Version = '7.4.5')
+        & $cm {
+            param($Installed, $DisplayName, $Version)
+            $script:__inst = $Installed; $script:__dn = $DisplayName; $script:__ver = $Version
+            function script:Get-ItemProperty {
+                param($Path, $LiteralPath, $ErrorAction)
+                if ($script:__inst) { return [pscustomobject]@{ DisplayName = $script:__dn; DisplayVersion = $script:__ver } }
+                return @()
+            }
+            try {
+                . ([scriptblock]::Create($script:C2cTaniumInstalledSrc))
+                Get-C2cTaniumInstalled
+            } finally {
+                Remove-Item function:script:Get-ItemProperty -ErrorAction SilentlyContinue
+            }
+        } $Installed $DisplayName $Version
+    }
+
+    It 'reports Installed = $true with the DisplayName + Version when a Tanium uninstall entry exists' {
+        $p = Invoke-C2cInstalledProbe -Installed $true -Version '7.4.5.99'
+        [bool]$p.Installed | Should Be $true
+        $p.Version         | Should Be '7.4.5.99'
+        $p.DisplayName     | Should Match '(?i)Tanium'
+    }
+
+    It 'reports Installed = $false when no uninstall entry matches Tanium' {
+        $p = Invoke-C2cInstalledProbe -Installed $false
+        [bool]$p.Installed | Should Be $false
+    }
+
+    It 'matches ONLY a DisplayName containing Tanium (a non-Tanium entry is not a match)' {
+        $p = Invoke-C2cInstalledProbe -Installed $true -DisplayName 'Some Other App'
+        [bool]$p.Installed | Should Be $false
     }
 }

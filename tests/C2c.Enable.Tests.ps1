@@ -124,8 +124,8 @@ function Invoke-C2cEnable {
 
         try {
             # target = self so the wrong-box guard passes (answering box == dialed short name).
-            # v1.4.0 worker signature: Computer, Cred, Auth, AttemptOffline, Pillars[], DoEnable, SstB64, TaniumService.
-            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Encryption') $DoEnable '' 'Tanium Client'
+            # v1.5.0 worker signature: Computer, Cred, Auth, AttemptOffline, Pillars[], DoEnable, TaniumService, TaniumInstalledSrc.
+            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Encryption') $DoEnable 'Tanium Client' $script:C2cTaniumInstalledSrc
             $pillars = @($res.Pillars)
             $enc = @($pillars | Where-Object { $_.Name -eq 'Encryption' })
             $blob = ''
@@ -275,12 +275,13 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - C2C Nemesis v1.4.0, per-pillar fix actions + run-all' {
+Describe 'C2C manifest - C2C Nemesis v1.5.0, per-pillar fix actions + run-all (no PKI fixer)' {
 
     $man = Get-JanetToolManifest
     $fix = @($man.actions | Where-Object { $_.id -eq 'fix-encryption' })[0]
     $inp = @($fix.inputs | Where-Object { $_.name -eq 'enableEncryption' })[0]
-    $fixIds  = @('fix-monitoring','fix-firewall','fix-antimalware','fix-patches','fix-encryption','fix-pki')
+    $mon = @($man.actions | Where-Object { $_.id -eq 'fix-monitoring' })[0]
+    $fixIds  = @('fix-monitoring','fix-firewall','fix-antimalware','fix-patches','fix-encryption')
     $destIds = @($fixIds + 'run-all')
 
     It 'reports the display name C2C Nemesis' {
@@ -289,13 +290,11 @@ Describe 'C2C manifest - C2C Nemesis v1.4.0, per-pillar fix actions + run-all' {
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.4.0' {
-        $man.version | Should Be '1.4.0'
+    It 'reports tool version 1.5.0' {
+        $man.version | Should Be '1.5.0'
     }
-    It 'exposes 9 actions: scan + import + six per-pillar fixes + run-all' {
-        # NB the operator brief said "8 actions incl. run-all"; the enumerated set is
-        # actually 9 (scan + import + 6 fix-* + run-all). We assert the real count.
-        @($man.actions).Count | Should Be 9
+    It 'exposes 8 actions: scan + import + five per-pillar fixes + run-all' {
+        @($man.actions).Count | Should Be 8
     }
     It 'has scan + import (read-only) and all fix-* + run-all (destructive)' {
         (@($man.actions | Where-Object { $_.id -eq 'scan' })[0].destructive)   | Should Be $false
@@ -309,6 +308,13 @@ Describe 'C2C manifest - C2C Nemesis v1.4.0, per-pillar fix actions + run-all' {
     It 'the legacy monolithic "fix" action id is REMOVED (clean break)' {
         @($man.actions | Where-Object { $_.id -eq 'fix' }).Count | Should Be 0
     }
+    It 'the fix-pki action is REMOVED (v1.5.0 dropped the PKI-roots fixer)' {
+        @($man.actions | Where-Object { $_.id -eq 'fix-pki' }).Count | Should Be 0
+    }
+    It 'no action declares an sstPath input anymore (run-all included)' {
+        $withSst = @($man.actions | Where-Object { @($_.inputs | Where-Object { $_.name -eq 'sstPath' }).Count -gt 0 })
+        @($withSst).Count | Should Be 0
+    }
     It 'the fix-encryption action declares the enableEncryption input (bool)' {
         $inp | Should Not BeNullOrEmpty
         $inp.type | Should Be 'bool'
@@ -316,17 +322,15 @@ Describe 'C2C manifest - C2C Nemesis v1.4.0, per-pillar fix actions + run-all' {
     It 'enableEncryption defaults to $false (resume stays the default; enable is opt-in)' {
         [bool]$inp.default | Should Be $false
     }
-    It 'fix-pki REQUIRES the sstPath input' {
-        $pki = @($man.actions | Where-Object { $_.id -eq 'fix-pki' })[0]
-        $sst = @($pki.inputs | Where-Object { $_.name -eq 'sstPath' })[0]
-        $sst | Should Not BeNullOrEmpty
-        [bool]$sst.required | Should Be $true
-    }
     It 'run-all declares the plan (textarea) input' {
         $ra = @($man.actions | Where-Object { $_.id -eq 'run-all' })[0]
         $pl = @($ra.inputs | Where-Object { $_.name -eq 'plan' })[0]
         $pl | Should Not BeNullOrEmpty
         $pl.type | Should Be 'textarea'
+    }
+    It 'the fix-monitoring description states the Tanium SOFTWARE installed (uninstall registry) check' {
+        $mon.description | Should Match '(?i)uninstall registry'
+        $mon.description | Should Match '(?i)Software Center'
     }
     It 'the fix-encryption description states the FVE-policy + Entra-first/AD-fallback / escrow-first / XtsAes256 enable behaviour' {
         $fix.description | Should Match 'FVE'

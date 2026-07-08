@@ -35,9 +35,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.4.0'
+        version  = '1.5.0'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (heal Tanium client), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker - FVE policy assert + Entra-first/AD-fallback recovery-key escrow, XtsAes256), and PkiRoots (add DoD roots from an operator .sst); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - five individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE), Patches (kick the MECM cycle), and Encryption (resume/ENABLE BitLocker - FVE policy assert + Entra-first/AD-fallback recovery-key escrow, XtsAes256); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK. PkiRoots is a ROUTED pillar (DoD roots via GPO / desk-side - .sst import not available). Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -67,7 +67,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-monitoring'
                 label       = 'Fix Monitoring (Tanium)'
-                description = 'DESTRUCTIVE (service state). Heal the endpoint-monitoring pillar on each target in one WinRM round-trip: the Tanium client service (name from c2c-baseline.json, default "Tanium Client") is set to StartType Automatic if it is not, then started if it is not Running, then re-read to verify. Result MONITORED (healed) / ALREADY MONITORED (was healthy) / FAIL (service not installed - deploy via MECM/desk-side, or it would not start). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (service state). Heal the endpoint-monitoring pillar on each target in one WinRM round-trip. First it verifies the Tanium SOFTWARE is installed by scanning the uninstall registry (HKLM 64- and 32-bit Uninstall keys for a DisplayName matching "Tanium"), then the Tanium client service (name from c2c-baseline.json, default "Tanium Client"): if the service is Running it is left alone (ALREADY MONITORED); if it exists but is Stopped/not-Automatic it is set to StartType Automatic and started, then re-read to verify (MONITORED); if the service is ABSENT but the software is installed it FAILs "repair via Software Center/MECM" (no service is created); if NEITHER the software nor the service is present it FAILs "deploy from Software Center/MECM". Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the Monitoring (Tanium) pillar on the target host(s)? This changes service state. Proceed?'
@@ -141,25 +141,9 @@ function Get-JanetToolManifest {
                 )
             }
             @{
-                id          = 'fix-pki'
-                label       = 'Fix PKI Roots'
-                description = 'DESTRUCTIVE (cert store). Add the DoD root certificates from an operator .sst bundle to LocalMachine\Root on each target - additive only, never removes anything. The .sst is read and validated into an X509Certificate2Collection admin-side ONCE, before any host is dialed (a bad bundle aborts the whole run). Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
-                kind        = 'stream-table'
-                destructive = $true
-                confirm     = 'Fix the PKI Roots pillar on the target host(s)? This adds DoD root certs. Proceed?'
-                columns     = @('Host','Ping','Status','Detail')
-                inputs      = @(
-                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='sstPath';        label='DoD root bundle (.sst) - REQUIRED'; type='file'; filter='SST files (*.sst)|*.sst|Cert bundles (*.sst;*.p7b)|*.sst;*.p7b|All files (*.*)|*.*'; required=$true },
-                    @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
-                    @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
-                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
-                )
-            }
-            @{
                 id          = 'run-all'
                 label       = 'RUN ALL - Fix Imported Non-Compliant Hosts'
-                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The "plan" input is the JSON array the Import action produced ([{host,pillars:[...]}, ...]); per host only its planned pillars run. Unknown pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If ANY planned host includes PkiRoots, a valid .sst is REQUIRED and validated up front (missing/invalid aborts the whole run, nothing dialed). Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
+                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The "plan" input is the JSON array the Import action produced ([{host,pillars:[...]}, ...]); per host only its planned pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG / PkiRoots route elsewhere); a host left with zero fixable pillars is reported and never dialed. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Run ALL fixes across the imported non-compliant hosts (each host, its own failed pillars)? This changes machines. Proceed?'
@@ -167,7 +151,6 @@ function Get-JanetToolManifest {
                 inputs      = @(
                     @{ name='plan';             label='Run-all plan (JSON: [{host,pillars:[...]}])'; type='textarea'; required=$true },
                     @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted OS volumes (only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
-                    @{ name='sstPath';          label='DoD root bundle (.sst) - required only if a host plans PkiRoots'; type='file'; filter='SST files (*.sst)|*.sst|Cert bundles (*.sst;*.p7b)|*.sst;*.p7b|All files (*.*)|*.*'; required=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline';   label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
@@ -231,11 +214,42 @@ function Get-C2cBaseline {
 # across the returned checks; the 2 EXT pillars (Vuln, COAMS) carry neither, so
 # "count all FAIL" already equals "count the 9 scored FAIL" (no explicit set needed).
 
+# --- Single-source endpoint probe: is the Tanium SOFTWARE installed? -----------
+# Both the read-only scan (check #1 Monitoring) and the destructive fix-monitoring
+# worker must answer "is Tanium installed?" identically. They run in SEPARATE remote
+# sessions, so the answer lives here as ONE source string that crosses the WinRM
+# boundary verbatim (strings serialize cleanly) and is dot-sourced remotely by each
+# call site to define Get-C2cTaniumInstalled. It scans the 64- and 32-bit uninstall
+# registry for a DisplayName matching 'Tanium' (the endpoint-readable install signal
+# a Software Center / MECM deployment leaves behind) and returns
+# @{ Installed=$bool; DisplayName=''; Version='' }.
+$script:C2cTaniumInstalledSrc = @'
+function Get-C2cTaniumInstalled {
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($p in $paths) {
+        try {
+            foreach ($k in @(Get-ItemProperty -Path $p -ErrorAction SilentlyContinue)) {
+                $dn = [string]$k.DisplayName
+                if ($dn -match '(?i)Tanium') {
+                    $ver = ''
+                    try { $ver = [string]$k.DisplayVersion } catch { $ver = '' }
+                    return [pscustomobject]@{ Installed=$true; DisplayName=$dn; Version=$ver }
+                }
+            }
+        } catch {}
+    }
+    return [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' }
+}
+'@
+
 # --- Per-host probe worker (runs in a pool runspace; no module scope here) ---
 # Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks }. All 11 checks run
 # inside ONE Invoke-Command round-trip; the verdict is computed here (admin-side).
 $script:C2cProbeBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, $Config)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, $Config, [string]$TaniumInstalledSrc)
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Ok=$false; Report=''; Checks=@() }
 
@@ -275,7 +289,9 @@ $script:C2cProbeBlock = {
 
     # ---- The consolidated read-only probe: all 11 C2C checks in one round-trip. ----
     $probeSb = {
-        param($taniumService, $sigMaxAge, $secAgents, $hostPatterns, $dodRoots)
+        param($taniumService, $sigMaxAge, $secAgents, $hostPatterns, $dodRoots, $taniumInstalledSrc)
+        # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
+        if ($taniumInstalledSrc) { try { . ([scriptblock]::Create($taniumInstalledSrc)) } catch {} }
         # Normalize the array args: an empty collection can cross the WinRM ArgumentList
         # boundary as $null, and @($null) is a 1-element array holding $null (a stray
         # $null host-pattern would be an empty regex that matches EVERYTHING -> a false
@@ -286,12 +302,18 @@ $script:C2cProbeBlock = {
         $checks = New-Object System.Collections.ArrayList
         $mk = { param($n,$s,$d) [void]$checks.Add([pscustomobject]@{ Name=$n; Status=$s; Detail=[string]$d }) }
 
-        # 1. Monitoring - Tanium client service running (endpoint monitoring installed).
+        # 1. Monitoring - Tanium SOFTWARE installed (uninstall registry) AND the Tanium
+        #    client service Running. PASS needs BOTH; Detail states both facts.
         try {
+            $ti = if (Get-Command Get-C2cTaniumInstalled -ErrorAction SilentlyContinue) { Get-C2cTaniumInstalled } else { [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' } }
+            $instTxt = if ($ti.Installed) { 'Tanium installed' + $(if ($ti.Version) { " (v$($ti.Version))" } else { '' }) } else { 'Tanium not installed' }
             $svc = Get-Service -Name $taniumService -ErrorAction SilentlyContinue
-            if (-not $svc)                      { & $mk 'Monitoring' 'FAIL' "service '$taniumService' not installed" }
-            elseif ($svc.Status -eq 'Running')  { & $mk 'Monitoring' 'PASS' "'$taniumService' Running" }
-            else                                { & $mk 'Monitoring' 'FAIL' "'$taniumService' $($svc.Status)" }
+            $svcTxt = if (-not $svc) { 'service not installed' } else { "service $($svc.Status)" }
+            if ($ti.Installed -and $svc -and $svc.Status -eq 'Running') {
+                & $mk 'Monitoring' 'PASS' "$instTxt; service Running"
+            } else {
+                & $mk 'Monitoring' 'FAIL' "$instTxt; $svcTxt"
+            }
         } catch { & $mk 'Monitoring' 'ERROR' $_.Exception.Message }
 
         # 2. Firewall - all three profiles enabled (endpoint firewall active).
@@ -459,7 +481,7 @@ $script:C2cProbeBlock = {
     }
 
     try {
-        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $secAgents, $hostPatterns, $dodRoots) -ErrorAction Stop
+        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $secAgents, $hostPatterns, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
     } catch {
         $r.Status = 'ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -514,18 +536,20 @@ $script:C2cProbeBlock = {
 # Fix; the rest route to the owning tool. Unknown rule names fall through to
 # 'review manually' (never silently dropped).
 $script:C2cPillarRouting = @{
-    Monitoring  = 'fixable HERE (Fix Monitoring: heal Tanium client service)'
+    Monitoring  = 'fixable HERE (Fix Monitoring: verify Tanium installed + heal client service)'
     Firewall    = 'fixable HERE (Fix Firewall: enable disabled profiles)'
     Encryption  = 'fixable HERE (Fix Encryption: resume / ENABLE BitLocker)'
     AntiMalware = 'fixable HERE (Fix AntiMalware: heal Defender / MDE)'
-    PkiRoots    = 'fixable HERE (Fix PKI Roots: add DoD roots from operator .sst)'
     Patches     = 'endpoint-kickable HERE (Fix Patches: trigger MECM scan / eval)'
+    PkiRoots    = 'DoD roots via GPO / desk-side (.sst import not available)'
     Vuln        = 'ACAS / Reports / KEV tools'
     OSVersion   = 'Windows Upgrade tool'
     STIG        = 'Reports / STIG'
 }
 # Endpoint-fixable pillars (each has a per-pillar fix action + is eligible for run-all).
-$script:C2cFixablePillars = @('Monitoring','Firewall','Encryption','AntiMalware','PkiRoots','Patches')
+# PkiRoots is intentionally NOT here - it routes elsewhere (GPO / desk-side); the .sst
+# import path was dropped in v1.5.0, so no plan/action ever marks it fixable.
+$script:C2cFixablePillars = @('Monitoring','Firewall','Encryption','AntiMalware','Patches')
 # Stable display order for the summary; unknown pillars append alphabetically.
 $script:C2cPillarOrder = @('Monitoring','Firewall','Encryption','AntiMalware','PkiRoots','Patches','Vuln','OSVersion','STIG')
 
@@ -698,7 +722,7 @@ function Test-JanetC2cHostIsSelf {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$SstB64, [string]$TaniumService)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
@@ -749,18 +773,29 @@ $script:C2cFixBlock = {
     $fixSb = {
         # Pillars cross as a '|'-delimited string (never an array) so no ArgumentList
         # flattening/serialization ambiguity over the WinRM boundary.
-        param([string]$PillarCsv, [bool]$DoEnable, [string]$SstB64, [string]$TaniumService)
+        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc)
         $Pillars = @(($PillarCsv -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
+        # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
+        if ($TaniumInstalledSrc) { try { . ([scriptblock]::Create($TaniumInstalledSrc)) } catch {} }
         $results = New-Object System.Collections.ArrayList
         $add = { param($n,$a,$res,$d) [void]$results.Add([pscustomobject]@{ Name=$n; Action=[string]$a; Result=[string]$res; Detail=[string]$d }) }
 
-        # M. Monitoring - heal the Tanium client service (StartType Automatic + Running).
+        # M. Monitoring - verify the Tanium SOFTWARE is installed (uninstall registry)
+        #    AND heal the Tanium client service (StartType Automatic + Running). A missing
+        #    service is NOT created here: installed-but-no-service -> repair via MECM;
+        #    neither installed nor service -> deploy via MECM.
         if ($Pillars -contains 'Monitoring') {
             try {
+                $ti = if (Get-Command Get-C2cTaniumInstalled -ErrorAction SilentlyContinue) { Get-C2cTaniumInstalled } else { [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' } }
+                $instTxt = if ($ti.Installed) { 'Tanium installed' + $(if ($ti.Version) { " (v$($ti.Version))" } else { '' }) } else { 'Tanium not installed' }
                 $svc = Get-Service -Name $TaniumService -ErrorAction SilentlyContinue
                 if (-not $svc) {
-                    & $add 'Monitoring' 'none' 'FAIL' "Tanium Client not installed - deploy via MECM/desk-side ('$TaniumService' service absent)"
+                    if ($ti.Installed) {
+                        & $add 'Monitoring' 'none' 'FAIL' "$instTxt but the '$TaniumService' client service is missing - repair via Software Center/MECM"
+                    } else {
+                        & $add 'Monitoring' 'none' 'FAIL' "Tanium not installed - deploy from Software Center/MECM ('$TaniumService' service absent)"
+                    }
                 } else {
                     $changed = New-Object System.Collections.ArrayList
                     if ([string]$svc.StartType -ne 'Automatic') {
@@ -775,11 +810,11 @@ $script:C2cFixBlock = {
                     $startNow = if ($svc2) { [string]$svc2.StartType } else { [string]$svc.StartType }
                     if (-not $runNow) {
                         $st = if ($svc2) { [string]$svc2.Status } else { [string]$svc.Status }
-                        & $add 'Monitoring' 'heal' 'FAIL' "'$TaniumService' still $st after heal attempt"
+                        & $add 'Monitoring' 'heal' 'FAIL' "$instTxt; '$TaniumService' still $st after heal attempt"
                     } elseif ($changed.Count -gt 0) {
-                        & $add 'Monitoring' 'heal' 'FIXED' "'$TaniumService' healed: $($changed -join '; '); now Running (StartType $startNow)"
+                        & $add 'Monitoring' 'heal' 'FIXED' "$instTxt; '$TaniumService' healed: $($changed -join '; '); now Running (StartType $startNow)"
                     } else {
-                        & $add 'Monitoring' 'none' 'NOCHANGE' "'$TaniumService' already Running (StartType $startNow)"
+                        & $add 'Monitoring' 'none' 'NOCHANGE' "$instTxt; '$TaniumService' already Running (StartType $startNow)"
                     }
                 }
             } catch { & $add 'Monitoring' 'error' 'FAIL' $_.Exception.Message }
@@ -1072,27 +1107,7 @@ $script:C2cFixBlock = {
             } catch { & $add 'AntiMalware' 'error' 'FAIL' $_.Exception.Message }
         }
 
-        # 3. PkiRoots - add DoD roots from the operator .sst. Additive only.
-        if (($Pillars -contains 'PkiRoots') -and $SstB64) {
-            $store = $null
-            try {
-                $bytes = [Convert]::FromBase64String($SstB64)
-                $col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
-                $col.Import($bytes)
-                $total = $col.Count
-                $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'Root','LocalMachine'
-                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-                $present = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                foreach ($c in $store.Certificates) { [void]$present.Add([string]$c.Thumbprint) }
-                $added = 0
-                foreach ($c in $col) { if (-not $present.Contains([string]$c.Thumbprint)) { $store.Add($c); $added++ } }
-                $store.Close(); $store = $null
-                if ($added -gt 0) { & $add 'PkiRoots' 'add-roots' 'FIXED' "added $added of $total root(s) to LocalMachine\Root" }
-                else              { & $add 'PkiRoots' 'none' 'NOCHANGE' "all $total root(s) already present" }
-            } catch { if ($store) { try { $store.Close() } catch {} }; & $add 'PkiRoots' 'error' 'FAIL' $_.Exception.Message }
-        }
-
-        # 4. Patches - kick the MECM Software Updates scan (113) then eval (108).
+        # 3. Patches - kick the MECM Software Updates scan (113) then eval (108).
         if ($Pillars -contains 'Patches') {
             try {
                 $ok = $true; $err = ''
@@ -1111,7 +1126,7 @@ $script:C2cFixBlock = {
     try {
         # Pass the pillar set as a '|'-delimited string (all-scalar ArgumentList) so it
         # crosses the WinRM boundary intact; the remote block splits it back to an array.
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $SstB64, $TaniumService -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc -ErrorAction Stop
     } catch {
         $r.Status = 'FAILED'; $r.Detail = "Fix: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -1152,8 +1167,6 @@ $script:C2cFixBlock = {
             'Encryption|STARTED'   { 'ENCRYPTION STARTED' }
             'Encryption|FIXED'     { 'PROTECTION RESUMED' }
             'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
-            'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
-            'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
             default                { [string]$res }
         }
     }
@@ -1234,29 +1247,12 @@ function Invoke-C2cImportAction {
     return @{ rows=@($rows); summary=@{ total=$total; compliant=$compliant; nonCompliant=$nonCompliant; nonCompliantHosts=@($nonCompliantHosts); pillars=@($pillars); runAllPlan=@($runAllPlan) } }
 }
 
-# --- Shared: read + validate an operator .sst bundle ADMIN-SIDE, once ---------
-# Returns @{ Ok; B64; Count; Name; Error }. Never leaves this box.
-function Read-C2cSstBundle {
-    param([string]$SstPath)
-    $p = ([string]$SstPath).Trim().Trim('"')
-    if (-not $p) { return @{ Ok=$false; B64=''; Error='no .sst file provided' } }
-    if (-not (Test-Path -LiteralPath $p)) { return @{ Ok=$false; B64=''; Error="not found: $p" } }
-    try {
-        $bytes = [System.IO.File]::ReadAllBytes($p)
-        $col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
-        $col.Import($bytes)
-        if ($col.Count -eq 0) { throw 'no certificates found in the file' }
-        return @{ Ok=$true; B64=[Convert]::ToBase64String($bytes); Count=$col.Count; Name=(Split-Path -Leaf $p) }
-    } catch { return @{ Ok=$false; B64=''; Error=$_.Exception.Message } }
-}
-
 $script:C2cPillarByAction = @{
     'fix-monitoring'  = 'Monitoring'
     'fix-firewall'    = 'Firewall'
     'fix-antimalware' = 'AntiMalware'
     'fix-patches'     = 'Patches'
     'fix-encryption'  = 'Encryption'
-    'fix-pki'         = 'PkiRoots'
 }
 
 # --- Action: per-pillar fixes + run-all (DESTRUCTIVE) ------------------------
@@ -1291,7 +1287,6 @@ function Invoke-C2cFixAction {
 
     $rows = New-Object System.Collections.ArrayList     # pre-rows (self-guard, zero-fixable info) + result rows
     $plan = New-Object System.Collections.ArrayList     # [ @{ Host; Pillars=@(...) } ] to dial (pre self-guard)
-    $sstB64 = ''
 
     if ($isRunAll) {
         # --- Parse + validate the run-all plan JSON --------------------------
@@ -1336,17 +1331,6 @@ function Invoke-C2cFixAction {
             & $send @{ type='log'; level='warn'; text='Run-all: no host has an endpoint-fixable pillar - nothing to run.' }
             return @{ rows=@($rows); summary=@{ total=0; infoSkipped=@($rows).Count } }
         }
-        # PKI needed only if some planned host includes PkiRoots. Validate up front.
-        $anyPki = @($plan | Where-Object { @($_.Pillars) -contains 'PkiRoots' }).Count -gt 0
-        if ($anyPki) {
-            $sst = Read-C2cSstBundle ([string]$Params['sstPath'])
-            if (-not $sst.Ok) {
-                & $send @{ type='log'; level='err'; text="Run-all: a planned host needs PkiRoots but the .sst is missing/invalid ($($sst.Error)) - ABORTED before any host was touched." }
-                return @{ rows=@($rows); summary=@{ total=0; rejected=$true } }
-            }
-            $sstB64 = $sst.B64
-            & $send @{ type='log'; level='info'; text="PKI: loaded $($sst.Count) certificate(s) from $($sst.Name)." }
-        }
     } else {
         # --- Per-pillar fix: one pillar, applied to every target -------------
         $pillar = $script:C2cPillarByAction[$ActionId]
@@ -1358,15 +1342,6 @@ function Invoke-C2cFixAction {
         if ($targets.Count -eq 0) {
             & $send @{ type='log'; level='warn'; text='No valid targets.' }
             return @{ rows=@(); summary=@{ total=0 } }
-        }
-        if ($pillar -eq 'PkiRoots') {
-            $sst = Read-C2cSstBundle ([string]$Params['sstPath'])
-            if (-not $sst.Ok) {
-                & $send @{ type='log'; level='err'; text="PKI Roots fix requires a valid .sst ($($sst.Error)) - ABORTED before any host was touched." }
-                return @{ rows=@(); summary=@{ total=$targets.Count; rejected=$true } }
-            }
-            $sstB64 = $sst.B64
-            & $send @{ type='log'; level='info'; text="PKI: loaded $($sst.Count) certificate(s) from $($sst.Name)." }
         }
         foreach ($t in $targets) { [void]$plan.Add(@{ Host=$t; Pillars=@($pillar) }) }
     }
@@ -1408,7 +1383,7 @@ function Invoke-C2cFixAction {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:C2cFixBlock)
         [void]$ps.AddArgument([string]$job.Host); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
-        [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($sstB64); [void]$ps.AddArgument($taniumService)
+        [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -1442,7 +1417,7 @@ function Invoke-C2cFixAction {
                 if ([string]::IsNullOrWhiteSpace($ln)) { continue }
                 # Colour by the pillar-flavoured label family: FAIL -> error, SKIP -> warn,
                 # ALREADY*/IN PROGRESS -> info, everything else (MONITORED / FIREWALL ENABLED
-                # / PROTECTED / ROOTS INSTALLED / PROTECTION RESUMED / ENCRYPTION STARTED /
+                # / PROTECTED / PROTECTION RESUMED / ENCRYPTION STARTED /
                 # PATCH CYCLE KICKED) -> ok.
                 $lvl = 'ok'
                 if     ($ln -match '^\s*\[FAIL\]')          { $lvl = 'error' }
@@ -1568,7 +1543,7 @@ function Invoke-JanetToolAction {
     foreach ($h in $targets) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:C2cProbeBlock)
-        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($config)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($config); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 

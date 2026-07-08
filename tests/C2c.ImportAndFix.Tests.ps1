@@ -1,16 +1,16 @@
 ﻿# =============================================================================
 #  C2c.ImportAndFix.Tests.ps1 - Pester 3.4 tests for the C2C action side
-#  (v1.4.0): the Tanium "C2C Compliance Status" CSV IMPORT parser (incl. the
-#  runAllPlan) and the destructive PER-PILLAR fix guards (fix-monitoring /
-#  fix-firewall / fix-antimalware / fix-pki, etc.).
+#  (v1.5.0): the Tanium "C2C Compliance Status" CSV IMPORT parser (incl. the
+#  runAllPlan + PkiRoots now ROUTED, not fixable) and the destructive PER-PILLAR
+#  fix guards (fix-monitoring / fix-firewall / fix-antimalware, etc.).
 #
 #  All tests exercise the PUBLIC contract (Invoke-JanetToolAction) so no
 #  internal helper is shimmed and NO WinRM call ever leaves this box:
 #    * import   - local parse only (no remote).
 #    * fix-*    - every negative case is refused BEFORE any host is dialed
-#                 (confirm-word, PKI-without-sst, junk targets), and the
-#                 self-guard case only supplies dispatcher-local targets so the
-#                 run short-circuits with zero fan-out.
+#                 (confirm-word, junk targets), and the self-guard case only
+#                 supplies dispatcher-local targets so the run short-circuits
+#                 with zero fan-out.
 #
 #  Run:  Invoke-Pester -Path .\tests\C2c.ImportAndFix.Tests.ps1
 # =============================================================================
@@ -39,6 +39,8 @@ Describe 'C2C import - Tanium Compliance CSV parsing' {
 
     # HOSTA appears twice (worst row = Non-Compliant must win over Compliant).
     # HOSTA carries numbered rule variants + an Audit rule + an unknown rule.
+    # HOSTD FAILS PKI Trust Roots (now a ROUTED pillar, not fixable) + Host Firewall
+    # (fixable) - proves PkiRoots is surfaced/routed but never enters the run-all plan.
     $csvBody = @"
 C2C Compliance Status:Compliance,C2C Compliance Status:Date,C2C Compliance Status:Age (Bucketed),Computer Name,Count
 "Non-Compliant
@@ -50,6 +52,9 @@ Compliant,,,HOSTA.area52.afnoapps.usaf.mil,1
 "Non-Compliant
 Failed Rule - Vulnerability Compliance",,,HOSTB.area52.afnoapps.usaf.mil,1
 Compliant,,,HOSTC.area52.afnoapps.usaf.mil,1
+"Non-Compliant
+Failed Rule - PKI Trust Roots
+Failed Rule - Host Firewall",,,HOSTD.area52.afnoapps.usaf.mil,1
 "@
     $csv = New-C2cTempCsv $csvBody
     $out = Invoke-C2cAction -ActionId 'import' -Params @{ csvPath = $csv }
@@ -93,9 +98,18 @@ Compliant,,,HOSTC.area52.afnoapps.usaf.mil,1
     }
 
     It 'tallies compliant / non-compliant correctly' {
-        $summary.total        | Should Be 3
-        $summary.nonCompliant | Should Be 2
+        $summary.total        | Should Be 4
+        $summary.nonCompliant | Should Be 3
         $summary.compliant    | Should Be 1
+    }
+
+    It 'surfaces PkiRoots as a ROUTED pillar (GPO / desk-side), never fixable' {
+        $pki = @($summary.pillars | Where-Object { $_.name -eq 'PkiRoots' })[0]
+        $pki | Should Not BeNullOrEmpty
+        $pki.routing | Should Match '(?i)GPO'
+        $pki.routing | Should Not Match '(?i)fixable HERE'
+        # HOSTD failed PkiRoots + Firewall - the failing-host count includes HOSTD.
+        @($pki.hosts) -contains 'HOSTD' | Should Be $true
     }
 
     It 'returns per-pillar host lists so the view can load them into targets' {
@@ -106,14 +120,19 @@ Compliant,,,HOSTC.area52.afnoapps.usaf.mil,1
 
     It 'emits a runAllPlan of each host + ONLY its endpoint-fixable failed pillars (verbatim for run-all)' {
         $plan = @($summary.runAllPlan)
-        # HOSTA has fixable failed pillars (Encryption + AntiMalware); HOSTB fails only
-        # Vuln (routes off-tool) so it is omitted; the unknown rule is not fixable either.
-        $plan.Count | Should Be 1
+        # HOSTA has fixable failed pillars (Encryption + AntiMalware); HOSTD has Firewall
+        # (fixable) but NOT PkiRoots (routed); HOSTB fails only Vuln (routes off-tool) so it
+        # is omitted; the unknown rule is not fixable either.
+        $plan.Count | Should Be 2
         $pa = @($plan | Where-Object { $_.host -eq 'HOSTA' })[0]
         $pa | Should Not BeNullOrEmpty
         @($pa.pillars) -contains 'Encryption'  | Should Be $true
         @($pa.pillars) -contains 'AntiMalware' | Should Be $true
         @($pa.pillars) -contains 'Vuln'        | Should Be $false
+        $pd = @($plan | Where-Object { $_.host -eq 'HOSTD' })[0]
+        $pd | Should Not BeNullOrEmpty
+        @($pd.pillars) -contains 'Firewall'    | Should Be $true
+        @($pd.pillars) -contains 'PkiRoots'    | Should Be $false
         @($plan | Where-Object { $_.host -eq 'HOSTB' }).Count | Should Be 0
     }
 
@@ -156,21 +175,18 @@ Describe 'C2C per-pillar fix - self-guard drops the dispatcher host' {
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C fix-pki - PKI roots require a valid .sst' {
+Describe 'C2C fix-pki - the PKI-roots fixer was REMOVED in v1.5.0' {
 
-    It 'REFUSES fix-pki with no .sst attached (before any host is dialed)' {
+    It 'no longer routes fix-pki to a fixer (unknown action - nothing dialed, no rows)' {
         $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'FIX' }
-        $out.Result.summary.rejected | Should Be $true
         @($out.Rows).Count | Should Be 0
+        # unknown action: the dispatcher returns an empty result (no fix ran).
+        @($out.Result.rows).Count | Should Be 0
     }
 
-    It 'REFUSES fix-pki when the .sst does not load as a certificate bundle' {
-        $bogus = Join-Path ([System.IO.Path]::GetTempPath()) ("c2c_bogus_{0}.sst" -f ([guid]::NewGuid().ToString('N')))
-        Set-Content -LiteralPath $bogus -Value 'this is not a certificate store' -Encoding UTF8
-        try {
-            $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'FIX'; sstPath = $bogus }
-            $out.Result.summary.rejected | Should Be $true
-        } finally { Remove-Item -LiteralPath $bogus -Force -ErrorAction SilentlyContinue }
+    It 'the manifest exposes no fix-pki action' {
+        $man = Get-JanetToolManifest
+        @($man.actions | Where-Object { $_.id -eq 'fix-pki' }).Count | Should Be 0
     }
 }
 
