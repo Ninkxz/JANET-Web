@@ -1,7 +1,35 @@
-{
-  "sigMaxAgeDays": 7,
-  "taniumService": "Tanium Client",
-  "securityAgentServices": ["masvc", "mfemms", "macmnsvc", "WinDefend", "Sense"],
-  "hostnamePatterns": ["^MSEKL", "^MSEKW"],
-  "dodRootThumbprints": []
+﻿{
+    "sigMaxAgeDays":  7,
+    "taniumService":  "Tanium Client",
+    "securityAgentServices":  [
+                                  "WinDefend",
+                                  "Sense"
+                              ],
+    "hostnamePatterns":  [
+                             "^MSEKL",
+                             "^MSEKW"
+                         ],
+    "dodRootThumbprints":  [
+                               "D9AFEED1CE9E9AFCEC45BBBBF72D3C06586FE04E",
+                               "D73CA91102A2204A36459ED32213B467D7CE97FB",
+                               "D37ECF61C0B4ED88681EF3630C4E2FC787B37AEF",
+                               "CA73856F1BD280836EB7E039FB859E715F87C634",
+                               "C313F919A6ED4E0E8451AFA930FB419A20F181E4",
+                               "B9D58EE7A0EC221833CE19D8384C854E64A5B4E1",
+                               "8C941B34EA1EA6ED9AE2BC54CF687252B4C9B561",
+                               "73E8BB08E337D6A5A6AEF90CFFDD97D9176CB582",
+                               "4ECB5CC3095670454DA1CBD410FC921F46B8564B",
+                               "DB00E5B7CC9393031FE8A61DF66C657C7462BB21",
+                               "D9AFEED1CE9E9AFCEC45BBBBF72D3C06586FE04E",
+                               "D73CA91102A2204A36459ED32213B467D7CE97FB",
+                               "D37ECF61C0B4ED88681EF3630C4E2FC787B37AEF",
+                               "CA73856F1BD280836EB7E039FB859E715F87C634",
+                               "C313F919A6ED4E0E8451AFA930FB419A20F181E4",
+                               "B9D58EE7A0EC221833CE19D8384C854E64A5B4E1",
+                               "B8269F25DBD937ECAFD4C35A9838571723F2D026",
+                               "8C941B34EA1EA6ED9AE2BC54CF687252B4C9B561",
+                               "73E8BB08E337D6A5A6AEF90CFFDD97D9176CB582",
+                               "4ECB5CC3095670454DA1CBD410FC921F46B8564B",
+                               "3A32EF7B9AB836F837181A4CEFA355C64667ACBF"
+                           ]
 }

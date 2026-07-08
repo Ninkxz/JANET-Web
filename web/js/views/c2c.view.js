@@ -46,9 +46,10 @@
 
   function statusCellCls(v) {
     switch (String(v)) {
-      // green: no failing pillars (scan) / at least one pillar fixed (fix).
+      // green: no failing pillars (scan) / at least one pillar fixed or encryption started (fix).
       case 'READY':
-      case 'FIXED': return 'st-ok';
+      case 'FIXED':
+      case 'STARTED': return 'st-ok';
       // red: at least one scored pillar failed -> predicted quarantine; or unreachable; or the fix failed.
       case 'QUARANTINE RISK':
       case 'OFFLINE':
@@ -61,8 +62,9 @@
       case 'DNS MISMATCH':
       case 'PARTIAL':
       case 'SKIPPED': return 'st-warn';
-      // blue: nothing changed (fix) or live in-progress phases streamed by the engine.
+      // blue: nothing changed (fix), encryption already running, or live in-progress phases streamed by the engine.
       case 'NO CHANGE':
+      case 'IN PROGRESS':
       case 'Scanning':
       case 'Probing':
       case 'Working': return 'st-info';
@@ -139,14 +141,23 @@
       var sstPath = '';                  // uploaded .sst server path (blank until chosen)
       var fixCard = sectionCard('MASS FIX - remediate endpoint-fixable pillars', 'cyan');
       var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      fixIntro.textContent = 'DESTRUCTIVE. Fixes the target list above. Resume BitLocker, heal Defender/MDE, add DoD PKI roots, kick the MECM patch cycle. Requires an admin session; type FIX to confirm.';
+      fixIntro.textContent = 'DESTRUCTIVE. Fixes the target list above. Resume BitLocker (opt-in: ENABLE BitLocker on decrypted OS volumes - escrow-first, XtsAes256), heal Defender/MDE, add DoD PKI roots, kick the MECM patch cycle. Requires an admin session; type FIX to confirm.';
       fixCard.appendChild(fixIntro);
-      var cbEnc = ui.checkbox('Encryption - resume suspended BitLocker', { title: 'Resume suspended BitLocker protectors on the system drive. Never STARTS encryption.' });
+      var cbEnc = ui.checkbox('Encryption - resume suspended BitLocker', { title: 'Resume suspended BitLocker protectors on the system drive. Does NOT start encryption unless "ENABLE BitLocker" (below) is also ticked.' });
+      var cbEncEnable = ui.checkbox('ENABLE BitLocker on FullyDecrypted volumes (XtsAes256)', { title: 'Opt-in. On a FullyDecrypted OS volume: add a RecoveryPassword protector and escrow it to AD FIRST (fail-closed - if the AD backup fails, the protector is removed and encryption is NEVER started), then add a TPM protector and start XtsAes256 full-disk encryption. Requires a TPM-ready + domain-joined host. Encryption then runs for hours in the background; protection activates on completion.' });
       var cbDef = ui.checkbox('AntiMalware - heal Defender / MDE', { title: 'Start WinDefend/Sense, enable RTP, update signatures if stale.' });
       var cbPki = ui.checkbox('PKI roots - add DoD roots from .sst', { title: 'Add DoD root certs from an operator .sst to LocalMachine\\Root (additive only).' });
       var cbPatch = ui.checkbox('Patches - kick MECM cycle (scan + eval)', { title: 'Trigger the MECM Software Updates scan (113) + eval (108). Installs run async.' });
       cbEnc._cb.checked = true; cbDef._cb.checked = true; cbPatch._cb.checked = true;
-      [cbEnc, cbDef, cbPki, cbPatch].forEach(function (c) { c.style.margin = '3px 0'; fixCard.appendChild(c); });
+      // ENABLE BitLocker is opt-in and stays disabled + unchecked unless the Encryption pillar is ticked.
+      cbEncEnable._cb.checked = false; cbEncEnable._cb.disabled = !cbEnc._cb.checked;
+      cbEnc.style.margin = '3px 0'; fixCard.appendChild(cbEnc);
+      cbEncEnable.style.margin = '2px 0 3px 22px'; fixCard.appendChild(cbEncEnable);
+      [cbDef, cbPki, cbPatch].forEach(function (c) { c.style.margin = '3px 0'; fixCard.appendChild(c); });
+      cbEnc._cb.addEventListener('change', function () {
+        cbEncEnable._cb.disabled = !cbEnc._cb.checked;
+        if (!cbEnc._cb.checked) { cbEncEnable._cb.checked = false; }
+      });
       // .sst picker row (disabled unless PKI ticked)
       var sstRow = el('div'); sstRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin:4px 0 8px 22px';
       var sstFileInput = el('input'); sstFileInput.type = 'file'; sstFileInput.accept = '.sst,.p7b'; sstFileInput.style.display = 'none';
@@ -266,7 +277,7 @@
         ],
         rowClass: function (r) {
           var s = String(r.Status);
-          if (s === 'READY' || s === 'FIXED') return 'row-ok';
+          if (s === 'READY' || s === 'FIXED' || s === 'STARTED') return 'row-ok';
           if (s === 'QUARANTINE RISK' || s === 'OFFLINE' || s === 'FAILED') return 'row-bad';
           if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH' || s === 'PARTIAL' || s === 'SKIPPED') return 'row-warn';
           return '';
@@ -320,6 +331,7 @@
         // lock the import + mass-fix controls too, so nothing can be re-fired mid-run.
         importBtn.disabled = on;
         cbEnc._cb.disabled = on; cbDef._cb.disabled = on; cbPki._cb.disabled = on; cbPatch._cb.disabled = on;
+        cbEncEnable._cb.disabled = on || !cbEnc._cb.checked;
         sstBtn.disabled = on || !cbPki._cb.checked; fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
       }
 
@@ -468,15 +480,19 @@
         if (cbDef._cb.checked) pillars.push('AntiMalware');
         if (cbPki._cb.checked) pillars.push('PkiRoots');
         if (cbPatch._cb.checked) pillars.push('Patches');
+        var enableEnc = cbEnc._cb.checked && cbEncEnable._cb.checked;
         var ok = await ctx.arm({
           title: 'Arm C2C Mass Fix',
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
-          body: 'About to mass-fix <b>' + hosts.length + '</b> host(s).<br>Pillars: <b>' + esc(pillars.join(', ')) + '</b>' + (cbPki._cb.checked ? '<br>PKI bundle: <b>' + esc(sstPath ? sstPath.split(/[\\/]/).pop() : '(none)') + '</b>' : ''),
+          body: 'About to mass-fix <b>' + hosts.length + '</b> host(s).<br>Pillars: <b>' + esc(pillars.join(', ')) + '</b>'
+            + (cbPki._cb.checked ? '<br>PKI bundle: <b>' + esc(sstPath ? sstPath.split(/[\\/]/).pop() : '(none)') + '</b>' : '')
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START full-disk encryption (XtsAes256) on any of the <b>' + hosts.length + '</b> host(s) whose OS volume is FullyDecrypted - escrow-first to AD, TPM-ready + domain-joined only. Encryption runs for hours in the background.' : ''),
           preflight: [
             { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
             { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
             { label: pillars.length + ' fix pillar(s) selected', ok: pillars.length > 0 },
-            { label: cbPki._cb.checked ? 'DoD root .sst attached' : 'PKI roots not selected', ok: !cbPki._cb.checked || !!sstPath }
+            { label: cbPki._cb.checked ? 'DoD root .sst attached' : 'PKI roots not selected', ok: !cbPki._cb.checked || !!sstPath },
+            { label: enableEnc ? 'ENABLE BitLocker: WILL start full-disk encryption on decrypted OS volumes' : 'ENABLE BitLocker not selected (resume-only)', ok: true }
           ],
           okText: 'Run Mass Fix', cancelText: 'Cancel'
         });
@@ -489,6 +505,7 @@
         run = ctx.run('fix', {
           targets: hosts.join('\n'),
           fixEncryption: cbEnc._cb.checked,
+          enableEncryption: enableEnc,
           fixDefender: cbDef._cb.checked,
           fixPki: cbPki._cb.checked,
           sstPath: sstPath || '',

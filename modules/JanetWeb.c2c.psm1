@@ -35,7 +35,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Readiness'
-        version  = '1.1.0'
+        version  = '1.2.0'
         category = 'Reporting'
         summary  = 'Comply-to-Connect (AFI/MPTO rule 3.B.2.B) tool: (1) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (2) IMPORT the Tanium "C2C Compliance Status" CSV export and route each failing pillar; (3) MASS FIX (destructive) that remediates the endpoint-fixable pillars - resume BitLocker, heal Defender/MDE, add DoD PKI roots from an operator .sst, and kick the MECM patch cycle. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
@@ -67,7 +67,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix'
                 label       = 'C2C Mass Fix'
-                description = 'DESTRUCTIVE. Remediate the endpoint-fixable failing pillars across the targets in one WinRM round-trip per host, fix-then-verify: Encryption (resume suspended BitLocker protectors - never START encryption from here), AntiMalware (heal Defender services/RTP/signatures; note missing MDE Sense), PkiRoots (add DoD roots from an operator .sst - additive only, never removes), and Patches (kick the MECM Software Updates scan + eval cycles). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE. Remediate the endpoint-fixable failing pillars across the targets in one WinRM round-trip per host, fix-then-verify: Encryption (by default resume suspended BitLocker protectors only; if "ENABLE BitLocker" is also ticked, a FullyDecrypted OS volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED: add a RecoveryPassword protector and back it up to AD BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector and XtsAes256 full-volume encryption; if the AD escrow fails, the protector is removed and encryption is NEVER started; the recovery password is never emitted), AntiMalware (heal Defender services/RTP/signatures; note missing MDE Sense), PkiRoots (add DoD roots from an operator .sst - additive only, never removes), and Patches (kick the MECM Software Updates scan + eval cycles). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Run the C2C Mass Fix on the target host(s)? This changes machines. Proceed?'
@@ -75,6 +75,7 @@ function Get-JanetToolManifest {
                 inputs      = @(
                     @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='fixEncryption';  label='Encryption: resume suspended BitLocker'; type='bool'; required=$false; default=$true },
+                    @{ name='enableEncryption'; label='Encryption: ENABLE BitLocker on decrypted volumes (TPM+RecoveryPassword->AD escrow, XtsAes256)'; type='bool'; required=$false; default=$false },
                     @{ name='fixDefender';    label='AntiMalware: heal Defender / MDE'; type='bool'; required=$false; default=$true },
                     @{ name='fixPki';         label='PKI roots: add DoD roots from .sst'; type='bool'; required=$false; default=$false },
                     @{ name='sstPath';        label='DoD root bundle (.sst) - required if PKI roots is ticked'; type='file'; filter='SST files (*.sst)|*.sst|Cert bundles (*.sst;*.p7b)|*.sst;*.p7b|All files (*.*)|*.*'; required=$false },
@@ -603,7 +604,7 @@ function Test-JanetC2cHostIsSelf {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [bool]$DoEnc, [bool]$DoDef, [bool]$DoPki, [bool]$DoPatch, [string]$SstB64)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [bool]$DoEnc, [bool]$DoDef, [bool]$DoPki, [bool]$DoPatch, [bool]$DoEnable, [string]$SstB64)
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Report=''; Pillars=@() }
 
@@ -647,11 +648,14 @@ $script:C2cFixBlock = {
     }
 
     $fixSb = {
-        param([bool]$DoEnc, [bool]$DoDef, [bool]$DoPki, [bool]$DoPatch, [string]$SstB64)
+        param([bool]$DoEnc, [bool]$DoDef, [bool]$DoPki, [bool]$DoPatch, [bool]$DoEnable, [string]$SstB64)
         $results = New-Object System.Collections.ArrayList
         $add = { param($n,$a,$res,$d) [void]$results.Add([pscustomobject]@{ Name=$n; Action=[string]$a; Result=[string]$res; Detail=[string]$d }) }
 
-        # 1. Encryption - resume SUSPENDED protectors only. Never START encryption.
+        # 1. Encryption - by default RESUME suspended protectors only. When the
+        #    operator opts in (DoEnable) and the OS volume is FullyDecrypted, ENABLE
+        #    BitLocker escrow-first / fail-closed (AD escrow BEFORE Enable-BitLocker;
+        #    TPM-gated + domain-joined; XtsAes256; recovery password NEVER emitted).
         if ($DoEnc) {
             try {
                 $sys = $env:SystemDrive
@@ -660,8 +664,92 @@ $script:C2cFixBlock = {
                     $ps = [string]$bl.ProtectionStatus; $vs = [string]$bl.VolumeStatus
                     if ($ps -eq 'On') {
                         & $add 'Encryption' 'none' 'NOCHANGE' "$sys protection already On; $vs"
-                    } elseif ($vs -match '(?i)Decrypt|EncryptionInProgress') {
-                        & $add 'Encryption' 'none' 'SKIP' "not encrypted ($vs) - BitLocker enable needs TPM+recovery-key escrow policy; route to MECM/desk-side"
+                    } elseif ($vs -match '(?i)EncryptionInProgress') {
+                        $pctIP = ''
+                        try { $pctIP = [string]$bl.EncryptionPercentage } catch {}
+                        & $add 'Encryption' 'none' 'IN PROGRESS' "encryption already in progress ($pctIP% done); protection activates on completion - no action taken"
+                    } elseif ($vs -match '(?i)FullyDecrypted') {
+                        if (-not $DoEnable) {
+                            & $add 'Encryption' 'none' 'SKIP' "not encrypted ($vs) - BitLocker enable needs TPM+recovery-key escrow policy; route to MECM/desk-side"
+                        } else {
+                            # ENABLE path - each precondition failing => SKIP, nothing changed.
+                            $volType = ''
+                            try { $volType = [string]$bl.VolumeType } catch {}
+                            if ($volType -and ($volType -ne 'OperatingSystem')) {
+                                & $add 'Encryption' 'none' 'SKIP' "$sys is not the OS volume (VolumeType=$volType) - enable only targets the OS volume"
+                            } else {
+                                $tpmOk = $false; $tpmWhy = 'TPM not ready - initialize via desk-side/MECM'
+                                try {
+                                    if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
+                                        $tp = Get-Tpm -ErrorAction Stop
+                                        if ([bool]$tp.TpmPresent -and [bool]$tp.TpmReady) { $tpmOk = $true }
+                                        elseif (-not [bool]$tp.TpmPresent) { $tpmWhy = 'TPM not present - cannot enable BitLocker (route to desk-side)' }
+                                    } else {
+                                        $tpmWhy = 'Get-Tpm unavailable - cannot confirm TPM readiness (route to desk-side/MECM)'
+                                    }
+                                } catch { $tpmWhy = "TPM not ready - initialize via desk-side/MECM ($($_.Exception.Message))" }
+                                if (-not $tpmOk) {
+                                    & $add 'Encryption' 'none' 'SKIP' $tpmWhy
+                                } else {
+                                    $domainJoined = $false
+                                    try { $domainJoined = [bool](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain } catch { $domainJoined = $false }
+                                    if (-not $domainJoined) {
+                                        & $add 'Encryption' 'none' 'SKIP' 'machine not domain-joined - AD recovery-password escrow unavailable; route to desk-side/MECM'
+                                    } else {
+                                        # ESCROW-FIRST, FAIL-CLOSED: add a RecoveryPassword protector and
+                                        # back it up to AD BEFORE any Enable-BitLocker. Never emit/return the
+                                        # recovery password value anywhere - do not touch .RecoveryPassword.
+                                        $escrowOk = $false; $newKpId = ''; $encFail = ''
+                                        try {
+                                            $beforeIds = @()
+                                            try { foreach ($k in @($bl.KeyProtector)) { $beforeIds += [string]$k.KeyProtectorId } } catch {}
+                                            $addRet = Add-BitLockerKeyProtector -MountPoint $sys -RecoveryPasswordProtector -ErrorAction Stop
+                                            try {
+                                                foreach ($k in @($addRet.KeyProtector)) {
+                                                    if (([string]$k.KeyProtectorType -match '(?i)RecoveryPassword') -and ($beforeIds -notcontains [string]$k.KeyProtectorId)) { $newKpId = [string]$k.KeyProtectorId; break }
+                                                }
+                                                if (-not $newKpId) {
+                                                    $rp = @($addRet.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' })
+                                                    if ($rp.Count -gt 0) { $newKpId = [string]$rp[$rp.Count - 1].KeyProtectorId }
+                                                }
+                                            } catch {}
+                                            try {
+                                                Backup-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
+                                                $escrowOk = $true
+                                            } catch {
+                                                $encFail = 'AD escrow failed - encryption NOT started'
+                                                try { if ($newKpId) { Remove-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction SilentlyContinue | Out-Null } } catch {}
+                                            }
+                                        } catch {
+                                            $encFail = "recovery-password protector add failed - encryption NOT started: $($_.Exception.Message)"
+                                        }
+                                        if (-not $escrowOk) {
+                                            if (-not $encFail) { $encFail = 'AD escrow failed - encryption NOT started' }
+                                            & $add 'Encryption' 'enable' 'FAIL' $encFail
+                                        } else {
+                                            # Escrow confirmed -> start FULL-volume encryption (TPM protector, XtsAes256).
+                                            try {
+                                                Enable-BitLocker -MountPoint $sys -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
+                                                Start-Sleep -Milliseconds 500
+                                                $blE = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
+                                                $vsE = [string]$blE.VolumeStatus
+                                                $pctE = ''
+                                                try { $pctE = [string]$blE.EncryptionPercentage } catch {}
+                                                if ($vsE -match '(?i)FullyDecrypted') {
+                                                    & $add 'Encryption' 'enable' 'FAIL' 'Enable-BitLocker returned but volume still FullyDecrypted - encryption did not start'
+                                                } else {
+                                                    & $add 'Encryption' 'enable' 'STARTED' "encryption started (XtsAes256, TPM+RecoveryPassword escrowed to AD) - $pctE% done; protection activates on completion; Tanium clears after next scan"
+                                                }
+                                            } catch {
+                                                & $add 'Encryption' 'enable' 'FAIL' "escrow succeeded but Enable-BitLocker failed: $($_.Exception.Message)"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } elseif ($vs -match '(?i)Decrypt') {
+                        & $add 'Encryption' 'none' 'SKIP' "not encrypted ($vs) - route to MECM/desk-side"
                     } else {
                         # Off + FullyEncrypted (classic post-firmware suspended-protectors) -> resume.
                         $act = 'Resume-BitLocker'
@@ -765,7 +853,7 @@ $script:C2cFixBlock = {
     }
 
     try {
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList @($DoEnc, $DoDef, $DoPki, $DoPatch, $SstB64) -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList @($DoEnc, $DoDef, $DoPki, $DoPatch, $DoEnable, $SstB64) -ErrorAction Stop
     } catch {
         $r.Status = 'FAILED'; $r.Detail = "Fix: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -776,7 +864,8 @@ $script:C2cFixBlock = {
     $r.Pillars = $pillars
     if ($pillars.Count -eq 0) { $r.Status = 'NO CHANGE'; $r.Detail = 'no enabled pillars returned a result'; return $r }
 
-    $fixed  = @($pillars | Where-Object { $_.Result -eq 'FIXED'  }).Count
+    # STARTED (BitLocker encryption kicked off) rolls up like FIXED for the host verdict.
+    $fixed  = @($pillars | Where-Object { $_.Result -eq 'FIXED' -or $_.Result -eq 'STARTED' }).Count
     $failed = @($pillars | Where-Object { $_.Result -eq 'FAIL'   }).Count
     $tot    = $pillars.Count
     if     ($fixed -ge 1 -and $failed -eq 0)   { $r.Status = 'FIXED' }
@@ -874,6 +963,7 @@ function Invoke-C2cFixAction {
     }
 
     $fixEnc    = Get-C2cBool $Params['fixEncryption'] $true
+    $doEnable  = Get-C2cBool $Params['enableEncryption'] $false
     $fixDef    = Get-C2cBool $Params['fixDefender']   $true
     $fixPki    = Get-C2cBool $Params['fixPki']        $false
     $kickPatch = Get-C2cBool $Params['kickPatchCycle'] $true
@@ -933,7 +1023,7 @@ function Invoke-C2cFixAction {
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
     $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
     $enabledList = @()
-    if ($fixEnc)    { $enabledList += 'Encryption' }
+    if ($fixEnc)    { $enabledList += $(if ($doEnable) { 'Encryption(resume+ENABLE)' } else { 'Encryption(resume)' }) }
     if ($fixDef)    { $enabledList += 'AntiMalware' }
     if ($fixPki)    { $enabledList += 'PkiRoots' }
     if ($kickPatch) { $enabledList += 'Patches' }
@@ -950,7 +1040,7 @@ function Invoke-C2cFixAction {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:C2cFixBlock)
         [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
-        [void]$ps.AddArgument($fixEnc); [void]$ps.AddArgument($fixDef); [void]$ps.AddArgument($fixPki); [void]$ps.AddArgument($kickPatch); [void]$ps.AddArgument($sstB64)
+        [void]$ps.AddArgument($fixEnc); [void]$ps.AddArgument($fixDef); [void]$ps.AddArgument($fixPki); [void]$ps.AddArgument($kickPatch); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($sstB64)
         [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -970,11 +1060,13 @@ function Invoke-C2cFixAction {
             foreach ($ln in ($rpt -split "`r?`n")) {
                 if ([string]::IsNullOrWhiteSpace($ln)) { continue }
                 $lvl = 'info'
-                if     ($ln -match '^\s*\[FIXED\]')    { $lvl = 'ok' }
-                elseif ($ln -match '^\s*\[NOCHANGE\]') { $lvl = 'info' }
-                elseif ($ln -match '^\s*\[KICKED\]')   { $lvl = 'info' }
-                elseif ($ln -match '^\s*\[SKIP\]')     { $lvl = 'warn' }
-                elseif ($ln -match '^\s*\[FAIL\]')     { $lvl = 'error' }
+                if     ($ln -match '^\s*\[FIXED\]')       { $lvl = 'ok' }
+                elseif ($ln -match '^\s*\[STARTED\]')     { $lvl = 'ok' }
+                elseif ($ln -match '^\s*\[NOCHANGE\]')    { $lvl = 'info' }
+                elseif ($ln -match '^\s*\[IN PROGRESS\]') { $lvl = 'info' }
+                elseif ($ln -match '^\s*\[KICKED\]')      { $lvl = 'info' }
+                elseif ($ln -match '^\s*\[SKIP\]')        { $lvl = 'warn' }
+                elseif ($ln -match '^\s*\[FAIL\]')        { $lvl = 'error' }
                 & $send @{ type='log'; level=$lvl; text=$ln }
             }
         }
