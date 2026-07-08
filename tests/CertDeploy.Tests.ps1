@@ -123,14 +123,16 @@ Describe 'CertDeploy deploy - Add-CertDeployBundleToStores is ADDITIVE (adds onl
                 CA         = @()
                 Disallowed = @()
             }
+            # Shared per-store backing so the v1.1.0 ReadOnly re-verify re-open sees the
+            # add (a cert added to Root persists on re-read -> INSTALLED, not NOT VERIFIED).
+            # Still additive-only: no Remove method exists, so a remove attempt would throw.
+            $rootStore = New-Object System.Collections.ArrayList
+            [void]$rootStore.Add([pscustomobject]@{ Thumbprint = $aTp })
             $opener = {
-                param($storeName)
+                param($storeName, $mode)
                 $o = New-Object psobject
-                $existing = @()
-                if ($storeName -eq 'Root') { $existing = @([pscustomobject]@{ Thumbprint = $aTp }) }
-                Add-Member -InputObject $o -MemberType NoteProperty -Name Certificates -Value $existing
-                Add-Member -InputObject $o -MemberType NoteProperty -Name _added -Value (New-Object System.Collections.ArrayList)
-                Add-Member -InputObject $o -MemberType ScriptMethod -Name Add   -Value { param($c) [void]$this._added.Add([string]$c.Thumbprint) }
+                Add-Member -InputObject $o -MemberType NoteProperty -Name Certificates -Value $rootStore
+                Add-Member -InputObject $o -MemberType ScriptMethod -Name Add   -Value { param($cert) [void]$this.Certificates.Add([pscustomobject]@{ Thumbprint = [string]$cert.Thumbprint }) }
                 Add-Member -InputObject $o -MemberType ScriptMethod -Name Close -Value { }
                 return $o
             }.GetNewClosure()

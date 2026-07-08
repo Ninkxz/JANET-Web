@@ -46,7 +46,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.0.0'
+        version  = '1.1.0'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -76,8 +76,22 @@ function Get-JanetToolManifest {
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='certBundleFolder'; label='DoD/LTMA trust bundle folder (blank = shipped Packages\DoD-Certs)'; type='text'; required=$false },
                     @{ name='confirm'; label='Type DEPLOY to confirm'; type='text'; required=$true },
+                    @{ name='includeExpired'; label='Include EXPIRED certs (dead trust anchors - default OFF)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
+                )
+            }
+            @{
+                id          = 'scan-cert-management'
+                label       = 'SCAN CERT MANAGEMENT (what manages trust)'
+                description = 'READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip that inspects WHAT MANAGES the LocalMachine trust store so you know whether a scripted .Default push will actually persist. Detects the DISA InstallRoot agent (uninstall registry DisplayName, a scheduled task, and the %ProgramFiles%\DoD-PKE path), counts the GPO physical Root/CA store (HKLM Policies SystemCertificates), and reads the LocalMachine Root store count for context. Reconciler verdict InstallRoot / GPO / InstallRoot+GPO / None detected / OFFLINE / CHECK ERROR - when a reconciler is present a scripted push may be pruned on reboot (align with InstallRoot/GPO instead); None detected means a manual .Default push WILL persist. Reachability is TCP-only (5985/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes anything.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Ping','InstallRoot','GPRoots','Reconciler','Detail')
+                inputs      = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
                 )
             }
             @{
@@ -114,7 +128,7 @@ function Get-CertDeployDefaultBundlePath { Join-Path $PSScriptRoot '..\Packages\
 #    CertCount; FileCount; Folder }. Ok=$false + Error if missing or ZERO certs.
 function Get-CertDeployBundle {
     param([string]$Folder)
-    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder='' }
+    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder=''; ExpiredCount=0; Expired=@() }
     $f = ([string]$Folder).Trim().Trim('"')
     $res.Folder = $f
     if (-not $f) { $res.Error = 'no cert bundle folder provided'; return $res }
@@ -130,7 +144,7 @@ function Get-CertDeployBundle {
             $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
             $cert.Import($file)
             $b64  = [Convert]::ToBase64String($cert.RawData)
-            [void]$groups[$store].Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; B64=$b64; Subject=[string]$cert.Subject; File=(Split-Path $file -Leaf) })
+            [void]$groups[$store].Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; B64=$b64; Subject=[string]$cert.Subject; File=(Split-Path $file -Leaf); NotAfter=$cert.NotAfter; Store=$store })
             return $true
         } catch { return $false }
     }
@@ -154,6 +168,23 @@ function Get-CertDeployBundle {
     }
     $res.Root = @($groups.Root); $res.CA = @($groups.CA); $res.Disallowed = @($groups.Disallowed)
     $res.CertCount = $total; $res.FileCount = $fileCount; $res.Ok = $true
+    # Expiry census (SHARED CONTRACT): a cert whose NotAfter is in the past (admin-side
+    # clock) is a dead trust anchor. Report ExpiredCount + Expired[] so the deploy path
+    # can exclude them by default and the read-only Check can always surface the count.
+    $now = Get-Date
+    $expired = New-Object System.Collections.ArrayList
+    foreach ($grp in @('Root','CA','Disallowed')) {
+        foreach ($c in @($res.$grp)) {
+            if (-not $c) { continue }
+            $na = $null
+            try { if ($c.NotAfter) { $na = [datetime]$c.NotAfter } } catch { $na = $null }
+            if ($na -and ($na -lt $now)) {
+                [void]$expired.Add(@{ Thumbprint=[string]$c.Thumbprint; Subject=[string]$c.Subject; NotAfter=$na.ToString('o'); Store=[string]$c.Store })
+            }
+        }
+    }
+    $res.Expired = @($expired)
+    $res.ExpiredCount = $expired.Count
     return $res
 }
 
@@ -185,12 +216,24 @@ function Resolve-CertDeployBundleFolder {
 
 # Serialize a bundle to the compact JSON the DEPLOY worker consumes (thumbprint +
 # b64 per store). @()-wrapped so ConvertFrom-Json single-element arrays round-trip.
+# SHARED CONTRACT: when -IncludeExpired is $false (default) expired certs (NotAfter
+# in the past) are EXCLUDED from the pushed set; $true includes them (dead anchors).
 function Convert-CertDeployBundleToJson {
-    param($Bundle)
+    param($Bundle, [bool]$IncludeExpired = $false)
+    $now = Get-Date
+    $sel = {
+        param($items)
+        @(@($items) | Where-Object { $_ } | Where-Object {
+            if ($IncludeExpired) { return $true }
+            $na = $null
+            try { if ($_.NotAfter) { $na = [datetime]$_.NotAfter } } catch { $na = $null }
+            return ((-not $na) -or ($na -ge $now))
+        } | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+    }.GetNewClosure()
     $payload = @{
-        Root       = @(@($Bundle.Root)       | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
-        CA         = @(@($Bundle.CA)         | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
-        Disallowed = @(@($Bundle.Disallowed) | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        Root       = @(& $sel $Bundle.Root)
+        CA         = @(& $sel $Bundle.CA)
+        Disallowed = @(& $sel $Bundle.Disallowed)
     }
     return ($payload | ConvertTo-Json -Depth 5 -Compress)
 }
@@ -234,33 +277,39 @@ function Add-CertDeployBundleToStores {
     param($Bundle, [scriptblock]$StoreOpener)
     if (-not $StoreOpener) {
         $StoreOpener = {
-            param($storeName)
+            param($storeName, $mode)
+            if (-not $mode) { $mode = 'ReadWrite' }
             $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
-            $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::$mode)
             return $st
         }
     }
     $added = 0; $already = 0; $total = 0; $failDetail = ''
+    $verified = 0
+    $notVerified = New-Object System.Collections.ArrayList
     $perStore = New-Object System.Collections.ArrayList
     foreach ($sm in @(@{ Prop='Root'; Store='Root' }, @{ Prop='CA'; Store='CA' }, @{ Prop='Disallowed'; Store='Disallowed' })) {
         $items = @()
         try { $items = @($Bundle.($sm.Prop)) | Where-Object { $_ } } catch { $items = @() }
         if ($items.Count -eq 0) { continue }
+        $wantedTps = New-Object System.Collections.ArrayList   # all wanted thumbprints in this store
+        $addedTps  = New-Object System.Collections.ArrayList   # thumbprints WE added this session
         $st = $null
         try {
-            $st = & $StoreOpener $sm.Store
+            $st = & $StoreOpener $sm.Store 'ReadWrite'
             $present = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($ec in $st.Certificates) { [void]$present.Add((([string]$ec.Thumbprint) -replace '[^0-9A-Fa-f]','')) }
             $sAdd = 0
             foreach ($it in $items) {
                 $total++
                 $tp = (([string]$it.t) -replace '[^0-9A-Fa-f]','')
+                if ($tp) { [void]$wantedTps.Add($tp) }
                 if ($tp -and $present.Contains($tp)) { $already++; continue }
                 try {
                     $raw  = [Convert]::FromBase64String([string]$it.b)
                     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$raw)
                     $st.Add($cert)
-                    if ($tp) { [void]$present.Add($tp) }
+                    if ($tp) { [void]$present.Add($tp); [void]$addedTps.Add($tp) }
                     $sAdd++; $added++
                 } catch { $failDetail += "add failed in $($sm.Store): $($_.Exception.Message); " }
             }
@@ -268,16 +317,36 @@ function Add-CertDeployBundleToStores {
         } catch {
             $failDetail += "store $($sm.Store) open failed: $($_.Exception.Message); "
         } finally { if ($st) { try { $st.Close() } catch {} } }
+
+        # PERSISTENCE RE-VERIFY (SHARED CONTRACT): re-open the SAME store READ-ONLY (a
+        # fresh handle - never the in-memory one) and confirm each wanted thumbprint is
+        # actually present. Any thumbprint WE added that is now absent means a reconciler
+        # or policy stripped it in-session -> NotVerified.
+        $rst = $null
+        try {
+            $rst = & $StoreOpener $sm.Store 'ReadOnly'
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($ec in $rst.Certificates) { [void]$seen.Add((([string]$ec.Thumbprint) -replace '[^0-9A-Fa-f]','')) }
+            foreach ($tp in $wantedTps) { if ($seen.Contains($tp)) { $verified++ } }
+            foreach ($tp in $addedTps)  { if (-not $seen.Contains($tp)) { [void]$notVerified.Add($tp) } }
+        } catch {
+            $failDetail += "store $($sm.Store) re-verify open failed: $($_.Exception.Message); "
+            foreach ($tp in $addedTps) { [void]$notVerified.Add($tp) }
+        } finally { if ($rst) { try { $rst.Close() } catch {} } }
     }
-    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail }
+    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified.ToArray()) }
 }
 # Classify an Add-CertDeployBundleToStores result into the raw deploy token: any
-# .Add error -> FAIL; else 1+ added -> INSTALLED; else nothing to add -> ALREADY. This
-# is the SINGLE classifier the deploy worker AND the unit tests call.
+# .Add/open error -> FAIL; else added-but-stripped-on-re-read -> NOT VERIFIED; else
+# 1+ added -> INSTALLED; else nothing to add -> ALREADY. This is the SINGLE classifier
+# the deploy worker AND the unit tests call.
 function Get-CertDeployResultToken {
     param($AddResult)
     if (-not $AddResult) { return 'FAIL' }
     if ([string]$AddResult.FailDetail) { return 'FAIL' }
+    $nv = @()
+    try { $nv = @($AddResult.NotVerified) | Where-Object { $_ } } catch { $nv = @() }
+    if ($nv.Count -gt 0)               { return 'NOT VERIFIED' }
     if ([int]$AddResult.Added -gt 0)   { return 'INSTALLED' }
     return 'ALREADY'
 }
@@ -357,6 +426,46 @@ function Get-CertDeployCheckRow {
         }
     }
     return @{ Host=[string]$Res.Host; Ping=[string]$Res.Ping; Status=$status; Missing=$missCell; Detail=$detail }
+}
+
+# --- scan-cert-management verdict + row builder (pure, admin-side) -------------
+# Reconciler verdict per SHARED CONTRACT: InstallRoot present -> 'InstallRoot' (or
+# 'InstallRoot+GPO' when the GPO physical Root/CA store also holds entries); else
+# GPRoots>0 -> 'GPO'; else 'None detected' (a manual .Default push WILL persist).
+function Get-CertDeployReconcilerVerdict {
+    param([bool]$InstallRoot, [int]$GpRoots)
+    if ($InstallRoot) {
+        if ($GpRoots -gt 0) { return 'InstallRoot+GPO' }
+        return 'InstallRoot'
+    }
+    if ($GpRoots -gt 0) { return 'GPO' }
+    return 'None detected'
+}
+
+# Turn a scan worker result into the display row (Reconciler verdict + evidence
+# Detail). OFFLINE / CHECK ERROR pass through as the Reconciler cell per contract.
+function Get-CertDeployScanRow {
+    param($Res)
+    $hostName = [string]$Res.Host
+    $ping     = [string]$Res.Ping
+    $ok = $false
+    try { $ok = [bool]$Res.Ok } catch { $ok = $false }
+    if (-not $ok) {
+        $st  = [string]$Res.Status
+        $rec = if ($st -eq 'OFFLINE') { 'OFFLINE' } else { 'CHECK ERROR' }
+        return @{ Host=$hostName; Ping=$ping; InstallRoot=''; GPRoots=''; Reconciler=$rec; Detail=[string]$Res.Detail }
+    }
+    $irPresent = [bool]$Res.InstallRootPresent
+    $gp        = [int]$Res.GpRoots
+    $verdict   = Get-CertDeployReconcilerVerdict -InstallRoot $irPresent -GpRoots $gp
+    $detail    = "InstallRoot: $([string]$Res.InstallRootToken); GPO roots: $gp; LocalMachine Root store holds $([int]$Res.DefaultRootCount) cert(s)."
+    if ($verdict -ne 'None detected') {
+        $mech = if ($irPresent -and $gp -gt 0) { 'InstallRoot/GPO' } elseif ($irPresent) { 'InstallRoot' } else { 'GPO' }
+        $detail += " This host reconciles its trust store - a scripted push may be pruned on reboot; align with $mech."
+    } else {
+        $detail += " No reconciler detected - a manual .Default push WILL persist."
+    }
+    return @{ Host=$hostName; Ping=$ping; InstallRoot=[string]$Res.InstallRootToken; GPRoots=[string]$gp; Reconciler=$verdict; Detail=$detail }
 }
 
 # --- Self-guard (COPIED from JanetWeb.c2c.psm1) ------------------------------
@@ -638,11 +747,20 @@ function Invoke-CertDeployCheckAction {
     $thumbJson  = Convert-CertDeployBundleToThumbJson $bundle
     $subjectMap = Get-CertDeploySubjectMap $bundle
     & $send @{ type='log'; level='info'; text="Cert bundle: $($bundle.CertCount) cert(s) [Root $(@($bundle.Root).Count)/CA $(@($bundle.CA).Count)/Disallowed $(@($bundle.Disallowed).Count)] from $($bundle.Folder) [$bundleSource]." }
+    # Always surface the bundle's expired-cert census (SHARED CONTRACT), regardless of
+    # includeExpired - Check is the read-only truth about dead anchors in the bundle.
+    $expiredCount = [int]$bundle.ExpiredCount
+    if ($expiredCount -gt 0) {
+        $expSubs = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
+        & $send @{ type='log'; level='warn'; text="Bundle contains $expiredCount EXPIRED cert(s) (dead trust anchors): $($expSubs -join '; '). Deploy EXCLUDES these by default." }
+    } else {
+        & $send @{ type='log'; level='info'; text='Bundle contains 0 expired cert(s) - all trust anchors are within validity.' }
+    }
 
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
     if ($targets.Count -eq 0) {
         & $send @{ type='log'; level='warn'; text='No valid targets.' }
-        return @{ rows=@(); summary=@{ total=0 } }
+        return @{ rows=@(); summary=@{ total=0; expiredCount=$expiredCount } }
     }
 
     $attemptOffline = Get-CertDeployBool $Params['attemptOffline'] $false
@@ -732,7 +850,7 @@ function Invoke-CertDeployCheckAction {
     $errors     = @($rows | Where-Object { $_.Status -eq 'CHECK ERROR' }).Count
     & $send @{ type='log'; level='ok'; text="Cert Check done - ALL PRESENT: $allPresent, MISSING: $missing, OFFLINE: $offline, CHECK ERROR: $errors (of $($targets.Count) host(s))." }
     & $send @{ type='status'; text="Done. $allPresent all-present, $missing missing, $offline offline of $($targets.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; allPresent=$allPresent; missing=$missing; offline=$offline; checkErrors=$errors; source=$bundleSource } }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; allPresent=$allPresent; missing=$missing; offline=$offline; checkErrors=$errors; expiredCount=$expiredCount; source=$bundleSource } }
 }
 
 # =============================================================================
@@ -795,8 +913,8 @@ $script:CertDeployDeployBlock = {
         if (-not (Get-Command Add-CertDeployBundleToStores -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='cert-store installer helper unavailable on target' } }
         $ar  = Add-CertDeployBundleToStores -Bundle $bundle
         $tok = if (Get-Command Get-CertDeployResultToken -ErrorAction SilentlyContinue) { Get-CertDeployResultToken $ar }
-               elseif ([string]$ar.FailDetail) { 'FAIL' } elseif ([int]$ar.Added -gt 0) { 'INSTALLED' } else { 'ALREADY' }
-        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail }
+               elseif ([string]$ar.FailDetail) { 'FAIL' } elseif (@($ar.NotVerified).Count -gt 0) { 'NOT VERIFIED' } elseif ([int]$ar.Added -gt 0) { 'INSTALLED' } else { 'ALREADY' }
+        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified) }
     }
 
     $ir = $null
@@ -808,9 +926,10 @@ $script:CertDeployDeployBlock = {
     $storeTxt = (@($ir.PerStore) -join ', ')
     $r.Added = [int]$ir.Added; $r.Total = [int]$ir.Total
     switch ([string]$ir.Token) {
-        'INSTALLED' { $r.Status = 'ROOTS INSTALLED';       $r.Detail = "added $($ir.Added) of $($ir.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
-        'ALREADY'   { $r.Status = 'ROOTS ALREADY PRESENT'; $r.Detail = "all $($ir.Total) already present across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
-        default     { $r.Status = 'FAILED';                $r.Detail = "added $($ir.Added) of $($ir.Total); errors: " + ([string]$ir.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        'INSTALLED'    { $r.Status = 'ROOTS INSTALLED';       $r.Detail = "added $($ir.Added) of $($ir.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        'ALREADY'      { $r.Status = 'ROOTS ALREADY PRESENT'; $r.Detail = "all $($ir.Total) already present across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        'NOT VERIFIED' { $r.Status = 'NOT VERIFIED';          $r.Detail = "added $($ir.Added) of $($ir.Total) but $(@($ir.NotVerified).Count) absent on re-read - a reconciler/policy may be stripping in-session" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        default        { $r.Status = 'FAILED';                $r.Detail = "added $($ir.Added) of $($ir.Total); errors: " + ([string]$ir.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
     }
     return $r
 }
@@ -845,8 +964,28 @@ function Invoke-CertDeployDeployAction {
         & $send @{ type='log'; level='err'; text="Deploy aborted: $($bundle.Error). Nothing was dialed." }
         return @{ rows=@(); summary=@{ total=0; rejected=$true } }
     }
-    $bundleJson = Convert-CertDeployBundleToJson $bundle
     & $send @{ type='log'; level='info'; text="Cert bundle: $($bundle.CertCount) cert(s) [Root $(@($bundle.Root).Count)/CA $(@($bundle.CA).Count)/Disallowed $(@($bundle.Disallowed).Count)] from $($bundle.Folder) [$bundleSource]." }
+
+    # EXPIRY GUARD (SHARED CONTRACT): expired certs are dead trust anchors. By default
+    # they are EXCLUDED from the pushed set (a "[SKIP]" line names them); includeExpired
+    # opt-in pushes them anyway, each flagged in the row/log detail. Convert-...ToJson
+    # does the filtering; pushCount here decides whether anything valid remains to dial.
+    $includeExpired  = Get-CertDeployBool $Params['includeExpired'] $false
+    $expiredCount    = [int]$bundle.ExpiredCount
+    $expiredSubjects = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
+    $bundleJson      = Convert-CertDeployBundleToJson $bundle $includeExpired
+    $pushCount       = if ($includeExpired) { [int]$bundle.CertCount } else { ([int]$bundle.CertCount - $expiredCount) }
+    if ($expiredCount -gt 0) {
+        if ($includeExpired) {
+            & $send @{ type='log'; level='warn'; text="[INCLUDE] $expiredCount expired cert(s) included and flagged (EXPIRED - dead trust anchor): $($expiredSubjects -join '; ')." }
+        } else {
+            & $send @{ type='log'; level='warn'; text="[SKIP] $expiredCount expired cert(s) excluded (dead trust anchors): $($expiredSubjects -join '; ')." }
+        }
+    }
+    if ($pushCount -le 0) {
+        & $send @{ type='log'; level='err'; text="Deploy aborted: after excluding $expiredCount expired cert(s) (dead trust anchors) the push set is EMPTY - nothing valid to deploy. Enable 'Include EXPIRED certs' only if you truly need dead anchors. Nothing was dialed." }
+        return @{ rows=@(); summary=@{ total=0; rejected=$true; expiredCount=$expiredCount; expiredExcluded=$expiredCount } }
+    }
 
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
     if ($targets.Count -eq 0) {
@@ -898,7 +1037,12 @@ function Invoke-CertDeployDeployAction {
 
     $emitResult = {
         param($res)
-        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Missing=''; Detail=[string]$res.Detail }
+        $detail = [string]$res.Detail
+        # includeExpired opt-in: flag the row/log detail so the operator sees dead anchors went out.
+        if ($includeExpired -and $expiredCount -gt 0 -and (@('ROOTS INSTALLED','ROOTS ALREADY PRESENT','NOT VERIFIED') -contains [string]$res.Status)) {
+            $detail += " (includes $expiredCount EXPIRED cert(s) - dead trust anchor)"
+        }
+        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Missing=''; Detail=$detail }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
         # JANET audit: a cert install is a security-state change.
@@ -910,6 +1054,7 @@ function Invoke-CertDeployDeployAction {
         elseif ($row.Status -eq 'ROOTS ALREADY PRESENT') { $lvl = 'info' }
         elseif ($row.Status -eq 'OFFLINE')               { $lvl = 'warn' }
         elseif ($row.Status -eq 'SKIPPED')               { $lvl = 'warn' }
+        elseif ($row.Status -eq 'NOT VERIFIED')          { $lvl = 'error' }
         elseif ($row.Status -eq 'FAILED')                { $lvl = 'error' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$res.Host) : $([string]$res.Status) - $([string]$res.Detail)" }
     }
@@ -956,14 +1101,242 @@ function Invoke-CertDeployDeployAction {
         }
     } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
 
-    $installed = @($rows | Where-Object { $_.Status -eq 'ROOTS INSTALLED' }).Count
-    $already   = @($rows | Where-Object { $_.Status -eq 'ROOTS ALREADY PRESENT' }).Count
-    $failed    = @($rows | Where-Object { $_.Status -eq 'FAILED' }).Count
-    $offline   = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
-    $skipped   = @($rows | Where-Object { $_.Status -eq 'SKIPPED' }).Count
-    & $send @{ type='log'; level='ok'; text="Cert Deploy done - INSTALLED: $installed, ALREADY PRESENT: $already, FAILED: $failed, OFFLINE: $offline, SKIPPED: $skipped." }
-    & $send @{ type='status'; text="Done. $installed installed, $already already-present, $failed failed of $($rows.Count) row(s)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; installed=$installed; already=$already; failed=$failed; offline=$offline; skipped=$skipped; selfSkipped=$selfSkipped.Count; source=$bundleSource } }
+    $installed   = @($rows | Where-Object { $_.Status -eq 'ROOTS INSTALLED' }).Count
+    $already     = @($rows | Where-Object { $_.Status -eq 'ROOTS ALREADY PRESENT' }).Count
+    $failed      = @($rows | Where-Object { $_.Status -eq 'FAILED' }).Count
+    $offline     = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
+    $skipped     = @($rows | Where-Object { $_.Status -eq 'SKIPPED' }).Count
+    $notVerified = @($rows | Where-Object { $_.Status -eq 'NOT VERIFIED' }).Count
+    & $send @{ type='log'; level='ok'; text="Cert Deploy done - INSTALLED: $installed, ALREADY PRESENT: $already, NOT VERIFIED: $notVerified, FAILED: $failed, OFFLINE: $offline, SKIPPED: $skipped." }
+    & $send @{ type='status'; text="Done. $installed installed, $already already-present, $notVerified not-verified, $failed failed of $($rows.Count) row(s)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; installed=$installed; already=$already; notVerified=$notVerified; failed=$failed; offline=$offline; skipped=$skipped; selfSkipped=$selfSkipped.Count; expiredCount=$expiredCount; expiredExcluded=$(if ($includeExpired) { 0 } else { $expiredCount }); source=$bundleSource } }
+}
+
+# =============================================================================
+#  scan-cert-management (READ-ONLY): per-host worker + fan-out. Inspects WHAT
+#  MANAGES the LocalMachine trust store (DISA InstallRoot agent / GPO physical
+#  store) so the operator knows if a scripted .Default push will actually persist.
+#  NEVER writes anything. Mirrors the CHECK path's reachability/session/wrong-box
+#  idioms; needs no cert bundle.
+# =============================================================================
+$script:CertDeployScanBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline)
+
+    $r = @{ Host=$Computer; Ping=''; Status=''; InstallRootPresent=$false; InstallRootToken='no'; GpRoots=0; DefaultRootCount=0; Ok=$false; Detail='' }
+
+    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). 5985 then 445, 1.5s.
+    $reachable = $false
+    foreach ($port in 5985,445) {
+        $tc = $null
+        try {
+            $tc = New-Object System.Net.Sockets.TcpClient
+            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        if ($reachable) { break }
+    }
+    if (-not $reachable) {
+        $r.Ping = 'Unreachable'
+        if (-not $AttemptOffline) {
+            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
+            return $r
+        }
+    }
+
+    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    $sess = $null
+    try { $sess = New-PSSession @splat } catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
+
+    # Wrong-box SOFT-skip (read-only path never writes anyway).
+    try {
+        $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+        if ($expectedShort) {
+            $answering = Invoke-Command -Session $sess -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop
+            if (([string]$answering).Trim().ToUpper() -ne $expectedShort.Trim().ToUpper()) {
+                Remove-PSSession $sess -ErrorAction SilentlyContinue
+                $r.Status = 'CHECK ERROR'; $r.Detail = "DNS MISMATCH: dialed '$expectedShort' but remote is '$answering' - soft-skipped, nothing read"
+                return $r
+            }
+        }
+    } catch {
+        Remove-PSSession $sess -ErrorAction SilentlyContinue
+        $r.Status = 'CHECK ERROR'; $r.Detail = "wrong-box guard probe failed: $($_.Exception.Message)"; return $r
+    }
+
+    # The consolidated READ-ONLY probe: detect the DISA InstallRoot agent, count the
+    # GPO physical Root/CA store, and read the .Default LocalMachine Root store count.
+    $scanSb = {
+        $res = [pscustomobject]@{ InstallRootPresent=$false; InstallRootToken='no'; GpRoots=0; DefaultRootCount=0; Err='' }
+        try {
+            # 1. DISA InstallRoot: uninstall registry (64- + 32-bit), a scheduled task, %ProgramFiles%\DoD-PKE.
+            $irName = ''; $irVer = ''
+            foreach ($up in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+                foreach ($k in @(Get-ItemProperty -Path $up -ErrorAction SilentlyContinue)) {
+                    $dn = [string]$k.DisplayName
+                    if ($dn -match 'InstallRoot') { $irName = $dn; $irVer = [string]$k.DisplayVersion; break }
+                }
+                if ($irName) { break }
+            }
+            $irTask = $false
+            try {
+                if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+                    if (@(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { [string]$_.TaskName -match 'InstallRoot' }).Count -gt 0) { $irTask = $true }
+                } else {
+                    $csv = schtasks /query /fo csv 2>$null
+                    if (($csv -join "`n") -match 'InstallRoot') { $irTask = $true }
+                }
+            } catch {}
+            $irPath = $false
+            foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+                if ($pf) { if (Test-Path -LiteralPath (Join-Path $pf 'DoD-PKE')) { $irPath = $true } }
+            }
+            $present = ($irName -ne '') -or $irTask -or $irPath
+            $res.InstallRootPresent = $present
+            if ($present) {
+                $bits = New-Object System.Collections.ArrayList
+                if ($irVer) { [void]$bits.Add("v$irVer") } elseif ($irName) { [void]$bits.Add('reg') }
+                if ($irTask) { [void]$bits.Add('task') }
+                if ($irPath -and -not $irName -and -not $irTask) { [void]$bits.Add('DoD-PKE path') }
+                $res.InstallRootToken = if ($bits.Count -gt 0) { "yes ($($bits -join ', '))" } else { 'yes' }
+            }
+            # 2. GPO physical Root/CA store (HKLM Policies SystemCertificates) - >0 means GPO manages roots.
+            $gp = 0
+            foreach ($gpk in @('HKLM:\SOFTWARE\Policies\Microsoft\SystemCertificates\Root\Certificates','HKLM:\SOFTWARE\Policies\Microsoft\SystemCertificates\CA\Certificates')) {
+                if (Test-Path -LiteralPath $gpk) { $gp += @(Get-ChildItem -LiteralPath $gpk -ErrorAction SilentlyContinue).Count }
+            }
+            $res.GpRoots = [int]$gp
+            # 3. .Default LocalMachine Root store count (context for the Detail).
+            try {
+                $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root','LocalMachine')
+                $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+                $res.DefaultRootCount = @($st.Certificates).Count
+                $st.Close()
+            } catch {}
+        } catch { $res.Err = $_.Exception.Message }
+        return $res
+    }
+
+    $raw = $null
+    try { $raw = Invoke-Command -Session $sess -ScriptBlock $scanSb -ErrorAction Stop }
+    catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
+    finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
+
+    if ($null -eq $raw) { $r.Status = 'CHECK ERROR'; $r.Detail = 'probe returned no result'; return $r }
+    $errTxt = ''
+    try { if ($raw.PSObject.Properties['Err']) { $errTxt = [string]$raw.Err } } catch {}
+    if ($errTxt) { $r.Status = 'CHECK ERROR'; $r.Detail = $errTxt; return $r }
+    $r.InstallRootPresent = [bool]$raw.InstallRootPresent
+    $r.InstallRootToken   = [string]$raw.InstallRootToken
+    $r.GpRoots            = [int]$raw.GpRoots
+    $r.DefaultRootCount   = [int]$raw.DefaultRootCount
+    $r.Ok = $true
+    return $r
+}
+
+function Invoke-CertDeployScanAction {
+    param([hashtable]$Params, [System.Management.Automation.PSCredential]$Credential, [scriptblock]$Emit)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $cancelJob = $null
+    if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
+    $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='No valid targets.' }
+        return @{ rows=@(); summary=@{ total=0; installRoot=0; gpoManaged=0; none=0; offline=0 } }
+    }
+
+    $attemptOffline = Get-CertDeployBool $Params['attemptOffline'] $false
+    $threads = 16
+    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    $threads = [Math]::Max(1, [Math]::Min(32, $threads))
+    $perHostTimeout = 150
+    $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
+    $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
+
+    & $send @{ type='status'; text="Scanning cert management on $($targets.Count) host(s) with $threads thread(s)..." }
+    & $send @{ type='log'; level='info'; text="[$(Get-Date -Format 'HH:mm:ss')] START Scan Cert Management on $($targets.Count) host(s) ($authLabel), $threads thread(s)." }
+
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+    $pool.Open()
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; InstallRoot=''; GPRoots=''; Reconciler='Queued'; Detail='waiting for a runspace...' }) }
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($h in $targets) {
+        $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+        [void]$ps.AddScript($script:CertDeployScanBlock)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+
+    $emitResult = {
+        param($res)
+        $row = Get-CertDeployScanRow -Res $res
+        [void]$rows.Add($row)
+        & $send (@{ type='row' } + $row)
+        $rec = [string]$row.Reconciler
+        $lvl = 'info'
+        if     ($rec -eq 'None detected') { $lvl = 'ok' }
+        elseif ($rec -eq 'OFFLINE')       { $lvl = 'warn' }
+        elseif ($rec -eq 'CHECK ERROR')   { $lvl = 'error' }
+        else                              { $lvl = 'warn' }
+        & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$row.Host) : $rec - $([string]$row.Detail)" }
+    }
+
+    $done = 0
+    try {
+        while ($done -lt $jobs.Count) {
+            foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail="worker error: $($_.Exception.Message)"; Ok=$false } }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail='worker returned no result'; Ok=$false } }
+                    & $emitResult $res
+                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $emitResult @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang"; Ok=$false }
+                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                if ($cancelCheck -and (& $cancelCheck)) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $emitResult @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail='cancelled by operator'; Ok=$false }
+                            $done++
+                        }
+                    }
+                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight scans stopped.' }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+
+    $installRoot = @($rows | Where-Object { @('InstallRoot','InstallRoot+GPO') -contains [string]$_.Reconciler }).Count
+    $gpoManaged  = @($rows | Where-Object { @('GPO','InstallRoot+GPO') -contains [string]$_.Reconciler }).Count
+    $none        = @($rows | Where-Object { [string]$_.Reconciler -eq 'None detected' }).Count
+    $offline     = @($rows | Where-Object { [string]$_.Reconciler -eq 'OFFLINE' }).Count
+    & $send @{ type='log'; level='ok'; text="Scan Cert Management done - InstallRoot: $installRoot, GPO: $gpoManaged, None detected: $none, OFFLINE: $offline (of $($targets.Count) host(s))." }
+    & $send @{ type='status'; text="Done. $installRoot InstallRoot, $gpoManaged GPO, $none none, $offline offline of $($targets.Count)." }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; installRoot=$installRoot; gpoManaged=$gpoManaged; none=$none; offline=$offline } }
 }
 
 function Invoke-JanetToolAction {
@@ -976,9 +1349,10 @@ function Invoke-JanetToolAction {
     $send = { param($e) if ($Emit) { & $Emit $e } }
 
     switch ($ActionId) {
-        'check'            { return (Invoke-CertDeployCheckAction  -Params $Params -Credential $Credential -Emit $Emit) }
-        'deploy'           { return (Invoke-CertDeployDeployAction -Params $Params -Credential $Credential -Emit $Emit) }
-        'import-pki-hosts' { return (Invoke-CertDeployImportAction -Params $Params -Emit $Emit) }
+        'check'                { return (Invoke-CertDeployCheckAction  -Params $Params -Credential $Credential -Emit $Emit) }
+        'deploy'               { return (Invoke-CertDeployDeployAction -Params $Params -Credential $Credential -Emit $Emit) }
+        'scan-cert-management' { return (Invoke-CertDeployScanAction   -Params $Params -Credential $Credential -Emit $Emit) }
+        'import-pki-hosts'     { return (Invoke-CertDeployImportAction -Params $Params -Emit $Emit) }
         default {
             & $send @{ type='error'; text="Unknown action '$ActionId'." }
             return @{ rows=@(); summary=@{} }
@@ -986,4 +1360,4 @@ function Invoke-JanetToolAction {
     }
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Get-CertDeployBundle, Resolve-CertDeployBundleFolder, Convert-CertDeployBundleToJson, Convert-CertDeployBundleToThumbJson, Get-CertDeploySubjectMap, Get-CertDeployDefaultBundlePath, Test-JanetCertDeployHostIsSelf, Get-CertDeployBool, ConvertFrom-CertDeployComplianceCsv, Test-CertDeployPkiLine, Get-CertDeployCheckRow, Invoke-CertDeployCheckAction, Invoke-CertDeployDeployAction, Invoke-CertDeployImportAction
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Get-CertDeployBundle, Resolve-CertDeployBundleFolder, Convert-CertDeployBundleToJson, Convert-CertDeployBundleToThumbJson, Get-CertDeploySubjectMap, Get-CertDeployDefaultBundlePath, Test-JanetCertDeployHostIsSelf, Get-CertDeployBool, ConvertFrom-CertDeployComplianceCsv, Test-CertDeployPkiLine, Get-CertDeployCheckRow, Get-CertDeployReconcilerVerdict, Get-CertDeployScanRow, Invoke-CertDeployCheckAction, Invoke-CertDeployDeployAction, Invoke-CertDeployScanAction, Invoke-CertDeployImportAction

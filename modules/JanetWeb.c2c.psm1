@@ -35,7 +35,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.7.0'
+        version  = '1.7.1'
         category = 'Reporting'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
@@ -357,11 +357,18 @@ function Invoke-JanetC2cWinrmHeal {
 # ADDITIVE by construction: for each store group, open the LocalMachine store
 # ReadWrite, add ONLY certs whose thumbprint is not already present, and NEVER
 # remove anything. $StoreOpener is injectable (default = a real X509Store) so the
-# additive-only guard is unit-testable against a fake store. Returns
-# @{ Added; Already; Total; PerStore=@('Root +N/M', ...); FailDetail }.
+# additive-only guard is unit-testable against a fake store. After the adds, each
+# store is RE-OPENED ReadOnly (fresh handle, $VerifyOpener, same Invoke-Command) to
+# confirm every ADDED thumbprint actually persisted - defeating a reconciler/policy
+# that strips certs in-session. Returns
+# @{ Added; Already; Total; PerStore=@('Root +N/M', ...); FailDetail; Verified; NotVerified }.
+# Verified = count of added thumbprints confirmed present on re-read; NotVerified =
+# added thumbprints ABSENT on re-read (added but stripped). Backward-compatible: a
+# custom $StoreOpener with NO $VerifyOpener trusts the add (legacy fake-store callers).
 $script:C2cAddCertsSrc = @'
 function Add-C2cBundleToStores {
-    param($Bundle, [scriptblock]$StoreOpener)
+    param($Bundle, [scriptblock]$StoreOpener, [scriptblock]$VerifyOpener)
+    $customOpener = [bool]$StoreOpener
     if (-not $StoreOpener) {
         $StoreOpener = {
             param($storeName)
@@ -370,12 +377,31 @@ function Add-C2cBundleToStores {
             return $st
         }
     }
+    # Persistence re-verify opener: fresh ReadOnly handle so we read the store's real
+    # backing (not the in-session object we added to). When a custom $StoreOpener was
+    # injected but NO $VerifyOpener, DON'T open the real store (unit-test compat) - trust
+    # the add. Injecting a $VerifyOpener always turns re-verify on.
+    $doVerify = $true
+    if (-not $VerifyOpener) {
+        if ($customOpener) { $doVerify = $false }
+        else {
+            $VerifyOpener = {
+                param($storeName)
+                $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+                $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+                return $st
+            }
+        }
+    }
     $added = 0; $already = 0; $total = 0; $failDetail = ''
+    $verified = 0
     $perStore = New-Object System.Collections.ArrayList
+    $notVerified = New-Object System.Collections.ArrayList
     foreach ($sm in @(@{ Prop='Root'; Store='Root' }, @{ Prop='CA'; Store='CA' }, @{ Prop='Disallowed'; Store='Disallowed' })) {
         $items = @()
         try { $items = @($Bundle.($sm.Prop)) | Where-Object { $_ } } catch { $items = @() }
         if ($items.Count -eq 0) { continue }
+        $addedThumbs = New-Object System.Collections.ArrayList
         $st = $null
         try {
             $st = & $StoreOpener $sm.Store
@@ -390,7 +416,7 @@ function Add-C2cBundleToStores {
                     $raw  = [Convert]::FromBase64String([string]$it.b)
                     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$raw)
                     $st.Add($cert)
-                    if ($tp) { [void]$present.Add($tp) }
+                    if ($tp) { [void]$present.Add($tp); [void]$addedThumbs.Add($tp) }
                     $sAdd++; $added++
                 } catch { $failDetail += "add failed in $($sm.Store): $($_.Exception.Message); " }
             }
@@ -398,17 +424,39 @@ function Add-C2cBundleToStores {
         } catch {
             $failDetail += "store $($sm.Store) open failed: $($_.Exception.Message); "
         } finally { if ($st) { try { $st.Close() } catch {} } }
+        # RE-VERIFY: fresh ReadOnly re-open, confirm each ADDED thumbprint persisted.
+        if ($addedThumbs.Count -gt 0) {
+            if (-not $doVerify) {
+                $verified += $addedThumbs.Count
+            } else {
+                $vst = $null
+                try {
+                    $vst = & $VerifyOpener $sm.Store
+                    $reread = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($rc in $vst.Certificates) { [void]$reread.Add((([string]$rc.Thumbprint) -replace '[^0-9A-Fa-f]','')) }
+                    foreach ($atp in $addedThumbs) {
+                        if ($reread.Contains($atp)) { $verified++ } else { [void]$notVerified.Add($atp) }
+                    }
+                } catch {
+                    # Could not re-read -> the adds are UNCONFIRMED (not a hard add failure;
+                    # FailDetail is left intact for real .Add errors only).
+                    foreach ($atp in $addedThumbs) { [void]$notVerified.Add($atp) }
+                } finally { if ($vst) { try { $vst.Close() } catch {} } }
+            }
+        }
     }
-    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail }
+    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified) }
 }
 # Classify an Add-C2cBundleToStores result into the raw PkiRoots token the fix worker
-# emits (and the label map keys on): any .Add error -> FAIL; else 1+ added -> FIXED;
-# else nothing to add -> NOCHANGE. This is the SINGLE classifier both the remote fix
-# worker (fixSb) and the unit tests call, so a mis-classification fails a test.
+# emits (and the label map keys on): any .Add error -> FAIL; else added-but-absent on
+# re-read -> NOT VERIFIED; else 1+ added -> FIXED; else nothing to add -> NOCHANGE.
+# This is the SINGLE classifier both the remote fix worker (fixSb) and the unit tests
+# call, so a mis-classification fails a test.
 function Get-C2cPkiRootsResultToken {
     param($AddResult)
     if (-not $AddResult) { return 'FAIL' }
     if ([string]$AddResult.FailDetail) { return 'FAIL' }
+    if (@($AddResult.NotVerified).Count -gt 0) { return 'NOT VERIFIED' }
     if ([int]$AddResult.Added -gt 0)   { return 'FIXED' }
     return 'NOCHANGE'
 }
@@ -1611,9 +1659,12 @@ $script:C2cFixBlock = {
                     # Classify via the shared helper (dot-sourced from $AddCertsSrc above) -
                     # the exact token the label map keys on. Inline fallback if unavailable.
                     $tok = if (Get-Command Get-C2cPkiRootsResultToken -ErrorAction SilentlyContinue) { Get-C2cPkiRootsResultToken $ar }
-                           elseif ([string]$ar.FailDetail) { 'FAIL' } elseif ([int]$ar.Added -gt 0) { 'FIXED' } else { 'NOCHANGE' }
+                           elseif ([string]$ar.FailDetail) { 'FAIL' } elseif (@($ar.NotVerified).Count -gt 0) { 'NOT VERIFIED' } elseif ([int]$ar.Added -gt 0) { 'FIXED' } else { 'NOCHANGE' }
                     if ($tok -eq 'FAIL') {
                         & $add 'PkiRoots' 'addstore' 'FAIL' ("added $($ar.Added) of $($ar.Total); errors: " + ([string]$ar.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                    } elseif ($tok -eq 'NOT VERIFIED') {
+                        $nv = @($ar.NotVerified)
+                        & $add 'PkiRoots' 'addstore' 'NOT VERIFIED' ("added $($ar.Added) of $($ar.Total) but $($nv.Count) absent on re-read - a reconciler/policy may be stripping in-session (thumbs: $($nv -join ', '))" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
                     } elseif ($tok -eq 'FIXED') {
                         & $add 'PkiRoots' 'addstore' 'FIXED' ("added $($ar.Added) of $($ar.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
                     } else {
@@ -1645,13 +1696,18 @@ $script:C2cFixBlock = {
     if ($pillarResults.Count -eq 0) { $r.Status = 'NO CHANGE'; $r.Detail = 'no enabled pillars returned a result'; return $r }
 
     # STARTED (BitLocker encryption kicked off) rolls up like FIXED for the host verdict.
+    # NOT VERIFIED (PkiRoots: added but absent on re-read) is its own bucket - louder than
+    # a plain FIXED/NO CHANGE, but not a hard FAIL (the add DID succeed, a reconciler
+    # stripped it). A real FAIL still wins; a mix of FAIL + NOT VERIFIED -> PARTIAL.
     $fixed  = @($pillarResults | Where-Object { $_.Result -eq 'FIXED' -or $_.Result -eq 'STARTED' }).Count
     $failed = @($pillarResults | Where-Object { $_.Result -eq 'FAIL'   }).Count
+    $notVer = @($pillarResults | Where-Object { $_.Result -eq 'NOT VERIFIED' }).Count
     $tot    = $pillarResults.Count
-    if     ($fixed -ge 1 -and $failed -eq 0)   { $r.Status = 'FIXED' }
-    elseif ($failed -ge 1 -and $failed -eq $tot) { $r.Status = 'FAILED' }
-    elseif ($failed -ge 1)                     { $r.Status = 'PARTIAL' }
-    else                                       { $r.Status = 'NO CHANGE' }
+    if     ($failed -ge 1 -and $failed -eq $tot)  { $r.Status = 'FAILED' }
+    elseif ($notVer -ge 1 -and $failed -eq 0)     { $r.Status = 'NOT VERIFIED' }
+    elseif ($fixed -ge 1 -and $failed -eq 0)      { $r.Status = 'FIXED' }
+    elseif ($failed -ge 1)                        { $r.Status = 'PARTIAL' }
+    else                                          { $r.Status = 'NO CHANGE' }
 
     # Per-pillar DISPLAY label map: pillar-flavoured names for the raw FIXED/NOCHANGE/
     # STARTED/KICKED tokens. The rollup above uses the RAW tokens (stable); the label is
@@ -1774,12 +1830,17 @@ $script:C2cPillarByAction = @{
 # (case-insensitive on Windows) <folder>\root\*.cer -> Root, <folder>\Intermediate\*.cer
 # -> CA, <folder>\Untrusted\*.cer -> Disallowed, and loose <folder>\*.cer -> Root.
 # Each .cer is loaded into an X509Certificate2 and captured as thumbprint + base64
-# (base64 crosses the WinRM boundary cleanly). Returns
-# @{ Ok; Error; Root=@(@{Thumbprint;B64;File}); CA=@(...); Disallowed=@(...); CertCount; FileCount; Folder }.
-# Ok=$false with a populated Error if the folder is missing or yields ZERO certs.
+# (base64 crosses the WinRM boundary cleanly). EXPIRED certs (NotAfter < now, admin
+# clock) are EXCLUDED from Root/CA/Disallowed (never serialized, never pushed to a
+# host - a dead trust anchor is worthless) and reported instead via ExpiredCount +
+# Expired[]. Returns
+# @{ Ok; Error; Root=@(@{Thumbprint;B64;File}); CA=@(...); Disallowed=@(...); CertCount;
+#    FileCount; Folder; ExpiredCount; Expired=@(@{Thumbprint;Subject;NotAfter;Store}) }.
+# CertCount counts only USABLE (non-expired) certs. Ok=$false with a populated Error if
+# the folder is missing, yields ZERO .cer, or yields ONLY expired certs (nothing usable).
 function Get-C2cCertBundle {
     param([string]$Folder)
-    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder='' }
+    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder=''; ExpiredCount=0; Expired=@() }
     $f = ([string]$Folder).Trim().Trim('"')
     $res.Folder = $f
     if (-not $f) { $res.Error = 'no cert bundle folder provided'; return $res }
@@ -1789,11 +1850,18 @@ function Get-C2cCertBundle {
         CA         = New-Object System.Collections.ArrayList
         Disallowed = New-Object System.Collections.ArrayList
     }
+    $expired = New-Object System.Collections.ArrayList
     $loadCer = {
         param($file, $store)
         try {
             $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
             $cert.Import($file)
+            # Expired = NotAfter < now (admin-side clock). A dead trust anchor is never
+            # serialized/pushed - record it in Expired[] and skip the usable group.
+            if ($cert.NotAfter -lt (Get-Date)) {
+                [void]$expired.Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; Subject=[string]$cert.Subject; NotAfter=$cert.NotAfter.ToString('o'); Store=$store })
+                return $true
+            }
             $b64  = [Convert]::ToBase64String($cert.RawData)
             [void]$groups[$store].Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; B64=$b64; File=(Split-Path $file -Leaf) })
             return $true
@@ -1812,9 +1880,15 @@ function Get-C2cCertBundle {
     foreach ($cf in @(Get-ChildItem -LiteralPath $f -Filter '*.cer' -File -ErrorAction SilentlyContinue)) {
         if (& $loadCer $cf.FullName 'Root') { $fileCount++ }
     }
+    $res.ExpiredCount = $expired.Count
+    $res.Expired      = @($expired)
     $total = $groups.Root.Count + $groups.CA.Count + $groups.Disallowed.Count
     if ($total -eq 0) {
-        $res.Error = "no .cer certificates found under $f (expected root\*.cer, Intermediate\*.cer, Untrusted\*.cer, or loose *.cer)"
+        if ($expired.Count -gt 0) {
+            $res.Error = "all $($expired.Count) cert(s) under $f are EXPIRED (dead trust anchors) - nothing usable to install"
+        } else {
+            $res.Error = "no .cer certificates found under $f (expected root\*.cer, Intermediate\*.cer, Untrusted\*.cer, or loose *.cer)"
+        }
         return $res
     }
     $res.Root = @($groups.Root); $res.CA = @($groups.CA); $res.Disallowed = @($groups.Disallowed)
@@ -1910,6 +1984,12 @@ function Invoke-C2cFixAction {
         } else {
             $bundle = Get-C2cCertBundle -Folder $bundleFolder
             if ($bundle.Ok) {
+                # Expiry guard (run-level, before dialing): expired certs were already
+                # excluded from the pushed set by Get-C2cCertBundle; report the exclusion.
+                if ([int]$bundle.ExpiredCount -gt 0) {
+                    $expSubjects = (@($bundle.Expired | ForEach-Object { [string]$_.Subject }) -join ', ')
+                    & $send @{ type='log'; level='warn'; text="[SKIP] $($bundle.ExpiredCount) expired cert(s) excluded (dead trust anchors): $expSubjects" }
+                }
                 $bundleJson = Convert-C2cBundleToJson $bundle
                 $bundleOk   = $true
                 & $send @{ type='log'; level='info'; text="Cert bundle: $($bundle.CertCount) cert(s) [Root $(@($bundle.Root).Count)/CA $(@($bundle.CA).Count)/Disallowed $(@($bundle.Disallowed).Count)] from $($bundle.Folder) [$bundleSource]." }

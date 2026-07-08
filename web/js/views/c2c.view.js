@@ -58,7 +58,7 @@
     Encryption:  { action: 'fix-encryption',  label: 'Encryption (BitLocker)', desc: 'Resume suspended protectors on EVERY fixed volume; opt-in ENABLE decrypted fixed volumes (OS: TPM; data: auto-unlock). Removable/USB never touched.' },
     AntiMalware: { action: 'fix-antimalware', label: 'AntiMalware (Defender)', desc: 'Start WinDefend / Sense (Automatic); force RTP only in Active mode (never Passive / EDR Block Mode); update stale signatures.' },
     Patches:     { action: 'fix-patches',     label: 'Patches (MECM cycle)',   desc: 'Trigger the MECM SUM scan (113) + eval (108); installs run async.' },
-    PkiRoots:    { action: 'fix-pki',         label: 'PKI Trust Roots',        desc: 'Install the DoD trust bundle .cer ADDITIVELY into Root/CA/Disallowed (uses the shared cert bundle folder above; blank = shipped Packages\\DoD-Certs).' }
+    PkiRoots:    { action: 'fix-pki',         label: 'PKI Trust Roots',        desc: 'Install the DoD trust bundle .cer ADDITIVELY into Root/CA/Disallowed (uses the shared cert bundle folder above; blank = shipped Packages\\DoD-Certs). Expired certs are auto-skipped - never pushed.' }
   };
 
   // Routed-elsewhere pillars: import shows these as non-runnable info notes.

@@ -8,10 +8,18 @@
    CSV, and a shared activity log along the bottom.
 
    CHECK  (action 'check')            - read-only; reports which hosts are missing
-                                        which roots. No admin session, no confirm.
+                                        which roots (+ expired-in-bundle count).
+                                        No admin session, no confirm.
    DEPLOY (action 'deploy')           - destructive; admin-session gated + a type-
                                         DEPLOY arm dialog stating it ADDITIVELY
                                         installs the DoD roots and never removes.
+                                        Expired certs are skipped by default; an
+                                        "Include expired certs" checkbox opts in.
+   SCAN CERT MANAGEMENT (action 'scan-cert-management') - read-only, no admin
+                                        gate, no confirm; reports whether
+                                        InstallRoot / GPO manages trust roots
+                                        per host (a manual push may be
+                                        reconciled away).
    Import (action 'import-pki-hosts') - parse a C2C export, load every PKI-tagged
                                         host into the TargetManager.
    Credentials are UNIVERSAL (shell header) - this view renders NO cred control.
@@ -39,11 +47,20 @@
     if (s === 'CHECK ERROR' || s === 'FAILED' || s === 'Cancelled') return 'row-bad';
     return '';
   }
+  function reconcilerCls(v) {
+    var s = String(v == null ? '' : v);
+    if (s === 'None detected') return 'st-ok';
+    if (s === 'InstallRoot' || s === 'GPO' || s === 'InstallRoot+GPO') return 'st-warn';
+    if (s === 'OFFLINE') return 'st-warn';
+    if (s === 'CHECK ERROR') return 'st-bad';
+    return '';
+  }
 
   JanetViews.register('certdeploy', {
     mount: function (host, ctx) {
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
       var run = null, unsub = null;
+      var scanRun = null, scanUnsub = null;
       function ts() { return ctx.util.clockStr(); }
       var esc = (ctx.util && ctx.util.esc) ? ctx.util.esc : function (s) { return String(s == null ? '' : s); };
 
@@ -86,6 +103,8 @@
 
       var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP.' });
       optCard.appendChild(offlineCb);
+      var includeExpiredCb = ui.checkbox('Include expired certs (dead anchors - normally skipped)', { title: 'Also push certificates whose NotAfter has already passed. Off by default - expired certs are dead trust anchors and are excluded from the bundle read + push unless ticked.' });
+      optCard.appendChild(includeExpiredCb);
       var threadsRow = el('div'); threadsRow.style.cssText = 'display:flex;align-items:center;gap:10px';
       threadsRow.appendChild(ui.label('Max concurrent:'));
       var threadsIn = ui.number({ value: 16, min: 1, max: 32, title: 'Parallel hosts (Check 1-32; Deploy caps at 16).' }); threadsIn.style.width = '80px';
@@ -120,8 +139,20 @@
         onRun: doDeploy,
         onCancel: function () { if (run) { run.cancel(); actlog.append({ text: '[' + ts() + '] CANCEL requested.', level: 'warn' }); } }
       });
+      var scanRunbar = C.RunBar({
+        label: 'SCAN CERT MANAGEMENT', cancelLabel: 'CANCEL SCAN', morphToCancel: true,
+        title: 'Read-only: reports whether InstallRoot policy and/or a GPO manages trust certs on each host (a manual push may be reconciled away). No admin session, no confirm.',
+        guards: [
+          function () { return targets.hosts().length ? null : 'No Hosts|Add at least one host to the list first.'; },
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '.') : null; }
+        ],
+        onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
+        onRun: doScanMgmt,
+        onCancel: function () { if (scanRun) { scanRun.cancel(); actlog.append({ text: '[' + ts() + '] CANCEL requested.', level: 'warn' }); } }
+      });
       var checkWrap = el('div'); checkWrap.appendChild(checkRunbar.el); actCard.appendChild(checkWrap);
       var deployWrap = el('div'); deployWrap.appendChild(deployRunbar.el); actCard.appendChild(deployWrap);
+      var scanWrap = el('div'); scanWrap.appendChild(scanRunbar.el); actCard.appendChild(scanWrap);
       left.appendChild(actCard);
       main.appendChild(left);
 
@@ -138,6 +169,8 @@
       var head = ui.card({}); head.style.cssText += ';display:flex;align-items:center;gap:12px;flex-wrap:wrap';
       var exportBtn = ui.ghostButton('Export CSV', { size: 'sm', title: 'Export the result rows to CSV.' });
       var clearBtn = ui.button('Clear', { variant: 'danger', size: 'sm', title: 'Clear the results grid.' });
+      var expiredBadge = el('div', 'muted', ''); expiredBadge.style.fontSize = '12px';
+      head.appendChild(expiredBadge);
       var spacer = el('div'); spacer.style.flex = '1'; head.appendChild(spacer);
       head.appendChild(exportBtn); head.appendChild(clearBtn);
       right.appendChild(head);
@@ -167,19 +200,51 @@
 
       root.appendChild(main);
 
+      // ---------- SCAN CERT MANAGEMENT (read-only, no admin gate, no confirm) ----------
+      var scanCard = ui.namedCard('SCAN CERT MANAGEMENT (what manages trust)', 'Read-only fleet scan: is InstallRoot policy and/or a GPO managing trust roots here (a manual push may get silently reconciled away)?');
+      scanCard.style.cssText += ';display:flex;flex-direction:column;gap:8px;flex:0 0 auto';
+      var scanStats = C.StatCards({ cards: [
+        { key: 'total', label: 'HOSTS', color: 'cyan' },
+        { key: 'installRoot', label: 'INSTALLROOT MANAGED', color: 'gold' },
+        { key: 'gpoManaged', label: 'GPO MANAGED', color: 'gold' },
+        { key: 'none', label: 'NONE DETECTED', color: 'ok' },
+        { key: 'offline', label: 'OFFLINE', color: 'accent' }
+      ] });
+      scanCard.appendChild(scanStats.el);
+      var scanGrid = C.ResultsGrid({
+        title: 'Scan Cert Management results',
+        emptyText: 'No results yet - add hosts, then Scan Cert Management.',
+        keyMode: { hostCol: 'Host' }, popOut: true, selectable: false,
+        columns: [
+          { key: 'Host', label: 'HOST', width: 150 },
+          { key: 'Ping', label: 'PING', width: 90 },
+          { key: 'InstallRoot', label: 'INSTALLROOT', width: 110 },
+          { key: 'GPRoots', label: 'GP ROOTS', width: 100 },
+          { key: 'Reconciler', label: 'RECONCILER', width: 150, render: function (r) { return { text: r.Reconciler == null ? '' : String(r.Reconciler), cls: reconcilerCls(r.Reconciler) }; } },
+          { key: 'Detail', label: 'DETAIL', render: function (r) { var t = String(r.Detail == null ? '' : r.Detail); return { text: t, title: t }; } }
+        ]
+      });
+      var scanGh = el('div'); scanGh.style.cssText = 'min-height:160px;max-height:340px;display:flex'; scanGh.appendChild(scanGrid.el);
+      scanCard.appendChild(scanGh);
+      var scanProg = C.ProgressStatusStrip({ showCount: true });
+      scanProg.el.style.marginTop = '8px';
+      scanCard.appendChild(scanProg.el);
+      root.appendChild(scanCard);
+
       var logCard = ui.card({}); logCard.classList.add('j-logdock');
       logCard.appendChild(actlog.el);
       root.appendChild(logCard);
 
       // ---------- behaviour ----------
       function setStatus(txt, cls) { statusLine.textContent = txt == null ? '' : String(txt); statusLine.className = cls || 'muted'; }
-      function isRunning() { return !!(run && run.state && run.state.active); }
+      function isRunning() { return !!(run && run.state && run.state.active) || isScanRunning(); }
+      function isScanRunning() { return !!(scanRun && scanRun.state && scanRun.state.active); }
       function threads() { var n = parseInt(threadsIn.value, 10); if (isNaN(n) || n < 1) n = 16; if (n > 32) n = 32; return n; }
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsIn.disabled = on; clearBtn.disabled = on;
-        bundleInput.disabled = on; importBtn.disabled = on;
+        bundleInput.disabled = on; importBtn.disabled = on; includeExpiredCb._cb.disabled = on;
       }
-      clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); stats.reset(); setStatus('Ready'); };
+      clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); stats.reset(); expiredBadge.textContent = ''; setStatus('Ready'); };
       exportBtn.onclick = function () {
         var rows = grid.rows();
         if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a Check or Deploy first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
@@ -218,6 +283,18 @@
               setStatus(verb + ' complete - ' + c.ok + ' ' + finalNoun + ', ' + c.missing + ' missing/failed, ' + c.errors + ' offline/error', bad ? 'st-warn' : 'st-ok');
               actlog.append({ text: '[' + ts() + '] FINISHED ' + verb + '. OK=' + c.ok + '  MISSING/FAILED=' + c.missing + '  OFFLINE/ERROR=' + c.errors, level: bad ? 'warn' : 'ok' });
             }
+          },
+          final: function (res) {
+            var sum = (res && res.summary) || {};
+            var ec = sum.ExpiredCount || 0;
+            if (ec > 0) {
+              expiredBadge.textContent = ec + ' expired in bundle (skipped)';
+              expiredBadge.className = 'st-warn';
+              var subs = (sum.Expired || []).map(function (x) { return x && x.Subject; }).filter(function (s) { return !!s; });
+              actlog.append({ text: '[' + ts() + '] ' + ec + ' expired cert(s) in bundle (skipped): ' + subs.slice(0, 5).join(', ') + (subs.length > 5 ? ' ...' : ''), level: 'warn' });
+            } else {
+              expiredBadge.textContent = ''; expiredBadge.className = 'muted';
+            }
           }
         });
       }
@@ -244,13 +321,23 @@
         if (isRunning()) return;
         var hosts = targets.hosts();
         var folderTxt = String(bundleInput.value || '').trim() || 'the shipped Packages\\DoD-Certs bundle';
+        var includeExpired = !!includeExpiredCb._cb.checked;
+        var expiredTxt = includeExpired
+          ? 'Expired certs in the bundle are <b>INCLUDED</b> - dead trust anchors WILL be pushed (each flagged EXPIRED - dead trust anchor).'
+          : 'Expired certs in the bundle are <b>skipped by default</b> - not pushed.';
         var ok = await ctx.arm({
           title: 'Arm DEPLOY TRUST CERTS',
           banner: 'DESTRUCTIVE - THIS WRITES TO THE LOCALMACHINE CERT STORES',
           body: 'About to <b>additively install</b> the DoD/LTMA trust roots from <b>' + esc(folderTxt) + '</b> into the <b>LocalMachine Root / CA / Disallowed</b> stores on <b>' + hosts.length + ' host(s)</b> over WinRM.'
             + '<br>It adds only the roots that are <b>not already present</b> and <b>never removes</b> anything - a host that already has every root is reported ROOTS ALREADY PRESENT and left untouched.'
+            + '<br>' + expiredTxt
             + '<br>The JANET dispatcher host is self-guarded out of the run.',
-          preflight: [{ label: hosts.length + ' host(s) targeted', ok: true }, { label: 'Bundle: ' + folderTxt, ok: true }, { label: 'Additive install - never removes a certificate', ok: true }],
+          preflight: [
+            { label: hosts.length + ' host(s) targeted', ok: true },
+            { label: 'Bundle: ' + folderTxt, ok: true },
+            { label: 'Additive install - never removes a certificate', ok: true },
+            { label: includeExpired ? 'Expired certs: INCLUDED (dead anchors will be pushed)' : 'Expired certs: excluded (skipped by default)', ok: true }
+          ],
           confirmWord: 'DEPLOY', okText: 'Deploy Trust Certs', cancelText: 'Cancel'
         });
         if (!ok) { actlog.append({ text: '[' + ts() + '] Deploy cancelled at the arming dialog.', level: 'warn' }); return; }
@@ -263,9 +350,49 @@
           certBundleFolder: String(bundleInput.value || ''),
           confirm: 'DEPLOY',
           attemptOffline: !!offlineCb._cb.checked,
+          includeExpired: includeExpired,
           threads: threads()
         }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: true });
         bindRun('Deploy', 'installed/present');
+      }
+
+      // ---- SCAN CERT MANAGEMENT (read-only; no admin gate, no confirm) ----
+      function scanSummarize() {
+        var t = 0, ir = 0, gpo = 0, none = 0, off = 0;
+        scanGrid.rows().forEach(function (r) {
+          var s = String(r.Reconciler == null ? '' : r.Reconciler);
+          t++;
+          if (s === 'InstallRoot' || s === 'InstallRoot+GPO') ir++;
+          if (s === 'GPO' || s === 'InstallRoot+GPO') gpo++;
+          if (s === 'None detected') none++;
+          if (s === 'OFFLINE') off++;
+        });
+        return { total: t, installRoot: ir, gpoManaged: gpo, none: none, offline: off };
+      }
+      function doScanMgmt() {
+        if (isRunning()) return;
+        var hosts = targets.hosts();
+        scanGrid.clear(); scanProg.reset(); scanStats.reset();
+        hosts.forEach(function (h) { scanGrid.upsert({ Host: h, Ping: '', InstallRoot: '', GPRoots: '', Reconciler: 'Queued', Detail: 'Queued' }); });
+        actlog.append({ text: '[' + ts() + '] Scan Cert Management on ' + hosts.length + ' host(s).', level: 'accent' });
+        lockInputs(true);
+        scanRun = ctx.run('scan-cert-management', {
+          targets: hosts.join('\n'),
+          attemptOffline: !!offlineCb._cb.checked,
+          threads: threads()
+        }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: false });
+        if (scanUnsub) scanUnsub();
+        scanUnsub = scanRun.subscribe({
+          status: function (t) { scanProg.setPhase(t); },
+          progress: function (p) { scanProg.setProgress(p.done, p.total); },
+          row: function (r) { scanGrid.upsert(r); scanStats.setAll(scanSummarize()); },
+          log: function (l) { actlog.append(l); },
+          error: function (e) { actlog.append({ text: '[' + ts() + '] ' + ((e && e.text) || 'error'), level: 'err' }); },
+          active: function (a) {
+            scanRunbar.setActive(a);
+            if (!a) { lockInputs(false); scanStats.setAll(scanSummarize()); }
+          }
+        });
       }
 
       // ---- Import C2C export -> load all PKI-tagged hosts ----
@@ -316,11 +443,11 @@
         actlog.append({ text: '[' + ts() + '] Loaded ' + pkiHosts.length + ' PKI-tagged host(s) into targets (' + added + ' new). Deploy the roots to get ahead of non-compliance.', level: 'accent' });
       }
 
-      actlog.append({ text: 'Cert Deploy ready. Proactively push the DoD/LTMA trust roots to any PKI-tagged host. Check is read-only; Deploy is additive (never removes). Blank bundle folder uses the shipped Packages\\DoD-Certs.', level: 'accent' });
+      actlog.append({ text: 'Cert Deploy ready. Proactively push the DoD/LTMA trust roots to any PKI-tagged host. Check is read-only; Deploy is additive (never removes) and skips expired certs unless Include expired certs is ticked. Scan Cert Management reports what (if anything) manages/reconciles trust roots per host. Blank bundle folder uses the shipped Packages\\DoD-Certs.', level: 'accent' });
 
       host.appendChild(root);
       this._root = root;
-      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} };
+      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (scanUnsub) scanUnsub(); } catch (e) {} };
     },
     unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
   });
