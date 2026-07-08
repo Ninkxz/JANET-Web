@@ -126,7 +126,7 @@
       var encEnableCb = null;            // the ENABLE-BitLocker checkbox on the Encryption card
       var encEnableChecked = false;      // persists the ENABLE opt-in across renderFixCards() rebuilds
       var importTiles = null;            // hero StatCards (built in the import card below)
-      FIXABLE.forEach(function (k) { fixChecked[k] = true; });   // every pillar checked by default
+      FIXABLE.forEach(function (k) { fixChecked[k] = false; });   // every pillar UNCHECKED by default; operator opts each one in
 
       // =================== layout ===================
       var root = el('div'); root.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)';
@@ -610,14 +610,15 @@
           log.append({ text: '[' + ts() + '] Loaded ' + flaggedHosts.length + ' non-compliant host(s) into Target Computers (' + added + ' new).', level: 'accent' });
         }
 
-        // (b) record per-pillar import badges + host lists; CHECK the pillars that failed
+        // (b) record per-pillar import badges + host lists. Do NOT auto-check any
+        // pillar - everything stays UNCHECKED by default so the operator explicitly
+        // opts in what to run (e.g. import a PKI csv, then tick PKI Trust Roots).
         importBadge = {}; importHosts = {};
         FIXABLE.forEach(function (k) {
           var p = byName[k];
           if (p && (p.failedCount || 0) > 0) {
             importBadge[k] = p.failedCount;
             importHosts[k] = (p.hosts && p.hosts.length) ? p.hosts.slice() : [];
-            fixChecked[k] = true;   // auto-check a pillar the import flagged
           }
         });
         renderFixCards();
@@ -665,7 +666,7 @@
         var badge = importBadge[key];      // failedCount from last import, or undefined
         var box = el('div', 'j-card'); box.style.cssText += ';padding:10px 12px';
         var r1 = el('div'); r1.style.cssText = 'display:flex;align-items:flex-start;gap:8px';
-        var cb = el('input'); cb.type = 'checkbox'; cb.checked = fixChecked[key] !== false; cb.style.marginTop = '3px';
+        var cb = el('input'); cb.type = 'checkbox'; cb.checked = fixChecked[key] === true; cb.style.marginTop = '3px';   // default UNCHECKED; operator opts each pillar in
         cb.setAttribute('data-fixcb', key);
         cb.title = 'Include ' + meta.label + ' in the run-all.';
         cb.addEventListener('change', function () { fixChecked[key] = cb.checked; });
