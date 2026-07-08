@@ -34,10 +34,10 @@
 function Get-JanetToolManifest {
     @{
         id       = 'c2c'
-        name     = 'C2C Readiness'
-        version  = '1.2.0'
+        name     = 'C2C Nemesis'
+        version  = '1.3.0'
         category = 'Reporting'
-        summary  = 'Comply-to-Connect (AFI/MPTO rule 3.B.2.B) tool: (1) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (2) IMPORT the Tanium "C2C Compliance Status" CSV export and route each failing pillar; (3) MASS FIX (destructive) that remediates the endpoint-fixable pillars - resume BitLocker, heal Defender/MDE, add DoD PKI roots from an operator .sst, and kick the MECM patch cycle. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, and bucket each failing rule into a canonical pillar with a routing hint; (2) MASS FIX (destructive) the endpoint-fixable pillars - resume/ENABLE BitLocker (FVE policy assert + Entra-first/AD-fallback recovery-key escrow, XtsAes256), heal Defender/MDE, add DoD PKI roots from an operator .sst, and kick the MECM patch cycle; (3) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -67,7 +67,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix'
                 label       = 'C2C Mass Fix'
-                description = 'DESTRUCTIVE. Remediate the endpoint-fixable failing pillars across the targets in one WinRM round-trip per host, fix-then-verify: Encryption (by default resume suspended BitLocker protectors only; if "ENABLE BitLocker" is also ticked, a FullyDecrypted OS volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED: add a RecoveryPassword protector and back it up to AD BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector and XtsAes256 full-volume encryption; if the AD escrow fails, the protector is removed and encryption is NEVER started; the recovery password is never emitted), AntiMalware (heal Defender services/RTP/signatures; note missing MDE Sense), PkiRoots (add DoD roots from an operator .sst - additive only, never removes), and Patches (kick the MECM Software Updates scan + eval cycles). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE. Remediate the endpoint-fixable failing pillars across the targets in one WinRM round-trip per host, fix-then-verify: Encryption (by default resume suspended BitLocker protectors only; if "ENABLE BitLocker" is also ticked, a FullyDecrypted OS volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED, mirroring the enterprise USAF enable script: assert the FVE BitLocker policy on the host (recovery-key escrow + XtsAes256 method), reuse-or-add a RecoveryPassword protector, then escrow it Entra-first (BackupToAAD-BitLockerKeyProtector) with on-prem AD fallback (Backup-BitLockerKeyProtector) BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector and XtsAes256 full-volume encryption; if BOTH escrow paths fail the RecoveryPassword protector we added is removed and encryption is NEVER started; the recovery password is never emitted), AntiMalware (heal Defender services/RTP/signatures; note missing MDE Sense), PkiRoots (add DoD roots from an operator .sst - additive only, never removes), and Patches (kick the MECM Software Updates scan + eval cycles). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Run the C2C Mass Fix on the target host(s)? This changes machines. Proceed?'
@@ -654,8 +654,10 @@ $script:C2cFixBlock = {
 
         # 1. Encryption - by default RESUME suspended protectors only. When the
         #    operator opts in (DoEnable) and the OS volume is FullyDecrypted, ENABLE
-        #    BitLocker escrow-first / fail-closed (AD escrow BEFORE Enable-BitLocker;
-        #    TPM-gated + domain-joined; XtsAes256; recovery password NEVER emitted).
+        #    BitLocker mirroring the enterprise USAF script, escrow-first / fail-closed
+        #    (FVE policy assert -> reuse/add RecoveryPassword protector -> Entra-first /
+        #    AD-fallback escrow BEFORE Enable-BitLocker; TPM-gated + domain-joined;
+        #    XtsAes256; recovery password NEVER emitted).
         if ($DoEnc) {
             try {
                 $sys = $env:SystemDrive
@@ -696,52 +698,133 @@ $script:C2cFixBlock = {
                                     if (-not $domainJoined) {
                                         & $add 'Encryption' 'none' 'SKIP' 'machine not domain-joined - AD recovery-password escrow unavailable; route to desk-side/MECM'
                                     } else {
-                                        # ESCROW-FIRST, FAIL-CLOSED: add a RecoveryPassword protector and
-                                        # back it up to AD BEFORE any Enable-BitLocker. Never emit/return the
-                                        # recovery password value anywhere - do not touch .RecoveryPassword.
-                                        $escrowOk = $false; $newKpId = ''; $encFail = ''
+                                        # Mirror the enterprise USAF enable script (fail-closed by our design):
+                                        #   1. assert FVE policy  2. reuse-or-add a RecoveryPassword protector
+                                        #   3. escrow Entra-first, AD fallback  4. Enable-BitLocker.
+                                        # Never emit/return the recovery password - do not touch .RecoveryPassword.
+
+                                        # ---- Step 1: assert FVE policy (idempotent). Policy is what enforces the
+                                        #      recovery-key escrow + XtsAes256 method - never encrypt without it. A write
+                                        #      failure FAILs the pillar and enable is NOT attempted.
+                                        $fveKey = 'HKLM:\SOFTWARE\Policies\Microsoft\FVE'
+                                        $recMsg = 'Your device is locked and will require a Bitlocker Recovery Key. For key retrieval, you can use another government funded device or if teleworking, the Desktop Anywhere application for key recovery. There are two ways to access your key.   Option 1: Navigate to https://myaccount.azure.us and select your device under the managed device option. Instructions can be found under "How can I get my Bitlocker Recovery Key?" at https://usaf.dps.mil/teams/EnterpriseBitLockerActivation.   Option 2: If the bitlockered device is not listed, you''ll need to contact your local CST or submit a vESD ticket.'
+                                        $polDwords = @(
+                                            [pscustomobject]@{ Name='EnableBDEWithNoTPM';              Value=0 }
+                                            [pscustomobject]@{ Name='EncryptionMethodWithXtsFdv';      Value=7 }
+                                            [pscustomobject]@{ Name='EncryptionMethodWithXtsOs';       Value=7 }
+                                            [pscustomobject]@{ Name='EncryptionMethodWithXtsRdv';      Value=7 }
+                                            [pscustomobject]@{ Name='FDVActiveDirectoryBackup';        Value=1 }
+                                            [pscustomobject]@{ Name='FDVActiveDirectoryInfoToStore';   Value=2 }
+                                            [pscustomobject]@{ Name='FDVHideRecoveryPage';             Value=1 }
+                                            [pscustomobject]@{ Name='FDVManageDRA';                    Value=1 }
+                                            [pscustomobject]@{ Name='FDVRecovery';                     Value=1 }
+                                            [pscustomobject]@{ Name='FDVRecoveryKey';                  Value=2 }
+                                            [pscustomobject]@{ Name='FDVRecoveryPassword';             Value=1 }
+                                            [pscustomobject]@{ Name='FDVRequireActiveDirectoryBackup'; Value=1 }
+                                            [pscustomobject]@{ Name='OSActiveDirectoryBackup';         Value=1 }
+                                            [pscustomobject]@{ Name='OSActiveDirectoryInfoToStore';    Value=2 }
+                                            [pscustomobject]@{ Name='OSHideRecoveryPage';              Value=1 }
+                                            [pscustomobject]@{ Name='OSManageDRA';                     Value=1 }
+                                            [pscustomobject]@{ Name='OSRecovery';                      Value=1 }
+                                            [pscustomobject]@{ Name='OSRecoveryKey';                   Value=0 }
+                                            [pscustomobject]@{ Name='OSRecoveryPassword';              Value=2 }
+                                            [pscustomobject]@{ Name='OSRequireActiveDirectoryBackup';  Value=2 }
+                                            [pscustomobject]@{ Name='RecoveryKeyMessageSource';        Value=2 }
+                                            [pscustomobject]@{ Name='UseAdvancedStartup';              Value=1 }
+                                            [pscustomobject]@{ Name='UseTPM';                          Value=1 }
+                                        )
+                                        $polSet = 0; $polOk = 0; $polErr = ''
                                         try {
-                                            $beforeIds = @()
-                                            try { foreach ($k in @($bl.KeyProtector)) { $beforeIds += [string]$k.KeyProtectorId } } catch {}
-                                            $addRet = Add-BitLockerKeyProtector -MountPoint $sys -RecoveryPasswordProtector -ErrorAction Stop
-                                            try {
-                                                foreach ($k in @($addRet.KeyProtector)) {
-                                                    if (([string]$k.KeyProtectorType -match '(?i)RecoveryPassword') -and ($beforeIds -notcontains [string]$k.KeyProtectorId)) { $newKpId = [string]$k.KeyProtectorId; break }
-                                                }
-                                                if (-not $newKpId) {
-                                                    $rp = @($addRet.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' })
-                                                    if ($rp.Count -gt 0) { $newKpId = [string]$rp[$rp.Count - 1].KeyProtectorId }
-                                                }
-                                            } catch {}
-                                            try {
-                                                Backup-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
-                                                $escrowOk = $true
-                                            } catch {
-                                                $encFail = 'AD escrow failed - encryption NOT started'
-                                                try { if ($newKpId) { Remove-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction SilentlyContinue | Out-Null } } catch {}
+                                            $keyItem = $null
+                                            try { $keyItem = Get-Item -LiteralPath $fveKey -ErrorAction Stop } catch { $keyItem = $null }
+                                            if (-not $keyItem) {
+                                                New-Item -Path $fveKey -Force -ErrorAction Stop | Out-Null
+                                                try { $keyItem = Get-Item -LiteralPath $fveKey -ErrorAction Stop } catch { $keyItem = $null }
                                             }
-                                        } catch {
-                                            $encFail = "recovery-password protector add failed - encryption NOT started: $($_.Exception.Message)"
-                                        }
-                                        if (-not $escrowOk) {
-                                            if (-not $encFail) { $encFail = 'AD escrow failed - encryption NOT started' }
-                                            & $add 'Encryption' 'enable' 'FAIL' $encFail
+                                            foreach ($pv in $polDwords) {
+                                                $cur = $null
+                                                if ($keyItem) { try { $cur = $keyItem.GetValue($pv.Name, $null) } catch { $cur = $null } }
+                                                if (($null -ne $cur) -and ([int]$cur -eq [int]$pv.Value)) { $polOk++ }
+                                                else { New-ItemProperty -Path $fveKey -Name $pv.Name -PropertyType DWord -Value ([int]$pv.Value) -Force -ErrorAction Stop | Out-Null; $polSet++ }
+                                            }
+                                            $curMsg = $null
+                                            if ($keyItem) { try { $curMsg = $keyItem.GetValue('RecoveryKeyMessage', $null) } catch { $curMsg = $null } }
+                                            if (($null -ne $curMsg) -and ([string]$curMsg -eq $recMsg)) { $polOk++ }
+                                            else { New-ItemProperty -Path $fveKey -Name 'RecoveryKeyMessage' -PropertyType String -Value $recMsg -Force -ErrorAction Stop | Out-Null; $polSet++ }
+                                        } catch { $polErr = $_.Exception.Message }
+
+                                        if ($polErr) {
+                                            & $add 'Encryption' 'enable' 'FAIL' "FVE policy assert failed: $polErr"
                                         } else {
-                                            # Escrow confirmed -> start FULL-volume encryption (TPM protector, XtsAes256).
+                                            $polTxt = "FVE policy: $polSet set/corrected, $polOk already-correct"
+                                            # ---- Step 2: REUSE an existing RecoveryPassword protector if one exists;
+                                            #      only Add one when none is present (track whether WE added it).
+                                            $weAdded = $false; $newKpId = ''; $encFail = ''
                                             try {
-                                                Enable-BitLocker -MountPoint $sys -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
-                                                Start-Sleep -Milliseconds 500
-                                                $blE = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
-                                                $vsE = [string]$blE.VolumeStatus
-                                                $pctE = ''
-                                                try { $pctE = [string]$blE.EncryptionPercentage } catch {}
-                                                if ($vsE -match '(?i)FullyDecrypted') {
-                                                    & $add 'Encryption' 'enable' 'FAIL' 'Enable-BitLocker returned but volume still FullyDecrypted - encryption did not start'
+                                                $existingRp = @()
+                                                try { $existingRp = @($bl.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' }) } catch { $existingRp = @() }
+                                                if ($existingRp.Count -gt 0) {
+                                                    $newKpId = [string]$existingRp[0].KeyProtectorId
                                                 } else {
-                                                    & $add 'Encryption' 'enable' 'STARTED' "encryption started (XtsAes256, TPM+RecoveryPassword escrowed to AD) - $pctE% done; protection activates on completion; Tanium clears after next scan"
+                                                    $beforeIds = @()
+                                                    try { foreach ($k in @($bl.KeyProtector)) { $beforeIds += [string]$k.KeyProtectorId } } catch {}
+                                                    $addRet = Add-BitLockerKeyProtector -MountPoint $sys -RecoveryPasswordProtector -ErrorAction Stop
+                                                    $weAdded = $true
+                                                    try {
+                                                        foreach ($k in @($addRet.KeyProtector)) {
+                                                            if (([string]$k.KeyProtectorType -match '(?i)RecoveryPassword') -and ($beforeIds -notcontains [string]$k.KeyProtectorId)) { $newKpId = [string]$k.KeyProtectorId; break }
+                                                        }
+                                                        if (-not $newKpId) {
+                                                            $rp = @($addRet.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' })
+                                                            if ($rp.Count -gt 0) { $newKpId = [string]$rp[$rp.Count - 1].KeyProtectorId }
+                                                        }
+                                                    } catch {}
                                                 }
                                             } catch {
-                                                & $add 'Encryption' 'enable' 'FAIL' "escrow succeeded but Enable-BitLocker failed: $($_.Exception.Message)"
+                                                $encFail = "recovery-password protector add failed - encryption NOT started: $($_.Exception.Message)"
+                                            }
+
+                                            if ($encFail) {
+                                                & $add 'Encryption' 'enable' 'FAIL' $encFail
+                                            } else {
+                                                # ---- Step 3: escrow FAIL-CLOSED, Entra first then on-prem AD. Record which
+                                                #      target took the key. If BOTH fail: remove the protector only if WE added
+                                                #      it this run (a pre-existing protector is never removed), then FAIL.
+                                                $escrowOk = $false; $escrowTarget = ''
+                                                try {
+                                                    if (Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue) {
+                                                        try {
+                                                            BackupToAAD-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
+                                                            $escrowOk = $true; $escrowTarget = 'Entra'
+                                                        } catch { $escrowOk = $false }
+                                                    }
+                                                    if (-not $escrowOk) {
+                                                        Backup-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction Stop | Out-Null
+                                                        $escrowOk = $true; $escrowTarget = 'AD'
+                                                    }
+                                                } catch { $escrowOk = $false }
+
+                                                if (-not $escrowOk) {
+                                                    if ($weAdded) { try { if ($newKpId) { Remove-BitLockerKeyProtector -MountPoint $sys -KeyProtectorId $newKpId -ErrorAction SilentlyContinue | Out-Null } } catch {} }
+                                                    & $add 'Encryption' 'enable' 'FAIL' 'escrow failed (Entra + AD) - encryption NOT started'
+                                                } else {
+                                                    # ---- Step 4: escrow confirmed -> start FULL-volume encryption (TPM protector, XtsAes256).
+                                                    try {
+                                                        Enable-BitLocker -MountPoint $sys -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
+                                                        Start-Sleep -Milliseconds 500
+                                                        $blE = Get-BitLockerVolume -MountPoint $sys -ErrorAction Stop
+                                                        $vsE = [string]$blE.VolumeStatus
+                                                        $pctE = ''
+                                                        try { $pctE = [string]$blE.EncryptionPercentage } catch {}
+                                                        if ($vsE -match '(?i)FullyDecrypted') {
+                                                            & $add 'Encryption' 'enable' 'FAIL' 'Enable-BitLocker returned but volume still FullyDecrypted - encryption did not start'
+                                                        } else {
+                                                            & $add 'Encryption' 'enable' 'STARTED' "encryption started (XtsAes256, TPM+RecoveryPassword escrowed to $escrowTarget) - $pctE% done; $polTxt; protection activates on completion; Tanium clears after next scan"
+                                                        }
+                                                    } catch {
+                                                        & $add 'Encryption' 'enable' 'FAIL' "escrow succeeded but Enable-BitLocker failed: $($_.Exception.Message)"
+                                                    }
+                                                }
                                             }
                                         }
                                     }

@@ -1,5 +1,5 @@
 /* ============================================================================
-   c2c.view.js  -  C2C Readiness (tool id: 'c2c')
+   c2c.view.js  -  C2C Nemesis (tool id: 'c2c')
    Read-only Comply-to-Connect (AFI/MPTO rule 3.B.2.B) quarantine predictor.
    Faithful single-window (non-tabbed) build mirroring the suite idiom
    (winupgrade / wpt): a left config column (TARGET COMPUTERS at the top, a
@@ -266,7 +266,7 @@
       var resHdr = el('div', 'j-section-h', 'RESULTS'); resHdr.style.marginBottom = '6px';
       resultsCard.appendChild(resHdr);
       var grid = C.ResultsGrid({
-        title: 'C2C readiness results',
+        title: 'C2C Nemesis results',
         emptyText: 'No results yet — add computers, then run C2C Readiness Scan.',
         keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
@@ -563,7 +563,7 @@
       }
 
       // =================== init ===================
-      log.append({ text: 'C2C Readiness ready. Add computers, then run the C2C Readiness Scan (read-only - changes nothing, no admin session needed).', level: 'accent' });
+      log.append({ text: 'C2C Nemesis ready. Add computers, then run the C2C Readiness Scan (read-only - changes nothing, no admin session needed).', level: 'accent' });
       log.append({ text: '9 scored checks (Monitoring, Firewall, AntiMalware, Patches, Encryption, AppWhitelist, Agents, PkiRoots, Hostname) + 2 EXT (VulnThreshold, Coams). The full per-check report streams here.', level: 'dim' });
 
       host.appendChild(root);

@@ -1,4 +1,8 @@
-# JANET Web - UI Spec: c2c (C2C Readiness)
+# JANET Web - UI Spec: c2c (C2C Nemesis)
+
+> Renamed 2026-07-08: display name **C2C Readiness -> C2C Nemesis** (tool id `c2c`
+> is unchanged - routes, registry keys, view registration and log/export names all
+> stay `c2c` / "C2C Readiness Scan").
 
 > Net-new JANET Web tool (no desktop twin). Read-only Comply-to-Connect quarantine
 > predictor. This is a standard `stream-table` tool: paste targets, run one action,
@@ -8,7 +12,7 @@
 
 ## Summary
 
-**C2C Readiness** (tool id `c2c`, category **Reporting**, icon `E72E`) predicts
+**C2C Nemesis** (tool id `c2c`, category **Reporting**, icon `E72E`) predicts
 whether each host would be **QUARANTINED** under AFI/MPTO **Comply-to-Connect rule
 3.B.2.B**. It fans out over WinRM, runs **one consolidated read-only probe per
 host** (11 C2C checks in a single `Invoke-Command` round-trip), emits **one result

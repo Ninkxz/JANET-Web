@@ -1,14 +1,22 @@
 ﻿# =============================================================================
-#  C2c.Enable.Tests.ps1 - Pester 3.4 tests for the C2C Mass Fix v1.2.0 opt-in
-#  BitLocker ENABLE path (Encryption pillar). Proves ESCROW-FIRST / FAIL-CLOSED
-#  behaviour by driving the module-scoped per-host worker ($script:C2cFixBlock)
-#  with the suite's shim idiom: New-PSSession / Remove-PSSession / Invoke-Command
-#  and every BitLocker/TPM/CIM cmdlet are shadowed IN MODULE SCOPE, so the enable
-#  logic runs LOCALLY against fakes and NO WinRM call ever leaves this box.
+#  C2c.Enable.Tests.ps1 - Pester 3.4 tests for the C2C Mass Fix v1.3.0 opt-in
+#  BitLocker ENABLE path (Encryption pillar). Proves the enable sequence now
+#  MIRRORS the enterprise USAF enable script - (1) assert FVE policy, (2) reuse-
+#  or-add a RecoveryPassword protector, (3) escrow Entra-first with an on-prem AD
+#  fallback, (4) Enable-BitLocker - while KEEPING our deliberate fail-closed
+#  semantics (if BOTH escrow paths fail, Enable is unreachable and the pillar
+#  FAILs; a protector we added is removed, a pre-existing one is not).
+#
+#  Driven with the suite's shim idiom: New-PSSession / Remove-PSSession /
+#  Invoke-Command, every BitLocker/TPM/CIM cmdlet, the Entra + AD escrow cmdlets,
+#  and the FVE-policy registry cmdlets (Get-Item / New-Item / New-ItemProperty)
+#  are shadowed IN MODULE SCOPE, so the enable logic runs LOCALLY against fakes
+#  and NO WinRM call and NO real registry write ever leaves this box.
 #
 #  The shimmed Invoke-Command EXECUTES the remote fix scriptblock locally
 #  (& $ScriptBlock @ArgumentList) against the shimmed cmdlets, which is how the
-#  Add -> Backup -> Enable order and the recovery-password redaction are observed.
+#  Policy -> Add -> escrow -> Enable order and the recovery-password redaction
+#  are observed.
 #
 #  Run:  Invoke-Pester -Path .\tests\C2c.Enable.Tests.ps1
 # =============================================================================
@@ -16,7 +24,13 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
 
 # Drive the per-host worker with mocked cmdlets. $Scenario tunes the fakes:
-#   happy | escrowfail | tpmnotready | notdomain
+#   happy           - policy ok, no pre-existing protector, Entra escrow succeeds.
+#   entrafail       - Entra throws, on-prem AD escrow succeeds.
+#   bothfail        - both escrow paths throw; WE added the protector.
+#   preexisthappy   - a RecoveryPassword protector already exists; Entra succeeds.
+#   preexistbothfail- pre-existing protector; both escrow paths throw.
+#   policyfail      - the FVE policy registry write throws.
+#   tpmnotready | notdomain - precondition gates (unchanged).
 function Invoke-C2cEnable {
     param([bool]$DoEnable, [string]$Scenario = 'happy')
     & $cm {
@@ -28,6 +42,10 @@ function Invoke-C2cEnable {
         $script:__sentinel    = $sentinel
         $script:__encMethod   = ''
         $script:__usedSpace   = $false
+        $script:__escrowId    = ''
+        $script:__preexist    = ($Scenario -eq 'preexisthappy' -or $Scenario -eq 'preexistbothfail')
+        $script:__entraThrow  = ($Scenario -eq 'entrafail' -or $Scenario -eq 'bothfail' -or $Scenario -eq 'preexistbothfail')
+        $script:__adThrow     = ($Scenario -eq 'bothfail' -or $Scenario -eq 'preexistbothfail')
 
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
@@ -40,7 +58,9 @@ function Invoke-C2cEnable {
             param($MountPoint, $ErrorAction)
             $script:__blCalls++
             if ($script:__blCalls -eq 1) {
-                return [pscustomobject]@{ ProtectionStatus = 'Off'; VolumeStatus = 'FullyDecrypted'; VolumeType = 'OperatingSystem'; EncryptionPercentage = 0; KeyProtector = @() }
+                $kps = @()
+                if ($script:__preexist) { $kps = @([pscustomobject]@{ KeyProtectorType = 'RecoveryPassword'; KeyProtectorId = '{PRE-KP}'; RecoveryPassword = $script:__sentinel }) }
+                return [pscustomobject]@{ ProtectionStatus = 'Off'; VolumeStatus = 'FullyDecrypted'; VolumeType = 'OperatingSystem'; EncryptionPercentage = 0; KeyProtector = $kps }
             }
             # post-Enable verify re-read
             return [pscustomobject]@{ ProtectionStatus = 'Off'; VolumeStatus = 'EncryptionInProgress'; VolumeType = 'OperatingSystem'; EncryptionPercentage = 2; KeyProtector = @() }
@@ -58,15 +78,38 @@ function Invoke-C2cEnable {
             $joined = ($script:__scenario -ne 'notdomain')
             return [pscustomobject]@{ PartOfDomain = $joined }
         }
+        # --- FVE policy registry shims (no real HKLM write) ---------------------
+        function script:Get-Item {
+            param($LiteralPath, $Path, $ErrorAction)
+            # Return a fake registry key whose GetValue() reports "value absent" so the
+            # policy assert treats every value as set/corrected (no real registry read).
+            $o = New-Object psobject
+            Add-Member -InputObject $o -MemberType ScriptMethod -Name GetValue -Value { param($n, $d) $null }
+            return $o
+        }
+        function script:New-Item { param($Path, [switch]$Force, $ErrorAction) }
+        function script:New-ItemProperty {
+            param($Path, $Name, $PropertyType, $Value, [switch]$Force, $ErrorAction)
+            if ($script:__scenario -eq 'policyfail') { throw 'registry write denied (test)' }
+            if (-not ($script:__order -contains 'Policy')) { [void]$script:__order.Add('Policy') }
+        }
+        # --- protector + escrow shims -------------------------------------------
         function script:Add-BitLockerKeyProtector {
             param($MountPoint, [switch]$RecoveryPasswordProtector, $ErrorAction)
             [void]$script:__order.Add('Add')
             return [pscustomobject]@{ KeyProtector = @([pscustomobject]@{ KeyProtectorType = 'RecoveryPassword'; KeyProtectorId = '{NEW-KP}'; RecoveryPassword = $script:__sentinel }) }
         }
+        function script:BackupToAAD-BitLockerKeyProtector {
+            param($MountPoint, $KeyProtectorId, $ErrorAction)
+            [void]$script:__order.Add('Entra')
+            $script:__escrowId = [string]$KeyProtectorId
+            if ($script:__entraThrow) { throw 'Entra (AAD) escrow failed (test)' }
+        }
         function script:Backup-BitLockerKeyProtector {
             param($MountPoint, $KeyProtectorId, $ErrorAction)
-            [void]$script:__order.Add('Backup')
-            if ($script:__scenario -eq 'escrowfail') { throw 'AD backup RPC failed' }
+            [void]$script:__order.Add('AD')
+            $script:__escrowId = [string]$KeyProtectorId
+            if ($script:__adThrow) { throw 'AD backup RPC failed (test)' }
         }
         function script:Remove-BitLockerKeyProtector {
             param($MountPoint, $KeyProtectorId, $ErrorAction)
@@ -88,99 +131,163 @@ function Invoke-C2cEnable {
             foreach ($p in $pillars) { $blob += ('|' + [string]$p.Name + '|' + [string]$p.Result + '|' + [string]$p.Detail) }
             $blob += ('|' + [string]$res.Detail + '|' + [string]$res.Report)
             [pscustomobject]@{
-                Status        = [string]$res.Status
-                EncResult     = $(if ($enc.Count) { [string]$enc[0].Result } else { '' })
-                EncDetail     = $(if ($enc.Count) { [string]$enc[0].Detail } else { '' })
-                Report        = [string]$res.Report
-                Order         = @($script:__order.ToArray())
-                AddCalled     = (@($script:__order) -contains 'Add')
-                BackupCalled  = (@($script:__order) -contains 'Backup')
-                RemoveCalled  = (@($script:__order) -contains 'Remove')
-                EnableCalled  = (@($script:__order) -contains 'Enable')
-                EncMethod     = [string]$script:__encMethod
-                UsedSpaceOnly = [bool]$script:__usedSpace
-                Leaked        = [bool]($blob -match [regex]::Escape($script:__sentinel))
+                Status         = [string]$res.Status
+                EncResult      = $(if ($enc.Count) { [string]$enc[0].Result } else { '' })
+                EncDetail      = $(if ($enc.Count) { [string]$enc[0].Detail } else { '' })
+                Report         = [string]$res.Report
+                Order          = @($script:__order.ToArray())
+                PolicyAsserted = (@($script:__order) -contains 'Policy')
+                AddCalled      = (@($script:__order) -contains 'Add')
+                EntraCalled    = (@($script:__order) -contains 'Entra')
+                AdCalled       = (@($script:__order) -contains 'AD')
+                RemoveCalled   = (@($script:__order) -contains 'Remove')
+                EnableCalled   = (@($script:__order) -contains 'Enable')
+                EscrowId       = [string]$script:__escrowId
+                EncMethod      = [string]$script:__encMethod
+                UsedSpaceOnly  = [bool]$script:__usedSpace
+                Leaked         = [bool]($blob -match [regex]::Escape($script:__sentinel))
             }
         } finally {
             Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
                 function:script:Get-BitLockerVolume, function:script:Get-Tpm, function:script:Get-CimInstance, `
-                function:script:Add-BitLockerKeyProtector, function:script:Backup-BitLockerKeyProtector, `
+                function:script:Get-Item, function:script:New-Item, function:script:New-ItemProperty, `
+                function:script:Add-BitLockerKeyProtector, function:script:BackupToAAD-BitLockerKeyProtector, `
+                function:script:Backup-BitLockerKeyProtector, `
                 function:script:Remove-BitLockerKeyProtector, function:script:Enable-BitLocker -ErrorAction SilentlyContinue
         }
     } $DoEnable $Scenario
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C Mass Fix v1.2.0 - opt-in BitLocker ENABLE (escrow-first, fail-closed)' {
+Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-first, fail-closed)' {
 
-    It '(a) escrow (Backup) FAILS => Enable-BitLocker NEVER called, protector removed, result FAIL' {
-        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'escrowfail'
-        $r.AddCalled    | Should Be $true
-        $r.BackupCalled | Should Be $true
-        $r.RemoveCalled | Should Be $true
+    It '(a) FVE policy assert FAILS => Add / escrow / Enable all uncalled, result FAIL' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'policyfail'
+        $r.EncResult    | Should Be 'FAIL'
+        $r.EncDetail    | Should Match 'FVE policy assert failed'
+        $r.AddCalled    | Should Be $false
+        $r.EntraCalled  | Should Be $false
+        $r.AdCalled     | Should Be $false
+        $r.EnableCalled | Should Be $false
+    }
+
+    It '(b) a pre-existing RecoveryPassword protector is REUSED (no Add), its id is escrowed, and on double-escrow-failure it is NOT removed' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'preexistbothfail'
+        $r.AddCalled    | Should Be $false
+        $r.EscrowId     | Should Be '{PRE-KP}'
+        $r.EntraCalled  | Should Be $true
+        $r.AdCalled     | Should Be $true
+        $r.RemoveCalled | Should Be $false     # pre-existing protector is never removed
         $r.EnableCalled | Should Be $false
         $r.EncResult    | Should Be 'FAIL'
-        $r.EncDetail    | Should Match 'AD escrow failed - encryption NOT started'
+        $r.EncDetail    | Should Match 'escrow failed \(Entra \+ AD\)'
     }
 
-    It '(b) TPM not ready => SKIP, no protector added, Enable never called' {
-        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'tpmnotready'
-        $r.EncResult    | Should Be 'SKIP'
-        $r.EncDetail    | Should Match 'TPM not ready'
-        $r.AddCalled    | Should Be $false
-        $r.EnableCalled | Should Be $false
-    }
-
-    It '(c) not domain-joined => SKIP, no protector added, Enable never called' {
-        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'notdomain'
-        $r.EncResult    | Should Be 'SKIP'
-        $r.EncDetail    | Should Match 'not domain-joined'
-        $r.AddCalled    | Should Be $false
-        $r.EnableCalled | Should Be $false
-    }
-
-    It '(d) REGRESSION: enableEncryption OFF + FullyDecrypted => today''s SKIP routing text (nothing changed)' {
-        $r = Invoke-C2cEnable -DoEnable $false -Scenario 'happy'
-        $r.EncResult    | Should Be 'SKIP'
-        $r.EncDetail    | Should Match 'route to MECM/desk-side'
-        $r.EncDetail    | Should Match 'TPM\+recovery-key escrow policy'
-        $r.AddCalled    | Should Be $false
-        $r.EnableCalled | Should Be $false
-    }
-
-    It '(e) HAPPY PATH: call order is Add -> Backup -> Enable, result STARTED, XtsAes256 full-volume' {
+    It '(c) Entra escrow SUCCEEDS => on-prem AD backup is never called, detail names Entra' {
         $r = Invoke-C2cEnable -DoEnable $true -Scenario 'happy'
-        $r.EncResult    | Should Be 'STARTED'
-        $r.Status       | Should Be 'FIXED'          # STARTED rolls up like FIXED
+        $r.EntraCalled  | Should Be $true
+        $r.AdCalled     | Should Be $false
         $r.EnableCalled | Should Be $true
-        $r.RemoveCalled | Should Be $false
-        $r.EncMethod    | Should Be 'XtsAes256'
-        $r.UsedSpaceOnly | Should Be $false          # full-volume (no -UsedSpaceOnly)
-        # exact call ordering: Add, then Backup, then Enable.
-        $order = @($r.Order)
-        $iAdd = [array]::IndexOf($order, 'Add')
-        $iBak = [array]::IndexOf($order, 'Backup')
-        $iEn  = [array]::IndexOf($order, 'Enable')
-        $iAdd | Should Not Be -1
-        ($iAdd -lt $iBak) | Should Be $true
-        ($iBak -lt $iEn)  | Should Be $true
+        $r.EncResult    | Should Be 'STARTED'
+        $r.EncDetail    | Should Match 'escrowed to Entra'
     }
 
-    It '(e) HAPPY PATH: the recovery password is NEVER present in the pillar object or report text' {
+    It '(d) Entra escrow THROWS => on-prem AD backup is called and succeeds, detail names AD' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'entrafail'
+        $r.EntraCalled  | Should Be $true
+        $r.AdCalled     | Should Be $true
+        $r.EnableCalled | Should Be $true
+        $r.EncResult    | Should Be 'STARTED'
+        $r.EncDetail    | Should Match 'escrowed to AD'
+    }
+
+    It '(e) BOTH escrow paths fail AND we added the protector => Remove called, Enable unreachable, FAIL' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'bothfail'
+        $r.AddCalled    | Should Be $true
+        $r.EntraCalled  | Should Be $true
+        $r.AdCalled     | Should Be $true
+        $r.RemoveCalled | Should Be $true      # we added it => remove it
+        $r.EnableCalled | Should Be $false     # enable is unreachable
+        $r.EncResult    | Should Be 'FAIL'
+        $r.EncDetail    | Should Match 'escrow failed \(Entra \+ AD\) - encryption NOT started'
+    }
+
+    It '(f) HAPPY PATH order is Policy -> Add -> escrow -> Enable, result STARTED, XtsAes256 full-volume' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'happy'
+        $r.EncResult     | Should Be 'STARTED'
+        $r.Status        | Should Be 'FIXED'          # STARTED rolls up like FIXED
+        $r.EncMethod     | Should Be 'XtsAes256'
+        $r.UsedSpaceOnly | Should Be $false           # full-volume (no -UsedSpaceOnly)
+        $r.PolicyAsserted | Should Be $true
+        # exact call ordering: Policy, then Add, then escrow (Entra), then Enable.
+        $order = @($r.Order)
+        $iPol = [array]::IndexOf($order, 'Policy')
+        $iAdd = [array]::IndexOf($order, 'Add')
+        $iEsc = [array]::IndexOf($order, 'Entra')
+        $iEn  = [array]::IndexOf($order, 'Enable')
+        $iPol | Should Not Be -1
+        ($iPol -lt $iAdd) | Should Be $true
+        ($iAdd -lt $iEsc) | Should Be $true
+        ($iEsc -lt $iEn)  | Should Be $true
+    }
+
+    It '(g) HAPPY PATH: the recovery password is NEVER present in the pillar object or report text' {
         $r = Invoke-C2cEnable -DoEnable $true -Scenario 'happy'
         $r.Leaked | Should Be $false
+    }
+
+    It '(g2) pre-existing + Entra success: recovery password still never leaks and the pre-existing id is escrowed' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'preexisthappy'
+        $r.AddCalled | Should Be $false
+        $r.EscrowId  | Should Be '{PRE-KP}'
+        $r.EncResult | Should Be 'STARTED'
+        $r.Leaked    | Should Be $false
+    }
+
+    It '(h) TPM not ready => SKIP, no policy write, no protector, escrow + Enable never called' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'tpmnotready'
+        $r.EncResult      | Should Be 'SKIP'
+        $r.EncDetail      | Should Match 'TPM not ready'
+        $r.PolicyAsserted | Should Be $false
+        $r.AddCalled      | Should Be $false
+        $r.EnableCalled   | Should Be $false
+    }
+
+    It '(h) not domain-joined => SKIP, no policy write, no protector, escrow + Enable never called' {
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'notdomain'
+        $r.EncResult      | Should Be 'SKIP'
+        $r.EncDetail      | Should Match 'not domain-joined'
+        $r.PolicyAsserted | Should Be $false
+        $r.AddCalled      | Should Be $false
+        $r.EnableCalled   | Should Be $false
+    }
+
+    It 'REGRESSION: enableEncryption OFF + FullyDecrypted => today''s SKIP routing text (nothing changed)' {
+        $r = Invoke-C2cEnable -DoEnable $false -Scenario 'happy'
+        $r.EncResult      | Should Be 'SKIP'
+        $r.EncDetail      | Should Match 'route to MECM/desk-side'
+        $r.EncDetail      | Should Match 'TPM\+recovery-key escrow policy'
+        $r.PolicyAsserted | Should Be $false
+        $r.AddCalled      | Should Be $false
+        $r.EnableCalled   | Should Be $false
     }
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - fix action exposes enableEncryption (default off), version 1.2.0' {
+Describe 'C2C manifest - C2C Nemesis, fix action exposes enableEncryption (default off), version 1.3.0' {
 
     $man = Get-JanetToolManifest
     $fix = @($man.actions | Where-Object { $_.id -eq 'fix' })[0]
     $inp = @($fix.inputs | Where-Object { $_.name -eq 'enableEncryption' })[0]
 
-    It 'reports tool version 1.2.0' {
-        $man.version | Should Be '1.2.0'
+    It 'reports the display name C2C Nemesis' {
+        $man.name | Should Be 'C2C Nemesis'
+    }
+    It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
+        $man.id | Should Be 'c2c'
+    }
+    It 'reports tool version 1.3.0' {
+        $man.version | Should Be '1.3.0'
     }
     It 'the fix action declares the enableEncryption input' {
         $inp | Should Not BeNullOrEmpty
@@ -189,7 +296,9 @@ Describe 'C2C manifest - fix action exposes enableEncryption (default off), vers
     It 'enableEncryption defaults to $false (resume stays the default; enable is opt-in)' {
         [bool]$inp.default | Should Be $false
     }
-    It 'the fix description states the escrow-first / XtsAes256 / TPM-gated enable behaviour' {
+    It 'the fix description states the FVE-policy + Entra-first/AD-fallback / escrow-first / XtsAes256 enable behaviour' {
+        $fix.description | Should Match 'FVE'
+        $fix.description | Should Match 'Entra-first'
         $fix.description | Should Match 'ESCROW-FIRST'
         $fix.description | Should Match 'XtsAes256'
         $fix.description | Should Match 'never started'
