@@ -1,15 +1,16 @@
 ﻿# =============================================================================
 #  C2c.ImportAndFix.Tests.ps1 - Pester 3.4 tests for the C2C action side
-#  (v1.1.0): the Tanium "C2C Compliance Status" CSV IMPORT parser and the
-#  destructive MASS FIX guards.
+#  (v1.4.0): the Tanium "C2C Compliance Status" CSV IMPORT parser (incl. the
+#  runAllPlan) and the destructive PER-PILLAR fix guards (fix-monitoring /
+#  fix-firewall / fix-antimalware / fix-pki, etc.).
 #
 #  All tests exercise the PUBLIC contract (Invoke-JanetToolAction) so no
 #  internal helper is shimmed and NO WinRM call ever leaves this box:
-#    * import  - local parse only (no remote).
-#    * fix     - every negative case is refused BEFORE any host is dialed
-#                (confirm-word, PKI-without-sst, junk targets), and the
-#                self-guard case only supplies dispatcher-local targets so the
-#                run short-circuits with zero fan-out.
+#    * import   - local parse only (no remote).
+#    * fix-*    - every negative case is refused BEFORE any host is dialed
+#                 (confirm-word, PKI-without-sst, junk targets), and the
+#                 self-guard case only supplies dispatcher-local targets so the
+#                 run short-circuits with zero fan-out.
 #
 #  Run:  Invoke-Pester -Path .\tests\C2c.ImportAndFix.Tests.ps1
 # =============================================================================
@@ -103,33 +104,46 @@ Compliant,,,HOSTC.area52.afnoapps.usaf.mil,1
         $enc.failedCount | Should Be 1
     }
 
+    It 'emits a runAllPlan of each host + ONLY its endpoint-fixable failed pillars (verbatim for run-all)' {
+        $plan = @($summary.runAllPlan)
+        # HOSTA has fixable failed pillars (Encryption + AntiMalware); HOSTB fails only
+        # Vuln (routes off-tool) so it is omitted; the unknown rule is not fixable either.
+        $plan.Count | Should Be 1
+        $pa = @($plan | Where-Object { $_.host -eq 'HOSTA' })[0]
+        $pa | Should Not BeNullOrEmpty
+        @($pa.pillars) -contains 'Encryption'  | Should Be $true
+        @($pa.pillars) -contains 'AntiMalware' | Should Be $true
+        @($pa.pillars) -contains 'Vuln'        | Should Be $false
+        @($plan | Where-Object { $_.host -eq 'HOSTB' }).Count | Should Be 0
+    }
+
     # Pester 3.4 runs the Describe body top-to-bottom, so this cleanup fires after
     # the It blocks above (which already parsed the fixture).
     Remove-Item -LiteralPath $csv -Force -ErrorAction SilentlyContinue
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C Mass Fix - confirm-word gate' {
+Describe 'C2C per-pillar fix - confirm-word gate' {
 
     It 'REJECTS the run when the confirm word is not exactly FIX (nothing changed)' {
-        $out = Invoke-C2cAction -ActionId 'fix' -Params @{ targets = 'WS-0001'; confirm = 'nope' }
+        $out = Invoke-C2cAction -ActionId 'fix-monitoring' -Params @{ targets = 'WS-0001'; confirm = 'nope' }
         $out.Result.summary.rejected | Should Be $true
         @($out.Rows).Count | Should Be 0
     }
 
     It 'REJECTS a lower-case "fix" (case-sensitive, exact word)' {
-        $out = Invoke-C2cAction -ActionId 'fix' -Params @{ targets = 'WS-0001'; confirm = 'fix' }
+        $out = Invoke-C2cAction -ActionId 'fix-firewall' -Params @{ targets = 'WS-0001'; confirm = 'fix' }
         $out.Result.summary.rejected | Should Be $true
     }
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C Mass Fix - self-guard drops the dispatcher host' {
+Describe 'C2C per-pillar fix - self-guard drops the dispatcher host' {
 
     It 'drops local host targets with a SKIPPED row and never fans out' {
         # Only dispatcher-local targets -> after the self-guard drop there is nothing
         # to run, so the action short-circuits with zero WinRM fan-out.
-        $out = Invoke-C2cAction -ActionId 'fix' -Params @{
+        $out = Invoke-C2cAction -ActionId 'fix-antimalware' -Params @{
             targets = ("{0}`n127.0.0.1`nlocalhost" -f $env:COMPUTERNAME)
             confirm = 'FIX'
         }
@@ -142,29 +156,29 @@ Describe 'C2C Mass Fix - self-guard drops the dispatcher host' {
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C Mass Fix - PKI roots require a valid .sst' {
+Describe 'C2C fix-pki - PKI roots require a valid .sst' {
 
-    It 'REFUSES fixPki with no .sst attached (before any host is dialed)' {
-        $out = Invoke-C2cAction -ActionId 'fix' -Params @{ targets = 'WS-0001'; confirm = 'FIX'; fixEncryption = $false; fixDefender = $false; kickPatchCycle = $false; fixPki = $true }
+    It 'REFUSES fix-pki with no .sst attached (before any host is dialed)' {
+        $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'FIX' }
         $out.Result.summary.rejected | Should Be $true
         @($out.Rows).Count | Should Be 0
     }
 
-    It 'REFUSES fixPki when the .sst does not load as a certificate bundle' {
+    It 'REFUSES fix-pki when the .sst does not load as a certificate bundle' {
         $bogus = Join-Path ([System.IO.Path]::GetTempPath()) ("c2c_bogus_{0}.sst" -f ([guid]::NewGuid().ToString('N')))
         Set-Content -LiteralPath $bogus -Value 'this is not a certificate store' -Encoding UTF8
         try {
-            $out = Invoke-C2cAction -ActionId 'fix' -Params @{ targets = 'WS-0001'; confirm = 'FIX'; fixEncryption = $false; fixDefender = $false; kickPatchCycle = $false; fixPki = $true; sstPath = $bogus }
+            $out = Invoke-C2cAction -ActionId 'fix-pki' -Params @{ targets = 'WS-0001'; confirm = 'FIX'; sstPath = $bogus }
             $out.Result.summary.rejected | Should Be $true
         } finally { Remove-Item -LiteralPath $bogus -Force -ErrorAction SilentlyContinue }
     }
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C Mass Fix - target token regex rejects junk' {
+Describe 'C2C per-pillar fix - target token regex rejects junk' {
 
     It 'refuses a run whose targets are all UNC/URL/leading-hyphen junk (0 valid, no fan-out)' {
-        $out = Invoke-C2cAction -ActionId 'fix' -Params @{
+        $out = Invoke-C2cAction -ActionId 'fix-monitoring' -Params @{
             targets = "\\evil\share`n../etc/passwd`n-badname`nhttp://x/y"
             confirm = 'FIX'
         }
@@ -173,7 +187,7 @@ Describe 'C2C Mass Fix - target token regex rejects junk' {
     }
 
     It 'requires the exact confirm word even when targets are junk (confirm gate is first)' {
-        $out = Invoke-C2cAction -ActionId 'fix' -Params @{ targets = '\\evil\share'; confirm = 'no' }
+        $out = Invoke-C2cAction -ActionId 'fix-monitoring' -Params @{ targets = '\\evil\share'; confirm = 'no' }
         $out.Result.summary.rejected | Should Be $true
     }
 }

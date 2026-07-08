@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-#  C2c.Enable.Tests.ps1 - Pester 3.4 tests for the C2C Mass Fix v1.3.0 opt-in
-#  BitLocker ENABLE path (Encryption pillar). Proves the enable sequence now
+#  C2c.Enable.Tests.ps1 - Pester 3.4 tests for the C2C v1.4.0 fix-encryption
+#  opt-in BitLocker ENABLE path (Encryption pillar). Proves the enable sequence
 #  MIRRORS the enterprise USAF enable script - (1) assert FVE policy, (2) reuse-
 #  or-add a RecoveryPassword protector, (3) escrow Entra-first with an on-prem AD
 #  fallback, (4) Enable-BitLocker - while KEEPING our deliberate fail-closed
@@ -124,7 +124,8 @@ function Invoke-C2cEnable {
 
         try {
             # target = self so the wrong-box guard passes (answering box == dialed short name).
-            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true $true $false $false $false $DoEnable ''
+            # v1.4.0 worker signature: Computer, Cred, Auth, AttemptOffline, Pillars[], DoEnable, SstB64, TaniumService.
+            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Encryption') $DoEnable '' 'Tanium Client'
             $pillars = @($res.Pillars)
             $enc = @($pillars | Where-Object { $_.Name -eq 'Encryption' })
             $blob = ''
@@ -274,11 +275,13 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - C2C Nemesis, fix action exposes enableEncryption (default off), version 1.3.0' {
+Describe 'C2C manifest - C2C Nemesis v1.4.0, per-pillar fix actions + run-all' {
 
     $man = Get-JanetToolManifest
-    $fix = @($man.actions | Where-Object { $_.id -eq 'fix' })[0]
+    $fix = @($man.actions | Where-Object { $_.id -eq 'fix-encryption' })[0]
     $inp = @($fix.inputs | Where-Object { $_.name -eq 'enableEncryption' })[0]
+    $fixIds  = @('fix-monitoring','fix-firewall','fix-antimalware','fix-patches','fix-encryption','fix-pki')
+    $destIds = @($fixIds + 'run-all')
 
     It 'reports the display name C2C Nemesis' {
         $man.name | Should Be 'C2C Nemesis'
@@ -286,17 +289,46 @@ Describe 'C2C manifest - C2C Nemesis, fix action exposes enableEncryption (defau
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.3.0' {
-        $man.version | Should Be '1.3.0'
+    It 'reports tool version 1.4.0' {
+        $man.version | Should Be '1.4.0'
     }
-    It 'the fix action declares the enableEncryption input' {
+    It 'exposes 9 actions: scan + import + six per-pillar fixes + run-all' {
+        # NB the operator brief said "8 actions incl. run-all"; the enumerated set is
+        # actually 9 (scan + import + 6 fix-* + run-all). We assert the real count.
+        @($man.actions).Count | Should Be 9
+    }
+    It 'has scan + import (read-only) and all fix-* + run-all (destructive)' {
+        (@($man.actions | Where-Object { $_.id -eq 'scan' })[0].destructive)   | Should Be $false
+        (@($man.actions | Where-Object { $_.id -eq 'import' })[0].destructive) | Should Be $false
+        foreach ($id in $destIds) {
+            $a = @($man.actions | Where-Object { $_.id -eq $id })[0]
+            $a | Should Not BeNullOrEmpty
+            [bool]$a.destructive | Should Be $true
+        }
+    }
+    It 'the legacy monolithic "fix" action id is REMOVED (clean break)' {
+        @($man.actions | Where-Object { $_.id -eq 'fix' }).Count | Should Be 0
+    }
+    It 'the fix-encryption action declares the enableEncryption input (bool)' {
         $inp | Should Not BeNullOrEmpty
         $inp.type | Should Be 'bool'
     }
     It 'enableEncryption defaults to $false (resume stays the default; enable is opt-in)' {
         [bool]$inp.default | Should Be $false
     }
-    It 'the fix description states the FVE-policy + Entra-first/AD-fallback / escrow-first / XtsAes256 enable behaviour' {
+    It 'fix-pki REQUIRES the sstPath input' {
+        $pki = @($man.actions | Where-Object { $_.id -eq 'fix-pki' })[0]
+        $sst = @($pki.inputs | Where-Object { $_.name -eq 'sstPath' })[0]
+        $sst | Should Not BeNullOrEmpty
+        [bool]$sst.required | Should Be $true
+    }
+    It 'run-all declares the plan (textarea) input' {
+        $ra = @($man.actions | Where-Object { $_.id -eq 'run-all' })[0]
+        $pl = @($ra.inputs | Where-Object { $_.name -eq 'plan' })[0]
+        $pl | Should Not BeNullOrEmpty
+        $pl.type | Should Be 'textarea'
+    }
+    It 'the fix-encryption description states the FVE-policy + Entra-first/AD-fallback / escrow-first / XtsAes256 enable behaviour' {
         $fix.description | Should Match 'FVE'
         $fix.description | Should Match 'Entra-first'
         $fix.description | Should Match 'ESCROW-FIRST'

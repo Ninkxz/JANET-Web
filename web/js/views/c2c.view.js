@@ -7,13 +7,19 @@
    action bar) beside a colour-coded per-host Results grid, with a sticky footer
    carrying progress + Export CSV + a streaming ActivityLog.
 
-   ONE operation only: "C2C Readiness Scan" (action id 'scan'). The engine fans
-   one worker per host, runs ONE consolidated read-only probe (11 C2C checks:
-   9 scored locally, 2 EXT/reported), streams the FULL per-check report to the
-   activity log ([PASS]/[FAIL]/[EXT]/[ERROR] lines the log colours), and emits
-   one final row per host ({ Host, Ping, Status, Detail }). Rows are keyed by
-   Host. The scan CHANGES NOTHING and is NOT gated on an admin session (read-only,
-   like the WPT ping / bulk-scan and the WinUpgrade Diagnose action).
+   Read-only "C2C Readiness Scan" (action id 'scan'): the engine fans one worker
+   per host, runs ONE consolidated read-only probe (11 C2C checks: 9 scored locally,
+   2 EXT/reported), streams the FULL per-check report to the activity log
+   ([PASS]/[FAIL]/[EXT]/[ERROR] lines the log colours), and emits one final row per
+   host ({ Host, Ping, Status, Detail }). Rows are keyed by Host. The scan CHANGES
+   NOTHING and is NOT gated on an admin session (read-only, like the WPT ping /
+   bulk-scan and the WinUpgrade Diagnose action).
+
+   Plus the ACTION half (v1.4.0, destructive, admin-session gated): IMPORT the Tanium
+   C2C CSV, then either a PER-PILLAR fix (six actions - fix-monitoring / -firewall /
+   -antimalware / -patches / -encryption / -pki, each its own Run button in the FIX
+   ACTIONS card) or RUN ALL (fix each imported non-compliant host's OWN failed
+   endpoint-fixable pillars in one pass). All fix rows share one FIX confirm input.
 
    Credentials are UNIVERSAL (shell header top-right) - this view renders NO
    per-tool credential control; it only READS ctx.session.state.credSet.
@@ -40,9 +46,19 @@
     ['Hostname', 'AFNET/AFNS valid hostname (matches the naming convention)']
   ];
 
-  // Mass-Fix pillars that are remediated on the endpoint (drives the import chips
-  // + the per-pillar "Load X hosts" buttons).
-  var FIXABLE = ['Encryption', 'AntiMalware', 'PkiRoots', 'Patches'];
+  // Endpoint-fixable pillars (drive the import chips, the per-pillar "Load X hosts"
+  // buttons, and the FIX ACTIONS card). Must match the engine's C2cFixablePillars.
+  var FIXABLE = ['Monitoring', 'Firewall', 'Encryption', 'AntiMalware', 'PkiRoots', 'Patches'];
+
+  // Per-pillar fix rows: canonical key -> action id, display label, one-line "what changes".
+  var FIX_PILLARS = [
+    { key: 'Monitoring',  action: 'fix-monitoring',  label: 'Fix Monitoring (Tanium)',    desc: 'Heal the Tanium client service: set Automatic + start it (FAIL if not installed).' },
+    { key: 'Firewall',    action: 'fix-firewall',    label: 'Fix Firewall',               desc: 'Enable any disabled Domain / Private / Public firewall profile.' },
+    { key: 'AntiMalware', action: 'fix-antimalware', label: 'Fix AntiMalware (Defender)', desc: 'Start WinDefend / Sense (Automatic), enable RTP, update stale signatures.' },
+    { key: 'Patches',     action: 'fix-patches',     label: 'Fix Patches (MECM cycle)',   desc: 'Trigger the MECM SUM scan (113) + eval (108); installs run async.' },
+    { key: 'Encryption',  action: 'fix-encryption',  label: 'Fix Encryption (BitLocker)', desc: 'Resume suspended protectors; opt-in ENABLE on FullyDecrypted OS volumes.' },
+    { key: 'PkiRoots',    action: 'fix-pki',         label: 'Fix PKI Roots',              desc: 'Add DoD roots from an operator .sst to LocalMachine\\Root (additive only).' }
+  ];
 
   function statusCellCls(v) {
     switch (String(v)) {
@@ -120,7 +136,7 @@
       var lastImport = null;             // last import summary (pillars + host lists)
       var importCard = sectionCard('IMPORT C2C COMPLIANCE CSV', 'cyan');
       var importIntro = el('div'); importIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      importIntro.textContent = 'Import the Tanium "C2C Compliance Status" CSV export, then load a pillar\'s failing hosts into the target list above to scan or Mass Fix.';
+      importIntro.textContent = 'Import the Tanium "C2C Compliance Status" CSV export, then RUN ALL (each host, its own failed pillars) or load a pillar\'s failing hosts into the target list above to scan or per-pillar fix.';
       importCard.appendChild(importIntro);
       var importFileInput = el('input'); importFileInput.type = 'file'; importFileInput.accept = '.csv,.txt'; importFileInput.style.display = 'none';
       var importBtn = ui.ctaButton('IMPORT C2C CSV', { title: 'Choose the Tanium C2C Compliance Status CSV export, upload it to the JANET Web host, and parse it (per-host pillar routing).' });
@@ -133,39 +149,32 @@
       importCard.appendChild(chipsWrap);
       var loadBtnsWrap = el('div'); loadBtnsWrap.style.cssText = 'margin-top:6px;display:flex;gap:6px;flex-wrap:wrap';
       importCard.appendChild(loadBtnsWrap);
+      // RUN ALL button holder (populated by renderImportSummary when runAllPlan is non-empty).
+      var runAllWrap = el('div'); runAllWrap.style.cssText = 'margin-top:8px;display:flex;gap:6px;flex-wrap:wrap';
+      importCard.appendChild(runAllWrap);
+      var runAllBtn = null;
       importFileInput.addEventListener('change', function () { if (importFileInput.files && importFileInput.files.length) doImport(); });
       importBtn.onclick = function () { if (isRunning()) return; importFileInput.value = ''; importFileInput.click(); };
       left.appendChild(importCard);
 
-      // --- MASS FIX (destructive; admin session required) ---
+      // --- FIX ACTIONS (per pillar; destructive; admin session required) ---
+      // Each pillar is its own runnable action (like the ACAS nemesis tool: everything
+      // portioned out per finding type). One shared FIX confirm + admin-session gate.
       var sstPath = '';                  // uploaded .sst server path (blank until chosen)
-      var fixCard = sectionCard('MASS FIX - remediate endpoint-fixable pillars', 'cyan');
+      var pillarRunBtns = [];            // per-row Run buttons (locked while any run is active)
+      var fixCard = sectionCard('FIX ACTIONS (per pillar) - run one remediation at a time', 'cyan');
       var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      fixIntro.textContent = 'DESTRUCTIVE. Fixes the target list above. Resume BitLocker (opt-in: ENABLE BitLocker on decrypted OS volumes - escrow-first, XtsAes256), heal Defender/MDE, add DoD PKI roots, kick the MECM patch cycle. Requires an admin session; type FIX to confirm.';
+      fixIntro.textContent = 'DESTRUCTIVE. Each pillar runs on its own against the target list above. Requires an admin session; type FIX once (below) to arm any of them.';
       fixCard.appendChild(fixIntro);
-      var cbEnc = ui.checkbox('Encryption - resume suspended BitLocker', { title: 'Resume suspended BitLocker protectors on the system drive. Does NOT start encryption unless "ENABLE BitLocker" (below) is also ticked.' });
-      var cbEncEnable = ui.checkbox('ENABLE BitLocker on FullyDecrypted volumes (XtsAes256)', { title: 'Opt-in. On a FullyDecrypted OS volume: add a RecoveryPassword protector and escrow it to AD FIRST (fail-closed - if the AD backup fails, the protector is removed and encryption is NEVER started), then add a TPM protector and start XtsAes256 full-disk encryption. Requires a TPM-ready + domain-joined host. Encryption then runs for hours in the background; protection activates on completion.' });
-      var cbDef = ui.checkbox('AntiMalware - heal Defender / MDE', { title: 'Start WinDefend/Sense, enable RTP, update signatures if stale.' });
-      var cbPki = ui.checkbox('PKI roots - add DoD roots from .sst', { title: 'Add DoD root certs from an operator .sst to LocalMachine\\Root (additive only).' });
-      var cbPatch = ui.checkbox('Patches - kick MECM cycle (scan + eval)', { title: 'Trigger the MECM Software Updates scan (113) + eval (108). Installs run async.' });
-      cbEnc._cb.checked = true; cbDef._cb.checked = true; cbPatch._cb.checked = true;
-      // ENABLE BitLocker is opt-in and stays disabled + unchecked unless the Encryption pillar is ticked.
-      cbEncEnable._cb.checked = false; cbEncEnable._cb.disabled = !cbEnc._cb.checked;
-      cbEnc.style.margin = '3px 0'; fixCard.appendChild(cbEnc);
-      cbEncEnable.style.margin = '2px 0 3px 22px'; fixCard.appendChild(cbEncEnable);
-      [cbDef, cbPki, cbPatch].forEach(function (c) { c.style.margin = '3px 0'; fixCard.appendChild(c); });
-      cbEnc._cb.addEventListener('change', function () {
-        cbEncEnable._cb.disabled = !cbEnc._cb.checked;
-        if (!cbEnc._cb.checked) { cbEncEnable._cb.checked = false; }
-      });
-      // .sst picker row (disabled unless PKI ticked)
-      var sstRow = el('div'); sstRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin:4px 0 8px 22px';
+
+      // The ENABLE-BitLocker opt-in (used by the Encryption row) + the .sst picker (used
+      // by the PKI Roots row) are declared here so run-all can read them too.
+      var cbEncEnable = ui.checkbox('ENABLE BitLocker on FullyDecrypted OS volumes (XtsAes256)', { title: 'Opt-in. On a FullyDecrypted OS volume: add a RecoveryPassword protector and escrow it (Entra-first, AD fallback) FIRST - fail-closed: if escrow fails, the protector is removed and encryption is NEVER started - then add a TPM protector and start XtsAes256 full-disk encryption. Requires a TPM-ready + domain-joined host. Encryption then runs for hours in the background; protection activates on completion. Applies to the Encryption row and to RUN ALL.' });
+      cbEncEnable._cb.checked = false;
+
       var sstFileInput = el('input'); sstFileInput.type = 'file'; sstFileInput.accept = '.sst,.p7b'; sstFileInput.style.display = 'none';
-      var sstBtn = ui.button('Choose .sst', { size: 'sm', title: 'Pick the DoD root bundle (.sst) to push.' }); sstBtn.disabled = true;
+      var sstBtn = ui.button('Choose .sst', { size: 'sm', title: 'Pick the DoD root bundle (.sst) to push (used by Fix PKI Roots and by RUN ALL when a host plans PkiRoots).' });
       var sstLabel = el('span', 'muted', 'no .sst chosen'); sstLabel.style.fontSize = '11.5px';
-      sstRow.appendChild(sstBtn); sstRow.appendChild(sstLabel); sstRow.appendChild(sstFileInput);
-      fixCard.appendChild(sstRow);
-      cbPki._cb.addEventListener('change', function () { sstBtn.disabled = !cbPki._cb.checked; });
       sstBtn.onclick = function () { sstFileInput.value = ''; sstFileInput.click(); };
       sstFileInput.addEventListener('change', function () {
         var f = sstFileInput.files && sstFileInput.files[0]; if (!f) return;
@@ -173,37 +182,48 @@
         ctx.uploadFile(f, 'c2c-sst').then(function (p) { sstPath = p; sstLabel.textContent = f.name; sstLabel.className = 'st-ok'; log.append({ text: '[' + ts() + '] .sst staged: ' + p, level: 'dim' }); })
           .catch(function (e) { sstPath = ''; sstLabel.textContent = 'upload failed'; sstLabel.className = 'st-bad'; log.append({ text: 'sst upload failed: ' + (e && e.message), level: 'err' }); });
       });
-      // threads + attempt-offline
-      var fixOptRow = el('div'); fixOptRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin:4px 0';
+
+      // one row per pillar: label + description + a small Run button; Encryption gets the
+      // indented ENABLE checkbox, PKI Roots gets the .sst picker.
+      FIX_PILLARS.forEach(function (row) {
+        var rowEl = el('div'); rowEl.style.cssText = 'display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-top:1px solid var(--border)';
+        var txt = el('div'); txt.style.cssText = 'flex:1;min-width:0';
+        var nm = el('div'); nm.style.cssText = 'font-weight:700;font-size:12.5px;color:var(--text)'; nm.textContent = row.label;
+        var ds = el('div'); ds.style.cssText = 'font-size:11.5px;line-height:1.35;color:var(--muted)'; ds.textContent = row.desc;
+        txt.appendChild(nm); txt.appendChild(ds);
+        var runBtn = ui.button('Run', { size: 'sm', variant: 'danger', title: 'Run the ' + row.label + ' remediation on the target list (destructive).' });
+        runBtn.style.flex = '0 0 auto';
+        runBtn.onclick = function () { doPillarFix(row); };
+        pillarRunBtns.push(runBtn);
+        rowEl.appendChild(txt); rowEl.appendChild(runBtn);
+        fixCard.appendChild(rowEl);
+        if (row.key === 'Encryption') {
+          cbEncEnable.style.margin = '2px 0 4px 22px'; fixCard.appendChild(cbEncEnable);
+        }
+        if (row.key === 'PkiRoots') {
+          var sstRow = el('div'); sstRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin:2px 0 4px 22px';
+          sstRow.appendChild(sstBtn); sstRow.appendChild(sstLabel); sstRow.appendChild(sstFileInput);
+          fixCard.appendChild(sstRow);
+        }
+      });
+
+      // shared options: threads + attempt-offline + confirm word + a cancel button.
+      var fixOptRow = el('div'); fixOptRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin:8px 0 4px;border-top:1px solid var(--border);padding-top:8px';
       fixOptRow.appendChild(ui.label('Max concurrent:'));
       var fixThreads = ui.number({ value: 8, min: 1, max: 16, title: 'Parallel hosts (1-16).' }); fixThreads.style.width = '72px';
       fixOptRow.appendChild(fixThreads);
       fixCard.appendChild(fixOptRow);
       var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/445 probe fails.' });
       fixOffline.style.margin = '2px 0'; fixCard.appendChild(fixOffline);
-      // confirm word
       var confirmRow = el('div'); confirmRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin:8px 0';
       confirmRow.appendChild(ui.label('Confirm:'));
-      var confirmInput = ui.input({ title: 'Type FIX (exactly) to arm the destructive mass fix.' }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '120px';
+      var confirmInput = ui.input({ title: 'Type FIX (exactly) to arm any per-pillar fix or RUN ALL.' }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '120px';
       confirmRow.appendChild(confirmInput);
+      var fixCancelBtn = ui.button('CANCEL RUN', { size: 'sm', title: 'Cancel the in-flight fix run (queued targets skip; in-flight fixes finish).' });
+      fixCancelBtn.disabled = true;
+      fixCancelBtn.onclick = function () { if (run) { run.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued targets will skip; in-flight fixes finish.', level: 'warn' }); } };
+      confirmRow.appendChild(fixCancelBtn);
       fixCard.appendChild(confirmRow);
-      // destructive RunBar
-      var fixRunbar = C.RunBar({
-        label: 'RUN MASS FIX', cancelLabel: 'CANCEL MASS FIX', morphToCancel: true,
-        title: 'Destructive: remediate the endpoint-fixable C2C pillars across the target list.',
-        guards: [
-          function () { return targets.count() ? null : 'No Computers|Add at least one computer (or Load a pillar\'s hosts from an import) before running the mass fix.'; },
-          function () { return (cbEnc._cb.checked || cbDef._cb.checked || cbPki._cb.checked || cbPatch._cb.checked) ? null : 'No Pillars|Tick at least one fix pillar (Encryption / AntiMalware / PKI roots / Patches).'; },
-          function () { return (cbPki._cb.checked && !sstPath) ? 'PKI Roots Need a .sst|PKI roots is ticked but no .sst bundle is attached. Choose a .sst, or untick PKI roots.' : null; },
-          function () { return (confirmInput.value === 'FIX') ? null : 'Type FIX to Confirm|Type FIX (exactly, uppercase) in the Confirm box to arm the destructive mass fix.'; },
-          function () { return ctx.session.state.credSet ? null : 'Admin session required|Set ADW credentials (top-right) and start an admin session before running the mass fix - it changes machines.'; }
-        ],
-        onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
-        onRun: doFix,
-        onCancel: function () { if (run) { run.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued targets will skip; in-flight fixes finish.', level: 'warn' }); } }
-      });
-      var fixRbWrap = el('div'); fixRbWrap.style.marginTop = '4px'; fixRbWrap.appendChild(fixRunbar.el);
-      fixCard.appendChild(fixRbWrap);
       left.appendChild(fixCard);
 
       // --- What this scans (read-only info) ---
@@ -212,8 +232,9 @@
       intro.textContent = 'One consolidated READ-ONLY probe per host (changes nothing) over WinRM. '
         + 'Predicts whether each host would be QUARANTINED. 9 checks are scored on the endpoint; '
         + '2 are EXT (external / server-side) - reported but never scored. '
-        + 'This tool also IMPORTS the Tanium C2C Compliance report (above) and can MASS FIX the '
-        + 'endpoint-fixable pillars - Encryption, AntiMalware, PkiRoots and Patches. '
+        + 'This tool also IMPORTS the Tanium C2C Compliance report (above) and can FIX the '
+        + 'endpoint-fixable pillars - Monitoring, Firewall, Encryption, AntiMalware, PkiRoots and Patches - '
+        + 'one at a time (FIX ACTIONS card) or all imported hosts at once (RUN ALL). '
         + 'Vuln routes to ACAS / Reports / KEV, OS Version to Windows Upgrade, STIG to Reports.';
       infoCard.appendChild(intro);
       var list = el('ol'); list.style.cssText = 'margin:0 0 8px 18px;padding:0;font-size:12px;line-height:1.5;color:var(--text)';
@@ -326,13 +347,18 @@
       function isRunning() { return !!(run && run.state && run.state.active); }
       function threads() { return Math.max(1, Math.min(64, parseInt(threadsInput.value, 10) || 16)); }
 
+      function threadsFix() { return Math.max(1, Math.min(16, parseInt(fixThreads.value, 10) || 8)); }
+
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsInput.disabled = on; clearBtn.disabled = on;
-        // lock the import + mass-fix controls too, so nothing can be re-fired mid-run.
+        // lock the import + per-pillar fix controls too, so nothing can be re-fired mid-run.
         importBtn.disabled = on;
-        cbEnc._cb.disabled = on; cbDef._cb.disabled = on; cbPki._cb.disabled = on; cbPatch._cb.disabled = on;
-        cbEncEnable._cb.disabled = on || !cbEnc._cb.checked;
-        sstBtn.disabled = on || !cbPki._cb.checked; fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
+        pillarRunBtns.forEach(function (b) { b.disabled = on; });
+        if (runAllBtn) { runAllBtn.disabled = on; }
+        cbEncEnable._cb.disabled = on;
+        sstBtn.disabled = on; fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
+        // the shared cancel button is only usable WHILE a run is active.
+        fixCancelBtn.disabled = !on;
       }
 
       function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -454,6 +480,17 @@
           b.onclick = function () { loadHosts(p.hosts || [], p.name + ' hosts'); };
           loadBtnsWrap.appendChild(b);
         });
+        // RUN ALL: shown only when the import carried a non-empty runAllPlan.
+        runAllWrap.innerHTML = ''; runAllBtn = null;
+        var plan = (s.runAllPlan && s.runAllPlan.length) ? s.runAllPlan : [];
+        if (plan.length) {
+          var fixes = 0; plan.forEach(function (e) { fixes += (e.pillars || []).length; });
+          runAllBtn = ui.button('RUN ALL (' + plan.length + ' hosts, ' + fixes + ' fixes)', { variant: 'danger', size: 'sm', title: 'Fix each imported non-compliant host\'s OWN failed endpoint-fixable pillars in one pass (destructive; type FIX + admin session).' });
+          runAllBtn.onclick = function () { doRunAll(); };
+          runAllWrap.appendChild(runAllBtn);
+          var hint = el('span', 'muted', 'each host, its own failed pillars'); hint.style.cssText = 'font-size:11px;align-self:center';
+          runAllWrap.appendChild(hint);
+        }
       }
 
       function unionPillarHosts(pillars) {
@@ -471,47 +508,86 @@
         log.append({ text: '[' + ts() + '] Loaded ' + hosts.length + ' ' + label + ' into the target list.', level: 'accent' });
       }
 
-      // ---- C2C Mass Fix (DESTRUCTIVE; admin session + FIX confirm required) ----
-      async function doFix() {
+      function alertDialog(title, body) { ctx.confirm({ title: title, body: body, okText: 'OK', cancelText: null }); }
+
+      // ---- Per-pillar fix (DESTRUCTIVE; admin session + FIX confirm required) ----
+      async function doPillarFix(row) {
         if (isRunning()) return;
         var hosts = targets.hosts();
-        var pillars = [];
-        if (cbEnc._cb.checked) pillars.push('Encryption');
-        if (cbDef._cb.checked) pillars.push('AntiMalware');
-        if (cbPki._cb.checked) pillars.push('PkiRoots');
-        if (cbPatch._cb.checked) pillars.push('Patches');
-        var enableEnc = cbEnc._cb.checked && cbEncEnable._cb.checked;
+        if (!hosts.length) { alertDialog('No Computers', 'Add at least one computer (or Load a pillar\'s hosts from an import) before running a fix.'); return; }
+        if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
+        if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
+        if (row.key === 'PkiRoots' && !sstPath) { alertDialog('PKI Roots Need a .sst', 'The PKI Roots fix requires a DoD root bundle (.sst). Choose one first.'); return; }
+        var enableEnc = row.key === 'Encryption' && cbEncEnable._cb.checked;
+
+        var pf = [
+          { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
+          { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet }
+        ];
+        if (row.key === 'Encryption') pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start encryption on decrypted OS volumes' : 'Resume-only (ENABLE not ticked)', ok: true });
+        if (row.key === 'PkiRoots') pf.push({ label: 'DoD root .sst attached', ok: !!sstPath });
+
         var ok = await ctx.arm({
-          title: 'Arm C2C Mass Fix',
+          title: 'Arm ' + row.label,
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
-          body: 'About to mass-fix <b>' + hosts.length + '</b> host(s).<br>Pillars: <b>' + esc(pillars.join(', ')) + '</b>'
-            + (cbPki._cb.checked ? '<br>PKI bundle: <b>' + esc(sstPath ? sstPath.split(/[\\/]/).pop() : '(none)') + '</b>' : '')
-            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START full-disk encryption (XtsAes256) on any of the <b>' + hosts.length + '</b> host(s) whose OS volume is FullyDecrypted - escrow-first to AD, TPM-ready + domain-joined only. Encryption runs for hours in the background.' : ''),
-          preflight: [
-            { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
-            { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
-            { label: pillars.length + ' fix pillar(s) selected', ok: pillars.length > 0 },
-            { label: cbPki._cb.checked ? 'DoD root .sst attached' : 'PKI roots not selected', ok: !cbPki._cb.checked || !!sstPath },
-            { label: enableEnc ? 'ENABLE BitLocker: WILL start full-disk encryption on decrypted OS volumes' : 'ENABLE BitLocker not selected (resume-only)', ok: true }
-          ],
-          okText: 'Run Mass Fix', cancelText: 'Cancel'
+          body: 'About to run <b>' + esc(row.label) + '</b> on <b>' + hosts.length + '</b> host(s).'
+            + (row.key === 'PkiRoots' ? '<br>PKI bundle: <b>' + esc(sstPath ? sstPath.split(/[\\/]/).pop() : '(none)') + '</b>' : '')
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START full-disk encryption (XtsAes256) on any of the <b>' + hosts.length + '</b> host(s) whose OS volume is FullyDecrypted - escrow-first, TPM-ready + domain-joined only. Encryption runs for hours in the background.' : ''),
+          preflight: pf, okText: 'Run ' + row.label, cancelText: 'Cancel'
         });
-        if (!ok) { log.append({ text: '[' + ts() + '] Mass fix cancelled at the arming dialog.', level: 'warn' }); return; }
+        if (!ok) { log.append({ text: '[' + ts() + '] ' + row.label + ' cancelled at the arming dialog.', level: 'warn' }); return; }
 
         grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
-        log.banner('C2C Mass Fix on ' + hosts.length + ' host(s) [' + pillars.join(', ') + ']');
+        log.banner('C2C ' + row.label + ' on ' + hosts.length + ' host(s)');
         lockInputs(true);
-        run = ctx.run('fix', {
-          targets: hosts.join('\n'),
-          fixEncryption: cbEnc._cb.checked,
+        var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked };
+        if (row.key === 'Encryption') params.enableEncryption = enableEnc;
+        if (row.key === 'PkiRoots') params.sstPath = sstPath || '';
+        run = ctx.run(row.action, params, { keyOf: keyByHost, destructive: true });
+        bindFixRun();
+      }
+
+      // ---- RUN ALL: each imported non-compliant host, its OWN failed pillars only ----
+      async function doRunAll() {
+        if (isRunning()) return;
+        var plan = (lastImport && lastImport.runAllPlan && lastImport.runAllPlan.length) ? lastImport.runAllPlan : [];
+        if (!plan.length) { alertDialog('Nothing to run', 'Import a C2C Compliance CSV first - RUN ALL needs a non-empty plan.'); return; }
+        if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before RUN ALL - it changes machines.'); return; }
+        if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box (in the FIX ACTIONS card) to arm RUN ALL.'); return; }
+
+        var pcount = {}, totalFixes = 0;
+        plan.forEach(function (e) { (e.pillars || []).forEach(function (p) { pcount[p] = (pcount[p] || 0) + 1; totalFixes++; }); });
+        var anyPki = !!pcount['PkiRoots'];
+        if (anyPki && !sstPath) { alertDialog('PKI Roots Need a .sst', 'One or more planned hosts include PkiRoots. Attach a DoD root .sst (in the FIX ACTIONS card) before RUN ALL, or it will abort server-side.'); return; }
+        var enableEnc = cbEncEnable._cb.checked;
+
+        var pf = Object.keys(pcount).sort().map(function (p) { return { label: p + ': ' + pcount[p] + ' host(s)', ok: true }; });
+        pf.unshift({ label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet });
+        pf.push({ label: enableEnc ? 'ENABLE BitLocker: planned Encryption hosts WILL start encryption' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
+        if (anyPki) pf.push({ label: 'DoD root .sst attached (PkiRoots planned)', ok: !!sstPath });
+
+        var ok = await ctx.arm({
+          title: 'Arm RUN ALL',
+          banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
+          body: 'About to fix <b>' + plan.length + '</b> imported non-compliant host(s) - each its OWN failed pillars (<b>' + totalFixes + '</b> fix(es) total).'
+            + '<br>Per-pillar host counts: <b>' + esc(Object.keys(pcount).sort().map(function (p) { return p + ' ' + pcount[p]; }).join(', ')) + '</b>'
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> planned Encryption hosts will START encryption on FullyDecrypted OS volumes.' : '<br>Encryption is resume-only (tick ENABLE BitLocker in the FIX ACTIONS card to start encryption).'),
+          preflight: pf, okText: 'RUN ALL', cancelText: 'Cancel'
+        });
+        if (!ok) { log.append({ text: '[' + ts() + '] RUN ALL cancelled at the arming dialog.', level: 'warn' }); return; }
+
+        var allHosts = plan.map(function (e) { return e.host; });
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + allHosts.length;
+        allHosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C RUN ALL on ' + plan.length + ' host(s) [' + totalFixes + ' fix(es)]');
+        lockInputs(true);
+        run = ctx.run('run-all', {
+          plan: JSON.stringify(plan),
           enableEncryption: enableEnc,
-          fixDefender: cbDef._cb.checked,
-          fixPki: cbPki._cb.checked,
           sstPath: sstPath || '',
-          kickPatchCycle: cbPatch._cb.checked,
           confirm: confirmInput.value,
-          threads: Math.max(1, Math.min(16, parseInt(fixThreads.value, 10) || 8)),
+          threads: threadsFix(),
           attemptOffline: fixOffline._cb.checked
         }, { keyOf: keyByHost, destructive: true });
         bindFixRun();
@@ -520,20 +596,19 @@
       function bindFixRun() {
         if (unsub) unsub();
         unsub = run.subscribe({
-          status: function (t) { prog.setPhase(t); fixRunbar.setStatus(t, 'st-info'); },
+          status: function (t) { prog.setPhase(t); },
           progress: function (p) { prog.setProgress(p.done, p.total); countLine.textContent = p.done + ' / ' + p.total; },
           row: function (r) { grid.upsert(r); },
           log: function (l) { log.append(l); },
           error: function (e) { log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' }); },
           active: function (a) {
-            fixRunbar.setActive(a);
             if (!a) {
               lockInputs(false);
               var c = fixTally();
               countLine.textContent = c.total + ' / ' + c.total;
               var bad = c.failed + c.partial;
-              log.append({ text: '[' + ts() + '] FINISHED C2C Mass Fix. FIXED=' + c.fixed + '  NO CHANGE=' + c.noChange + '  PARTIAL=' + c.partial + '  FAILED=' + c.failed + '  OFFLINE=' + c.offline + '  SKIPPED=' + c.skipped, level: bad ? 'warn' : 'ok' });
-              fixRunbar.setStatus('Done - Fixed ' + c.fixed + ' / Partial ' + c.partial + ' / NoChange ' + c.noChange + ' / Failed ' + c.failed, bad ? 'st-bad' : 'st-ok');
+              log.append({ text: '[' + ts() + '] FINISHED C2C fix. FIXED=' + c.fixed + '  NO CHANGE=' + c.noChange + '  PARTIAL=' + c.partial + '  FAILED=' + c.failed + '  OFFLINE=' + c.offline + '  SKIPPED=' + c.skipped, level: bad ? 'warn' : 'ok' });
+              runbar.setStatus('Fix done - Fixed ' + c.fixed + ' / Partial ' + c.partial + ' / NoChange ' + c.noChange + ' / Failed ' + c.failed, bad ? 'st-bad' : 'st-ok');
             }
           }
         });
