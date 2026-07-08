@@ -25,10 +25,23 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.5.1'
+        version  = '1.6.0'
         category = 'Hardening'
-        summary  = 'Remotely enable UEFI Secure Boot on Dell, HP and Lenovo systems via a WinRM-armed SYSTEM scheduled task, with a UEFI+GPT brick-safety precheck and dry-run preflight.'
+        summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
+            @{
+                id          = 'scan-secure-boot'
+                label       = 'Scan Secure Boot (Fleet)'
+                description = 'READ-ONLY fleet-wide Secure Boot posture scan. One WinRM Invoke-Command round-trip per host (no C$ drop, no scheduled task, no firmware write) reads Secure Boot state (Confirm-SecureBootUEFI + SecureBoot registry corroboration), firmware type (UEFI/Legacy), the system disk partition style (GPT/MBR), manufacturer/model, BIOS version/date and OS build, then derives an admin-side verdict per host: ENABLED, READY TO ENABLE, OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR. No host cap, no admin-session gate. Unreachable hosts soft-skip (OFFLINE); a stale-DNS wrong box soft-skips (DNS MISMATCH). Feed the READY-TO-ENABLE hosts to Enable Secure Boot in waves of up to 50.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Ping','Verdict','SecureBoot','Firmware','Disk','Manufacturer','Model','Detail')
+                inputs      = @(
+                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads';        label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
+                )
+            }
             @{
                 id          = 'enable-secure-boot'
                 label       = 'Enable Secure Boot'
@@ -690,6 +703,334 @@ $script:SbeLiveWorker = {
     }
 }
 
+# ----------------------------------------------------------------------------
+# SCAN (v1.6.0) - read-only fleet Secure Boot posture. Mirrors the c2c 'scan'
+# shape (plain WinRM Invoke-Command, TCP 5985/445 pre-check, DNS-mismatch soft
+# skip, per-host watchdog) - NONE of the C$-payload/scheduled-task machinery
+# that the firmware WRITE needs. No 50-host cap, no admin-session gate.
+# ----------------------------------------------------------------------------
+
+# Admin-side verdict derivation (pure, deterministic, unit-testable). Runs in
+# module scope (NOT in the pool worker), fed the raw fields the probe returns.
+#   SecureBoot   : 'On' / 'Off' / 'NotUEFI/Unsupported' / 'Unknown'
+#   Firmware     : 'UEFI' / 'Legacy' / 'Unknown'
+#   Disk         : 'GPT' / 'MBR' / 'Unknown'
+#   Manufacturer : Win32_ComputerSystem.Manufacturer
+# Returns exactly one of: ENABLED / READY TO ENABLE / OFF - UNSUPPORTED OEM /
+# BLOCKED - LEGACY/MBR / CHECK ERROR. (OFFLINE / DNS MISMATCH are host-level
+# statuses resolved before this is ever called.)
+function Get-SbeScanVerdict {
+    param([string]$SecureBoot, [string]$Firmware, [string]$Disk, [string]$Manufacturer)
+    $sb = ([string]$SecureBoot).Trim()
+    $fw = ([string]$Firmware).Trim()
+    $dk = ([string]$Disk).Trim()
+
+    # Already compliant - nothing to do.
+    if ($sb -match '^(?i)on$') { return 'ENABLED' }
+
+    # Non-UEFI firmware or an MBR system disk cannot take Secure Boot safely; the
+    # enabler must NOT be fed these (needs MBR2GPT / reimage first).
+    if ($sb -match '^(?i)NotUEFI' -or $fw -match '^(?i)Legacy' -or $dk -match '^(?i)MBR') {
+        return 'BLOCKED - LEGACY/MBR'
+    }
+
+    # An indeterminate Secure Boot state (Confirm-SecureBootUEFI unreadable and no
+    # corroborating registry value) is NOT a clean 'Off' - never call it ready.
+    if ($sb -notmatch '^(?i)off$') { return 'CHECK ERROR' }
+
+    # Off, but we could not positively confirm the safe UEFI + GPT boot path.
+    if ($fw -notmatch '^(?i)UEFI' -or $dk -notmatch '^(?i)GPT') { return 'CHECK ERROR' }
+
+    # Off + UEFI + GPT: supported OEM (the enable payload's Dell/HP/Lenovo branches)
+    # is ready to enable; any other manufacturer is a manual/desk-side job.
+    if ($Manufacturer -match '(?i)LENOVO|HP|Hewlett|Dell') { return 'READY TO ENABLE' }
+    return 'OFF - UNSUPPORTED OEM'
+}
+
+# Per-host read-only probe (runs in a pool runspace; no module scope here). One
+# Invoke-Command round-trip; returns the raw fields + a host-level status. The
+# verdict is computed admin-side (Get-SbeScanVerdict) by the orchestrator.
+$script:SbeScanWorker = {
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline)
+
+    $r = [ordered]@{
+        Computer=$Computer; Ping=''; HostStatus=''; SecureBoot='?'; Firmware='?';
+        Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail=''
+    }
+
+    # TCP reachability (WinRM 5985 then SMB 445, 1.5s). NEVER ICMP (AFNET GPO).
+    $reachable = $false
+    foreach ($port in 5985,445) {
+        $tc = $null
+        try {
+            $tc = New-Object System.Net.Sockets.TcpClient
+            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        if ($reachable) { break }
+    }
+    if (-not $reachable) {
+        $r.Ping = 'Unreachable'
+        if (-not $AttemptOffline) { $r.HostStatus = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
+    }
+
+    $wsOpt = New-PSSessionOption -OperationTimeout 90000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    $sess = $null
+    try { $sess = New-PSSession @splat } catch { $r.HostStatus = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
+
+    $probeSb = {
+        # 1. Secure Boot state: Confirm-SecureBootUEFI, then corroborate via the
+        #    SecureBoot State registry key when the cmdlet is unavailable/unreadable.
+        $sb = 'Unknown'
+        try {
+            $val = Confirm-SecureBootUEFI -ErrorAction Stop
+            $sb = if ($val) { 'On' } else { 'Off' }
+        } catch [System.PlatformNotSupportedException] {
+            $sb = 'NotUEFI/Unsupported'
+        } catch {
+            try {
+                $reg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' -Name 'UEFISecureBootEnabled' -ErrorAction Stop
+                $sb = if ([int]$reg.UEFISecureBootEnabled -eq 1) { 'On' } else { 'Off' }
+            } catch { $sb = 'Unknown' }
+        }
+
+        # 2. Firmware type: $env:firmware_type (reliable on booted Windows), with a
+        #    fallback: the SecureBoot State registry key only exists on UEFI firmware.
+        $fw = 'Unknown'
+        if ($env:firmware_type) {
+            if     ($env:firmware_type -match '(?i)UEFI')        { $fw = 'UEFI' }
+            elseif ($env:firmware_type -match '(?i)Legacy|BIOS') { $fw = 'Legacy' }
+            else                                                 { $fw = [string]$env:firmware_type }
+        }
+        if ($fw -eq 'Unknown' -and (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State')) { $fw = 'UEFI' }
+
+        # 3. System disk partition style (the disk holding C:).
+        $disk = 'Unknown'
+        try {
+            if (Get-Command Get-Partition -ErrorAction SilentlyContinue) {
+                $d = Get-Partition -DriveLetter 'C' -ErrorAction Stop | Get-Disk -ErrorAction Stop
+                if ($d -and $d.PartitionStyle) { $disk = [string]$d.PartitionStyle }
+            }
+        } catch { $disk = 'Unknown' }
+        if ([string]::IsNullOrWhiteSpace($disk) -or $disk -eq 'Unknown') {
+            try {
+                $bp = Get-CimInstance -ClassName Win32_DiskPartition -ErrorAction Stop | Where-Object { $_.BootPartition } | Select-Object -First 1
+                if ($bp -and $bp.Type) { $disk = if ($bp.Type -match '(?i)GPT') { 'GPT' } else { 'MBR' } }
+            } catch {}
+        }
+        if ([string]::IsNullOrWhiteSpace($disk)) { $disk = 'Unknown' }
+
+        $cs = $null; $bios = $null; $os = $null
+        try { $cs   = Get-CimInstance -ClassName Win32_ComputerSystem  -ErrorAction Stop } catch {}
+        try { $bios = Get-CimInstance -ClassName Win32_BIOS            -ErrorAction Stop } catch {}
+        try { $os   = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop } catch {}
+
+        $biosDate = ''
+        if ($bios -and $bios.ReleaseDate) { try { $biosDate = ([datetime]$bios.ReleaseDate).ToString('yyyy-MM-dd') } catch { $biosDate = [string]$bios.ReleaseDate } }
+
+        [pscustomobject]@{
+            RemoteName   = $env:COMPUTERNAME
+            SecureBoot   = $sb
+            Firmware     = $fw
+            Disk         = $disk
+            Manufacturer = if ($cs)   { [string]$cs.Manufacturer }     else { '?' }
+            Model        = if ($cs)   { [string]$cs.Model }            else { '?' }
+            Bios         = if ($bios) { [string]$bios.SMBIOSBIOSVersion } else { '?' }
+            BiosDate     = $biosDate
+            OsBuild      = if ($os)   { [string]$os.BuildNumber }      else { '?' }
+        }
+    }
+
+    try {
+        $p = Invoke-Command -Session $sess -ScriptBlock $probeSb -ErrorAction Stop
+    } catch {
+        $r.HostStatus = 'CHECK ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
+        Remove-PSSession $sess -ErrorAction SilentlyContinue
+        return $r
+    } finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
+
+    # DNS-mismatch soft-skip (read-only, name compare, never a PTR lookup). An
+    # IP-literal target has no DNS indirection, so the guard is skipped for it.
+    $actualName  = ([string]$p.RemoteName).Trim()
+    $targetShort = ($Computer -split '\.')[0]
+    $isIpLiteral = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+    if (-not $isIpLiteral -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+        $r.HostStatus = 'DNS MISMATCH'; $r.Detail = "dialed '$targetShort' but remote is '$actualName' - skipped (would report the wrong machine)"
+        return $r
+    }
+
+    $r.HostStatus   = 'OK'
+    $r.SecureBoot   = [string]$p.SecureBoot
+    $r.Firmware     = [string]$p.Firmware
+    $r.Disk         = [string]$p.Disk
+    $r.Manufacturer = [string]$p.Manufacturer
+    $r.Model        = [string]$p.Model
+    $r.Bios         = [string]$p.Bios
+    $r.BiosDate     = [string]$p.BiosDate
+    $r.OsBuild      = [string]$p.OsBuild
+    return $r
+}
+
+# --- Action: scan-secure-boot (read-only) -----------------------------------
+function Invoke-SbeScanAction {
+    param([hashtable]$Params, [System.Management.Automation.PSCredential]$Credential, [scriptblock]$Emit)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $cancelJob = $null
+    if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
+    $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    # No 50-host cap on the read-only scan (allow big pastes). Same clean host-list
+    # parse the enable path uses (bare host/IPv4 tokens only).
+    $targets = ConvertTo-SecureBootHostList ([string]$Params['targets'])
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='No valid targets.' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    # Read-only: NO self-guard drop (scanning the dispatcher is harmless) and no
+    # admin-session gate - mirrors the c2c scan conventions.
+    $attemptOffline = Get-SbeBool $Params['attemptOffline'] $false
+    $threads = 16
+    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    $threads = [Math]::Max(1, [Math]::Min(32, $threads))
+    $perHostTimeout = 120
+    $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
+    $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
+
+    & $send @{ type='status'; text="Secure Boot fleet scan on $($targets.Count) host(s) with $threads thread(s)..." }
+    & $send @{ type='log'; level='info'; text="[$(Get-Date -Format 'HH:mm:ss')] START Secure Boot scan on $($targets.Count) host(s) ($authLabel), $threads thread(s)." }
+
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+    $pool.Open()
+    # Seed Queued rows so the operator sees the whole target list immediately.
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Verdict='Queued'; SecureBoot=''; Firmware=''; Disk=''; Manufacturer=''; Model=''; Detail='waiting for a runspace...' }) }
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($h in $targets) {
+        $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+        [void]$ps.AddScript($script:SbeScanWorker)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
+    }
+
+    $rows       = New-Object System.Collections.ArrayList
+    $readyHosts = New-Object System.Collections.ArrayList
+
+    $emitResult = {
+        param($res)
+        $hostStatus = [string]$res.HostStatus
+        if ($hostStatus -eq 'OK') {
+            $verdict = Get-SbeScanVerdict -SecureBoot ([string]$res.SecureBoot) -Firmware ([string]$res.Firmware) -Disk ([string]$res.Disk) -Manufacturer ([string]$res.Manufacturer)
+        } else {
+            $verdict = $hostStatus   # OFFLINE / DNS MISMATCH / CHECK ERROR / Cancelled
+        }
+        $detail = [string]$res.Detail
+        if ($hostStatus -eq 'OK') {
+            $parts = New-Object System.Collections.ArrayList
+            switch ($verdict) {
+                'READY TO ENABLE'       { [void]$parts.Add('off + UEFI + GPT + supported OEM - safe to feed to Enable') }
+                'ENABLED'               { [void]$parts.Add('Secure Boot already on - nothing to do') }
+                'OFF - UNSUPPORTED OEM' { [void]$parts.Add("manufacturer '$($res.Manufacturer)' not supported by the enabler - manual/desk-side") }
+                'BLOCKED - LEGACY/MBR'  { [void]$parts.Add('Legacy BIOS or MBR disk - run MBR2GPT / reimage before enabling') }
+                'CHECK ERROR'           { [void]$parts.Add('could not positively confirm the UEFI + GPT boot path / Secure Boot state') }
+            }
+            if ($res.Bios -and $res.Bios -ne '?') { [void]$parts.Add("BIOS $($res.Bios)$(if ($res.BiosDate) { " ($($res.BiosDate))" } else { '' })") }
+            if ($res.OsBuild -and $res.OsBuild -ne '?') { [void]$parts.Add("OS build $($res.OsBuild)") }
+            $detail = ($parts -join '; ')
+        }
+        $row = @{
+            Host=[string]$res.Computer; Ping=[string]$res.Ping; Verdict=$verdict
+            SecureBoot=[string]$res.SecureBoot; Firmware=[string]$res.Firmware; Disk=[string]$res.Disk
+            Manufacturer=[string]$res.Manufacturer; Model=[string]$res.Model; Detail=$detail
+        }
+        [void]$rows.Add($row)
+        if ($verdict -eq 'READY TO ENABLE') { [void]$readyHosts.Add((([string]$res.Computer) -split '\.')[0]) }
+        & $send (@{ type='row' } + $row)
+        $lvl = switch ($verdict) {
+            'READY TO ENABLE'       { 'ok' }
+            'ENABLED'               { 'ok' }
+            'CHECK ERROR'           { 'error' }
+            'OFFLINE'               { 'warn' }
+            'DNS MISMATCH'          { 'warn' }
+            'BLOCKED - LEGACY/MBR'  { 'warn' }
+            'OFF - UNSUPPORTED OEM' { 'warn' }
+            default                 { 'info' }
+        }
+        & $send @{ type='log'; level=$lvl; text=("{0}: {1} - SB={2} FW={3} Disk={4} [{5} {6}]" -f $res.Computer, $verdict, $res.SecureBoot, $res.Firmware, $res.Disk, $res.Manufacturer, $res.Model) }
+    }
+
+    $done = 0
+    try {
+        while ($done -lt $jobs.Count) {
+            foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = [ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail="worker error: $($_.Exception.Message)" } }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = [ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail='worker returned no result' } }
+                    & $emitResult $res
+                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                }
+            }
+            # Per-host watchdog: abandon a host that overran its own clock (wedged read).
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $emitResult ([ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang" })
+                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                if ($cancelCheck -and (& $cancelCheck)) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $emitResult ([ordered]@{ Computer=$j.Host; Ping=''; HostStatus='Cancelled'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail='cancelled by operator' })
+                            $done++
+                        }
+                    }
+                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight probes stopped.' }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+
+    # Tally per verdict from the emitted rows (each row carries its Verdict).
+    $verdicts = @('ENABLED','READY TO ENABLE','OFF - UNSUPPORTED OEM','BLOCKED - LEGACY/MBR','CHECK ERROR','OFFLINE','DNS MISMATCH')
+    $counts = @{}
+    foreach ($v in $verdicts) { $counts[$v] = @($rows | Where-Object { $_.Verdict -eq $v }).Count }
+    $ready       = [int]$counts['READY TO ENABLE']
+    $enabled     = [int]$counts['ENABLED']
+    $blocked     = [int]$counts['BLOCKED - LEGACY/MBR']
+    $unsupported = [int]$counts['OFF - UNSUPPORTED OEM']
+    $readyList   = @($readyHosts | Sort-Object -Unique)
+
+    & $send @{ type='log'; level='ok'; text="Scan done - ENABLED: $enabled, READY TO ENABLE: $ready, OFF - UNSUPPORTED OEM: $unsupported, BLOCKED - LEGACY/MBR: $blocked, CHECK ERRORS: $($counts['CHECK ERROR']), OFFLINE: $($counts['OFFLINE'])." }
+    & $send @{ type='status'; text="Done. $ready ready-to-enable, $enabled already enabled, $blocked blocked, $unsupported unsupported-OEM of $($targets.Count)." }
+    return @{
+        rows    = @($rows)
+        summary = @{
+            total       = $targets.Count
+            counts      = $counts
+            ready       = $ready
+            enabled     = $enabled
+            blocked     = $blocked
+            unsupported = $unsupported
+            readyHosts  = $readyList
+        }
+    }
+}
+
 function Get-SbeBool {
     param($Value, [bool]$Default)
     if ($null -eq $Value) { return $Default }
@@ -714,6 +1055,11 @@ function Invoke-JanetToolAction {
     $cancelJob = $null
     if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }
+
+    # Read-only fleet scan (v1.6.0): its own action, no host cap / admin gate.
+    if ($ActionId -eq 'scan-secure-boot') {
+        return (Invoke-SbeScanAction -Params $Params -Credential $Credential -Emit $Emit)
+    }
 
     if ($ActionId -ne 'enable-secure-boot') {
         & $send @{ type='error'; text="Unknown action '$ActionId'." }

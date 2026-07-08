@@ -97,8 +97,13 @@
 
     dhcp: '<b>Connect</b> to a DHCP server, <b>Load</b> an option\'s values from a scope to preview, then <b>Apply</b> (one scope) or <b>Bulk</b> append / prepend / remove across many. <b>Set is a whole-option atomic replace - read first.</b> Changes the server.',
 
-    secureboot: 'Load <b>Targets</b> (max 50), optionally set a BIOS password and parallel jobs, tick <b>Dry Run</b> to verify reachability + OEM detection, then uncheck and <b>Enable Secure Boot</b> via a SYSTEM scheduled task. <b>Destructive</b> (UEFI firmware); a brick-safety precheck guards unbootable configs.',
+    secureboot: 'First run <b>Scan Secure Boot (Fleet)</b> (read-only, no host cap) to get a per-host verdict, then <b>Load READY-TO-ENABLE hosts</b> into Targets. Set a BIOS password / parallel jobs, optionally <b>Dry Run</b> to verify reachability + OEM detection, then <b>Enable Secure Boot</b> via a SYSTEM scheduled task in waves of &le;50. <b>Enable is destructive</b> (UEFI firmware); a brick-safety precheck guards unbootable configs.',
     biosfirmware: 'Load <b>Targets</b> and <b>Scan BIOS Firmware</b> - a <b>read-only</b> WinRM scan that reads each host BIOS version + model and scores it <b>Current</b> / <b>Outdated</b> / <b>Unknown</b> against the per-model baseline. <b>List Baselines</b> shows the targets in effect and whether they came from <b>JanetLocal\\BiosFirmwareCatalog.json</b> (editable) or the built-in default. No firmware is written.',
+    remoteadmin: {
+      _overview: 'Two hands-on-keyboard capabilities. <b>Open C$</b> launches \\\\&lt;computer&gt;\\C$ in Explorer on your own session (<b>read-only</b>; no admin session). <b>Run Script</b> fans an operator-authored PowerShell block to one or many hosts over WinRM - <b>Destructive</b>, admin-session-gated, and SHA256-audited.',
+      opencshare: 'Type a computer name (bare hostname or IPv4) and <b>Open C$</b> to launch \\\\&lt;computer&gt;\\C$ in Windows Explorer on your <b>own</b> machine. <b>Read-only</b> - JANET only opens the share; needs no admin session. The name is strictly validated and the access is audited.',
+      runscript: 'Load <b>Targets</b>, type a <b>PowerShell script block</b>, set concurrency + per-host timeout, then <b>RUN</b> (type RUN to confirm). Runs your block verbatim on every target over WinRM and streams captured output per host. <b>Destructive</b> (arbitrary remote code): needs a live admin session; the JANET host is self-guarded out and the exact script is SHA256-audited before it runs.'
+    },
     beta: {
       _overview: '<b>Beta Lab</b> - staging ground for experimental, <b>read-only</b> fleet features. None are active right now; new sections appear here as they bake, then graduate into their own tool. (App Versions + Software Inventory moved into Workstation Patching; logged-on user / last boot / pending-reboot into the WPT Bulk Scan grid.)'
     }
@@ -1148,9 +1153,11 @@
   },
   "secureboot": {
     "overview": {
-      "what": "<b>Secure Boot Enabler</b> enables UEFI Secure Boot on up to 50 targets via OEM WMI DCOM (the SMBus firmware interface under SYSTEM context via a scheduled task). A left TARGET MACHINES card lists hosts (max 50); a right column holds Settings (BIOS password, parallel jobs, Dry-run), an Action bar, and a RESULTS grid showing per-host Status (Success / Skipped / Error / DryRun), Manufacturer, Before/After secure-boot state, and reachability.",
+      "what": "<b>Secure Boot Enabler</b> is a two-stage tool. Stage 1 is a READ-ONLY fleet SCAN (action 'scan-secure-boot', no host cap) that fans out one WinRM probe per host and derives a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so you know exactly which hosts are safe to harden. Stage 2 ENABLES UEFI Secure Boot on up to 50 targets via OEM WMI under SYSTEM context (a scheduled task) with a UEFI+GPT brick-safety precheck. A left TARGET MACHINES card feeds both stages; the SCAN SECURE BOOT (FLEET) card sits above the enable Settings, Action bar, and RESULTS grid.",
       "steps": [
-        "Enter hostnames in TARGET MACHINES (one per line; Import TXT supported; max 50).",
+        "SCAN FIRST: enter hostnames in TARGET MACHINES (no cap for the scan) and click SCAN SECURE BOOT (FLEET) - read-only, no admin session needed. Read the VERDICT column.",
+        "Click 'Load READY-TO-ENABLE hosts -> Targets (N)' to fill the target list with just the hosts the enabler can harden (or Copy READY list / Export CSV). If N > 50, slice into waves.",
+        "Enter hostnames in TARGET MACHINES (one per line; Import TXT supported; max 50 for the ENABLE stage).",
         "Type the BIOS admin password in the SETTINGS card (or leave blank if the BIOS has no password \u2014 the tool will ask for confirmation).",
         "Set Parallel jobs (1-10, default 5) for concurrent machines.",
         "Tick Dry Run to probe reachability and manufacturer detection only (no firmware write).",
@@ -1163,7 +1170,9 @@
       "notes": [
         "This is a firmware change (destructive) \u2014 targets are rebooted ONLY if the firmware write succeeds AND the tool detects a successful change (not automatic; manual reboot may be needed for full effect).",
         "BIOS password is required if the BIOS is password-protected; blank password works only if the BIOS has no password set (tool will ask for confirmation).",
-        "Max 50 hosts per run (safety guard for firmware operations).",
+        "The SCAN stage is read-only (no firmware write, no admin session, no host cap) - it just reports posture. Only the ENABLE stage changes firmware and is capped at 50 hosts per wave.",
+        "Scan verdicts: ENABLED (already on), READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo - safe to enable), OFF - UNSUPPORTED OEM (manual/desk-side), BLOCKED - LEGACY/MBR (run MBR2GPT or reimage first - do NOT feed to the enabler), CHECK ERROR / OFFLINE / DNS MISMATCH (host skipped).",
+        "Max 50 hosts per ENABLE run (safety guard for firmware operations); the scan has no cap.",
         "Manufacturer detection is automatic (reads SMBIOS/DMI); the tool knows Dell, HP/Lenovo/Supermicro and can attempt generic WMI, but older/unknown OEMs may fail with 'Unsupported manufacturer'.",
         "Admin session (Set Credentials) is REQUIRED for real enable; Dry-run does not require credential.",
         "Dry-run is safe (reachability + manufacturer detection only; no firmware write).",
