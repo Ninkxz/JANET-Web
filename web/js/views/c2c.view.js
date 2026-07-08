@@ -2,25 +2,25 @@
    c2c.view.js  -  C2C Nemesis (tool id: 'c2c')
    Comply-to-Connect (AFI/MPTO rule 3.B.2.B) quarantine predictor + remediation.
 
-   TWO surfaces share one Results grid + Activity log:
+   ONE host list (TARGET COMPUTERS) drives everything:
 
-   1. READ-ONLY "C2C Readiness Scan" (action id 'scan'): paste/add targets, the
-      engine fans one worker per host, runs ONE consolidated read-only probe (11
-      C2C checks: 9 scored locally, 2 EXT/reported), streams the full per-check
-      report to the log, and emits one verdict row per host. Changes NOTHING and
-      is NOT gated on an admin session.
+   1. READ-ONLY "C2C Readiness Scan" (action 'scan') + "Version Check"
+      (action 'version-check'): read-only probes across the Target Computers.
+      Change NOTHING and are NOT gated on an admin session.
 
-   2. IMPORT-DRIVEN FIX (v1.6.0, destructive, admin-session gated) - mirrors the
-      ACAS Nemesis Updater idiom: IMPORT the Tanium C2C Compliance CSV, and the
-      import populates one CARD PER FIXABLE PILLAR (Monitoring / Firewall /
-      Encryption / AntiMalware / Patches / PKI Trust Roots), each carrying its OWN
-      affected-host list. Each card = checkbox (checked by default) + affected-host
-      count + View hosts + a per-card Fix; the Encryption card carries the ENABLE
-      BitLocker toggle. RUN ALL fixes every CHECKED card's hosts (each host, its
-      own checked failed pillars) in one pass. Vuln / OSVersion / STIG are shown as
-      ROUTED-ELSEWHERE info cards (never dialed). fix-pki is a folder/.cer DoD-roots
-      installer (the .sst mechanism was dropped in v1.5.0); its cert-bundle folder
-      DEFAULTS to the shipped Packages\DoD-Certs bundle when left blank (one-click).
+   2. TARGET-DRIVEN FIX (destructive, admin-session gated): the six endpoint-
+      fixable pillars (Monitoring / Firewall / Encryption / AntiMalware / Patches
+      / PKI Trust Roots) are ALWAYS shown as fix cards. Each per-card Fix, and the
+      "FIX SELECTED PILLARS ON TARGET LIST" run-all, dial the TARGET COMPUTERS
+      list - no import required. Anything you can put in Target Computers is
+      fixable. Every fixer is VERIFY-FIRST (NOCHANGE on a host already compliant),
+      so running a pillar against a host that does not need it is safe.
+
+   3. OPTIONAL IMPORT of the Tanium "C2C Compliance Status" CSV: a convenience
+      that (a) auto-loads the non-compliant hosts into Target Computers, (b) checks
+      + badges the pillars each host failed, and (c) shows the routed-elsewhere
+      pillars (Vuln -> ACAS/KEV, OSVersion -> Windows Upgrade, STIG -> Reports) as
+      info notes. The import NEVER gates the fix cards or the ability to run a fix.
 
    Credentials are UNIVERSAL (shell header top-right) - this view renders NO
    per-tool credential control; it only READS ctx.session.state.credSet.
@@ -47,9 +47,8 @@
     ['Hostname', 'AFNET/AFNS valid hostname (matches the naming convention)']
   ];
 
-  // Endpoint-fixable pillars (drive the import-built FIX cards + RUN ALL). Must
-  // match the engine's $script:C2cFixablePillars (v1.6.0 - PkiRoots back as the
-  // folder/.cer-bundle DoD-roots installer).
+  // Endpoint-fixable pillars (drive the ALWAYS-ON fix cards + run-all). Must match
+  // the engine's $script:C2cFixablePillars.
   var FIXABLE = ['Monitoring', 'Firewall', 'Encryption', 'AntiMalware', 'Patches', 'PkiRoots'];
 
   // Per-fixable-pillar card metadata: canonical key -> action id + display + blurb.
@@ -59,10 +58,10 @@
     Encryption:  { action: 'fix-encryption',  label: 'Encryption (BitLocker)', desc: 'Resume suspended protectors on EVERY fixed volume; opt-in ENABLE decrypted fixed volumes (OS: TPM; data: auto-unlock). Removable/USB never touched.' },
     AntiMalware: { action: 'fix-antimalware', label: 'AntiMalware (Defender)', desc: 'Start WinDefend / Sense (Automatic); force RTP only in Active mode (never Passive / EDR Block Mode); update stale signatures.' },
     Patches:     { action: 'fix-patches',     label: 'Patches (MECM cycle)',   desc: 'Trigger the MECM SUM scan (113) + eval (108); installs run async.' },
-    PkiRoots:    { action: 'fix-pki',         label: 'PKI Trust Roots',        desc: 'Install the DoD trust bundle .cer ADDITIVELY into Root/CA/Disallowed (needs the cert bundle folder below).' }
+    PkiRoots:    { action: 'fix-pki',         label: 'PKI Trust Roots',        desc: 'Install the DoD trust bundle .cer ADDITIVELY into Root/CA/Disallowed (uses the shared cert bundle folder above; blank = shipped Packages\\DoD-Certs).' }
   };
 
-  // Routed-elsewhere pillars: shown as non-runnable info cards (host counts only).
+  // Routed-elsewhere pillars: import shows these as non-runnable info notes.
   var ROUTED = [
     { key: 'Vuln',      label: 'Vuln (ACAS / KEV)',   route: 'ACAS / Reports / KEV tools' },
     { key: 'OSVersion', label: 'OS Version',          route: 'Windows Upgrade tool' },
@@ -119,11 +118,15 @@
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
 
       // ---- run/result state ----
-      var run = null, unsub = null;
-      var lastImport = null;             // last import summary (pillars + host lists + runAllPlan)
-      var fixChecked = {};               // pillar name -> bool (card checkbox state; default true)
+      var run = null, unsub = null, offTargets = null;
+      var lastImport = null;             // last import summary (for routed notes / re-badge)
+      var fixChecked = {};               // pillar -> bool (card checkbox; default TRUE for all six)
+      var importBadge = {};              // pillar -> failedCount from the last import (badge/hint)
+      var importHosts = {};              // pillar -> flagged host list from the last import (info only)
       var encEnableCb = null;            // the ENABLE-BitLocker checkbox on the Encryption card
+      var encEnableChecked = false;      // persists the ENABLE opt-in across renderFixCards() rebuilds
       var importTiles = null;            // hero StatCards (built in the import card below)
+      FIXABLE.forEach(function (k) { fixChecked[k] = true; });   // every pillar checked by default
 
       // =================== layout ===================
       var root = el('div'); root.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)';
@@ -135,12 +138,15 @@
       var left = el('div'); left.style.cssText = 'flex:0 0 470px;display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto';
       body.appendChild(left);
 
-      // --- Computers (TargetManager) for the read-only scan ---
-      var compCard = sectionCard('TARGET COMPUTERS (read-only scan)');
+      // --- TARGET COMPUTERS (TargetManager) - the ONE list that drives scan AND fixes ---
+      var compCard = sectionCard('TARGET COMPUTERS');
       compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
+      var compHint = el('div'); compHint.style.cssText = 'font-size:11.5px;line-height:1.4;color:var(--muted);margin:-2px 0 8px';
+      compHint.textContent = 'The single host list for BOTH the read-only Scan / Version Check and the destructive FIX cards below. Type / paste / Import TXT, or Import a C2C CSV (optional) to auto-load the non-compliant hosts. Every fixer is verify-first, so a host already compliant reports NO CHANGE.';
+      compCard.appendChild(compHint);
       var targets = C.TargetManager({
         model: ctx.util.targetModel(''),
-        hint: 'One host per line - comma/space/semicolon ok; # starts a comment. Used by the read-only Scan (the FIX cards below carry their own imported hosts).',
+        hint: 'One host per line - comma/space/semicolon ok; # starts a comment. Drives the Scan, the Version Check and every Fix.',
         placeholder: 'WS-0001\nWS-0002\n# lab row\nWS-0003',
         importLabel: 'Import TXT', importAccept: '.txt',
         countNoun: 'computer',
@@ -150,13 +156,77 @@
       compCard.appendChild(tgHolder);
       left.appendChild(compCard);
 
-      // --- IMPORT C2C COMPLIANCE CSV (Tanium export; local parse, no admin gate) ---
-      var importCard = sectionCard('IMPORT C2C COMPLIANCE CSV', 'cyan');
+      // --- FIX PILLARS ON TARGET LIST (destructive; admin session required) ---
+      var fixCard = sectionCard('FIX PILLARS ON TARGET LIST (destructive)', 'cyan');
+      var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
+      fixIntro.textContent = 'Pick the pillars, type FIX once, then Fix one pillar or run "FIX SELECTED PILLARS ON TARGET LIST" - all against the Target Computers above. No import needed. Every fixer is verify-first (NO CHANGE where a host is already compliant), so it is safe to run a pillar on a host that does not need it. Requires an admin session.';
+      fixCard.appendChild(fixIntro);
+
+      // controls row (ALWAYS visible now)
+      var fixControls = el('div'); fixControls.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:8px';
+
+      // prominent target-driven RUN ALL
+      var runAllRow = el('div'); runAllRow.style.cssText = 'display:flex';
+      var runAllBtn = ui.button('FIX SELECTED PILLARS ON TARGET LIST', { variant: 'danger', title: 'Fix every CHECKED pillar on every host in the Target Computers list, in one pass (destructive). Verify-first: a host already compliant for a pillar reports NO CHANGE.' });
+      runAllBtn.style.cssText += ';flex:1;font-weight:700';
+      runAllBtn.onclick = function () { doRunAll(); };
+      runAllRow.appendChild(runAllBtn);
+      fixControls.appendChild(runAllRow);
+
+      var ctlRow1 = el('div'); ctlRow1.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+      var selAllBtn = ui.ghostButton('Check all', { size: 'sm', title: 'Check every fixable pillar.' });
+      var selNoneBtn = ui.ghostButton('Check none', { size: 'sm', title: 'Uncheck every fixable pillar.' });
+      selAllBtn.onclick = function () { setAllChecked(true); };
+      selNoneBtn.onclick = function () { setAllChecked(false); };
+      ctlRow1.appendChild(selAllBtn); ctlRow1.appendChild(selNoneBtn);
+      var ctlSp = el('div'); ctlSp.style.flex = '1'; ctlRow1.appendChild(ctlSp);
+      var fixCancelBtn = ui.button('CANCEL RUN', { size: 'sm', title: 'Cancel the in-flight fix run (queued targets skip; in-flight fixes finish).' });
+      fixCancelBtn.disabled = true;
+      fixCancelBtn.onclick = function () { if (run) { run.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued targets will skip; in-flight fixes finish.', level: 'warn' }); } };
+      ctlRow1.appendChild(fixCancelBtn);
+      fixControls.appendChild(ctlRow1);
+
+      var ctlRow2 = el('div'); ctlRow2.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+      ctlRow2.appendChild(ui.label('Confirm:'));
+      var confirmInput = ui.input({ title: 'Type FIX (exactly) to arm any per-card fix or the run-all.' }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '110px';
+      ctlRow2.appendChild(confirmInput);
+      ctlRow2.appendChild(ui.label('Max concurrent:'));
+      var fixThreads = ui.number({ value: 8, min: 1, max: 16, title: 'Parallel hosts (1-16).' }); fixThreads.style.width = '68px';
+      ctlRow2.appendChild(fixThreads);
+      fixControls.appendChild(ctlRow2);
+
+      var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/445 probe fails.' });
+      fixOffline.style.margin = '0'; fixControls.appendChild(fixOffline);
+
+      var fixWinrmHeal = ui.checkbox('Recover WinRM via RPC if 5985 is down (best-effort; often blocked - default off)', { title: 'Opt-in. For a host whose TCP 5985 probe fails, try remote SCM recovery over RPC (Get-Service / Start-Service / Set-Service Automatic against the target) then re-probe. RPC is frequently blocked on AFNET, so leave this off unless you know it is allowed. Never acts on the dispatcher host.' });
+      fixWinrmHeal.style.margin = '0'; fixControls.appendChild(fixWinrmHeal);
+
+      // Shared DoD trust-bundle folder path (used by the PKI Trust Roots card + run-all).
+      var pkiRow = el('div'); pkiRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+      pkiRow.appendChild(ui.label('PKI cert bundle folder:'));
+      var pkiBundleInput = ui.input({ title: 'Server-readable path (e.g. a UNC path) to the DoD trust bundle folder holding root\\*.cer, Intermediate\\*.cer, Untrusted\\*.cer (and/or loose *.cer -> Root). Read admin-side once; certs are added ADDITIVELY to LocalMachine Root/CA/Disallowed. LEAVE BLANK to use the SHIPPED DoD bundle (Packages\\DoD-Certs) - one-click fix-pki. Type a folder to override with your own.' });
+      pkiBundleInput.placeholder = 'leave blank -> shipped DoD bundle (Packages\\DoD-Certs)';
+      pkiBundleInput.style.cssText += ';flex:1;min-width:220px;font-size:11.5px';
+      pkiRow.appendChild(pkiBundleInput);
+      fixControls.appendChild(pkiRow);
+      var pkiHint = el('div', 'muted', 'PKI: leave the folder blank for the shipped DoD trust bundle (Packages\\DoD-Certs), or type a folder to override. Put any hosts in Target Computers and run Fix PKI to push the bundle (the LTMA workflow).');
+      pkiHint.style.cssText = 'font-size:11px;line-height:1.35;margin:-2px 0 0 2px';
+      fixControls.appendChild(pkiHint);
+
+      fixCard.appendChild(fixControls);
+
+      // fixable-card body (six cards, always rendered) + routed notes (import only)
+      var fixBody = el('div'); fixBody.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+      fixCard.appendChild(fixBody);
+      left.appendChild(fixCard);
+
+      // --- IMPORT C2C COMPLIANCE CSV (optional convenience; local parse, no admin gate) ---
+      var importCard = sectionCard('IMPORT C2C COMPLIANCE CSV (optional)', 'cyan');
       var importIntro = el('div'); importIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      importIntro.textContent = 'Import the Tanium "C2C Compliance Status" CSV export. The import builds one FIX card per endpoint-fixable pillar below (each carrying its own affected hosts); RUN ALL fixes every checked card at once.';
+      importIntro.textContent = 'OPTIONAL. Import the Tanium "C2C Compliance Status" CSV to auto-load its non-compliant hosts into Target Computers and pre-check + badge the pillars each host failed. Fixes never require this - it is a convenience.';
       importCard.appendChild(importIntro);
       var importFileInput = el('input'); importFileInput.type = 'file'; importFileInput.accept = '.csv,.txt'; importFileInput.style.display = 'none';
-      var importBtn = ui.ctaButton('IMPORT C2C CSV', { title: 'Choose the Tanium C2C Compliance Status CSV export, upload it to the JANET Web host, and parse it (per-host pillar routing).' });
+      var importBtn = ui.ctaButton('IMPORT C2C CSV', { title: 'Choose the Tanium C2C Compliance Status CSV export, upload it to the JANET Web host, and parse it (auto-load targets + badge pillars).' });
       importBtn.style.maxWidth = '260px';
       var importRow = el('div'); importRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap'; importRow.appendChild(importBtn);
       importCard.appendChild(importRow); importCard.appendChild(importFileInput);
@@ -171,72 +241,9 @@
       importCard.appendChild(importTiles.el);
       var importStatus = el('div', 'muted', 'Idle.'); importStatus.style.cssText = 'margin-top:8px;font-size:12px';
       importCard.appendChild(importStatus);
-      // convenience: load all non-compliant hosts into the scan target list
-      var loadScanWrap = el('div'); loadScanWrap.style.cssText = 'margin-top:6px;display:flex;gap:6px;flex-wrap:wrap';
-      importCard.appendChild(loadScanWrap);
       importFileInput.addEventListener('change', function () { if (importFileInput.files && importFileInput.files.length) doImport(); });
       importBtn.onclick = function () { if (isRunning()) return; importFileInput.value = ''; importFileInput.click(); };
       left.appendChild(importCard);
-
-      // --- FIX (import-driven cards; destructive; admin session required) ---
-      var fixCard = sectionCard('FIX - IMPORTED PILLARS (destructive)', 'cyan');
-      var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      fixIntro.textContent = 'One card per endpoint-fixable pillar the import found. Each card pushes ONLY to the hosts that failed it. Check the cards you want, type FIX once, then Fix a single card or RUN ALL the checked ones. Requires an admin session.';
-      fixCard.appendChild(fixIntro);
-
-      // controls row (shown once an import has fixable cards)
-      var fixControls = el('div'); fixControls.style.cssText = 'display:none;flex-direction:column;gap:8px;margin-bottom:8px';
-      var ctlRow1 = el('div'); ctlRow1.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
-      var selAllBtn = ui.ghostButton('Select all', { size: 'sm', title: 'Check every fixable card.' });
-      var selNoneBtn = ui.ghostButton('Select none', { size: 'sm', title: 'Uncheck every fixable card.' });
-      selAllBtn.onclick = function () { setAllChecked(true); };
-      selNoneBtn.onclick = function () { setAllChecked(false); };
-      var ctlSp = el('div'); ctlSp.style.flex = '1';
-      var runAllBtn = ui.button('RUN ALL', { variant: 'danger', size: 'sm', title: 'Fix every CHECKED card - each host gets only its own checked failed pillars, in one pass (destructive).' });
-      runAllBtn.onclick = function () { doRunAll(); };
-      ctlRow1.appendChild(selAllBtn); ctlRow1.appendChild(selNoneBtn); ctlRow1.appendChild(ctlSp); ctlRow1.appendChild(runAllBtn);
-      fixControls.appendChild(ctlRow1);
-
-      var ctlRow2 = el('div'); ctlRow2.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
-      ctlRow2.appendChild(ui.label('Confirm:'));
-      var confirmInput = ui.input({ title: 'Type FIX (exactly) to arm any per-card fix or RUN ALL.' }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '110px';
-      ctlRow2.appendChild(confirmInput);
-      ctlRow2.appendChild(ui.label('Max concurrent:'));
-      var fixThreads = ui.number({ value: 8, min: 1, max: 16, title: 'Parallel hosts (1-16).' }); fixThreads.style.width = '68px';
-      ctlRow2.appendChild(fixThreads);
-      var fixCancelBtn = ui.button('CANCEL RUN', { size: 'sm', title: 'Cancel the in-flight fix run (queued targets skip; in-flight fixes finish).' });
-      fixCancelBtn.disabled = true;
-      fixCancelBtn.onclick = function () { if (run) { run.cancel(); log.append({ text: '[' + ts() + '] CANCEL requested - queued targets will skip; in-flight fixes finish.', level: 'warn' }); } };
-      ctlRow2.appendChild(fixCancelBtn);
-      fixControls.appendChild(ctlRow2);
-
-      var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/445 probe fails.' });
-      fixOffline.style.margin = '0'; fixControls.appendChild(fixOffline);
-
-      var fixWinrmHeal = ui.checkbox('Recover WinRM via RPC if 5985 is down (best-effort; often blocked - default off)', { title: 'Opt-in. For a host whose TCP 5985 probe fails, try remote SCM recovery over RPC (Get-Service / Start-Service / Set-Service Automatic against the target) then re-probe. RPC is frequently blocked on AFNET, so leave this off unless you know it is allowed. Never acts on the dispatcher host.' });
-      fixWinrmHeal.style.margin = '0'; fixControls.appendChild(fixWinrmHeal);
-
-      // Shared DoD trust-bundle folder path (used by the PKI Trust Roots card + RUN ALL).
-      var pkiRow = el('div'); pkiRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
-      pkiRow.appendChild(ui.label('PKI cert bundle folder:'));
-      var pkiBundleInput = ui.input({ title: 'Server-readable path (e.g. a UNC path) to the DoD trust bundle folder holding root\\*.cer, Intermediate\\*.cer, Untrusted\\*.cer (and/or loose *.cer -> Root). Read admin-side once; certs are added ADDITIVELY to LocalMachine Root/CA/Disallowed. LEAVE BLANK to use the SHIPPED DoD bundle (Packages\\DoD-Certs) - one-click fix-pki. Type a folder to override with your own.' });
-      pkiBundleInput.placeholder = 'leave blank -> shipped DoD bundle (Packages\\DoD-Certs)';
-      pkiBundleInput.style.cssText += ';flex:1;min-width:220px;font-size:11.5px';
-      pkiRow.appendChild(pkiBundleInput);
-      fixControls.appendChild(pkiRow);
-      var pkiHint = el('div', 'muted', 'Default: the shipped DoD trust bundle (Packages\\DoD-Certs) - leave blank to use it, or type a folder to override.');
-      pkiHint.style.cssText = 'font-size:11px;line-height:1.35;margin:-2px 0 0 2px';
-      fixControls.appendChild(pkiHint);
-
-      fixCard.appendChild(fixControls);
-
-      // fixable-card body + routed-card body (populated on import)
-      var fixBody = el('div'); fixBody.style.cssText = 'display:flex;flex-direction:column;gap:8px';
-      fixCard.appendChild(fixBody);
-      var fixEmpty = el('div', 'muted', 'No fix cards yet - import a C2C Compliance CSV above.');
-      fixEmpty.style.cssText = 'padding:14px;text-align:center;font-size:12px;border:1px dashed var(--edge);border-radius:3px';
-      fixBody.appendChild(fixEmpty);
-      left.appendChild(fixCard);
 
       // --- What this scans (read-only info) ---
       var infoCard = sectionCard('WHAT THIS SCANS - Comply-to-Connect (rule 3.B.2.B)', 'cyan');
@@ -244,9 +251,9 @@
       intro.textContent = 'One consolidated READ-ONLY probe per host (changes nothing) over WinRM. '
         + 'Predicts whether each host would be QUARANTINED. 9 checks are scored on the endpoint; '
         + '2 are EXT (external / server-side) - reported but never scored. '
-        + 'This tool also IMPORTS the Tanium C2C Compliance report (above) and FIXES the '
-        + 'endpoint-fixable pillars - Monitoring, Firewall, Encryption, AntiMalware, Patches and PKI Trust Roots - '
-        + 'per card or all at once (RUN ALL). '
+        + 'The same Target Computers list also drives the destructive FIX cards - Monitoring, Firewall, '
+        + 'Encryption, AntiMalware, Patches and PKI Trust Roots - per pillar or all at once. '
+        + 'Import the Tanium C2C Compliance report (optional) to auto-load targets + badge which pillar each host failed. '
         + 'Vuln routes to ACAS / Reports / KEV, OS Version to Windows Upgrade, STIG to Reports.';
       infoCard.appendChild(intro);
       var list = el('ol'); list.style.cssText = 'margin:0 0 8px 18px;padding:0;font-size:12px;line-height:1.5;color:var(--text)';
@@ -326,7 +333,7 @@
       resultsCard.appendChild(resHdr);
       var grid = C.ResultsGrid({
         title: 'C2C Nemesis results',
-        emptyText: 'No results yet - add computers then Scan, or import a CSV then Fix.',
+        emptyText: 'No results yet - add computers then Scan or Fix.',
         keyMode: { hostCol: 'Host' }, popOut: true,
         columns: [
           { key: 'Host', label: 'HOST', width: 170 },
@@ -388,32 +395,40 @@
       function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
       function alertDialog(title, bodyTxt) { ctx.confirm({ title: title, body: bodyTxt, okText: 'OK', cancelText: null }); }
       function keyByHost(ev) { return ev.Host != null ? String(ev.Host) : (ev.host != null ? String(ev.host) : null); }
+      var NEED_TARGETS = 'Add hosts to Target Computers first (type / paste / Import TXT, or Import a C2C CSV to auto-load them).';
 
-      // fixable pillars actually present in this import (>=1 failed host).
-      function presentFixable() {
-        if (!lastImport) return [];
-        var byName = {};
-        (lastImport.pillars || []).forEach(function (p) { byName[p.name] = p; });
-        return FIXABLE.filter(function (k) { return byName[k] && byName[k].failedCount > 0; });
-      }
-      function pillarData(name) {
-        if (!lastImport) return null;
-        var found = (lastImport.pillars || []).filter(function (p) { return p.name === name; })[0];
-        return found || null;
-      }
+      function checkedFixable() { return FIXABLE.filter(function (k) { return fixChecked[k] !== false; }); }
 
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsInput.disabled = on; clearBtn.disabled = on;
         importBtn.disabled = on;
         verBtn.disabled = on; verMatchInput.disabled = on; verTgtInput.disabled = on; verHeal._cb.disabled = on;
-        selAllBtn.disabled = on; selNoneBtn.disabled = on; runAllBtn.disabled = on;
+        selAllBtn.disabled = on; selNoneBtn.disabled = on;
         fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
         fixWinrmHeal._cb.disabled = on; pkiBundleInput.disabled = on;
         if (encEnableCb) encEnableCb._cb.disabled = on;
-        // per-card Fix buttons
-        Array.prototype.forEach.call(fixBody.querySelectorAll('[data-fixbtn]'), function (b) { b.disabled = on; });
+        // per-card checkboxes
+        Array.prototype.forEach.call(fixBody.querySelectorAll('[data-fixcb]'), function (c) { c.disabled = on; });
         // the shared cancel button is only usable WHILE a run is active.
         fixCancelBtn.disabled = !on;
+        // fix buttons + run-all get their enabled state from the target count (unless locked)
+        updateTargetButtons();
+      }
+
+      // Live-update every target-driven Fix button + the run-all label/enabled state
+      // from the CURRENT Target Computers count. Called on mount, on target edits,
+      // and whenever a run starts/stops (via lockInputs).
+      function updateTargetButtons() {
+        var n = targets.count();
+        var locked = isRunning();
+        runAllBtn.textContent = 'FIX SELECTED PILLARS ON TARGET LIST (' + n + ' host' + (n === 1 ? '' : 's') + ')';
+        runAllBtn.disabled = locked || n === 0;
+        Array.prototype.forEach.call(fixBody.querySelectorAll('[data-fixbtn]'), function (b) {
+          var key = b.getAttribute('data-fixbtn');
+          var meta = FIX_META[key];
+          b.textContent = 'Fix ' + meta.label + ' on ' + n + ' target host' + (n === 1 ? '' : 's');
+          b.disabled = locked || n === 0;
+        });
       }
 
       function summarize() {
@@ -528,7 +543,7 @@
         return t;
       }
 
-      // ---- Import C2C Compliance CSV (read-only; no admin session, no confirm) ----
+      // ---- Import C2C Compliance CSV (optional convenience; read-only, no admin session) ----
       function doImport() {
         if (isRunning()) return;
         var files = importFileInput.files ? Array.prototype.slice.call(importFileInput.files) : [];
@@ -539,7 +554,6 @@
           return;
         }
         importStatus.textContent = 'Uploading ' + f.name + ' ...'; importStatus.className = 'st-info';
-        lastImport = null; loadScanWrap.innerHTML = '';
         log.banner('Import C2C Compliance CSV: ' + f.name);
         ctx.uploadFile(f).then(function (p) {
           log.append({ text: 'Uploaded to host: ' + p, level: 'dim' });
@@ -548,11 +562,21 @@
           if (unsub) unsub();
           unsub = run.subscribe({
             status: function (t) { importStatus.textContent = t; },
-            row: function () {},   // import rows drive the cards/log, not the results grid
+            row: function () {},   // import rows drive the badges/log, not the results grid
             log: function (l) { log.append(l); },
             error: function (e) { importStatus.textContent = 'Import failed'; importStatus.className = 'st-bad'; log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' }); },
             active: function (a) { importBtn.disabled = a; },
-            final: function (res) { renderImportSummary((res && res.summary) || {}); }
+            // The run bus delivers the action's return value ({rows,summary}) as the
+            // 'final' payload (RunController.reduce -> dispatch(key,'final',ev.result)),
+            // so res.summary is the import summary. Guarded so a bad/empty payload logs
+            // instead of silently doing nothing (dispatch swallows handler throws).
+            final: function (res) {
+              try { applyImportSummary((res && res.summary) || {}); }
+              catch (err) {
+                importStatus.textContent = 'Import parsed but the summary could not be applied.'; importStatus.className = 'st-bad';
+                log.append({ text: '[' + ts() + '] Import summary apply error: ' + (err && err.message ? err.message : err), level: 'err' });
+              }
+            }
           });
         }).catch(function (e) {
           importStatus.textContent = 'Upload failed: ' + (e && e.message); importStatus.className = 'st-bad';
@@ -560,81 +584,90 @@
         });
       }
 
-      function renderImportSummary(s) {
-        lastImport = s;
-        var fixablePlan = (s.runAllPlan && s.runAllPlan.length) ? s.runAllPlan.length : 0;
-        var nonCompliant = s.nonCompliant || 0;
-        var routedOnly = Math.max(0, nonCompliant - fixablePlan);
-        importTiles.setAll({ total: s.total || 0, noncompliant: nonCompliant, fixable: fixablePlan, routed: routedOnly });
-        importStatus.textContent = 'Imported ' + (s.total || 0) + ' host(s): ' + (s.compliant || 0) + ' compliant, ' + nonCompliant + ' non-compliant.';
+      // Import is a CONVENIENCE: it loads targets + badges/checks pillars. It never
+      // gates the fix cards (those are always present + target-driven).
+      function applyImportSummary(s) {
+        lastImport = s || {};
+        var pillars = (s && s.pillars) ? s.pillars : [];
+        var byName = {}; pillars.forEach(function (p) { if (p && p.name != null) byName[p.name] = p; });
+
+        // hero tiles
+        var runAllPlan = (s && s.runAllPlan && s.runAllPlan.length) ? s.runAllPlan.length : 0;
+        var nonCompliant = (s && s.nonCompliant) || 0;
+        var routedOnly = Math.max(0, nonCompliant - runAllPlan);
+        importTiles.setAll({ total: (s && s.total) || 0, noncompliant: nonCompliant, fixable: runAllPlan, routed: routedOnly });
+        importStatus.textContent = 'Imported ' + ((s && s.total) || 0) + ' host(s): ' + ((s && s.compliant) || 0) + ' compliant, ' + nonCompliant + ' non-compliant.';
         importStatus.className = 'st-ok';
 
-        // default every fixable card CHECKED
-        fixChecked = {};
-        presentFixable().forEach(function (k) { fixChecked[k] = true; });
+        // (a) auto-load the non-compliant hosts into Target Computers (merge, never clobber)
+        var flaggedHosts = (s && s.nonCompliantHosts && s.nonCompliantHosts.length) ? s.nonCompliantHosts.slice() : [];
+        if (flaggedHosts.length) {
+          var existing = targets.hosts();
+          var seen = {}; existing.forEach(function (h) { seen[String(h).toLowerCase()] = true; });
+          var added = 0;
+          flaggedHosts.forEach(function (h) { var k = String(h).toLowerCase(); if (!seen[k]) { seen[k] = true; existing.push(h); added++; } });
+          targets.setText(existing.join('\n'));
+          log.append({ text: '[' + ts() + '] Loaded ' + flaggedHosts.length + ' non-compliant host(s) into Target Computers (' + added + ' new).', level: 'accent' });
+        }
+
+        // (b) record per-pillar import badges + host lists; CHECK the pillars that failed
+        importBadge = {}; importHosts = {};
+        FIXABLE.forEach(function (k) {
+          var p = byName[k];
+          if (p && (p.failedCount || 0) > 0) {
+            importBadge[k] = p.failedCount;
+            importHosts[k] = (p.hosts && p.hosts.length) ? p.hosts.slice() : [];
+            fixChecked[k] = true;   // auto-check a pillar the import flagged
+          }
+        });
         renderFixCards();
 
-        // convenience: load ALL non-compliant hosts into the scan target list
-        loadScanWrap.innerHTML = '';
-        var allHosts = (s.nonCompliantHosts && s.nonCompliantHosts.length) ? s.nonCompliantHosts : [];
-        if (allHosts.length) {
-          var b = ui.ghostButton('Load ' + allHosts.length + ' non-compliant -> scan targets', { size: 'sm', title: 'Replace the read-only Scan target list with every non-compliant host.' });
-          b.onclick = function () { if (isRunning()) return; targets.setText(allHosts.join('\n')); log.append({ text: '[' + ts() + '] Loaded ' + allHosts.length + ' non-compliant host(s) into the scan target list.', level: 'accent' }); };
-          loadScanWrap.appendChild(b);
-        }
+        // (c) routed-elsewhere info notes
+        var routedTxt = ROUTED.map(function (m) {
+          var p = byName[m.key]; var c = p ? (p.failedCount || 0) : 0;
+          return c > 0 ? (m.label + ' ' + c + ' -> ' + m.route) : null;
+        }).filter(Boolean);
+        if (routedTxt.length) log.append({ text: '[' + ts() + '] Routed elsewhere: ' + routedTxt.join('  |  '), level: 'info' });
       }
 
       function setAllChecked(on) {
-        presentFixable().forEach(function (k) { fixChecked[k] = on; });
+        FIXABLE.forEach(function (k) { fixChecked[k] = on; });
         renderFixCards();
       }
 
-      // ---- render one card per fixable pillar + routed info cards ----
+      // ---- render the six fixable cards (ALWAYS) + routed notes (import only) ----
       function renderFixCards() {
         fixBody.innerHTML = ''; encEnableCb = null;
-        var fixable = presentFixable();
-        if (!lastImport) {
-          fixControls.style.display = 'none';
-          fixBody.appendChild(fixEmpty);
-          return;
-        }
-        if (fixable.length === 0 && routedPresent().length === 0) {
-          fixControls.style.display = 'none';
-          var noneHint = el('div', 'muted', 'Import parsed OK but no host has a fixable or routed failing pillar.');
-          noneHint.style.cssText = 'padding:12px;text-align:center;font-size:12px;border:1px dashed var(--edge);border-radius:3px';
-          fixBody.appendChild(noneHint);
-          return;
-        }
-        fixControls.style.display = fixable.length ? 'flex' : 'none';
+        fixBody.appendChild(sectionEyebrow('FIXABLE PILLARS  (target-driven)'));
+        FIXABLE.forEach(function (k) { fixBody.appendChild(buildFixCard(k)); });
 
-        if (fixable.length) {
-          fixBody.appendChild(sectionEyebrow('FIXABLE HERE  (' + fixable.length + ')'));
-          fixable.forEach(function (k) { fixBody.appendChild(buildFixCard(k, pillarData(k))); });
-        }
         var routed = routedPresent();
         if (routed.length) {
-          fixBody.appendChild(sectionEyebrow('ROUTED ELSEWHERE  (' + routed.length + ')'));
+          fixBody.appendChild(sectionEyebrow('ROUTED ELSEWHERE  (from import - ' + routed.length + ')'));
           routed.forEach(function (r) { fixBody.appendChild(buildRoutedCard(r.meta, r.data)); });
         }
+        updateTargetButtons();
       }
 
       function routedPresent() {
-        if (!lastImport) return [];
-        return ROUTED.map(function (m) { return { meta: m, data: pillarData(m.key) }; })
-                     .filter(function (x) { return x.data && x.data.failedCount > 0; });
+        if (!lastImport || !lastImport.pillars) return [];
+        var byName = {}; lastImport.pillars.forEach(function (p) { if (p && p.name != null) byName[p.name] = p; });
+        return ROUTED.map(function (m) { return { meta: m, data: byName[m.key] }; })
+                     .filter(function (x) { return x.data && (x.data.failedCount || 0) > 0; });
       }
 
       function sectionEyebrow(t) {
         var h = el('div', 'j-eyebrow', t); h.style.cssText += ';margin:6px 0 2px'; return h;
       }
 
-      function buildFixCard(key, data) {
+      function buildFixCard(key) {
         var meta = FIX_META[key];
-        var count = (data && data.failedCount) || 0;
+        var badge = importBadge[key];      // failedCount from last import, or undefined
         var box = el('div', 'j-card'); box.style.cssText += ';padding:10px 12px';
         var r1 = el('div'); r1.style.cssText = 'display:flex;align-items:flex-start;gap:8px';
         var cb = el('input'); cb.type = 'checkbox'; cb.checked = fixChecked[key] !== false; cb.style.marginTop = '3px';
-        cb.title = 'Include ' + meta.label + ' in RUN ALL.';
+        cb.setAttribute('data-fixcb', key);
+        cb.title = 'Include ' + meta.label + ' in the run-all.';
         cb.addEventListener('change', function () { fixChecked[key] = cb.checked; });
         r1.appendChild(cb);
 
@@ -644,29 +677,32 @@
         txt.appendChild(nm); txt.appendChild(ds);
         r1.appendChild(txt);
 
-        var right = el('div'); right.style.cssText = 'display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:0 0 auto';
-        var hostLbl = el('div'); hostLbl.style.cssText = 'font-family:var(--mono);font-size:11px;color:var(--cyan);cursor:pointer;text-decoration:underline dotted';
-        hostLbl.textContent = count + ' host' + (count === 1 ? '' : 's');
-        hostLbl.title = 'Click to review the affected host list.';
-        hostLbl.onclick = function () { showPillarHosts(key, data); };
-        right.appendChild(hostLbl);
-        r1.appendChild(right);
+        // import badge (right): "N flagged by import" -> click reviews the flagged hosts
+        if (badge != null) {
+          var right = el('div'); right.style.cssText = 'display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:0 0 auto';
+          var hostLbl = el('div'); hostLbl.style.cssText = 'font-family:var(--mono);font-size:11px;color:var(--cyan);cursor:pointer;text-decoration:underline dotted;text-align:right';
+          hostLbl.textContent = badge + ' flagged by import';
+          hostLbl.title = 'Click to review the hosts the import flagged for ' + meta.label + '. (Fix dials the Target Computers list, not this list.)';
+          hostLbl.onclick = function () { showImportHosts(key); };
+          right.appendChild(hostLbl);
+          r1.appendChild(right);
+        }
         box.appendChild(r1);
 
         // Encryption card: the ENABLE-BitLocker opt-in toggle
         if (key === 'Encryption') {
-          encEnableCb = ui.checkbox('ENABLE BitLocker on ALL FullyDecrypted FIXED volumes - OS + DATA (XtsAes256)', { title: 'Opt-in. Starts XtsAes256 FULL-VOLUME encryption on EVERY FullyDecrypted FIXED volume: the OS volume (TPM protector) AND fixed DATA volumes such as D:, E: (recovery-password protector, NO TPM, plus BitLocker auto-unlock). Every volume escrows its recovery key FIRST (Entra-first, AD fallback) and is fail-closed - if escrow fails the protector is removed and encryption is NEVER started. Removable / USB drives are never touched. The OS volume needs a TPM-ready + domain-joined host; a DATA volume only enables once the OS volume is BitLocker-on. Runs for hours in the background. Applies to this card and to RUN ALL.' });
-          encEnableCb._cb.checked = false;
+          encEnableCb = ui.checkbox('ENABLE BitLocker on ALL FullyDecrypted FIXED volumes - OS + DATA (XtsAes256)', { title: 'Opt-in. Starts XtsAes256 FULL-VOLUME encryption on EVERY FullyDecrypted FIXED volume: the OS volume (TPM protector) AND fixed DATA volumes such as D:, E: (recovery-password protector, NO TPM, plus BitLocker auto-unlock). Every volume escrows its recovery key FIRST (Entra-first, AD fallback) and is fail-closed - if escrow fails the protector is removed and encryption is NEVER started. Removable / USB drives are never touched. The OS volume needs a TPM-ready + domain-joined host; a DATA volume only enables once the OS volume is BitLocker-on. Runs for hours in the background. Applies to this card and to the run-all.' });
+          encEnableCb._cb.checked = encEnableChecked;   // restore, don't reset, on card rebuild
+          encEnableCb._cb.onchange = function () { encEnableChecked = encEnableCb._cb.checked; };
           encEnableCb.style.margin = '6px 0 2px 22px';
           box.appendChild(encEnableCb);
         }
 
         var r2 = el('div'); r2.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px';
         var r2sp = el('div'); r2sp.style.flex = '1'; r2.appendChild(r2sp);
-        var fixBtn = ui.button('Fix on ' + count, { variant: 'danger', size: 'sm', title: 'Run the ' + meta.label + ' remediation on this pillar\'s ' + count + ' affected host(s) (destructive).' });
+        var fixBtn = ui.button('Fix ' + meta.label, { variant: 'danger', size: 'sm', title: 'Run the ' + meta.label + ' remediation on every host in the Target Computers list (destructive). Verify-first: a host already compliant reports NO CHANGE.' });
         fixBtn.setAttribute('data-fixbtn', key);
-        fixBtn.disabled = count === 0;
-        fixBtn.onclick = function () { doPillarFix(key, data); };
+        fixBtn.onclick = function () { doPillarFix(key); };
         r2.appendChild(fixBtn);
         box.appendChild(r2);
         return box;
@@ -688,37 +724,37 @@
         return box;
       }
 
-      // review the exact host set a fix card will push to.
-      function showPillarHosts(key, data) {
-        var hosts = (data && data.hosts) ? data.hosts.slice() : [];
+      // review the hosts the IMPORT flagged for a pillar (informational only).
+      function showImportHosts(key) {
+        var hosts = (importHosts[key] || []).slice();
         var b = el('div');
         var d = el('div'); d.style.cssText = 'font-size:11.5px;color:var(--text-dim);margin-bottom:8px';
-        d.innerHTML = '<b>' + esc((FIX_META[key] && FIX_META[key].label) || key) + '</b><br>' + hosts.length + ' affected host(s). Fix pushes ONLY to these.';
+        d.innerHTML = '<b>' + esc((FIX_META[key] && FIX_META[key].label) || key) + '</b><br>' + hosts.length + ' host(s) the import flagged for this pillar.<br>Fix dials the <b>Target Computers</b> list (they were auto-loaded on import).';
         b.appendChild(d);
         var listBox = el('div'); listBox.style.cssText = 'max-height:260px;overflow:auto;font-family:var(--mono);font-size:11.5px;border:1px solid var(--edge);border-radius:3px;padding:6px 8px;background:var(--bg)';
         if (hosts.length) hosts.forEach(function (h) { var r = el('div'); r.textContent = h; listBox.appendChild(r); });
         else { var em = el('div', 'muted'); em.textContent = '(no hosts resolved)'; listBox.appendChild(em); }
         b.appendChild(listBox);
-        ctx.confirm({ title: 'Affected hosts - ' + ((FIX_META[key] && FIX_META[key].label) || key), body: b, okText: 'Close', cancelText: null });
+        ctx.confirm({ title: 'Import-flagged hosts - ' + ((FIX_META[key] && FIX_META[key].label) || key), body: b, okText: 'Close', cancelText: null });
       }
 
-      // ---- Per-card fix (DESTRUCTIVE; admin session + FIX confirm required) ----
-      async function doPillarFix(key, data) {
+      // ---- Per-card fix (DESTRUCTIVE; TARGET-driven; admin session + FIX confirm) ----
+      async function doPillarFix(key) {
         if (isRunning()) return;
         var meta = FIX_META[key];
-        var hosts = (data && data.hosts) ? data.hosts.slice() : [];
-        if (!hosts.length) { alertDialog('No affected hosts', 'No affected hosts resolved for ' + meta.label + '. Re-import the C2C CSV.'); return; }
+        var hosts = targets.hosts();
+        if (!hosts.length) { alertDialog('No target hosts', NEED_TARGETS); return; }
         if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
         if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
-        // Cert bundle is OPTIONAL now: a blank folder auto-falls-back to the shipped DoD
-        // bundle (Packages\DoD-Certs) engine-side, so one-click fix-pki works. Type a
-        // folder only to override. (If neither exists the engine aborts with a clear log.)
+        // Cert bundle is OPTIONAL: a blank folder auto-falls-back to the shipped DoD
+        // bundle (Packages\DoD-Certs) engine-side, so one-click fix-pki works.
         var bundleFolder = String(pkiBundleInput.value || '').trim();
         var enableEnc = key === 'Encryption' && encEnableCb && encEnableCb._cb.checked;
 
         var pf = [
-          { label: hosts.length + ' affected host(s) queued', ok: hosts.length > 0 },
-          { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet }
+          { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
+          { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+          { label: 'Verify-first: a host already compliant for ' + meta.label + ' reports NO CHANGE (safe to run on any host)', ok: true }
         ];
         if (key === 'Encryption') pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Resume-only (ENABLE not ticked)', ok: true });
         if (key === 'PkiRoots') pf.push({ label: 'Cert bundle: ' + (bundleFolder || 'shipped DoD default (Packages\\DoD-Certs)'), ok: true });
@@ -727,7 +763,8 @@
         var ok = await ctx.arm({
           title: 'Arm Fix ' + meta.label,
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
-          body: 'About to run <b>Fix ' + esc(meta.label) + '</b> on <b>' + hosts.length + '</b> affected host(s).'
+          body: 'About to run <b>Fix ' + esc(meta.label) + '</b> on the <b>' + hosts.length + '</b> host(s) in Target Computers.'
+            + '<br>This fixer is <b>verify-first</b>: a host already compliant for this pillar is reported NO CHANGE and left untouched, so running it against hosts that do not need it is safe.'
             + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START XtsAes256 FULL-VOLUME encryption on <b>every FullyDecrypted FIXED volume</b> of the <b>' + hosts.length + '</b> host(s) - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock). Removable / USB drives are never touched. Escrow-first, fail-closed; the OS volume needs TPM-ready + domain-joined. Encryption runs for hours in the background.' : ''),
           preflight: pf, okText: 'Run Fix ' + meta.label, cancelText: 'Cancel'
         });
@@ -735,7 +772,7 @@
 
         grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
-        log.banner('C2C Fix ' + meta.label + ' on ' + hosts.length + ' host(s)');
+        log.banner('C2C Fix ' + meta.label + ' on ' + hosts.length + ' target host(s)');
         lockInputs(true);
         var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked };
         if (key === 'Encryption') params.enableEncryption = enableEnc;
@@ -744,49 +781,44 @@
         bindFixRun();
       }
 
-      // ---- RUN ALL: each CHECKED fixable card's hosts, its OWN checked pillars ----
+      // ---- Target-driven run-all: every CHECKED pillar on every Target host ----
       async function doRunAll() {
         if (isRunning()) return;
-        var basePlan = (lastImport && lastImport.runAllPlan && lastImport.runAllPlan.length) ? lastImport.runAllPlan : [];
-        if (!basePlan.length) { alertDialog('Nothing to run', 'Import a C2C Compliance CSV first - RUN ALL needs a non-empty plan.'); return; }
-        var checkedPillars = presentFixable().filter(function (k) { return fixChecked[k] !== false; });
-        if (!checkedPillars.length) { alertDialog('Nothing checked', 'Check at least one fixable card before RUN ALL.'); return; }
-        // build the plan: each host keeps only its own CHECKED failed pillars (intersect with the import plan)
-        var plan = basePlan.map(function (e) {
-          var keep = (e.pillars || []).filter(function (p) { return checkedPillars.indexOf(p) >= 0; });
-          return keep.length ? { host: e.host, pillars: keep } : null;
-        }).filter(function (x) { return x; });
-        if (!plan.length) { alertDialog('Nothing to run', 'No host has a CHECKED fixable pillar.'); return; }
-        if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before RUN ALL - it changes machines.'); return; }
-        if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm RUN ALL.'); return; }
+        var hosts = targets.hosts();
+        if (!hosts.length) { alertDialog('No target hosts', NEED_TARGETS); return; }
+        var checkedPillars = checkedFixable();
+        if (!checkedPillars.length) { alertDialog('Nothing checked', 'Check at least one fixable pillar before running.'); return; }
+        if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running - it changes machines.'); return; }
+        if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the run-all.'); return; }
 
-        var pcount = {}, totalFixes = 0;
-        plan.forEach(function (e) { (e.pillars || []).forEach(function (p) { pcount[p] = (pcount[p] || 0) + 1; totalFixes++; }); });
+        // Every host gets every CHECKED pillar - the engine runs each pillar verify-first.
+        var plan = hosts.map(function (h) { return { host: h, pillars: checkedPillars.slice() }; });
         var enableEnc = !!(encEnableCb && encEnableCb._cb.checked && checkedPillars.indexOf('Encryption') >= 0);
-
         var bundleFolder = String(pkiBundleInput.value || '').trim();
         var pkiChecked = checkedPillars.indexOf('PkiRoots') >= 0;
 
-        var pf = Object.keys(pcount).sort().map(function (p) { return { label: p + ': ' + pcount[p] + ' host(s)', ok: true }; });
-        pf.unshift({ label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet });
-        pf.push({ label: enableEnc ? 'ENABLE BitLocker: checked Encryption hosts WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
-        if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs) - leave blank to use it', ok: true });
+        var pf = [
+          { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+          { label: hosts.length + ' target host(s) x ' + checkedPillars.length + ' pillar(s): ' + checkedPillars.join(', '), ok: true },
+          { label: 'Verify-first: each pillar reports NO CHANGE on a host already compliant, so "all pillars on all targets" is safe', ok: true }
+        ];
+        pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
+        if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs)', ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
         var ok = await ctx.arm({
-          title: 'Arm RUN ALL',
+          title: 'Arm FIX SELECTED PILLARS ON TARGET LIST',
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
-          body: 'About to fix <b>' + plan.length + '</b> host(s) - each its OWN checked failed pillars (<b>' + totalFixes + '</b> fix(es) total).'
-            + '<br>Per-pillar host counts: <b>' + esc(Object.keys(pcount).sort().map(function (p) { return p + ' ' + pcount[p]; }).join(', ')) + '</b>'
-            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> checked Encryption hosts will START XtsAes256 full-volume encryption on <b>every FullyDecrypted FIXED volume</b> - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock); removable / USB drives are never touched. Runs for hours in the background.' : '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).'),
-          preflight: pf, okText: 'RUN ALL', cancelText: 'Cancel'
+          body: 'About to fix <b>' + hosts.length + '</b> target host(s), each getting all <b>' + checkedPillars.length + '</b> checked pillar(s): <b>' + esc(checkedPillars.join(', ')) + '</b>.'
+            + '<br>Every fixer is <b>verify-first</b> - a host already compliant for a pillar is reported NO CHANGE and left untouched. That is why running all checked pillars against every target is safe: only what is actually wrong per host changes.'
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> hosts will START XtsAes256 full-volume encryption on <b>every FullyDecrypted FIXED volume</b> - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock); removable / USB drives are never touched. Runs for hours in the background.' : '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).'),
+          preflight: pf, okText: 'RUN ON TARGET LIST', cancelText: 'Cancel'
         });
-        if (!ok) { log.append({ text: '[' + ts() + '] RUN ALL cancelled at the arming dialog.', level: 'warn' }); return; }
+        if (!ok) { log.append({ text: '[' + ts() + '] Run-all cancelled at the arming dialog.', level: 'warn' }); return; }
 
-        var allHosts = plan.map(function (e) { return e.host; });
-        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + allHosts.length;
-        allHosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
-        log.banner('C2C RUN ALL on ' + plan.length + ' host(s) [' + totalFixes + ' fix(es)]');
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C RUN ALL on ' + hosts.length + ' target host(s) [' + checkedPillars.join(', ') + ']');
         lockInputs(true);
         run = ctx.run('run-all', {
           plan: JSON.stringify(plan),
@@ -845,11 +877,15 @@
       }
 
       // =================== init ===================
-      log.append({ text: 'C2C Nemesis ready. Add computers then run the C2C Readiness Scan (read-only), or import the Tanium C2C Compliance CSV to build the FIX cards.', level: 'accent' });
-      log.append({ text: '9 scored checks (Monitoring, Firewall, AntiMalware, Patches, Encryption, AppWhitelist, Agents, PkiRoots, Hostname) + 2 EXT (VulnThreshold, Coams). The full per-check report streams here.', level: 'dim' });
+      renderFixCards();                                   // six fix cards render immediately (no import needed)
+      offTargets = targets.model.onChange(function () { updateTargetButtons(); });   // live fix-button counts
+      updateTargetButtons();
+
+      log.append({ text: 'C2C Nemesis ready. Add hosts to Target Computers (type / paste / Import TXT, or Import a C2C CSV to auto-load them), pick pillars, then Fix - one pillar or all at once. Every fixer is verify-first, so it only changes what is actually wrong per host. Import is optional.', level: 'accent' });
+      log.append({ text: 'Read-only side: C2C Readiness Scan + Version Check across the same Target Computers (9 scored checks + 2 EXT). The full per-check report streams here.', level: 'dim' });
 
       host.appendChild(root);
-      this._root = root; this._unsub = function () { if (unsub) unsub(); };
+      this._root = root; this._unsub = function () { if (unsub) unsub(); if (offTargets) offTargets(); };
     },
     unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
   });

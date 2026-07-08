@@ -4,6 +4,35 @@
 > is unchanged - routes, registry keys, view registration and log/export names all
 > stay `c2c` / "C2C Readiness Scan").
 
+> **v1.8.0 (2026-07-08) - fixes are TARGET-DRIVEN; import is now OPTIONAL:**
+> The **TARGET COMPUTERS** list is the single source of truth for every action -
+> the read-only Scan / Version Check AND the destructive fixes. The **six fixable
+> pillar cards** (Monitoring / Firewall / Encryption / AntiMalware / Patches / PKI
+> Trust Roots) now render **immediately at mount** (no import required); each
+> pillar's per-card **Fix** and the prominent **FIX SELECTED PILLARS ON TARGET
+> LIST** run-all dial `targets.hosts()`. Anything you can put in Target Computers is
+> fixable (this delivers the LTMA "push the DoD cert bundle to any host list"
+> workflow: type hosts, run Fix PKI). The **CSV import is now purely a convenience**:
+> on import the view (a) auto-loads the non-compliant hosts into Target Computers
+> (merged, never clobbering typed hosts), (b) auto-checks + **badges** each pillar a
+> host failed ("N flagged by import", click to review the flagged hosts), and (c)
+> logs the routed-elsewhere pillars (Vuln / OSVersion / STIG). Import NEVER gates the
+> cards or the ability to run a fix.
+>
+> **Import "cards do not load" fix:** the run-bus final-summary contract was verified
+> end-to-end correct (engine returns `@{rows;summary}`; the server emits
+> `@{type='final';result=$res}`; `RunController.reduce` dispatches `final` with
+> `ev.result`, so `res.summary` is the import summary - identical to the working ACAS
+> pattern). The real defect was architectural: card rendering AND every fix path were
+> hard-gated on the import bucket (`lastImport` / per-card `data.hosts`), and
+> `RunController.dispatch` **silently swallows any handler exception**, so a single
+> throw inside the import callback left the operator with an empty "No fix cards yet"
+> panel and no way to fix. The rework removes that gate entirely (cards are always
+> present + target-driven) and wraps the import-summary apply in try/catch that logs
+> instead of failing silently. **No engine or param/plan shape changed** (per-card
+> fix still sends `targets`; run-all still sends `plan=[{host,pillars}]`), so the
+> Pester suite is untouched (569/569).
+
 > **v1.7.0 (2026-07-08) - two pillar-correctness fixes (real fleet evidence):**
 > (1) **Encryption covers ALL FIXED VOLUMES**, not just the system drive. The scan
 > check FAILs if any fixed volume is decrypted (removable/USB excluded); the fixer
@@ -273,32 +302,54 @@ tallies (`perPillar`) alongside the per-status host counts.
 (all NOCHANGE/SKIP) / PARTIAL (mix with FAIL) / FAILED (all failed or session error)
 / OFFLINE / SKIPPED. Emits a `VulnPatched` audit row per host.
 
-### View - the fix cards (ACAS Updater idiom)
+### View - the fix cards (TARGET-DRIVEN, v1.8.0)
 
-After a successful import the view renders, under a **FIXABLE HERE** section, one
-compact card per fixable pillar present (Monitoring / Firewall / Encryption /
-AntiMalware / Patches / **PKI Trust Roots**). Each card = a checkbox (checked by default)
-+ the pillar title + its affected-host count (click to review the host list in a dialog)
-+ a per-card **Fix on N** button that dispatches `fix-<pillar>` with `targets` = that
-pillar's imported hosts. The **Encryption** card carries the ENABLE-BitLocker toggle -
-its label + tooltip and the per-card / RUN ALL preflight + arm dialogs DISCLOSE that
-ticking it starts XtsAes256 FULL-VOLUME encryption on EVERY FullyDecrypted FIXED volume:
-the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra
-escrow + auto-unlock), an hours-long background operation; removable / USB drives are
-never touched. The
-**PKI Trust Roots** card uses the shared **PKI cert bundle folder** path input in the
-fix-card header, which now DEFAULTS to the shipped bundle - its placeholder/hint reads
-"leave blank -> shipped DoD bundle (Packages\DoD-Certs)", so one-click fix-pki works with
-nothing typed; type a folder only to override (applies to the PKI card and RUN ALL). Under a **ROUTED
-ELSEWHERE** section, non-runnable info cards show Vuln / OSVersion / STIG with their host
-counts (never dialed). A **Select all / Select none** pair, a single shared `FIX` confirm
-input + threads / attempt-offline / a shared **Recover WinRM (RPC)** toggle + the PKI
-cert bundle path + CANCEL RUN, and a prominent **RUN ALL** button live in the fix-card
-header. RUN ALL builds the plan from the CHECKED fixable cards (each host mapped to only
-its own checked failed pillars, intersected with the imported `runAllPlan`) and arms a
-`ctx.arm` dialog listing the per-pillar host counts (encryption only STARTS if the
-Encryption card's ENABLE toggle is ticked; PkiRoots is skipped per host if no bundle
-folder is set). A separate read-only **VERSION CHECK** card (productMatch + optional
-targetVersion + a WinRM-heal toggle) runs `version-check` across the Target Computers
-list. Credentials stay universal (no per-tool cred control). All runs stream into the
+The view renders **all six fixable pillar cards immediately at mount**, under a
+**FIXABLE PILLARS (target-driven)** section - Monitoring / Firewall / Encryption /
+AntiMalware / Patches / **PKI Trust Roots**. No import is required. Each card = a
+checkbox (**checked by default**) + the pillar title + description, and a per-card
+**Fix `<pillar>` on N target host(s)** button whose count updates **live** from the
+Target Computers list (subscribed via `targets.model.onChange`). Per-card Fix
+dispatches `fix-<pillar>` with `targets` = **`targets.hosts().join('\n')`** (the
+Target Computers list), NOT an import bucket. If the target list is empty the button
+is disabled and the guard alerts *"Add hosts to Target Computers first (type / paste
+/ Import TXT, or Import a C2C CSV to auto-load them)."* Because every fixer is
+**verify-first** (NO CHANGE where a host is already compliant), the per-card and
+run-all arm dialogs state that running a pillar against a host that does not need it
+is safe.
+
+A prominent **FIX SELECTED PILLARS ON TARGET LIST (N host(s))** button is the
+target-driven run-all: it builds `plan = targets.hosts().map(h => ({host:h,
+pillars:<checked fixable pillars>}))` and dispatches `run-all` with
+`{ plan, enableEncryption, certBundleFolder, winrmHeal, confirm, threads,
+attemptOffline }`. Its arm dialog lists the checked pillars + the target host count +
+the destructive/BitLocker disclosure + the verify-first safety note.
+
+The **Encryption** card carries the ENABLE-BitLocker toggle - its label + tooltip and
+the per-card / run-all preflight + arm dialogs DISCLOSE that ticking it starts
+XtsAes256 FULL-VOLUME encryption on EVERY FullyDecrypted FIXED volume: the OS volume
+(TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow +
+auto-unlock), an hours-long background operation; removable / USB drives are never
+touched. The **PKI Trust Roots** card uses the shared **PKI cert bundle folder** path
+input in the fix-card header (defaults to the shipped `Packages\DoD-Certs` bundle -
+placeholder "leave blank -> shipped DoD bundle"); one-click Fix PKI against any host
+list is the LTMA workflow. The header also holds a **Check all / Check none** pair, a
+single shared `FIX` confirm input + threads / attempt-offline / a shared **Recover
+WinRM (RPC)** toggle + **CANCEL RUN**.
+
+**Import is optional and additive.** The **IMPORT C2C COMPLIANCE CSV (optional)**
+card (below the fix cards) still shows the hero StatCards. On a successful import the
+view: (a) **merges** the summary's `nonCompliantHosts` into Target Computers (never
+clobbering hosts the operator typed - de-duped case-insensitively, logs how many were
+new); (b) for each fixable pillar with `failedCount > 0`, records a **badge**
+("N flagged by import", cyan, click to review that pillar's flagged hosts in a
+dialog) and re-checks it; (c) logs the routed-elsewhere pillars (Vuln / OSVersion /
+STIG) and shows them under a **ROUTED ELSEWHERE (from import)** section as
+non-runnable info cards. The import `final` handler is wrapped in try/catch so a
+malformed summary logs an error to the activity log + status line instead of
+silently no-op'ing (the run bus's `dispatch` swallows handler throws).
+
+A separate read-only **VERSION CHECK** card (productMatch + optional targetVersion +
+a WinRM-heal toggle) runs `version-check` across the Target Computers list.
+Credentials stay universal (no per-tool cred control). All runs stream into the
 shared Results grid + Activity log; Export CSV is retained.
