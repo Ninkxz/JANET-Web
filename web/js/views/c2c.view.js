@@ -31,7 +31,7 @@
   // engine row events are keyed 'Host'; CSV header keeps the desktop label 'Computer'.
   var EXPORT_COLS = [['Host', 'Computer'], ['Ping', 'Ping'], ['Status', 'Status'], ['Detail', 'Detail']];
 
-  // The 11 C2C checks (rule 3.B.2.B). 9 are scored on the endpoint; 2 are EXT
+  // The 10 C2C checks (rule 3.B.2.B). 8 are scored on the endpoint; 2 are EXT
   // (external / server-side - reported in the activity log but never scored).
   var CHECKS = [
     ['Monitoring', 'Endpoint monitoring installed (Tanium SOFTWARE installed + client service running)'],
@@ -43,8 +43,7 @@
     ['AppWhitelist', 'Application whitelist active (AppLocker or WDAC enforcing)'],
     ['Agents', 'Patching + security agents installed and active (CcmExec + a security agent)'],
     ['PkiRoots', 'PKI trust roots baseline present (DoD roots in LocalMachine\\Root)'],
-    ['Coams', 'All 7 COAMS tags applied  [EXT - ARAD/ePO server-side, not endpoint-readable]'],
-    ['Hostname', 'AFNET/AFNS valid hostname (matches the naming convention)']
+    ['Coams', 'All 7 COAMS tags applied  [EXT - ARAD/ePO server-side, not endpoint-readable]']
   ];
 
   // Endpoint-fixable pillars (drive the ALWAYS-ON fix cards + run-all). Must match
@@ -266,7 +265,7 @@
       });
       infoCard.appendChild(list);
       var verdictNote = el('div'); verdictNote.style.cssText = 'font-size:12px;line-height:1.45;color:var(--muted)';
-      verdictNote.textContent = 'Verdict = count of FAIL among the 9 scored checks: '
+      verdictNote.textContent = 'Verdict = count of FAIL among the 8 scored checks: '
         + 'READY (0 fail, 0 error) / QUARANTINE RISK (1+ fail) / CHECK ERRORS (0 fail but 1+ error). '
         + 'EXT checks (VulnThreshold, Coams) are shown but never count. The full per-check report streams to the activity log.';
       infoCard.appendChild(verdictNote);
@@ -883,7 +882,7 @@
       updateTargetButtons();
 
       log.append({ text: 'C2C Nemesis ready. Add hosts to Target Computers (type / paste / Import TXT, or Import a C2C CSV to auto-load them), pick pillars, then Fix - one pillar or all at once. Every fixer is verify-first, so it only changes what is actually wrong per host. Import is optional.', level: 'accent' });
-      log.append({ text: 'Read-only side: C2C Readiness Scan + Version Check across the same Target Computers (9 scored checks + 2 EXT). The full per-check report streams here.', level: 'dim' });
+      log.append({ text: 'Read-only side: C2C Readiness Scan + Version Check across the same Target Computers (8 scored checks + 2 EXT). The full per-check report streams here.', level: 'dim' });
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); if (offTargets) offTargets(); };

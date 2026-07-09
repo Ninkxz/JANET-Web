@@ -7,14 +7,14 @@
 #  and never needs an admin session (read-only, like the WPT ping / bulk-scan and
 #  the Windows Upgrade Diagnose action).
 #
-#  The probe runs 11 C2C checks. 9 are scored locally (admin-side, from the check
+#  The probe runs 10 C2C checks. 8 are scored locally (admin-side, from the check
 #  results); 2 are marked EXT (external - reported, never scored) because they are
 #  server-side (ARAD/ACAS/ePO) and not endpoint-determinable. Every check yields a
 #  status PASS / FAIL / EXT / ERROR and a short Detail; each runs inside ONE
 #  Invoke-Command round-trip ON the target, wrapped in its own try/catch so one
 #  failed check becomes ERROR and never aborts the probe.
 #
-#  Verdict (computed admin-side): count FAIL among the 9 scored checks ->
+#  Verdict (computed admin-side): count FAIL among the 8 scored checks ->
 #    READY            = 0 FAIL and 0 ERROR
 #    QUARANTINE RISK  = >= 1 FAIL   (Detail lists the failing pillars)
 #    CHECK ERRORS     = 0 FAIL but >= 1 ERROR
@@ -35,14 +35,14 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.7.1'
+        version  = '1.7.2'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 C2C checks (9 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 10 C2C checks (8 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
                 label       = 'C2C Readiness Scan'
-                description = 'Read-only prediction of Comply-to-Connect quarantine (rule 3.B.2.B). Per host, one consolidated WinRM probe runs 11 checks - Monitoring (Tanium), Firewall, AntiMalware (Defender), Patches (MECM), Vuln threshold (EXT), Encryption (BitLocker), AppWhitelist (AppLocker/WDAC), Agents (patch+security), PKI roots, COAMS tags (EXT), and hostname - and returns a one-word verdict: READY (all scored pillars pass), QUARANTINE RISK (one or more FAIL), CHECK ERRORS (a check could not be evaluated), or OFFLINE. The two EXT pillars (Vuln, COAMS) are server-side (ARAD/ACAS/ePO) so they are reported but never scored. The full colour-tagged 11-line report streams to the activity log. Changes NOTHING and needs no admin session.'
+                description = 'Read-only prediction of Comply-to-Connect quarantine (rule 3.B.2.B). Per host, one consolidated WinRM probe runs 10 checks - Monitoring (Tanium), Firewall, AntiMalware (Defender), Patches (MECM), Vuln threshold (EXT), Encryption (BitLocker), AppWhitelist (AppLocker/WDAC), Agents (patch+security), PKI roots, and COAMS tags (EXT) - and returns a one-word verdict: READY (all scored pillars pass), QUARANTINE RISK (one or more FAIL), CHECK ERRORS (a check could not be evaluated), or OFFLINE. The two EXT pillars (Vuln, COAMS) are server-side (ARAD/ACAS/ePO) so they are reported but never scored. The full colour-tagged 10-line report streams to the activity log. Changes NOTHING and needs no admin session.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','Status','Detail')
@@ -260,10 +260,10 @@ function Get-C2cBaseline {
     } catch { return @{ Config = $cfg; Source = "embedded defaults (baseline read error: $($_.Exception.Message))" } }
 }
 
-# The 9 SCORED pillars are Monitoring/Firewall/AntiMalware/Patches/Encryption/
-# AppWhitelist/Agents/PkiRoots/Hostname. The verdict simply tallies FAIL/ERROR
+# The 8 SCORED pillars are Monitoring/Firewall/AntiMalware/Patches/Encryption/
+# AppWhitelist/Agents/PkiRoots. The verdict simply tallies FAIL/ERROR
 # across the returned checks; the 2 EXT pillars (Vuln, COAMS) carry neither, so
-# "count all FAIL" already equals "count the 9 scored FAIL" (no explicit set needed).
+# "count all FAIL" already equals "count the 8 scored FAIL" (no explicit set needed).
 
 # --- Single-source endpoint probe: is the Tanium SOFTWARE installed? -----------
 # Both the read-only scan (check #1 Monitoring) and the destructive fix-monitoring
@@ -492,7 +492,7 @@ try { . ([scriptblock]::Create($script:C2cWinrmHealSrc)) } catch {}
 try { . ([scriptblock]::Create($script:C2cAddCertsSrc)) } catch {}
 
 # --- Per-host probe worker (runs in a pool runspace; no module scope here) ---
-# Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks }. All 11 checks run
+# Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks }. All 10 checks run
 # inside ONE Invoke-Command round-trip; the verdict is computed here (admin-side).
 $script:C2cProbeBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, $Config, [string]$TaniumInstalledSrc)
@@ -528,7 +528,6 @@ $script:C2cProbeBlock = {
     if ($Config.ContainsKey('sigMaxAgeHours')) { $tmph = 0; if ([int]::TryParse([string]$Config['sigMaxAgeHours'], [ref]$tmph)) { $sigMaxHours = $tmph } }
     if ($sigMaxHours -le 0) { $sigMaxHours = $sigMaxAge * 24 }
     $secAgents     = @($Config['securityAgentServices'])
-    $hostPatterns  = @($Config['hostnamePatterns'])
     $dodRoots      = @($Config['dodRootThumbprints'])
 
     $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
@@ -537,9 +536,9 @@ $script:C2cProbeBlock = {
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
 
-    # ---- The consolidated read-only probe: all 11 C2C checks in one round-trip. ----
+    # ---- The consolidated read-only probe: all 10 C2C checks in one round-trip. ----
     $probeSb = {
-        param($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $hostPatterns, $dodRoots, $taniumInstalledSrc)
+        param($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $dodRoots, $taniumInstalledSrc)
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
         if ($taniumInstalledSrc) { try { . ([scriptblock]::Create($taniumInstalledSrc)) } catch {} }
         # Normalize the array args: an empty collection can cross the WinRM ArgumentList
@@ -547,7 +546,6 @@ $script:C2cProbeBlock = {
         # $null host-pattern would be an empty regex that matches EVERYTHING -> a false
         # PASS). Drop null/blank elements so every list is a clean [string] array.
         $secAgents    = @(@($secAgents)    | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
-        $hostPatterns = @(@($hostPatterns) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
         $dodRoots     = @(@($dodRoots)     | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
         $checks = New-Object System.Collections.ArrayList
         $mk = { param($n,$s,$d) [void]$checks.Add([pscustomobject]@{ Name=$n; Status=$s; Detail=[string]$d }) }
@@ -829,20 +827,15 @@ $script:C2cProbeBlock = {
         # 10. COAMS - 7 asset tags, server-side (ARAD/ePO), not endpoint-readable -> EXT.
         & $mk 'COAMS' 'EXT' 'ARAD/ePO server-side tags (7) - not endpoint-readable'
 
-        # 11. Hostname - AFNET/AFNS naming convention (authoritative verdict is ARAD-side).
-        try {
-            $name = $env:COMPUTERNAME
-            $matched = $false
-            foreach ($pat in @($hostPatterns)) { if ($name -match $pat) { $matched = $true; break } }
-            if ($matched) { & $mk 'Hostname' 'PASS' "$name matches naming convention (authoritative verdict is ARAD-side)" }
-            else          { & $mk 'Hostname' 'FAIL' "$name does not match naming convention (authoritative verdict is ARAD-side)" }
-        } catch { & $mk 'Hostname' 'ERROR' $_.Exception.Message }
+        # (The old local Hostname naming-convention check was removed: its patterns were
+        # base-specific (^MSEKL/^MSEKW), so it FALSE-flagged every host at other bases as
+        # QUARANTINE RISK. The authoritative hostname verdict is ARAD-side anyway.)
 
         return @{ RemoteName = $env:COMPUTERNAME; Checks = @($checks) }
     }
 
     try {
-        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $hostPatterns, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
+        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
     } catch {
         $r.Status = 'ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -877,11 +870,11 @@ $script:C2cProbeBlock = {
     $parts = New-Object System.Collections.ArrayList
     if ($fail -ge 1) { [void]$parts.Add("$fail FAIL: $($failNames -join ', ')") }
     if ($err  -ge 1) { [void]$parts.Add("$err ERROR: $($errNames -join ', ')") }
-    if ($fail -eq 0 -and $err -eq 0) { [void]$parts.Add('all 9 scored pillars pass') }
+    if ($fail -eq 0 -and $err -eq 0) { [void]$parts.Add('all 8 scored pillars pass') }
     if ($extNames.Count -gt 0) { [void]$parts.Add("EXT: $($extNames -join ', ')") }
     $r.Detail = ($parts -join ' | ')
 
-    # Full 11-line colour-tagged report ([PASS]/[FAIL]/[EXT]/[ERROR]) the view colours.
+    # Full 10-line colour-tagged report ([PASS]/[FAIL]/[EXT]/[ERROR]) the view colours.
     $rptLines = foreach ($c in $checks) { '[{0}] {1}: {2}' -f ([string]$c.Status), ('{0,-12}' -f [string]$c.Name), ([string]$c.Detail) }
     $r.Report = ($rptLines -join "`r`n")
     return $r
