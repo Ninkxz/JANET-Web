@@ -126,7 +126,7 @@ Describe 'C2C v1.9.0 - fix-lockscreen is wired as an opt-in action, NOT a run-al
     It 'fix-lockscreen maps to the Lockscreen pillar' {
         & $cm { $script:C2cPillarByAction['fix-lockscreen'] } | Should Be 'Lockscreen'
     }
-    It 'reports tool version 1.10.0' {
-        (& $cm { Get-JanetToolManifest }).version | Should Be '1.10.0'
+    It 'reports tool version 1.11.0' {
+        (& $cm { Get-JanetToolManifest }).version | Should Be '1.11.0'
     }
 }
