@@ -7,19 +7,29 @@
 #  and never needs an admin session (read-only, like the WPT ping / bulk-scan and
 #  the Windows Upgrade Diagnose action).
 #
-#  The probe runs 10 C2C checks. 8 are scored locally (admin-side, from the check
-#  results); 2 are marked EXT (external - reported, never scored) because they are
-#  server-side (ARAD/ACAS/ePO) and not endpoint-determinable. Every check yields a
-#  status PASS / FAIL / EXT / ERROR and a short Detail; each runs inside ONE
-#  Invoke-Command round-trip ON the target, wrapped in its own try/catch so one
-#  failed check becomes ERROR and never aborts the probe.
+#  The probe runs 11 C2C checks. Each yields a status PASS / FAIL / EXT / ERROR and a
+#  short Detail, and runs inside ONE Invoke-Command round-trip ON the target, wrapped in
+#  its own try/catch so one failed check becomes ERROR and never aborts the probe.
 #
-#  Verdict (computed admin-side): count FAIL among the 8 scored checks ->
-#    READY            = 0 FAIL and 0 ERROR
-#    QUARANTINE RISK  = >= 1 FAIL   (Detail lists the failing pillars)
-#    CHECK ERRORS     = 0 FAIL but >= 1 ERROR
+#  v1.8.0 aligns the verdict to the authoritative C2C TASKORD 26-0822 Tanium dashboard,
+#  which quarantines on ONLY 5 rules and treats the rest as audit/informational. Each
+#  pillar carries a TIER ($script:C2cPillarTier); the verdict scores ONLY the quarantine
+#  tier, so stricter-than-TASKORD JANET checks stay visible + fixer-remediable but never
+#  falsely predict quarantine:
+#    Quarantine : Firewall, AntiMalware (Defender installed + sig<7d + MDE OrgId),
+#                 Patches (security, 7-day grace), Encryption (C: Protection ON), Vuln (EXT)
+#    Audit      : PkiRoots, OSVersion            (shown, never quarantines - matches
+#                 the dashboard's "you cannot be non-compliant for audit rules")
+#    Info       : AppWhitelist, Agents, COAMS    (advisory; not a TASKORD rule)
+#    Attest     : Monitoring (Tanium)            (a dead client cannot attest -> NOT ATTESTING)
+#
+#  Verdict (computed admin-side, quarantine-tier only):
+#    QUARANTINE RISK  = >= 1 quarantine-tier FAIL   (Detail lists the failing pillars)
+#    CHECK ERRORS     = 0 quarantine FAIL but >= 1 quarantine-tier ERROR
+#    NOT ATTESTING    = only Monitoring (Tanium) failing - box invisible to the dashboard
+#    READY            = 0 of the above (audit/info fails are advisory, shown in Detail)
 #    OFFLINE          = host unreachable (TCP 5985/445)
-#  EXT checks (Vuln, COAMS) are shown but never count toward the verdict.
+#  Vuln + COAMS are EXT (server-side ARAD/ACAS/ePO) - reported, never scored.
 #
 #  Baseline config (UPR/biosfirmware pattern): an editable JanetLocal\c2c-baseline.json
 #  read FRESH each scan, overlaid on the embedded defaults below. The tool never
@@ -35,14 +45,14 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.7.2'
+        version  = '1.8.0'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 10 C2C checks (8 scored, 2 external/server-side), flag each host READY or QUARANTINE RISK; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
         actions  = @(
             @{
                 id          = 'scan'
                 label       = 'C2C Readiness Scan'
-                description = 'Read-only prediction of Comply-to-Connect quarantine (rule 3.B.2.B). Per host, one consolidated WinRM probe runs 10 checks - Monitoring (Tanium), Firewall, AntiMalware (Defender), Patches (MECM), Vuln threshold (EXT), Encryption (BitLocker), AppWhitelist (AppLocker/WDAC), Agents (patch+security), PKI roots, and COAMS tags (EXT) - and returns a one-word verdict: READY (all scored pillars pass), QUARANTINE RISK (one or more FAIL), CHECK ERRORS (a check could not be evaluated), or OFFLINE. The two EXT pillars (Vuln, COAMS) are server-side (ARAD/ACAS/ePO) so they are reported but never scored. The full colour-tagged 10-line report streams to the activity log. Changes NOTHING and needs no admin session.'
+                description = 'Read-only prediction of Comply-to-Connect quarantine, aligned to the C2C TASKORD 26-0822 dashboard. Per host, one consolidated WinRM probe runs 11 checks, each tiered: QUARANTINE pillars (the only ones that predict quarantine) = Firewall, AntiMalware (Defender installed + signatures <7 days + MDE Org ID), Patches (security updates past a 7-day grace), Encryption (C: Protection ON), Vuln (EXT, AQC server-side); AUDIT pillars (shown, never quarantine) = PKI Trust Roots, OS Version (Win11/24H2+/Enterprise); INFO pillars (advisory) = AppWhitelist, Agents, COAMS; ATTEST = Monitoring (Tanium). Verdict: QUARANTINE RISK (>=1 quarantine FAIL), NOT ATTESTING (only Tanium down - box invisible to the dashboard), CHECK ERRORS, READY (audit/info findings shown as advisory), or OFFLINE. The full colour-tagged report streams to the activity log. Changes NOTHING and needs no admin session.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','Status','Detail')
@@ -202,9 +212,10 @@ function Get-C2cBaselineDefaults {
     @{
         sigMaxAgeDays         = 7
         sigMaxAgeHours        = 24
+        graceDays             = 7          # Patching: MECM-deadline/StartTime grace before a pending update counts (TASKORD rule 5)
         taniumService         = 'Tanium Client'
         securityAgentServices = @('masvc','mfemms','macmnsvc','WinDefend','Sense')
-        hostnamePatterns      = @('^MSEKL','^MSEKW')
+        hostnamePatterns      = @('^MSEKL','^MSEKW')   # dead config: the hostname check was removed (base-specific false-flags)
         dodRootThumbprints    = @()
     }
 }
@@ -243,6 +254,10 @@ function Get-C2cBaseline {
             $nh = 0; if ([int]::TryParse([string]$obj.sigMaxAgeHours, [ref]$nh)) { $cfg.sigMaxAgeHours = $nh }
         } else {
             $cfg.sigMaxAgeHours = [int]$cfg.sigMaxAgeDays * 24
+        }
+        # graceDays (v1.8.0): Patching grace window in DAYS (default 7, TASKORD rule 5).
+        if ((& $has 'graceDays') -and $null -ne $obj.graceDays) {
+            $ng = 0; if ([int]::TryParse([string]$obj.graceDays, [ref]$ng)) { $cfg.graceDays = $ng }
         }
         if ((& $has 'taniumService') -and -not [string]::IsNullOrWhiteSpace([string]$obj.taniumService)) {
             $cfg.taniumService = [string]$obj.taniumService
@@ -491,11 +506,88 @@ try { . ([scriptblock]::Create($script:C2cInstalledProductSrc)) } catch {}
 try { . ([scriptblock]::Create($script:C2cWinrmHealSrc)) } catch {}
 try { . ([scriptblock]::Create($script:C2cAddCertsSrc)) } catch {}
 
+# --- TASKORD 26-0822 alignment: MDE Org ID + pillar tiers + display tag ----------
+# The required MDE (Microsoft Defender for Endpoint) tenant/Org ID from the C2C
+# TASKORD 26-0822 Anti-Malware rule. HARDCODED on purpose: it is the program-wide C2C
+# tenant (identical for every base under this TASKORD), NOT a base-specific value like
+# the removed hostname patterns - so it can never false-flag another base.
+$script:C2cMdeOrgId = '99557BCC-8DC2-443B-AF2E-08C9162C01BB'
+
+# Per-pillar TIER + tiered verdict + display tag. Defined as a SOURCE STRING so it can be
+# dot-sourced BOTH in module scope (admin-side use + unit tests) AND inside each pool worker
+# runspace - which is built from InitialSessionState::CreateDefault() and has NO module
+# functions. Same idiom as $C2cTaniumInstalledSrc / $C2cWinrmHealSrc: the worker calls
+# Get-C2cVerdict, so it must be injected there (a plain module function would be absent ->
+# blank verdict on every scanned host). The tier map is the single source both the verdict
+# and the report-tag renderer key off; Vuln is Quarantine by meaning but emits EXT (never
+# scored); Audit/Info fails are advisory; Monitoring is Attest (dead Tanium client -> NOT ATTESTING).
+$script:C2cVerdictSrc = @'
+$script:C2cPillarTier = @{
+    Monitoring   = 'Attest'
+    Firewall     = 'Quarantine'
+    AntiMalware  = 'Quarantine'
+    Patches      = 'Quarantine'
+    Encryption   = 'Quarantine'
+    Vuln         = 'Quarantine'
+    AppWhitelist = 'Info'
+    Agents       = 'Info'
+    PkiRoots     = 'Audit'
+    OSVersion    = 'Audit'
+    COAMS        = 'Info'
+}
+function Get-C2cPillarTier { param([string]$Name) $t = $script:C2cPillarTier[$Name]; if ($t) { $t } else { 'Quarantine' } }
+function Get-C2cDisplayTag {
+    param([string]$Name, [string]$Status)
+    $tier = Get-C2cPillarTier $Name
+    if (($Status -eq 'FAIL' -or $Status -eq 'ERROR')) {
+        if ($tier -eq 'Audit') { return 'AUDIT' }
+        if ($tier -eq 'Info')  { return 'INFO' }
+    }
+    return $Status
+}
+function Get-C2cVerdict {
+    param([object[]]$Checks)
+    $checks = @($Checks)
+    $qFail   = @($checks | Where-Object { $_.Status -eq 'FAIL'  -and (Get-C2cPillarTier $_.Name) -eq 'Quarantine' } | ForEach-Object { [string]$_.Name })
+    $qErr    = @($checks | Where-Object { $_.Status -eq 'ERROR' -and (Get-C2cPillarTier $_.Name) -eq 'Quarantine' } | ForEach-Object { [string]$_.Name })
+    $monBad  = @($checks | Where-Object { $_.Name -eq 'Monitoring' -and ($_.Status -eq 'FAIL' -or $_.Status -eq 'ERROR') }).Count -gt 0
+    $auditBad = @($checks | Where-Object { ($_.Status -eq 'FAIL' -or $_.Status -eq 'ERROR') -and (Get-C2cPillarTier $_.Name) -eq 'Audit' } | ForEach-Object { [string]$_.Name })
+    $infoBad  = @($checks | Where-Object { ($_.Status -eq 'FAIL' -or $_.Status -eq 'ERROR') -and (Get-C2cPillarTier $_.Name) -eq 'Info'  } | ForEach-Object { [string]$_.Name })
+    $extNames = @($checks | Where-Object { $_.Status -eq 'EXT' } | ForEach-Object { [string]$_.Name })
+
+    if     ($qFail.Count -ge 1) { $status = 'QUARANTINE RISK'; $ok = $false }
+    elseif ($qErr.Count  -ge 1) { $status = 'CHECK ERRORS';    $ok = $false }
+    elseif ($monBad)            { $status = 'NOT ATTESTING';   $ok = $false }
+    else                        { $status = 'READY';           $ok = $true  }
+
+    $parts = New-Object System.Collections.ArrayList
+    if ($qFail.Count -ge 1) { [void]$parts.Add("$($qFail.Count) FAIL: $($qFail -join ', ')") }
+    if ($qErr.Count  -ge 1) { [void]$parts.Add("$($qErr.Count) ERROR: $($qErr -join ', ')") }
+    if ($status -eq 'NOT ATTESTING') { [void]$parts.Add('Tanium not reporting - compliance cannot be attested to the C2C dashboard') }
+    if ($status -eq 'READY')         { [void]$parts.Add('all quarantine pillars pass') }
+    if ($auditBad.Count -gt 0) { [void]$parts.Add("AUDIT: $($auditBad -join ', ')") }
+    if ($infoBad.Count  -gt 0) { [void]$parts.Add("INFO: $($infoBad -join ', ')") }
+    if ($extNames.Count -gt 0) { [void]$parts.Add("EXT: $($extNames -join ', ')") }
+    if ($status -eq 'READY') { [void]$parts.Add('AQC/Vuln not endpoint-verifiable - import the Tanium C2C CSV to score the #1 quarantine driver') }
+    $detail = ($parts -join ' | ')
+
+    $rptLines = foreach ($c in $checks) { '[{0}] {1}: {2}' -f (Get-C2cDisplayTag $c.Name $c.Status), ('{0,-12}' -f [string]$c.Name), ([string]$c.Detail) }
+    return @{ Status = $status; Ok = $ok; Detail = $detail; Report = ($rptLines -join "`r`n") }
+}
+'@
+# Dot-source in MODULE scope (admin-side use + unit tests). Each pool worker dot-sources it again.
+try { . ([scriptblock]::Create($script:C2cVerdictSrc)) } catch {}
+
 # --- Per-host probe worker (runs in a pool runspace; no module scope here) ---
 # Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks }. All 10 checks run
 # inside ONE Invoke-Command round-trip; the verdict is computed here (admin-side).
 $script:C2cProbeBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, $Config, [string]$TaniumInstalledSrc)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, $Config, [string]$TaniumInstalledSrc, [string]$VerdictSrc)
+
+    # This block runs in a pool runspace with NO module scope. Dot-source the tiered-verdict
+    # helpers (Get-C2cVerdict / Get-C2cPillarTier / Get-C2cDisplayTag) so the verdict below
+    # can call them - a plain module function would be absent here (-> blank verdict).
+    if ($VerdictSrc) { try { . ([scriptblock]::Create($VerdictSrc)) } catch {} }
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Ok=$false; Report=''; Checks=@() }
 
@@ -527,6 +619,8 @@ $script:C2cProbeBlock = {
     $sigMaxHours = 0
     if ($Config.ContainsKey('sigMaxAgeHours')) { $tmph = 0; if ([int]::TryParse([string]$Config['sigMaxAgeHours'], [ref]$tmph)) { $sigMaxHours = $tmph } }
     if ($sigMaxHours -le 0) { $sigMaxHours = $sigMaxAge * 24 }
+    $graceDays     = 7; if ($Config.ContainsKey('graceDays')) { $tmpg = 0; if ([int]::TryParse([string]$Config['graceDays'], [ref]$tmpg) -and $tmpg -ge 0) { $graceDays = $tmpg } }
+    $mdeOrgId      = [string]$Config['mdeOrgId']
     $secAgents     = @($Config['securityAgentServices'])
     $dodRoots      = @($Config['dodRootThumbprints'])
 
@@ -538,7 +632,7 @@ $script:C2cProbeBlock = {
 
     # ---- The consolidated read-only probe: all 10 C2C checks in one round-trip. ----
     $probeSb = {
-        param($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $dodRoots, $taniumInstalledSrc)
+        param($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $taniumInstalledSrc)
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
         if ($taniumInstalledSrc) { try { . ([scriptblock]::Create($taniumInstalledSrc)) } catch {} }
         # Normalize the array args: an empty collection can cross the WinRM ArgumentList
@@ -572,25 +666,43 @@ $script:C2cProbeBlock = {
                 if ($off.Count -eq 0) { & $mk 'Firewall' 'PASS' 'Domain/Private/Public all enabled' }
                 else                  { & $mk 'Firewall' 'FAIL' "disabled profile(s): $($off -join ', ')" }
             } else {
-                # Fallback: parse netsh advfirewall show allprofiles state.
+                # Fallback: parse netsh advfirewall show allprofiles state. Fail CLOSED:
+                # if the output does not parse (locale, format), do NOT emit a false PASS -
+                # require all 3 profile headers AND 3 State lines, else ERROR.
                 $txt = (& netsh advfirewall show allprofiles state 2>&1 | Out-String)
                 $curProf = ''; $disabled = New-Object System.Collections.ArrayList
+                $profHdrs = 0; $stateLns = 0
                 foreach ($ln in ($txt -split "`r?`n")) {
-                    if     ($ln -match '^(Domain|Private|Public)\s+Profile') { $curProf = $Matches[1] }
-                    elseif ($ln -match '^State\s+(\S+)') { if ($Matches[1] -notmatch '^(?i:on)$' -and $curProf) { [void]$disabled.Add($curProf) } }
+                    if     ($ln -match '^(Domain|Private|Public)\s+Profile') { $curProf = $Matches[1]; $profHdrs++ }
+                    elseif ($ln -match '^State\s+(\S+)') { $stateLns++; if ($Matches[1] -notmatch '^(?i:on)$' -and $curProf) { [void]$disabled.Add($curProf) } }
                 }
-                if ($disabled.Count -eq 0) { & $mk 'Firewall' 'PASS' 'all profiles enabled (netsh)' }
-                else                       { & $mk 'Firewall' 'FAIL' "disabled profile(s): $(($disabled | Select-Object -Unique) -join ', ') (netsh)" }
+                if ($profHdrs -lt 3 -or $stateLns -lt 3) {
+                    & $mk 'Firewall' 'ERROR' "netsh output not parseable ($profHdrs profile header(s), $stateLns state line(s)) - cannot confirm firewall state"
+                } elseif ($disabled.Count -eq 0) {
+                    & $mk 'Firewall' 'PASS' 'all profiles enabled (netsh)'
+                } else {
+                    & $mk 'Firewall' 'FAIL' "disabled profile(s): $(($disabled | Select-Object -Unique) -join ', ') (netsh)"
+                }
             }
         } catch { & $mk 'Firewall' 'ERROR' $_.Exception.Message }
 
-        # 3. AntiMalware - honour Get-MpComputerStatus.AMRunningMode. PASS = Defender
-        #    installed AND ( (Active AND RTP on) OR (Passive / EDR Block Mode AND MDE
-        #    Sense onboarded) ) AND signatures fresh (age <= sigMaxHours). On MDE-managed
-        #    boxes Defender runs Passive/EDR with RTP off - that is CORRECT, not a fail.
-        #    FAIL when AMRunningMode is null/empty (Disabled/Not Running), Active-but-RTP-off,
-        #    or signatures stale. Fallback: root\SecurityCenter2 for non-Defender AV.
+        # 3. AntiMalware - TASKORD 26-0822 rule 1 (quarantine): Defender INSTALLED
+        #    AND signature age < 7 DAYS (strict, 168h) AND MDE Org ID == the required
+        #    tenant. Those three are the ONLY quarantine conditions. RunningMode / RTP /
+        #    Sense-onboarded are shown as advisory detail but NEVER fail the pillar (a
+        #    Passive/EDR box or an Active-RTP-off box is TASKORD-compliant if it is
+        #    installed, fresh, and correctly tenanted). Fallback: root\SecurityCenter2
+        #    (Defender-only - TASKORD requires Microsoft Defender specifically).
         try {
+            # Endpoint-read the MDE Org ID (Status\OrgId, else the ATP root OrgId).
+            $foundOrg = ''
+            try { $st1 = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name 'OrgId' -ErrorAction SilentlyContinue; if ($st1) { $foundOrg = [string]$st1.OrgId } } catch {}
+            if (-not $foundOrg) { try { $st2 = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection' -Name 'OrgId' -ErrorAction SilentlyContinue; if ($st2) { $foundOrg = [string]$st2.OrgId } } catch {} }
+            $reqOrg = ([string]$mdeOrgId).Trim()
+            $orgNorm = { param($g) (([string]$g) -replace '[{}\s]','').ToUpperInvariant() }
+            $orgOk = ($reqOrg) -and ((& $orgNorm $foundOrg) -eq (& $orgNorm $reqOrg))
+            $orgTxt = if ($foundOrg) { "OrgId $foundOrg" } else { 'OrgId missing (not MDE-onboarded)' }
+
             if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
                 $mp     = Get-MpComputerStatus -ErrorAction Stop
                 $mode   = [string]$mp.AMRunningMode
@@ -604,8 +716,10 @@ $script:C2cProbeBlock = {
                 if ($lastUpd -is [datetime]) { $ageHours = [math]::Round(((Get-Date) - $lastUpd).TotalHours, 1) }
                 elseif ($lastUpd -and ($lastUpd -as [datetime])) { $ageHours = [math]::Round(((Get-Date) - ([datetime]$lastUpd)).TotalHours, 1) }
                 else { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
-                $sigFresh = ($null -ne $ageHours) -and ($ageHours -le $sigMaxHours)
-                # MDE Sense onboarded: Sense service Running OR OnboardingState reg = 1.
+                # TASKORD bar: STRICT < 7 days (168h). $sigMaxHours (default 24) is now an
+                # advisory fleet budget only - a breach is noted, never failed.
+                $sigFresh = ($null -ne $ageHours) -and ($ageHours -lt 168)
+                # MDE Sense onboarded (advisory): Sense service Running OR OnboardingState reg = 1.
                 $senseOnboarded = $false
                 try { $ss = Get-Service -Name 'Sense' -ErrorAction SilentlyContinue; if ($ss -and $ss.Status -eq 'Running') { $senseOnboarded = $true } } catch {}
                 if (-not $senseOnboarded) {
@@ -614,42 +728,35 @@ $script:C2cProbeBlock = {
                         if ($ob -and [int]$ob.OnboardingState -eq 1) { $senseOnboarded = $true }
                     } catch {}
                 }
-                $isPassive = ($mode -match '(?i)passive|edr')
-                $isActive  = ($mode) -and (-not $isPassive)
                 $lastTxt = if ($lastUpd) { [string]$lastUpd } else { 'unknown' }
                 $ageTxt  = if ($null -ne $ageHours) { "${ageHours}h" } else { 'unknown' }
                 $modeTxt = if ($mode) { $mode } else { 'null (Disabled/Not Running)' }
-                $baseDet = "RunningMode $modeTxt; RTP $rtp; prod $amProd; engine $amEng; sig last $lastTxt (age $ageTxt, budget ${sigMaxHours}h)"
-                if (-not $mode) {
-                    & $mk 'AntiMalware' 'FAIL' "Defender AMRunningMode empty (Disabled/Not Running); $baseDet"
-                } elseif ($isPassive) {
-                    if ($senseOnboarded -and $sigFresh) {
-                        & $mk 'AntiMalware' 'PASS' "Passive/EDR Block Mode - MDE Sense primary (onboarded), signatures fresh; $baseDet"
-                    } else {
-                        $why = New-Object System.Collections.ArrayList
-                        if (-not $senseOnboarded) { [void]$why.Add('MDE Sense not onboarded') }
-                        if (-not $sigFresh)       { [void]$why.Add("sig age $ageTxt > ${sigMaxHours}h") }
-                        & $mk 'AntiMalware' 'FAIL' "Passive/EDR but $($why -join '; '); $baseDet"
-                    }
+                # Advisory notes (never fail): mode/RTP posture + fleet-budget breach.
+                $adv = New-Object System.Collections.ArrayList
+                if (-not $mode)      { [void]$adv.Add('RunningMode empty (Defender Disabled/Not Running)') }
+                elseif ($mode -match '(?i)passive|edr') { if (-not $senseOnboarded) { [void]$adv.Add('Passive/EDR but MDE Sense not onboarded') } }
+                elseif (-not $rtp)   { [void]$adv.Add('Active but RTP off') }
+                if ($sigFresh -and ($null -ne $ageHours) -and ($ageHours -ge $sigMaxHours)) { [void]$adv.Add("sig age $ageTxt exceeds fleet budget ${sigMaxHours}h but within TASKORD 7-day") }
+                $advTxt = if ($adv.Count -gt 0) { " | advisory: $($adv -join '; ')" } else { '' }
+                $baseDet = "installed (RunningMode $modeTxt; RTP $rtp; prod $amProd; engine $amEng); sig age $ageTxt (last $lastTxt); $orgTxt"
+                if ($sigFresh -and $orgOk) {
+                    & $mk 'AntiMalware' 'PASS' "Defender installed, signatures <7d, MDE OrgId matches; $baseDet$advTxt"
                 } else {
-                    # Active - Defender is the primary AV: needs RTP on + fresh signatures.
-                    if ($rtp -and $sigFresh) {
-                        & $mk 'AntiMalware' 'PASS' "Active - RTP on, signatures fresh; $baseDet"
-                    } else {
-                        $why = New-Object System.Collections.ArrayList
-                        if (-not $rtp)      { [void]$why.Add('RTP off') }
-                        if (-not $sigFresh) { [void]$why.Add("sig age $ageTxt > ${sigMaxHours}h") }
-                        & $mk 'AntiMalware' 'FAIL' "Active but $($why -join '; '); $baseDet"
-                    }
+                    $why = New-Object System.Collections.ArrayList
+                    if (-not $sigFresh) { [void]$why.Add("sig age $ageTxt >= 7 days") }
+                    if (-not $orgOk)    { [void]$why.Add(("MDE " + $(if ($foundOrg) { "OrgId $foundOrg != required $reqOrg (wrong tenant - needs MDE re-onboarding)" } else { 'not onboarded (OrgId missing)' }))) }
+                    & $mk 'AntiMalware' 'FAIL' "$($why -join '; '); $baseDet$advTxt"
                 }
             } else {
-                # Fallback: root\SecurityCenter2 AntiVirusProduct (productState bitmask).
+                # Fallback: root\SecurityCenter2. TASKORD requires Microsoft Defender - a
+                # healthy third-party-only AV FAILs (named), and the Org ID must still match.
                 $av = @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)
-                if ($av.Count -eq 0) { & $mk 'AntiMalware' 'FAIL' 'no AntiVirusProduct registered' }
+                if ($av.Count -eq 0) { & $mk 'AntiMalware' 'FAIL' "no AntiVirusProduct registered; $orgTxt" }
                 else {
                     $names = (@($av | ForEach-Object { [string]$_.displayName }) -join ', ')
+                    $defender = @($av | Where-Object { [string]$_.displayName -match '(?i)defender' })
                     $enabled = $false; $current = $true
-                    foreach ($p in $av) {
+                    foreach ($p in $defender) {
                         try {
                             $hex  = '{0:X6}' -f [int]$p.productState
                             $prov = [Convert]::ToInt32($hex.Substring(2,2),16)
@@ -658,28 +765,54 @@ $script:C2cProbeBlock = {
                             if (($sig  -band 0x10) -ne 0) { $current = $false }
                         } catch {}
                     }
-                    if ($enabled -and $current) { & $mk 'AntiMalware' 'PASS' "SecurityCenter2: $names (enabled, up to date)" }
-                    else                        { & $mk 'AntiMalware' 'FAIL' "SecurityCenter2: $names (enabled=$enabled, up-to-date=$current)" }
+                    if ($defender.Count -eq 0) {
+                        & $mk 'AntiMalware' 'FAIL' "Microsoft Defender not present (SecurityCenter2: $names); TASKORD requires Defender; $orgTxt"
+                    } elseif ($enabled -and $current -and $orgOk) {
+                        & $mk 'AntiMalware' 'PASS' "SecurityCenter2 Defender enabled + up to date, MDE OrgId matches ($names); $orgTxt"
+                    } else {
+                        $why = New-Object System.Collections.ArrayList
+                        if (-not ($enabled -and $current)) { [void]$why.Add("Defender enabled=$enabled up-to-date=$current") }
+                        if (-not $orgOk) { [void]$why.Add(("MDE " + $(if ($foundOrg) { "OrgId $foundOrg != required $reqOrg" } else { 'not onboarded (OrgId missing)' }))) }
+                        & $mk 'AntiMalware' 'FAIL' "SecurityCenter2 Defender ($names): $($why -join '; ')"
+                    }
                 }
             }
         } catch { & $mk 'AntiMalware' 'ERROR' $_.Exception.Message }
 
-        # 4. Patches - 0 applicable-not-installed MECM updates (exact wpt CCM query).
+        # 4. Patches - TASKORD 26-0822 rule 5 (quarantine): security patches with a 7-day
+        #    grace. Quarantine-relevant = an applicable-not-installed update that is OVERDUE:
+        #    past its MECM enforcement Deadline, or (no deadline) content older than graceDays.
+        #    Pending-but-in-grace updates are advisory, not a fail.
+        #    NOTE: the old filter tested InstallState/ApplicabilityState - those are
+        #    CCM_Application props, $null on CCM_SoftwareUpdate, so it passed EVERY row (a
+        #    no-op bug). ComplianceState=0 (ciNotPresent) is the correct applicable-not-installed test.
         try {
-            $upd = @(Get-CimInstance -Query "SELECT * FROM CCM_SoftwareUpdate" -Namespace root/CCM/ClientSDK -ErrorAction Stop |
-                     Where-Object { $_.InstallState -ne 'Installed' -and $_.ApplicabilityState -ne 'NotApplicable' })
-            if ($upd.Count -eq 0) { & $mk 'Patches' 'PASS' '0 pending MECM update(s)' }
-            else                  { & $mk 'Patches' 'FAIL' "$($upd.Count) pending MECM update(s)" }
+            $now = Get-Date
+            $pending = @(Get-CimInstance -Query "SELECT * FROM CCM_SoftwareUpdate WHERE ComplianceState=0" -Namespace root/CCM/ClientSDK -ErrorAction Stop)
+            $overdue = @($pending | Where-Object {
+                ($_.Deadline -and ($_.Deadline -is [datetime]) -and ($_.Deadline -lt $now)) -or
+                ((-not $_.Deadline) -and $_.StartTime -and ($_.StartTime -is [datetime]) -and ($_.StartTime -lt $now.AddDays(-$graceDays)))
+            })
+            $inGrace = $pending.Count - $overdue.Count
+            $caveat = ' (MECM-deployed updates only; Tanium scans the full patch list independently)'
+            if ($overdue.Count -eq 0) {
+                & $mk 'Patches' 'PASS' "0 overdue update(s); $($pending.Count) pending within ${graceDays}-day grace$caveat"
+            } else {
+                & $mk 'Patches' 'FAIL' "$($overdue.Count) overdue update(s) past MECM deadline/${graceDays}-day grace ($inGrace more pending within grace)$caveat"
+            }
         } catch { & $mk 'Patches' 'ERROR' 'MECM/CCM not queryable' }
 
-        # 5. Vuln threshold - server-side (ARAD/ACAS), not endpoint-determinable -> EXT.
-        & $mk 'Vuln' 'EXT' 'Scored server-side (ARAD/ACAS) - remediate via ACAS / Reports / KEV / UPR'
+        # 5. Vuln threshold - TASKORD rule 3: AQC Score (filtered) must be < 25. This is the
+        #    #1 fleet quarantine driver but the AQC score is server-side (ARAD/ACAS) and NOT
+        #    endpoint-readable -> EXT (import the Tanium C2C CSV to score it per host).
+        & $mk 'Vuln' 'EXT' 'AQC Score (filtered) must be < 25 - the #1 fleet quarantine driver; NOT verifiable by this scan (import the Tanium C2C CSV, or remediate via ACAS / Reports / KEV / UPR)'
 
-        # 6. Encryption - EVERY FIXED VOLUME (C:, D:, ...) must be ProtectionStatus On
-        #    AND VolumeStatus FullyEncrypted. Removable/USB (BitLocker To Go), network
-        #    and optical volumes are excluded; letterless system/EFI/recovery partitions
-        #    that Get-BitLockerVolume omits never fabricate a failure. Fallback: manage-bde
-        #    on the system drive (noted limitation) when Get-BitLockerVolume is unavailable.
+        # 6. Encryption - TASKORD 26-0822 rule 2 (quarantine): the C: / OS volume has
+        #    Protection Status ON. That single condition is what quarantines. Other fixed
+        #    volumes not protected, or the OS volume still converting (Protection On but not
+        #    yet FullyEncrypted), are shown as ADVISORY detail but never fail the pillar
+        #    (the Fix Encryption card still targets all fixed volumes as DoD hardening).
+        #    Fallback: manage-bde on the system drive when Get-BitLockerVolume is unavailable.
         try {
             $sysDrive = $env:SystemDrive
             if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
@@ -721,39 +854,42 @@ $script:C2cProbeBlock = {
                     & $mk 'Encryption' 'ERROR' 'no fixed BitLocker volumes could be enumerated'
                 } else {
                     $srcNote = if (-not $haveFixedSrc) { ' [no fixed-drive source available; OS volume only]' } else { '' }
-                    $bad    = New-Object System.Collections.ArrayList
+                    # Identify the OS/C: volume (the ONLY thing TASKORD rule 2 scores).
+                    $osVol = @($fixedVols | Where-Object { [string]$_.VolumeType -eq 'OperatingSystem' })[0]
+                    if (-not $osVol) { $osVol = @($fixedVols | Where-Object { ([string]$_.MountPoint).TrimEnd('\') -ieq $sysDrive })[0] }
+                    if (-not $osVol) { $osVol = $fixedVols[0] }
                     $allTxt = New-Object System.Collections.ArrayList
+                    $adv    = New-Object System.Collections.ArrayList
                     foreach ($b in $fixedVols) {
                         $mpB = ([string]$b.MountPoint).TrimEnd('\'); if (-not $mpB) { $mpB = '(no letter)' }
                         $psB = [string]$b.ProtectionStatus; $vsB = [string]$b.VolumeStatus
                         $pctB = ''; try { $pctB = [string]$b.EncryptionPercentage } catch {}
                         $vsTxt = if (($vsB -match '(?i)EncryptionInProgress') -and $pctB) { "$vsB($pctB%)" } else { $vsB }
                         [void]$allTxt.Add("$mpB $psB/$vsTxt")
-                        if (-not (($psB -eq 'On') -and ($vsB -match '(?i)FullyEncrypted'))) { [void]$bad.Add("$mpB $psB/$vsTxt") }
+                        # Advisory (NOT scored): any fixed volume not On, or the OS volume not yet FullyEncrypted.
+                        if (-not ($psB -eq 'On')) { [void]$adv.Add("$mpB $psB/$vsTxt") }
+                        elseif (($b -eq $osVol) -and -not ($vsB -match '(?i)FullyEncrypted')) { [void]$adv.Add("$mpB On but $vsTxt") }
                     }
-                    if ($bad.Count -eq 0) { & $mk 'Encryption' 'PASS' ("all $($fixedVols.Count) fixed volume(s) encrypted: $($allTxt -join '; ')$srcNote") }
-                    else                  { & $mk 'Encryption' 'FAIL' ("non-compliant: $($bad -join '; ') [all: $($allTxt -join '; ')]$srcNote") }
+                    $osMp = ([string]$osVol.MountPoint).TrimEnd('\'); if (-not $osMp) { $osMp = $sysDrive }
+                    $osPs = [string]$osVol.ProtectionStatus
+                    $advTxt = if ($adv.Count -gt 0) { " | advisory (not scored): $($adv -join '; ')" } else { '' }
+                    if ($osPs -eq 'On') { & $mk 'Encryption' 'PASS' "$osMp (OS) Protection On [all: $($allTxt -join '; ')]$srcNote$advTxt" }
+                    else                { & $mk 'Encryption' 'FAIL' "$osMp (OS) Protection $osPs - TASKORD rule 2 requires C: Protection On [all: $($allTxt -join '; ')]$srcNote$advTxt" }
                 }
             } else {
                 # Fallback: manage-bde -status on the system drive (Get-BitLockerVolume
-                # unavailable). The C2C compliance bar is FULLY ENCRYPTED, not merely
-                # Protection On - so PASS only when BOTH 'Protection Status: Protection On'
-                # AND the volume is fully encrypted ('Conversion Status: Fully Encrypted',
-                # or 'Percentage Encrypted: 100%' as the equivalent). Otherwise FAIL and
-                # name the gap (e.g. Protection On but Conversion Status Encryption in Progress).
+                # unavailable). TASKORD rule 2 = Protection Status ON on C: (NOT Fully
+                # Encrypted) - so PASS on Protection On alone; conversion status is advisory.
                 $out = (& manage-bde -status $sysDrive 2>&1 | Out-String)
                 $protOn  = ($out -match '(?i)Protection\s+Status:\s*Protection\s+On')
-                $fullEnc = ($out -match '(?i)Conversion\s+Status:\s*Fully\s+Encrypted') -or ($out -match '(?i)Percentage\s+Encrypted:\s*100(\.0+)?\s*%')
-                $fbNote  = '(manage-bde; system-drive only - Get-BitLockerVolume unavailable, other fixed volumes NOT verified)'
-                if ($protOn -and $fullEnc) {
-                    & $mk 'Encryption' 'PASS' "$sysDrive Protection On + Fully Encrypted $fbNote"
-                } elseif ($protOn) {
-                    $cs = ''
-                    if ($out -match '(?i)Conversion\s+Status:\s*([^\r\n]+)') { $cs = ([string]$Matches[1]).Trim() }
-                    $csTxt = if ($cs) { "Conversion Status $cs" } else { 'not Fully Encrypted' }
-                    & $mk 'Encryption' 'FAIL' "$sysDrive Protection On but $csTxt (not Fully Encrypted) $fbNote"
+                $fbNote  = '(manage-bde; system-drive only - Get-BitLockerVolume unavailable)'
+                $cs = ''
+                if ($out -match '(?i)Conversion\s+Status:\s*([^\r\n]+)') { $cs = ([string]$Matches[1]).Trim() }
+                $csTxt = if ($cs) { " (Conversion Status $cs)" } else { '' }
+                if ($protOn) {
+                    & $mk 'Encryption' 'PASS' "$sysDrive Protection On$csTxt $fbNote"
                 } else {
-                    & $mk 'Encryption' 'FAIL' "$sysDrive Protection Off/unknown (manage-bde; system-drive only - Get-BitLockerVolume unavailable)"
+                    & $mk 'Encryption' 'FAIL' "$sysDrive Protection Off/unknown$csTxt - TASKORD rule 2 requires C: Protection On $fbNote"
                 }
             }
         } catch { & $mk 'Encryption' 'ERROR' $_.Exception.Message }
@@ -827,6 +963,27 @@ $script:C2cProbeBlock = {
         # 10. COAMS - 7 asset tags, server-side (ARAD/ePO), not endpoint-readable -> EXT.
         & $mk 'COAMS' 'EXT' 'ARAD/ePO server-side tags (7) - not endpoint-readable'
 
+        # 11. OSVersion - TASKORD 26-0822 AUDIT rule 6 (informational, never quarantines):
+        #     Windows 11 AND Release ID 24H2+ AND Edition Enterprise. One registry read
+        #     (Get-ItemProperty, not the slow Get-ComputerInfo). ProductName is NOT used -
+        #     it still reports "Windows 10" on Win11; CurrentBuildNumber is authoritative.
+        try {
+            $cv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+            $build = 0; [void][int]::TryParse([string]$cv.CurrentBuildNumber, [ref]$build)
+            $disp  = [string]$cv.DisplayVersion
+            $edir  = [string]$cv.EditionID
+            $win11      = ($build -ge 22000)
+            $is24h2plus = ($build -ge 26100)
+            $enterprise = ($edir -eq 'Enterprise')   # exact - Pro/EnterpriseS(LTSC)/Education fail
+            $why = New-Object System.Collections.ArrayList
+            if (-not $win11)      { [void]$why.Add("not Windows 11 (build $build)") }
+            if (-not $is24h2plus) { [void]$why.Add("release $disp < 24H2 (build $build)") }
+            if (-not $enterprise) { [void]$why.Add("edition $edir != Enterprise") }
+            $verTxt = "Win11=$win11 (build $build); release $disp; edition $edir"
+            if ($why.Count -eq 0) { & $mk 'OSVersion' 'PASS' "Windows 11 $disp Enterprise; $verTxt" }
+            else                  { & $mk 'OSVersion' 'FAIL' "$($why -join '; ') - remediate via the Windows Upgrade tool; $verTxt" }
+        } catch { & $mk 'OSVersion' 'ERROR' $_.Exception.Message }
+
         # (The old local Hostname naming-convention check was removed: its patterns were
         # base-specific (^MSEKL/^MSEKW), so it FALSE-flagged every host at other bases as
         # QUARANTINE RISK. The authoritative hostname verdict is ARAD-side anyway.)
@@ -835,7 +992,7 @@ $script:C2cProbeBlock = {
     }
 
     try {
-        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $secAgents, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
+        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
     } catch {
         $r.Status = 'ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -855,28 +1012,9 @@ $script:C2cProbeBlock = {
     $r.Checks = $checks
     if ($checks.Count -eq 0) { $r.Status = 'ERROR'; $r.Detail = 'probe returned no checks'; return $r }
 
-    # Verdict: count FAIL / ERROR across the returned checks. The 2 always-EXT pillars
-    # (Vuln, COAMS) and an EXT PkiRoots contribute 0 FAIL / 0 ERROR by construction, so
-    # a plain FAIL/ERROR tally already honours "EXT is shown but never scored".
-    $failNames = @($checks | Where-Object { $_.Status -eq 'FAIL'  } | ForEach-Object { [string]$_.Name })
-    $errNames  = @($checks | Where-Object { $_.Status -eq 'ERROR' } | ForEach-Object { [string]$_.Name })
-    $extNames  = @($checks | Where-Object { $_.Status -eq 'EXT'   } | ForEach-Object { [string]$_.Name })
-    $fail = $failNames.Count; $err = $errNames.Count
-
-    if     ($fail -ge 1) { $r.Status = 'QUARANTINE RISK'; $r.Ok = $false }
-    elseif ($err  -ge 1) { $r.Status = 'CHECK ERRORS';    $r.Ok = $false }
-    else                 { $r.Status = 'READY';           $r.Ok = $true  }
-
-    $parts = New-Object System.Collections.ArrayList
-    if ($fail -ge 1) { [void]$parts.Add("$fail FAIL: $($failNames -join ', ')") }
-    if ($err  -ge 1) { [void]$parts.Add("$err ERROR: $($errNames -join ', ')") }
-    if ($fail -eq 0 -and $err -eq 0) { [void]$parts.Add('all 8 scored pillars pass') }
-    if ($extNames.Count -gt 0) { [void]$parts.Add("EXT: $($extNames -join ', ')") }
-    $r.Detail = ($parts -join ' | ')
-
-    # Full 10-line colour-tagged report ([PASS]/[FAIL]/[EXT]/[ERROR]) the view colours.
-    $rptLines = foreach ($c in $checks) { '[{0}] {1}: {2}' -f ([string]$c.Status), ('{0,-12}' -f [string]$c.Name), ([string]$c.Detail) }
-    $r.Report = ($rptLines -join "`r`n")
+    # TASKORD-tiered verdict + tagged report (single source; unit-tested).
+    $v = Get-C2cVerdict -Checks $checks
+    $r.Status = $v.Status; $r.Ok = $v.Ok; $r.Detail = $v.Detail; $r.Report = $v.Report
     return $r
 }
 
@@ -1209,14 +1347,18 @@ $script:C2cFixBlock = {
                         else                    { & $add 'Firewall' 'enable' 'FAIL' "still disabled after enable: $($still -join ', ')" }
                     }
                 } else {
-                    # netsh fallback (no NetSecurity module).
+                    # netsh fallback (no NetSecurity module). Fail CLOSED: if the output does
+                    # not parse (locale/format), THROW rather than report a false NOCHANGE/FIXED
+                    # (the outer catch maps it to a Firewall FAIL).
                     $parse = {
                         param($txt)
                         $curProf=''; $dis = New-Object System.Collections.ArrayList
+                        $profHdrs=0; $stateLns=0
                         foreach ($ln in ($txt -split "`r?`n")) {
-                            if     ($ln -match '^(Domain|Private|Public)\s+Profile') { $curProf = $Matches[1] }
-                            elseif ($ln -match '^State\s+(\S+)') { if ($Matches[1] -notmatch '^(?i:on)$' -and $curProf) { [void]$dis.Add($curProf) } }
+                            if     ($ln -match '^(Domain|Private|Public)\s+Profile') { $curProf = $Matches[1]; $profHdrs++ }
+                            elseif ($ln -match '^State\s+(\S+)') { $stateLns++; if ($Matches[1] -notmatch '^(?i:on)$' -and $curProf) { [void]$dis.Add($curProf) } }
                         }
+                        if ($profHdrs -lt 3 -or $stateLns -lt 3) { throw "netsh output not parseable ($profHdrs header(s), $stateLns state line(s))" }
                         ,@($dis | Select-Object -Unique)
                     }
                     $off = & $parse (& netsh advfirewall show allprofiles state 2>&1 | Out-String)
@@ -1786,6 +1928,21 @@ function Invoke-C2cImportAction {
     foreach ($n in $script:C2cPillarOrder) { if ($pillarHosts.ContainsKey($n)) { $ordered += $n } }
     foreach ($n in ($pillarHosts.Keys | Sort-Object)) { if ($ordered -notcontains $n) { $ordered += $n } }
 
+    # Aggregate AUDIT-rule pillars (PKI Trust Roots, OS Version) -> host lists. The dashboard
+    # reports these as audit rules that DON'T quarantine, but they are still real, targetable
+    # findings (PkiRoots is endpoint-fixable). Kept separate from Failed so the Failed/Audit
+    # scoring separation stays honest.
+    $auditPillarHosts = @{}
+    foreach ($rec in $recs) {
+        foreach ($p in @($rec.Audit)) {
+            if (-not $auditPillarHosts.ContainsKey($p)) { $auditPillarHosts[$p] = New-Object System.Collections.ArrayList }
+            if (-not $auditPillarHosts[$p].Contains($rec.Short)) { [void]$auditPillarHosts[$p].Add($rec.Short) }
+        }
+    }
+    $auditOrdered = @()
+    foreach ($n in $script:C2cPillarOrder) { if ($auditPillarHosts.ContainsKey($n)) { $auditOrdered += $n } }
+    foreach ($n in ($auditPillarHosts.Keys | Sort-Object)) { if ($auditOrdered -notcontains $n) { $auditOrdered += $n } }
+
     & $send @{ type='log'; level='ok'; text="Imported $total host(s): $compliant Compliant, $nonCompliant Non-Compliant." }
     $pillars = New-Object System.Collections.ArrayList
     foreach ($p in $ordered) {
@@ -1794,19 +1951,33 @@ function Invoke-C2cImportAction {
         [void]$pillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route })
         & $send @{ type='log'; level='info'; text=("{0}: {1} host(s) -> {2}" -f $p, $hosts.Count, $route) }
     }
-
-    # Run-all plan: each non-compliant host + ONLY its endpoint-fixable failed pillars,
-    # exactly the JSON the view hands to the 'run-all' action verbatim. Hosts whose only
-    # failures route elsewhere (Vuln/OSVersion/STIG) carry no fixable pillars -> omitted.
-    $runAllPlan = New-Object System.Collections.ArrayList
-    foreach ($rec in ($recs | Sort-Object { $_.Short })) {
-        $fx = @(@($rec.Failed) | Where-Object { $script:C2cFixablePillars -contains $_ })
-        if ($fx.Count -gt 0) { [void]$runAllPlan.Add(@{ host=$rec.Short; pillars=@($fx) }) }
+    $auditPillars = New-Object System.Collections.ArrayList
+    foreach ($p in $auditOrdered) {
+        $hosts = @($auditPillarHosts[$p])
+        $route = Get-C2cPillarRouting $p
+        [void]$auditPillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route; audit=$true })
+        & $send @{ type='log'; level='info'; text=("AUDIT {0}: {1} host(s) (advisory, non-quarantine) -> {2}" -f $p, $hosts.Count, $route) }
     }
-    & $send @{ type='log'; level='info'; text=("Run-all plan: {0} host(s) with >=1 endpoint-fixable pillar." -f $runAllPlan.Count) }
+
+    # Run-all plan: each host + its endpoint-fixable pillars. Includes fixable AUDIT pillars
+    # (e.g. PkiRoots) tagged audit=true so run-all can PROACTIVELY remediate the audit
+    # population (per the Cert Deploy investment) without ever calling audit findings a
+    # quarantine cause. Hosts whose only failures route elsewhere (Vuln/OSVersion/STIG) are omitted.
+    $runAllPlan = New-Object System.Collections.ArrayList
+    $auditFixHostCount = 0
+    foreach ($rec in ($recs | Sort-Object { $_.Short })) {
+        $fxFailed = @(@($rec.Failed) | Where-Object { $script:C2cFixablePillars -contains $_ })
+        $fxAudit  = @(@($rec.Audit)  | Where-Object { $script:C2cFixablePillars -contains $_ })
+        $allFx    = @(@($fxFailed + $fxAudit) | Select-Object -Unique)
+        if ($allFx.Count -gt 0) {
+            [void]$runAllPlan.Add(@{ host=$rec.Short; pillars=@($allFx); auditPillars=@($fxAudit) })
+            if ($fxAudit.Count -gt 0 -and $fxFailed.Count -eq 0) { $auditFixHostCount++ }
+        }
+    }
+    & $send @{ type='log'; level='info'; text=("Run-all plan: {0} host(s) with >=1 endpoint-fixable pillar ({1} from audit-only findings, proactive)." -f $runAllPlan.Count, $auditFixHostCount) }
 
     & $send @{ type='status'; text="Done. $total host(s) imported ($nonCompliant non-compliant)." }
-    return @{ rows=@($rows); summary=@{ total=$total; compliant=$compliant; nonCompliant=$nonCompliant; nonCompliantHosts=@($nonCompliantHosts); pillars=@($pillars); runAllPlan=@($runAllPlan) } }
+    return @{ rows=@($rows); summary=@{ total=$total; compliant=$compliant; nonCompliant=$nonCompliant; nonCompliantHosts=@($nonCompliantHosts); pillars=@($pillars); auditPillars=@($auditPillars); runAllPlan=@($runAllPlan) } }
 }
 
 $script:C2cPillarByAction = @{
@@ -2436,6 +2607,8 @@ function Invoke-JanetToolAction {
     # Load the baseline fresh (works even if the file is missing).
     $baseline = Get-C2cBaseline
     $config   = $baseline.Config
+    # Inject the hardcoded TASKORD MDE Org ID (module scope here; the probe runspace has none).
+    $config['mdeOrgId'] = $script:C2cMdeOrgId
 
     # Targets: accept only bare host/IPv4 tokens; drop UNC/URL/junk before any WinRM call.
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
@@ -2468,7 +2641,7 @@ function Invoke-JanetToolAction {
     foreach ($h in $targets) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:C2cProbeBlock)
-        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($config); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($config); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc); [void]$ps.AddArgument($script:C2cVerdictSrc)
         [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -2551,14 +2724,15 @@ function Invoke-JanetToolAction {
     # Tally from the emitted rows (each row carries its Status) - no module-scope counters.
     $ready    = @($rows | Where-Object { $_.Status -eq 'READY' }).Count
     $risk     = @($rows | Where-Object { $_.Status -eq 'QUARANTINE RISK' }).Count
+    $notAttest= @($rows | Where-Object { $_.Status -eq 'NOT ATTESTING' }).Count
     $chkErr   = @($rows | Where-Object { $_.Status -eq 'CHECK ERRORS' }).Count
     $offline  = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
-    $other    = $targets.Count - $ready - $risk - $chkErr - $offline
+    $other    = $targets.Count - $ready - $risk - $notAttest - $chkErr - $offline
     $pct      = if ($targets.Count -gt 0) { [math]::Round(($ready / $targets.Count) * 100, 1) } else { 0 }
 
-    & $send @{ type='log'; level='ok'; text="C2C readiness - $pct% READY ($ready/$($targets.Count)). QUARANTINE RISK: $risk, CHECK ERRORS: $chkErr, OFFLINE: $offline, Other: $other. (EXT pillars Vuln/COAMS scored server-side.)" }
-    & $send @{ type='status'; text="Done. $ready ready, $risk quarantine-risk, $chkErr check-errors, $offline offline of $($targets.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; ready=$ready; risk=$risk; checkErrors=$chkErr; offline=$offline; other=$other; readyPct=$pct; source=$baseline.Source } }
+    & $send @{ type='log'; level='ok'; text="C2C readiness - $pct% READY ($ready/$($targets.Count)). QUARANTINE RISK: $risk, NOT ATTESTING: $notAttest, CHECK ERRORS: $chkErr, OFFLINE: $offline, Other: $other. (EXT pillars Vuln/COAMS scored server-side.)" }
+    & $send @{ type='status'; text="Done. $ready ready, $risk quarantine-risk, $notAttest not-attesting, $chkErr check-errors, $offline offline of $($targets.Count)." }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; ready=$ready; risk=$risk; notAttesting=$notAttest; checkErrors=$chkErr; offline=$offline; other=$other; readyPct=$pct; source=$baseline.Source } }
 }
 
 Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction

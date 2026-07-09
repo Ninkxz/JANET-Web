@@ -31,19 +31,20 @@
   // engine row events are keyed 'Host'; CSV header keeps the desktop label 'Computer'.
   var EXPORT_COLS = [['Host', 'Computer'], ['Ping', 'Ping'], ['Status', 'Status'], ['Detail', 'Detail']];
 
-  // The 10 C2C checks (rule 3.B.2.B). 8 are scored on the endpoint; 2 are EXT
-  // (external / server-side - reported in the activity log but never scored).
+  // The 11 C2C checks, tiered to the TASKORD 26-0822 dashboard. Only the QUARANTINE
+  // tier predicts quarantine; AUDIT + INFO are advisory; Monitoring is ATTEST.
   var CHECKS = [
-    ['Monitoring', 'Endpoint monitoring installed (Tanium SOFTWARE installed + client service running)'],
-    ['Firewall', 'Endpoint firewall active (Domain + Private + Public profiles enabled)'],
-    ['AntiMalware', 'Anti-malware active + signatures fresh (Defender AMRunningMode: Active needs RTP; Passive / EDR Block Mode needs MDE Sense onboarded)'],
-    ['Patches', 'All requisite patches installed (0 pending MECM/CCM updates)'],
-    ['VulnThreshold', 'Below the vulnerability threshold  [EXT - scored server-side (ARAD/ACAS)]'],
-    ['Encryption', 'Data-at-rest encryption active (BitLocker On + FullyEncrypted for EVERY fixed volume; removable/USB excluded)'],
-    ['AppWhitelist', 'Application whitelist active (AppLocker or WDAC enforcing)'],
-    ['Agents', 'Patching + security agents installed and active (CcmExec + a security agent)'],
-    ['PkiRoots', 'PKI trust roots baseline present (DoD roots in LocalMachine\\Root)'],
-    ['Coams', 'All 7 COAMS tags applied  [EXT - ARAD/ePO server-side, not endpoint-readable]']
+    ['Monitoring', '[ATTEST] Endpoint monitoring (Tanium installed + client running) - a dead client cannot attest -> NOT ATTESTING'],
+    ['Firewall', '[QUARANTINE] Endpoint firewall active (Domain + Private + Public profiles enabled)'],
+    ['AntiMalware', '[QUARANTINE] Defender installed + signatures < 7 days + MDE Org ID matches (RunningMode/RTP/Sense are advisory)'],
+    ['Patches', '[QUARANTINE] Security patches installed within a 7-day grace (0 overdue MECM/CCM updates)'],
+    ['VulnThreshold', '[QUARANTINE] AQC Score (filtered) < 25  [EXT - server-side (ARAD/ACAS); the #1 quarantine driver - import the CSV to score]'],
+    ['Encryption', '[QUARANTINE] C: / OS volume BitLocker Protection ON (other fixed volumes are advisory)'],
+    ['AppWhitelist', '[INFO] Application whitelist (AppLocker or WDAC enforcing) - advisory, not a TASKORD rule'],
+    ['Agents', '[INFO] Patching + security agents (CcmExec + a security agent) - advisory, not a TASKORD rule'],
+    ['PkiRoots', '[AUDIT] PKI trust roots baseline present (DoD roots in LocalMachine\\Root) - audit, never quarantines'],
+    ['OsVersion', '[AUDIT] OS Version Win11 + 24H2+ + Enterprise - audit, never quarantines (remediate via Windows Upgrade)'],
+    ['Coams', '[INFO] All 7 COAMS tags applied  [EXT - ARAD/ePO server-side, not endpoint-readable]']
   ];
 
   // Endpoint-fixable pillars (drive the ALWAYS-ON fix cards + run-all). Must match
@@ -83,8 +84,10 @@
       case 'OUTDATED':
       case 'FAILED': return 'st-bad';
       // amber: no fail but a check errored, the host couldn't be evaluated, operator cancel,
-      // a partial fix, a self/DNS skip, or product not installed.
+      // a partial fix, a self/DNS skip, product not installed, or Tanium not reporting
+      // (NOT ATTESTING - box invisible to the C2C dashboard, distinct from a quarantine).
       case 'CHECK ERRORS':
+      case 'NOT ATTESTING':
       case 'Cancelled':
       case 'ERROR':
       case 'DNS MISMATCH':
@@ -247,9 +250,10 @@
       // --- What this scans (read-only info) ---
       var infoCard = sectionCard('WHAT THIS SCANS - Comply-to-Connect (rule 3.B.2.B)', 'cyan');
       var intro = el('div'); intro.style.cssText = 'font-size:12.5px;line-height:1.45;color:var(--text);margin-bottom:8px';
-      intro.textContent = 'One consolidated READ-ONLY probe per host (changes nothing) over WinRM. '
-        + 'Predicts whether each host would be QUARANTINED. 9 checks are scored on the endpoint; '
-        + '2 are EXT (external / server-side) - reported but never scored. '
+      intro.textContent = 'One consolidated READ-ONLY probe per host (changes nothing) over WinRM, aligned to the '
+        + 'C2C TASKORD 26-0822 dashboard. Only the 5 QUARANTINE pillars (Firewall, AntiMalware, Patches, '
+        + 'Encryption, AQC/Vuln) predict quarantine; PKI Trust Roots + OS Version are AUDIT (shown, never '
+        + 'quarantine) and AppWhitelist / Agents / COAMS are INFO (advisory). '
         + 'The same Target Computers list also drives the destructive FIX cards - Monitoring, Firewall, '
         + 'Encryption, AntiMalware, Patches and PKI Trust Roots - per pillar or all at once. '
         + 'Import the Tanium C2C Compliance report (optional) to auto-load targets + badge which pillar each host failed. '
@@ -265,9 +269,10 @@
       });
       infoCard.appendChild(list);
       var verdictNote = el('div'); verdictNote.style.cssText = 'font-size:12px;line-height:1.45;color:var(--muted)';
-      verdictNote.textContent = 'Verdict = count of FAIL among the 8 scored checks: '
-        + 'READY (0 fail, 0 error) / QUARANTINE RISK (1+ fail) / CHECK ERRORS (0 fail but 1+ error). '
-        + 'EXT checks (VulnThreshold, Coams) are shown but never count. The full per-check report streams to the activity log.';
+      verdictNote.textContent = 'Verdict scores ONLY the QUARANTINE tier: '
+        + 'QUARANTINE RISK (1+ quarantine-pillar fail) / NOT ATTESTING (only Tanium down - box invisible to the dashboard) / '
+        + 'CHECK ERRORS (a quarantine check could not be evaluated) / READY (audit + info findings are shown as advisory, never quarantine). '
+        + 'The full per-check report streams to the activity log ([QUARANTINE] fails in red, [AUDIT]/[INFO] as advisory).';
       infoCard.appendChild(verdictNote);
       left.appendChild(infoCard);
 
@@ -589,6 +594,10 @@
         lastImport = s || {};
         var pillars = (s && s.pillars) ? s.pillars : [];
         var byName = {}; pillars.forEach(function (p) { if (p && p.name != null) byName[p.name] = p; });
+        // AUDIT pillars (PkiRoots / OSVersion) - shown, never quarantine, but PkiRoots is
+        // endpoint-fixable so it still badges the fix card and loads its hosts.
+        var auditPillars = (s && s.auditPillars) ? s.auditPillars : [];
+        var auditByName = {}; auditPillars.forEach(function (p) { if (p && p.name != null) auditByName[p.name] = p; });
 
         // hero tiles
         var runAllPlan = (s && s.runAllPlan && s.runAllPlan.length) ? s.runAllPlan.length : 0;
@@ -598,8 +607,14 @@
         importStatus.textContent = 'Imported ' + ((s && s.total) || 0) + ' host(s): ' + ((s && s.compliant) || 0) + ' compliant, ' + nonCompliant + ' non-compliant.';
         importStatus.className = 'st-ok';
 
-        // (a) auto-load the non-compliant hosts into Target Computers (merge, never clobber)
+        // (a) auto-load hosts into Target Computers (merge, never clobber): the non-compliant
+        // hosts PLUS any audit-only hosts (e.g. compliant boxes failing the PKI audit) so the
+        // proactive PkiRoots fix can target them.
         var flaggedHosts = (s && s.nonCompliantHosts && s.nonCompliantHosts.length) ? s.nonCompliantHosts.slice() : [];
+        var auditSeen = {}; flaggedHosts.forEach(function (h) { auditSeen[String(h).toLowerCase()] = true; });
+        auditPillars.forEach(function (p) {
+          (p && p.hosts ? p.hosts : []).forEach(function (h) { var k = String(h).toLowerCase(); if (!auditSeen[k]) { auditSeen[k] = true; flaggedHosts.push(h); } });
+        });
         if (flaggedHosts.length) {
           var existing = targets.hosts();
           var seen = {}; existing.forEach(function (h) { seen[String(h).toLowerCase()] = true; });
@@ -614,7 +629,9 @@
         // opts in what to run (e.g. import a PKI csv, then tick PKI Trust Roots).
         importBadge = {}; importHosts = {};
         FIXABLE.forEach(function (k) {
-          var p = byName[k];
+          // A fixable pillar may be a quarantine failure (byName) OR an audit finding
+          // (auditByName, e.g. PkiRoots). Take whichever the import surfaced.
+          var p = byName[k] || auditByName[k];
           if (p && (p.failedCount || 0) > 0) {
             importBadge[k] = p.failedCount;
             importHosts[k] = (p.hosts && p.hosts.length) ? p.hosts.slice() : [];
@@ -622,9 +639,15 @@
         });
         renderFixCards();
 
-        // (c) routed-elsewhere info notes
+        // (c) audit-rule findings (advisory - never quarantine) - log distinctly from failures
+        var auditTxt = auditPillars.map(function (p) {
+          return (p && (p.failedCount || 0) > 0) ? (p.name + ' ' + p.failedCount + ' (audit -> ' + (p.routing || 'review') + ')') : null;
+        }).filter(Boolean);
+        if (auditTxt.length) log.append({ text: '[' + ts() + '] AUDIT findings (advisory, non-quarantine): ' + auditTxt.join('  |  '), level: 'info' });
+
+        // (d) routed-elsewhere info notes
         var routedTxt = ROUTED.map(function (m) {
-          var p = byName[m.key]; var c = p ? (p.failedCount || 0) : 0;
+          var p = byName[m.key] || auditByName[m.key]; var c = p ? (p.failedCount || 0) : 0;
           return c > 0 ? (m.label + ' ' + c + ' -> ' + m.route) : null;
         }).filter(Boolean);
         if (routedTxt.length) log.append({ text: '[' + ts() + '] Routed elsewhere: ' + routedTxt.join('  |  '), level: 'info' });
@@ -650,8 +673,11 @@
       }
 
       function routedPresent() {
-        if (!lastImport || !lastImport.pillars) return [];
-        var byName = {}; lastImport.pillars.forEach(function (p) { if (p && p.name != null) byName[p.name] = p; });
+        if (!lastImport) return [];
+        var byName = {};
+        (lastImport.pillars || []).forEach(function (p) { if (p && p.name != null) byName[p.name] = p; });
+        // OS Version is an AUDIT pillar now - still routed to the Windows Upgrade tool.
+        (lastImport.auditPillars || []).forEach(function (p) { if (p && p.name != null && byName[p.name] == null) byName[p.name] = p; });
         return ROUTED.map(function (m) { return { meta: m, data: byName[m.key] }; })
                      .filter(function (x) { return x.data && (x.data.failedCount || 0) > 0; });
       }
@@ -882,7 +908,7 @@
       updateTargetButtons();
 
       log.append({ text: 'C2C Nemesis ready. Add hosts to Target Computers (type / paste / Import TXT, or Import a C2C CSV to auto-load them), pick pillars, then Fix - one pillar or all at once. Every fixer is verify-first, so it only changes what is actually wrong per host. Import is optional.', level: 'accent' });
-      log.append({ text: 'Read-only side: C2C Readiness Scan + Version Check across the same Target Computers (8 scored checks + 2 EXT). The full per-check report streams here.', level: 'dim' });
+      log.append({ text: 'Read-only side: C2C Readiness Scan + Version Check across the same Target Computers (11 TASKORD-tiered checks: 5 QUARANTINE, 2 AUDIT, 3 INFO, Monitoring=ATTEST). The full per-check report streams here.', level: 'dim' });
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); if (offTargets) offTargets(); };

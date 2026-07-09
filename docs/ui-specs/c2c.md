@@ -4,6 +4,35 @@
 > is unchanged - routes, registry keys, view registration and log/export names all
 > stay `c2c` / "C2C Readiness Scan").
 
+> **v1.8.0 (2026-07-09) - TASKORD 26-0822 realignment: tiered verdict, MDE Org ID,
+> encryption/patch rule fixes, new OS Version audit check:** The scan's verdict now
+> matches the authoritative **C2C TASKORD 26-0822** Tanium dashboard instead of a
+> blanket "any FAIL -> quarantine" rule. Each of the 11 checks carries a fixed
+> **tier** (`$script:C2cPillarTier`): **5 QUARANTINE** (Firewall, AntiMalware,
+> Patches, Encryption, Vuln[EXT]) are the only checks that can produce **QUARANTINE
+> RISK**; **2 AUDIT** (PKI Trust Roots, OS Version - OS Version is a brand-new check)
+> are shown and still fixer-remediable but never quarantine; **3 INFO** (AppWhitelist,
+> Agents, COAMS) are JANET-only advisory checks stricter than the TASKORD baseline;
+> **Monitoring** is its own **ATTEST** tier - a dead/uninstalled Tanium client now
+> drives a dedicated **NOT ATTESTING** verdict instead of being lumped into
+> QUARANTINE RISK. Three checks were corrected to match the TASKORD rule text instead
+> of JANET's stricter prior reading: **AntiMalware** now PASSes on installed +
+> signatures < 7 days (168h, strict) + a matching **MDE Org ID**
+> (`99557BCC-8DC2-443B-AF2E-08C9162C01BB`, hardcoded program-wide, not base-specific) -
+> RunningMode / RTP / Sense-onboarded stay advisory-only, never a fail; **Encryption**
+> now scores the **C: / OS volume's Protection Status alone** (other fixed volumes are
+> advisory, not scored - was previously all-fixed-volumes-FullyEncrypted); **Patches**
+> fixes a no-op WMI filter bug (`InstallState`/`ApplicabilityState` are
+> `CCM_Application` properties, always `$null` on `CCM_SoftwareUpdate`, so the old
+> filter silently passed every pending row) - the correct query is `ComplianceState=0`,
+> plus a new `graceDays` baseline key (default 7) before an overdue update fails the
+> check (was previously any-pending-fails). The `Firewall` netsh fallback now fails
+> CLOSED (`ERROR`) instead of falsely PASSing on unparseable output. Import now
+> aggregates each host's **Audit**-rule CSV findings into a parallel `auditPillars`
+> summary (kept separate from the quarantine-relevant `pillars`), and the `run-all`
+> plan can proactively remediate an audit-only fixable pillar (PkiRoots) on an
+> otherwise-Compliant host. Module **1.7.2 -> 1.8.0**.
+
 > **v1.8.0 (2026-07-08) - fixes are TARGET-DRIVEN; import is now OPTIONAL:**
 > The **TARGET COMPUTERS** list is the single source of truth for every action -
 > the read-only Scan / Version Check AND the destructive fixes. The **six fixable
@@ -53,7 +82,7 @@
 > only on Fully Encrypted (Protection On + Conversion Status Fully Encrypted / 100%), not
 > Protection On alone.
 
-> Net-new JANET Web tool (no desktop twin). Read-only Comply-to-Connect quarantine
+> JANET Web tool (with a desktop twin, C2CNemesisTool). Read-only Comply-to-Connect quarantine
 > predictor. This is a standard `stream-table` tool: paste targets, run one action,
 > watch per-host verdict rows stream in and the full per-check report fill the
 > activity log. Reuse the shared stream-table view (same as wpt / winupgrade /
@@ -63,12 +92,15 @@
 
 **C2C Nemesis** (tool id `c2c`, category **Reporting**, icon `E72E`) predicts
 whether each host would be **QUARANTINED** under AFI/MPTO **Comply-to-Connect rule
-3.B.2.B**. It fans out over WinRM, runs **one consolidated read-only probe per
-host** (11 C2C checks in a single `Invoke-Command` round-trip), emits **one result
-row per host** (`Host / Ping / Status / Detail`), and streams the **full 11-line
-per-check report** to the activity log for colouring. It **changes nothing** and
-**needs no admin session** (read-only, like the WPT ping / bulk-scan and the
-Windows Upgrade Diagnose action).
+3.B.2.B**, aligned to the authoritative **C2C TASKORD 26-0822** Tanium dashboard:
+only **5 of the 11 checks** (the QUARANTINE tier) actually drive that verdict, **2**
+are shown as audit-only (never quarantine), **3** are JANET-only advisory info, and
+Monitoring (Tanium) has its own dedicated **NOT ATTESTING** outcome. It fans out
+over WinRM, runs **one consolidated read-only probe per host** (11 C2C checks in a
+single `Invoke-Command` round-trip), emits **one result row per host** (`Host / Ping
+/ Status / Detail`), and streams the **full 11-line per-check report** to the
+activity log for colouring. It **changes nothing** and **needs no admin session**
+(read-only, like the WPT ping / bulk-scan and the Windows Upgrade Diagnose action).
 
 ## Action
 
@@ -81,38 +113,86 @@ Windows Upgrade Diagnose action).
 
 Each check runs inside the one probe (its own try/catch, so a single failure ->
 that check = `ERROR`, never aborting the probe) and yields a status
-`PASS / FAIL / EXT / ERROR` plus a short Detail. **9 are scored locally; 2 are
-EXT** (external - reported, never scored).
+`PASS / FAIL / EXT / ERROR` plus a short Detail. Every pillar also carries a fixed
+**tier** (`$script:C2cPillarTier`) that the verdict keys off ADMIN-SIDE - the check
+bodies themselves are tier-agnostic, tiering is applied purely when the verdict and
+report tag are computed:
 
-| # | Pillar | Mechanism (read-only, on the target) | PASS when |
-|---|--------|--------------------------------------|-----------|
-| 1 | Monitoring | `Get-C2cTaniumInstalled` (scan the 64- and 32-bit HKLM Uninstall keys for a DisplayName matching "Tanium") AND `Get-Service` the Tanium client service (`taniumService`, default "Tanium Client") | software installed AND service Running. Detail states BOTH facts, e.g. `Tanium installed (v...); service Running` / `Tanium not installed; service not installed` / `Tanium installed (v...); service Stopped` |
-| 2 | Firewall | `Get-NetFirewallProfile` (Domain/Private/Public); fallback `netsh advfirewall show allprofiles state` | all three profiles Enabled (else FAIL lists the disabled ones) |
-| 3 | AntiMalware | `Get-MpComputerStatus.AMRunningMode` (Defender, NIPR); Sense onboarding via `Get-Service Sense` / `OnboardingState` reg; fallback `root\SecurityCenter2` AntiVirusProduct | Defender installed AND ( (**Active** AND RealTimeProtectionEnabled) OR (**Passive / EDR Block Mode** AND MDE Sense onboarded) ) AND signatures fresh (age <= `sigMaxAgeHours`, default 24). FAIL when AMRunningMode is null/empty (Disabled/Not Running), Active-but-RTP-off, or signatures stale. Detail carries RunningMode + AMProductVersion + AMEngineVersion + AntivirusSignatureLastUpdated + age in HOURS |
-| 4 | Patches | `CCM_SoftwareUpdate` in `root\ccm\ClientSDK` (`InstallState != Installed` AND `ApplicabilityState != NotApplicable`) - the exact wpt query | 0 pending (else FAIL count). CCM absent -> ERROR "MECM/CCM not queryable" |
-| 5 | Vuln | **EXT** - not endpoint-determinable | n/a - "Scored server-side (ARAD/ACAS) - remediate via ACAS / Reports / KEV / UPR" |
-| 6 | Encryption | Enumerate ALL FIXED volumes: `Get-BitLockerVolume` correlated with fixed drive type (`Get-Volume` DriveType Fixed, else `Win32_Volume` DriveType=3); removable/USB/network/optical excluded, letterless system/EFI/recovery partitions skipped (never a false fail); fallback `manage-bde -status` on the system drive (noted limitation) - the fallback PASSes only when the output shows BOTH `Protection Status: Protection On` AND the volume is fully encrypted (`Conversion Status: Fully Encrypted`, or `Percentage Encrypted: 100%` as the equivalent); Protection On with an in-progress conversion FAILs and the Detail names the gap | EVERY fixed volume ProtectionStatus On AND VolumeStatus FullyEncrypted. FAIL lists each non-compliant volume + status, e.g. `C: On/FullyEncrypted; D: Off/FullyDecrypted; E: On/EncryptionInProgress(47%)` |
-| 7 | AppWhitelist | AppLocker via `Get-AppLockerPolicy -Effective` (any RuleCollection EnforcementMode=Enabled); else WDAC via `Win32_DeviceGuard` (`CodeIntegrityPolicyEnforcementStatus >= 2`) | either enforcing (audit-only -> FAIL with a note; neither -> FAIL) |
-| 8 | Agents | patch agent `Get-Service CcmExec` Running AND >=1 `securityAgentServices` Running | both true; Detail names both states |
-| 9 | PkiRoots | compare `Cert:\LocalMachine\Root` thumbprints against `dodRootThumbprints` | every required thumbprint present (else FAIL lists how many/which). **Empty baseline -> EXT** "configure DoD root thumbprints in c2c-baseline.json" |
-| 10 | COAMS | **EXT** - server-side ARAD/ePO asset tags, not endpoint-readable | n/a - "ARAD/ePO server-side tags (7) - not endpoint-readable" |
-| 11 | Hostname | test `$env:COMPUTERNAME` against `hostnamePatterns` (default `^MSEKL`, `^MSEKW` = Lakenheath laptop/workstation) | matches any pattern (else FAIL "<name> does not match naming convention"); Detail notes the authoritative verdict is ARAD-side |
+- **QUARANTINE** (5: Firewall, AntiMalware, Patches, Encryption, Vuln) - the ONLY
+  pillars the TASKORD 26-0822 dashboard actually quarantines on. Vuln always emits
+  `EXT`, so it can never itself contribute a scored FAIL.
+- **AUDIT** (2: PkiRoots, OsVersion) - shown, still fixer-remediable (PkiRoots), but
+  a FAIL here NEVER quarantines (mirrors the dashboard's own "you cannot be
+  non-compliant for audit rules").
+- **INFO** (3: AppWhitelist, Agents, COAMS) - JANET-only advisory checks, stricter
+  than the TASKORD baseline; a FAIL here is shown but never quarantines.
+- **ATTEST** (1: Monitoring) - a dead/uninstalled Tanium client cannot report
+  compliance to the dashboard at all, so it drives its own **NOT ATTESTING** verdict
+  rather than `QUARANTINE RISK`.
 
-## Verdict (computed admin-side)
+| # | Pillar | Tier | Mechanism (read-only, on the target) | PASS when |
+|---|--------|------|---------------------------------------|-----------|
+| 1 | Monitoring | ATTEST | `Get-C2cTaniumInstalled` (scan the 64- and 32-bit HKLM Uninstall keys for a DisplayName matching "Tanium") AND `Get-Service` the Tanium client service (`taniumService`, default "Tanium Client") | software installed AND service Running. Detail states BOTH facts, e.g. `Tanium installed (v...); service Running` / `Tanium not installed; service not installed` / `Tanium installed (v...); service Stopped`. A FAIL/ERROR here (with no Quarantine-tier FAIL) drives `NOT ATTESTING`, not `QUARANTINE RISK` |
+| 2 | Firewall | QUARANTINE | `Get-NetFirewallProfile` (Domain/Private/Public); fallback `netsh advfirewall show allprofiles state`, requiring all 3 profile headers AND 3 `State` lines to parse - **fails CLOSED** (`ERROR` "netsh output not parseable") rather than the old false-PASS on unparseable output | all three profiles Enabled (else FAIL lists the disabled ones) |
+| 3 | AntiMalware | QUARANTINE | TASKORD rule 1. Endpoint-read the MDE Org ID (`HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status`->`OrgId`, fallback the ATP root key), normalize (strip braces/whitespace, uppercase) and compare to the hardcoded program-wide tenant `$script:C2cMdeOrgId` = `99557BCC-8DC2-443B-AF2E-08C9162C01BB`. `Get-MpComputerStatus` for install/signature-age; fallback `root\SecurityCenter2` AntiVirusProduct (Defender-only - a healthy 3rd-party-only AV FAILs, named, because TASKORD requires Defender specifically) | **installed** (Get-MpComputerStatus succeeds, or SecurityCenter2 has an enabled+current Defender product) **AND** signature age **< 7 days** (168h, strict) **AND** the endpoint's MDE Org ID matches. FAIL names every gap: `sig age Xh >= 7 days`, `MDE OrgId <found\|missing> != required <reqOrg>`. RunningMode / RTP / Sense-onboarded / product+engine version / a breach of the old `sigMaxAgeHours` fleet budget are now ALL advisory-only Detail - NEVER a fail (e.g. a Passive / EDR Block Mode box, or an Active-but-RTP-off box, PASSes if installed + fresh + correctly tenanted) |
+| 4 | Patches | QUARANTINE | TASKORD rule 5. `SELECT * FROM CCM_SoftwareUpdate WHERE ComplianceState=0` (0=ciNotPresent=applicable-not-installed) in `root\ccm\ClientSDK` - **fixes a no-op filter bug**: the old query tested `InstallState`/`ApplicabilityState`, which are `CCM_Application` properties that are always `$null` on `CCM_SoftwareUpdate`, so every pending row silently passed the old filter. `overdue` = a pending update whose MECM `Deadline` has passed, or (no deadline) whose `StartTime` is older than the `graceDays` baseline key (default 7) | `overdue` count is 0 (Detail: `0 overdue update(s); M pending within 7-day grace`, plus a caveat that this is MECM-deployed updates only - Tanium scans the full patch list independently). FAIL names the overdue count; a pending-but-in-grace update is never itself a fail. CCM absent -> ERROR "MECM/CCM not queryable" |
+| 5 | Vuln | QUARANTINE (EXT) | **EXT** - not endpoint-determinable | n/a - "AQC Score (filtered) must be < 25 - the #1 fleet quarantine driver; NOT verifiable by this scan (import the Tanium C2C CSV, or remediate via ACAS / Reports / KEV / UPR)" |
+| 6 | Encryption | QUARANTINE | TASKORD rule 2. Identify the **C: / OS volume alone** (`VolumeType -eq 'OperatingSystem'`, else the volume whose MountPoint matches `$env:SystemDrive`) out of the enumerated fixed volumes (`Get-BitLockerVolume` correlated with fixed drive type - `Get-Volume` DriveType Fixed, else `Win32_Volume` DriveType=3; removable/USB/network/optical excluded, letterless system/EFI/recovery partitions skipped); fallback `manage-bde -status` on the system drive | that ONE volume's `ProtectionStatus -eq 'On'` - the entire TASKORD rule 2 score. Other fixed volumes not On, or the OS volume still mid-conversion (Protection On but not yet FullyEncrypted), are appended as `advisory (not scored): D: Off/FullyDecrypted; C: On but EncryptionInProgress(42%)` - shown, never a fail. `manage-bde` fallback: PASS on `Protection Status: Protection On` alone (Conversion Status is advisory detail, not scored) |
+| 7 | AppWhitelist | INFO | AppLocker via `Get-AppLockerPolicy -Effective` (any RuleCollection EnforcementMode=Enabled); else WDAC via `Win32_DeviceGuard` (`CodeIntegrityPolicyEnforcementStatus >= 2`) | either enforcing (audit-only -> FAIL with a note; neither -> FAIL). Not a TASKORD rule - advisory only, never quarantines |
+| 8 | Agents | INFO | patch agent `Get-Service CcmExec` Running AND >=1 `securityAgentServices` Running | both true; Detail names both states. Not a TASKORD rule - advisory only, never quarantines |
+| 9 | PkiRoots | AUDIT | compare `Cert:\LocalMachine\Root` thumbprints against `dodRootThumbprints` | every required thumbprint present (else FAIL lists how many/which). **Empty baseline -> EXT** "configure DoD root thumbprints in c2c-baseline.json". Audit tier: a FAIL is shown as `[AUDIT]` (never `[FAIL]`) and stays fixer-remediable (`fix-pki`) but never quarantines |
+| 10 | COAMS | INFO | **EXT** - server-side ARAD/ePO asset tags, not endpoint-readable | n/a - "ARAD/ePO server-side tags (7) - not endpoint-readable" |
+| 11 | OsVersion | AUDIT | TASKORD rule 6 (NEW check, replaces the removed base-specific Hostname check). One registry read: `Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion` (NOT the slow `Get-ComputerInfo`, and NOT `ProductName` - it still reports "Windows 10" on an 11 box; `CurrentBuildNumber` is authoritative) | Windows 11 (`CurrentBuildNumber >= 22000`) AND release 24H2+ (build >= 26100) AND `EditionID -eq 'Enterprise'` (exact match - Pro / EnterpriseS(LTSC) / Education FAIL). FAIL names every gap and routes to the Windows Upgrade tool. Audit tier: shown as `[AUDIT]`, never quarantines |
 
-Count `FAIL` among the 9 scored checks (EXT pillars Vuln + COAMS are shown but
-**never** count):
+## Verdict (computed admin-side, TASKORD-tiered)
 
-- **READY** - 0 FAIL and 0 ERROR.
-- **QUARANTINE RISK** - >= 1 FAIL (Detail lists the failing pillars).
-- **CHECK ERRORS** - 0 FAIL but >= 1 ERROR (a pillar could not be evaluated).
+`Get-C2cVerdict` scores **only the QUARANTINE tier** (Firewall / AntiMalware /
+Patches / Encryption / Vuln); AUDIT (PkiRoots, OsVersion) and INFO (AppWhitelist,
+Agents, COAMS) FAIL/ERROR are advisory-only and never change the verdict:
+
+```
+qFail  = count(FAIL  where tier==Quarantine)   # Vuln is always EXT, so never contributes
+qErr   = count(ERROR where tier==Quarantine)
+monBad = Monitoring.Status in (FAIL, ERROR)
+
+if     qFail >= 1 : QUARANTINE RISK   (Ok=false)
+elif   qErr  >= 1 : CHECK ERRORS      (Ok=false)
+elif   monBad     : NOT ATTESTING     (Ok=false)
+else              : READY             (Ok=true)
+```
+
+- **QUARANTINE RISK** - >= 1 quarantine-tier FAIL (Detail lists the failing
+  pillars). Outranks everything else, including a simultaneous Monitoring failure.
+- **CHECK ERRORS** - 0 quarantine FAIL but >= 1 quarantine-tier ERROR (a
+  quarantine-relevant pillar could not be evaluated). An AUDIT/INFO-tier ERROR (e.g.
+  AppWhitelist, OsVersion) never triggers this and never demotes an otherwise-READY
+  host.
+- **NOT ATTESTING** - every quarantine pillar passes but Monitoring (Tanium) is
+  FAIL/ERROR: the box is invisible to the C2C dashboard and cannot attest
+  compliance, which is a materially different problem than a quarantine-triggering
+  FAIL (and gets its own status rather than being lumped into QUARANTINE RISK).
+- **READY** - 0 of the above. Any AUDIT/INFO findings are still shown, just
+  advisory.
 - **OFFLINE** - host unreachable (TCP 5985/445). With `attemptOffline` ticked the
-  probe still tries a session; a connect/session failure surfaces as `ERROR`.
+  probe still tries a session; a connect/session failure surfaces as `ERROR`
+  (rolled up to `CHECK ERRORS` on the result row).
 
-`Detail` is a short summary, e.g. `3 FAIL: Firewall, Encryption, PkiRoots | EXT:
-Vuln, COAMS`. The activity log receives the full 11-line report, each line prefixed
-`[PASS]` / `[FAIL]` / `[EXT]` / `[ERROR]` so the view colours it (PASS -> ok,
-FAIL -> error, ERROR -> warn, EXT -> info).
+`Detail` stacks its parts in order: the FAIL count/list, the ERROR count/list, then
+either the NOT ATTESTING sentence (`Tanium not reporting - compliance cannot be
+attested to the C2C dashboard`) or the READY sentence (`all quarantine pillars
+pass`), then `AUDIT: <names>`, `INFO: <names>`, `EXT: <names>` - and, on a READY
+verdict, `AQC/Vuln not endpoint-verifiable - import the Tanium C2C CSV to score the
+#1 quarantine driver` (a READY scan never claims the server-side AQC score was
+actually verified). E.g. `2 FAIL: Firewall, Encryption | AUDIT: PkiRoots | EXT:
+Vuln, COAMS`.
+
+The activity log receives the full 11-line report, each line prefixed with its
+**display tag** (`Get-C2cDisplayTag`): a Quarantine/Attest-tier line keeps its raw
+status (`[PASS]` / `[FAIL]` / `[ERROR]` / `[EXT]`); an Audit- or Info-tier FAIL/ERROR
+is re-tagged `[AUDIT]` / `[INFO]` instead, so the report never paints an advisory
+finding as red as a quarantine failure. The view colours by tag: `[PASS]` -> ok
+(green), `[FAIL]` -> error (red), `[ERROR]` -> warn (amber), `[EXT]` / `[AUDIT]` /
+`[INFO]` -> info (neutral - same bucket as EXT).
 
 ## Config (baseline)
 
@@ -124,6 +204,7 @@ overlays the file if present, so it works even if the file is missing. Defaults:
 {
   "sigMaxAgeDays": 7,
   "sigMaxAgeHours": 24,
+  "graceDays": 7,
   "taniumService": "Tanium Client",
   "securityAgentServices": ["masvc", "mfemms", "macmnsvc", "WinDefend", "Sense"],
   "hostnamePatterns": ["^MSEKL", "^MSEKW"],
@@ -131,13 +212,26 @@ overlays the file if present, so it works even if the file is missing. Defaults:
 }
 ```
 
-`sigMaxAgeHours` (v1.7.0, default 24) is the signature-freshness budget in HOURS used
-by the AntiMalware scan check and fixer; if omitted it falls back to `sigMaxAgeDays * 24`.
+`sigMaxAgeHours` (v1.7.0, default 24) no longer decides AntiMalware PASS/FAIL - the
+TASKORD-mandated 7-day (168h, strict) bar does that now, hardcoded. `sigMaxAgeHours`
+is now (a) an advisory fleet-budget note in Detail when breached but still inside
+the 7-day TASKORD bar, and (b) still the threshold the `fix-antimalware` action uses
+to decide whether to `Update-MpSignature`; if omitted it falls back to
+`sigMaxAgeDays * 24`. `graceDays` (v1.8.0, default 7) is the Patching grace window
+in DAYS: a pending MECM update only fails the scan once it is past its enforcement
+`Deadline` or, absent a deadline, once its `StartTime` is older than `graceDays`.
+
+The MDE Org ID (`99557BCC-8DC2-443B-AF2E-08C9162C01BB`) is **not** a baseline key -
+it is the hardcoded module constant `$script:C2cMdeOrgId` (the program-wide C2C
+tenant, identical for every base under TASKORD 26-0822), threaded into the probe's
+`ArgumentList`. It is deliberately NOT read from `c2c-baseline.json` and cannot be
+overridden per base, unlike the removed base-specific `hostnamePatterns`.
 
 The tool **never writes** this file (no SMB atomic-write hazard) - operators edit
 the JSON by hand and re-run. Leaving `dodRootThumbprints` empty is intentional: the
 PkiRoots check reports **EXT** (not FAIL) until real DoD root thumbprints are
-configured, so an un-configured baseline never manufactures a false quarantine.
+configured, so an un-configured baseline never manufactures a false quarantine
+(and, being Audit tier, a configured-but-failing PkiRoots never quarantines either).
 
 ## Run model / reuse
 
@@ -232,20 +326,31 @@ FQDN -> short name for targeting (FQDN kept for display/export). De-duplicates b
 host, worst row wins (Non-Compliant over Compliant; tie -> more failed pillars).
 Summary: `@{ total; compliant; nonCompliant; nonCompliantHosts=@(...);
 pillars=@(@{ name; failedCount; hosts=@(...); routing });
-runAllPlan=@(@{ host; pillars=@(...) }) }`. `runAllPlan` is each non-compliant host
-plus ONLY its endpoint-fixable failed pillars (PkiRoots is fixable again in v1.6.0, so it
-DOES enter the plan) - the exact JSON the view intersects with the checked cards for the
-`run-all` action. Unknown rules are surfaced verbatim, never dropped.
+auditPillars=@(@{ name; failedCount; hosts=@(...); routing; audit=true });
+runAllPlan=@(@{ host; pillars=@(...); auditPillars=@(...) }) }`. `pillars` is the
+**Failed**-rule aggregation only (quarantine-relevant); `auditPillars` (v1.8.0) is
+the same shape built from each host's **Audit**-rule findings (PKI Trust Roots, OS
+Version) - kept separate so the CSV's own Failed/Audit split stays honest (an audit
+finding is never counted as a compliance failure). `runAllPlan` is built from EVERY
+imported record, not just non-compliant ones: each host's endpoint-fixable Failed
+pillars UNION its endpoint-fixable Audit pillars (currently only PkiRoots is both
+fixable and an audit rule), with the audit subset also called out on that plan entry
+as `auditPillars` - so an otherwise-Compliant host that only fails the PKI audit
+rule still gets a `run-all` plan entry and can be proactively remediated (`fix-pki`)
+without ever being called a quarantine risk. This is the exact JSON the view
+intersects with the checked cards for the `run-all` action. Unknown rules are
+surfaced verbatim, never dropped.
 
 The view renders an **IMPORT C2C COMPLIANCE CSV** card (file picker + Import) below
 Target Computers, plus **hero StatCards** that populate after import: Total hosts /
 Non-Compliant / Fixable hosts (distinct hosts with >=1 fixable pillar = `runAllPlan`
-length) / Routed-only (non-compliant minus fixable). After import the view builds one
-**FIX CARD per fixable pillar** present (see below).
+length - can now exceed Non-Compliant, since an audit-only proactive fix can target a
+Compliant host) / Routed-only (non-compliant minus fixable, floored at 0). After
+import the view builds one **FIX CARD per fixable pillar** present (see below).
 
 ### Import-driven fix CARDS + `run-all` (**destructive**, `destructive=true`)
 
-There are **five per-pillar actions** plus **run-all**. All are `destructive=true`,
+There are **six per-pillar actions** (Monitoring, Firewall, AntiMalware, Patches, Encryption, PkiRoots) plus **run-all**. All are `destructive=true`,
 columns `Host, Ping, Status, Detail`, server admin-session gate, and require
 `confirm` == exact `FIX`. Shared safety on every one: rejects 0 valid targets (same
 token regex as scan); **self-guard** drops any dispatcher-local target
@@ -307,7 +412,7 @@ tallies (`perPillar`) alongside the per-status host counts.
 The view renders **all six fixable pillar cards immediately at mount**, under a
 **FIXABLE PILLARS (target-driven)** section - Monitoring / Firewall / Encryption /
 AntiMalware / Patches / **PKI Trust Roots**. No import is required. Each card = a
-checkbox (**checked by default**) + the pillar title + description, and a per-card
+checkbox (**UNCHECKED by default** - the operator opts each pillar in) + the pillar title + description, and a per-card
 **Fix `<pillar>` on N target host(s)** button whose count updates **live** from the
 Target Computers list (subscribed via `targets.model.onChange`). Per-card Fix
 dispatches `fix-<pillar>` with `targets` = **`targets.hosts().join('\n')`** (the
@@ -339,15 +444,22 @@ WinRM (RPC)** toggle + **CANCEL RUN**.
 
 **Import is optional and additive.** The **IMPORT C2C COMPLIANCE CSV (optional)**
 card (below the fix cards) still shows the hero StatCards. On a successful import the
-view: (a) **merges** the summary's `nonCompliantHosts` into Target Computers (never
-clobbering hosts the operator typed - de-duped case-insensitively, logs how many were
-new); (b) for each fixable pillar with `failedCount > 0`, records a **badge**
-("N flagged by import", cyan, click to review that pillar's flagged hosts in a
-dialog) and re-checks it; (c) logs the routed-elsewhere pillars (Vuln / OSVersion /
-STIG) and shows them under a **ROUTED ELSEWHERE (from import)** section as
-non-runnable info cards. The import `final` handler is wrapped in try/catch so a
-malformed summary logs an error to the activity log + status line instead of
-silently no-op'ing (the run bus's `dispatch` swallows handler throws).
+view: (a) **merges** the summary's `nonCompliantHosts` **plus every host carrying an
+endpoint-fixable AUDIT finding** (v1.8.0 - e.g. a Compliant box still missing a PKI
+trust root) into Target Computers (never clobbering hosts the operator typed -
+de-duped case-insensitively, logs how many were new); (b) for each fixable pillar
+with `failedCount > 0` - taken from EITHER the Failed aggregation OR the v1.8.0
+`auditPillars` aggregation (so PkiRoots can badge purely from an audit-only finding
+on an otherwise-compliant host) - records a **badge** ("N flagged by import", cyan,
+click to review that pillar's flagged hosts in a dialog); the checkbox itself stays
+**UNCHECKED** (import never auto-ticks a pillar - the operator opts in explicitly,
+same as the always-on cards); (c) logs the AUDIT-rule findings on their own line
+(`AUDIT findings (advisory, non-quarantine): PkiRoots N (audit -> ...)`, distinct
+from the Failed-pillar log lines) and the routed-elsewhere pillars (Vuln / OSVersion
+/ STIG) shown under a **ROUTED ELSEWHERE (from import)** section as non-runnable
+info cards. The import `final` handler is wrapped in try/catch so a malformed
+summary logs an error to the activity log + status line instead of silently
+no-op'ing (the run bus's `dispatch` swallows handler throws).
 
 A separate read-only **VERSION CHECK** card (productMatch + optional targetVersion +
 a WinRM-heal toggle) runs `version-check` across the Target Computers list.

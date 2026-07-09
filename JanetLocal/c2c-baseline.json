@@ -1,6 +1,7 @@
 ﻿{
     "sigMaxAgeDays":  7,
     "sigMaxAgeHours":  24,
+    "graceDays":  7,
     "taniumService":  "Tanium Client",
     "securityAgentServices":  [
                                   "WinDefend",
