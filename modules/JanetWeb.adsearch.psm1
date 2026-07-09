@@ -881,10 +881,11 @@ $script:AdSearchEngine = {
             $dcDone = 0
             try {
                 while ($dcDone -lt $dcJobs.Count) {
+                    $activeCount = @($dcJobs | Where-Object { $_.PS -and $_.StartedAt }).Count
                     foreach ($j in $dcJobs) {
-                        # Stamp real execution start (NotStarted->Running) so the per-DC
-                        # clock doesn't penalize DCs still queued behind the cap.
-                        if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                        # Stamp real start only up to the pool's real concurrency, in queue order: a PS queued
+                        # in a saturated pool reports State='Running' at once, which would false-time-out the backlog.
+                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $dcPool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                         if ($j.PS -and $j.Async.IsCompleted) {
                             $res = $null
                             try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ DC = $j.DC; Reachable = $true; Events = $null; Error = "$($_.Exception.Message)" } }

@@ -1195,10 +1195,11 @@ function Invoke-UprFanOut {
     $cancelled = $false; $timedOut = $false
     try {
         while ($done -lt $jobs.Count) {
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
-                # Stamp real execution start (NotStarted->Running) so the per-host
-                # clock doesn't penalize hosts still queued behind the thread cap.
-                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                # Stamp real start only up to the pool's real concurrency, in queue order: a PS queued in
+                # a saturated pool reports State='Running' at once, which would false-time-out the backlog.
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }

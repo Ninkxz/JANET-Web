@@ -805,8 +805,13 @@ function Invoke-CertDeployCheckAction {
     $done = 0
     try {
         while ($done -lt $jobs.Count) {
+            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
+            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so the
+            # old InvocationStateInfo check stamped StartedAt at ENQUEUE for every job and the
+            # watchdog then falsely timed out the whole backlog at once (~threads*timeout hosts in).
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
@@ -1062,8 +1067,13 @@ function Invoke-CertDeployDeployAction {
     $done = 0
     try {
         while ($done -lt $jobs.Count) {
+            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
+            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so the
+            # old InvocationStateInfo check stamped StartedAt at ENQUEUE for every job and the
+            # watchdog then falsely timed out the whole backlog at once (~threads*timeout hosts in).
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
@@ -1291,8 +1301,13 @@ function Invoke-CertDeployScanAction {
     $done = 0
     try {
         while ($done -lt $jobs.Count) {
+            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
+            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so the
+            # old InvocationStateInfo check stamped StartedAt at ENQUEUE for every job and the
+            # watchdog then falsely timed out the whole backlog at once (~threads*timeout hosts in).
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }

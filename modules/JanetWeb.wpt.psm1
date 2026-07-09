@@ -4214,10 +4214,11 @@ function Invoke-WptFanOut {
     $cancelled = $false; $timedOut = $false
     try {
         while ($done -lt $jobs.Count) {
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
-                # Stamp real execution start (NotStarted->Running) so the per-host
-                # clock doesn't penalize hosts still queued behind the thread cap.
-                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                # Stamp real start only up to the pool's real concurrency, in queue order: a PS queued in
+                # a saturated pool reports State='Running' at once, which would false-time-out the backlog.
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     # Surface a worker-runspace failure as an explicit log event too: for actions
@@ -4979,8 +4980,11 @@ function Invoke-JanetToolAction {
             $perHostTimeout = 300   # per-host watchdog: abandon a single (host x app) trigger wedged on a WMI/CIM call so it can't pin a worker thread for the whole batch
             try {
                 while ($done -lt $jobs.Count) {
+                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
+                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
+                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
                     foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                         if ($j.PS -and $j.Async.IsCompleted) {
                             $res = $null
                             try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail="worker error: $($_.Exception.Message)" } }
@@ -5056,8 +5060,11 @@ function Invoke-JanetToolAction {
             $perHostTimeout = 300   # per-host watchdog: abandon a single host wedged on the HKLM/HKU uninstall enumeration so it can't pin a worker thread for the whole batch
             try {
                 while ($done -lt $jobs.Count) {
+                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
+                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
+                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
                     foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                         if ($j.PS -and $j.Async.IsCompleted) {
                             $res = $null; $err = $null
                             try { $res = $j.PS.EndInvoke($j.Async) } catch { $err = "worker error: $($_.Exception.Message)" }
@@ -5255,8 +5262,11 @@ function Invoke-JanetToolAction {
             $perHostTimeout = 300   # per-host watchdog: abandon a single host wedged on a WMI/CIM call so it can't pin a worker thread for the whole batch
             try {
                 while ($done -lt $jobs.Count) {
+                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
+                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
+                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
                     foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                         if ($j.PS -and $j.Async.IsCompleted) {
                             $res = $null
                             try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; KBs=@(); Error="worker error: $($_.Exception.Message)" } }
@@ -5650,8 +5660,11 @@ function Invoke-JanetToolAction {
             $perHostTimeout = 300   # per-host watchdog: abandon a single host wedged on the Program Files/Users/Java jar tree walk so it can't pin a worker thread for the whole batch
             try {
                 while ($done -lt $jobs.Count) {
+                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
+                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
+                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
                     foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                         if ($j.PS -and $j.Async.IsCompleted) {
                             $res = $null
                             try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; ScanOK=$false; Jars=@(); Error="worker error: $($_.Exception.Message)" } }

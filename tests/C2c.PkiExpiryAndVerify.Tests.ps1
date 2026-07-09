@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  C2c.PkiExpiryAndVerify.Tests.ps1 - Pester 3.4 tests for the C2C v1.7.1
+#  C2c.PkiExpiryAndVerify.Tests.ps1 - Pester 3.4 tests for the C2C v1.7.2
 #  PkiRoots hardening (expiry guard + persistence re-verify), PkiRoots path ONLY:
 #
 #    (1) EXPIRY GUARD (admin-side, at bundle read) - Get-C2cCertBundle EXCLUDES

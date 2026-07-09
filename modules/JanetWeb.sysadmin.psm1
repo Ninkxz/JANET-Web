@@ -448,8 +448,12 @@ function Invoke-JanetToolAction {
     $done = 0
     try {
         while ($done -lt $jobs.Count) {
+            # Stamp the per-host clock only up to the pool's real concurrency, in queue order: a PS
+            # queued in a saturated RunspacePool reports State='Running' at once, so the old check
+            # stamped StartedAt at ENQUEUE and the watchdog false-timed-out the backlog (~threads*timeout in).
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $j.PS.InvocationStateInfo.State -eq 'Running') { $j.StartedAt = Get-Date }
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }

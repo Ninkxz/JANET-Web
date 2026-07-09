@@ -2092,11 +2092,12 @@ function Invoke-AcasFanOut {
     $cancelled = $false; $timedOut = $false
     try {
         while ($done -lt $psJobs.Count) {
+            $activeCount = @($psJobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($pj in $psJobs) {
-                # Stamp the real execution start: the pool queues anything beyond
-                # $Threads, so a per-host clock from BeginInvoke would punish queued
-                # hosts for slot-wait. NotStarted -> Running means a runspace took it.
-                if ($pj.PS -and -not $pj.StartedAt -and $pj.PS.InvocationStateInfo.State -eq 'Running') { $pj.StartedAt = Get-Date }
+                # Stamp real start only up to the pool's real concurrency, in queue order: a PS queued in a
+                # saturated pool reports State='Running' at once, so the old check stamped StartedAt at ENQUEUE
+                # and the watchdog false-timed-out the backlog (~threads*timeout hosts in).
+                if ($pj.PS -and -not $pj.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $pj.StartedAt = Get-Date; $activeCount++ }
                 if ($pj.PS -and $pj.Async.IsCompleted) {
                     $resStr = ''
                     try {
