@@ -24,6 +24,13 @@
 #  v0.3.0: diagnose + forcediscovery ported verbatim from References\24h2script.ps1
 #  (the desktop "24H2 Remote Helper"); pin/unpin gained the bypass + SCCM options.
 #
+#  v0.4.0: target-version parameterization (24H2 / 25H2 via $script:WinUpgradeTargets) -
+#  fleet-status / diagnose / upgrade-drive take a 'version' input that threads MinBuild
+#  into the worker (default 24H2 / 26100 keeps every existing behaviour identical), plus
+#  three new actions ported from the desktop helper: repair-health (DISM /RestoreHealth +
+#  sfc /scannow), auto-fix (per-device analyse-then-fix, ported from $sbAutoFix) and
+#  error-report (read-only per-error row scan reusing the diagnose signature logic).
+#
 #  Contract:
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -42,7 +49,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.3.0'
+        version  = '0.4.0'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -55,6 +62,7 @@ function Get-JanetToolManifest {
                 columns      = @('Host','Ping','Status','Detail')
                 inputs       = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='version'; label='Target version'; type='select'; required=$false; default='24H2'; options=@('24H2','25H2'); help='Feature-update target the readiness gate checks against - 24H2 (build 26100+) or 25H2 (build 26200+). Default 24H2.' },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
@@ -65,9 +73,10 @@ function Get-JanetToolManifest {
                 description  = 'Read-only fleet posture board for the 23H2 -> 24H2 journey (changes NOTHING). Runs the SAME per-host readiness scan as Run Diagnostic Scan across the targets and rolls each host up to a single Win24H2Status: Already 24H2+ (build 26100+); Pending reboot (a feature update is staged / the box is pending-reboot, i.e. mid-upgrade); Ready (on 23H2 / build 22631 or older AND CPU/TPM/disk all pass); Blocked: <reason> (on <=23H2 but a hardware check fails - CPU unsupported / no TPM 2.0 / disk <64GB, joined). Pinned is shown as a secondary flag with the pinned version. Returns per-host rows plus a rollup summary (already24h2 / ready / blocked / pendingReboot counts + block-reason breakdown). Read-only registry / CIM reads only - no policy writes, no reboots.'
                 kind         = 'stream-table'
                 destructive  = $false
-                columns      = @('Host','Online','DisplayVersion','OsBuild','Win24H2Status','Eligible','BlockReason','Pinned','PinnedVersion','PendingReboot','Error')
+                columns      = @('Host','Online','DisplayVersion','OsBuild','FreeGB','Win24H2Status','Eligible','BlockReason','Pinned','PinnedVersion','PendingReboot','Error')
                 inputs       = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='version'; label='Target version'; type='select'; required=$false; default='24H2'; options=@('24H2','25H2'); help='Feature-update target the board rolls up against - 24H2 (build 26100+) or 25H2 (build 26200+). Default 24H2. The Win24H2Status column reads "Already <version>+" for the chosen target.' },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
@@ -195,6 +204,61 @@ function Get-JanetToolManifest {
                 )
             },
             @{
+                id          = 'repair-health'
+                label       = 'Repair Health (DISM + SFC)'
+                description  = 'Rebuild the component store on each target with DISM /Online /Cleanup-Image /RestoreHealth, then run sfc /scannow to repair protected system files. Use this on hosts that Run Diagnostic Scan flagged with a component-store / registry-hive corruption signature (CBS_E_INVALID_PACKAGE, FOD inventory, 0x000003F1) blocking the feature upgrade. DISM may pull repair payload from Windows Update, so it can run 15-45 min per device. Per host it reports the DISM verdict (OK / OK (reboot) / exit N / error), the SFC verdict (no violations / repaired / could not fix / blocked (pending repair) / error), a rolled-up Status (CLEAN / REPAIRED / PARTIAL / FAILED) and whether a reboot is required. If "reboot" is ticked AND a reboot is required AND no user is logged on, it reboots on a 60s countdown; a logged-on user defers the reboot.'
+                kind         = 'stream-table'
+                destructive  = $true
+                confirm      = 'Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow on the selected host(s). This can take 15-45 MINUTES per device and DISM may pull repair payload from Windows Update. If "Reboot when repairs require it and no user is logged on" is ticked and this is NOT a Dry-run, a host that needs a reboot AND has no interactive user will REBOOT on a 60s countdown to complete the repair (a logged-on user defers it). Proceed?'
+                columns      = @('Host','Ping','Status','Dism','Sfc','RebootNeeded','Detail')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='reboot'; label='Reboot when repairs require it and no user is logged on'; type='bool'; required=$false; default=$false; help='After a repair that reports a reboot is required, reboot the host on a 60s countdown - but ONLY if no interactive user is logged on. A logged-on user defers the reboot (reported, never forced).' },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='dryRun'; label='Dry-run (no changes)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=4 }
+                )
+            },
+            @{
+                id          = 'auto-fix'
+                label       = 'Auto-Fix (per device)'
+                description  = 'Analyse each device and apply ONLY the fixes it actually needs to unblock the feature upgrade (ported from the desktop Auto-Fix). Per host it reads readiness first and SKIPS a host already on the target build. Then, gated by the ticked categories: writes the Target Release Version policy where it is missing / inactive / half-written; sets the CPU/TPM MoSetup bypass ONLY where the hardware is genuinely unsupported; removes drivers that failed injection per THIS device''s own setup logs (with a corrected boot-critical guard - a non-boot-class or absent device tagged boot-critical is treated as a false positive and removed); clears EXPIRED Windows Update pause values (active pauses are respected); repairs the component store (DISM/SFC) ONLY where the setup logs show corruption; deletes a stale rolled-back $WINDOWS.~BT to reclaim disk; and refreshes the SCCM client. Returns a per-device Status (FIXED / NO CHANGES / ALREADY ON TARGET / DRY-RUN / FAILED) and a semicolon-joined summary of the fixes applied. Optional reboot when a fix requires it and no user is logged on. Dry-run analyses everything read-only and reports what WOULD be fixed.'
+                kind         = 'stream-table'
+                destructive  = $true
+                confirm      = 'Auto-Fix the selected host(s): each device is analysed and gets ONLY the fixes it needs from the categories ticked below (policy / bypass / driver removal / pause clear / component-store repair / staging clear / SCCM refresh). This writes registry policy, may remove drivers and (if enabled) run DISM/SFC. If "reboot" is ticked and this is NOT a Dry-run, a host that needs a reboot AND has no logged-on user will REBOOT on a 60s countdown. A Dry-run changes nothing and reports what WOULD be fixed. Proceed?'
+                columns      = @('Host','Ping','Status','Fixes','RebootNeeded','Detail')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='version'; label='Target version'; type='select'; required=$false; default='24H2'; options=@('24H2','25H2'); help='Feature-update target each device is driven toward - 24H2 (build 26100+) or 25H2 (build 26200+). A device already on/above this build is skipped ("ALREADY ON TARGET").' },
+                    @{ name='fixPolicy'; label='Set the Target Release Version policy where missing/half-written'; type='bool'; required=$false; default=$true },
+                    @{ name='fixBypass'; label='Apply CPU/TPM bypass ONLY where hardware is unsupported'; type='bool'; required=$false; default=$true; help='Sets HKLM:\SYSTEM\Setup\MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU=1 only on a device whose CPU or TPM fails the check and where it is not already set.' },
+                    @{ name='fixDrivers'; label='Remove drivers that failed injection per this device''s own setup logs'; type='bool'; required=$false; default=$true },
+                    @{ name='driverSafe'; label='Skip driver removal when the device is currently connected'; type='bool'; required=$false; default=$true; help='When a failed-injection driver''s device is still present/connected, skip removal (safer). A disconnected/absent device is removed.' },
+                    @{ name='fixPause'; label='Clear EXPIRED Windows Update pause values (active pauses are respected)'; type='bool'; required=$false; default=$true },
+                    @{ name='fixRepair'; label='DISM/SFC repair only where setup logs show corruption - SLOW'; type='bool'; required=$false; default=$false; help='Runs DISM /RestoreHealth + sfc /scannow ONLY when the setup logs match a registry/component-store corruption signature. 15-45 min per matching device.' },
+                    @{ name='clearStaging'; label='Delete a stale rolled-back $WINDOWS.~BT to reclaim disk'; type='bool'; required=$false; default=$false; help='Only when the staging is classified STALE (rolled-back attempt). Best-effort; tolerates partial deletion.' },
+                    @{ name='sccmRefresh'; label='Refresh the SCCM / MECM client (policy + eval cycles)'; type='bool'; required=$false; default=$true },
+                    @{ name='reboot'; label='Reboot when a fix requires it and no user is logged on'; type='bool'; required=$false; default=$false; help='After a fix that reports a reboot is required, reboot the host on a 60s countdown - but ONLY if no interactive user is logged on. A logged-on user defers the reboot.' },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='dryRun'; label='Dry-run (analyse only - reports what WOULD be fixed)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=8 }
+                )
+            },
+            @{
+                id          = 'error-report'
+                label       = 'Error Report'
+                description  = 'Read-only per-error scan (changes NOTHING): reuses the diagnostic signature logic and returns ONE row per detected upgrade error per host, so a fleet''s blockers roll up as a flat, exportable list. Each row carries a Category (DISK / DRIVER / REGISTRY / COMPONENT_STORE / PAUSED / POLICY / STAGING / MEMORY / ADLDS / SETUPDIAG / NONE), a Severity (BLOCK / WARN / INFO), the concrete Evidence (the value or log line), and a one-sentence Fix. A clean host returns a single NONE / INFO "No upgrade errors detected" row; a host already on/above the target build returns a single NONE row noting the build.'
+                kind         = 'stream-table'
+                destructive  = $false
+                columns      = @('Host','Category','Severity','Evidence','Fix')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='version'; label='Target version'; type='select'; required=$false; default='24H2'; options=@('24H2','25H2'); help='Feature-update target the scan checks readiness/blockers against - 24H2 (build 26100+) or 25H2 (build 26200+).' },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
+                )
+            },
+            @{
                 id          = 'ping'
                 label       = 'Ping Sweep'
                 description  = 'Quick reachability check across the target list (changes nothing).'
@@ -261,18 +325,23 @@ function Get-WinUpgradeFleetStatus {
     #   Ready            - on 23H2 (22631) or older AND eligible (CPU/TPM/disk all pass)
     #   Blocked: <reason>- on <=23H2 but a hardware check fails (reasons joined)
     # Pinned is a SECONDARY flag surfaced in its own column, never folded in here.
+    # MinBuild + Version make the verdict target-aware (default 26100 / '24H2' keeps every
+    # existing string identical); the summary rollup matches the 'Already ' PREFIX so a
+    # '25H2' target rolls up the same way.
     param(
         [int]$OsBuild = 0,
         [bool]$Online = $false,
         [bool]$Eligible = $false,
         [string]$BlockReason = '',
         [bool]$PendingReboot = $false,
-        [string]$ErrorText = ''
+        [string]$ErrorText = '',
+        [int]$MinBuild = 26100,
+        [string]$Version = '24H2'
     )
-    if ($ErrorText)          { return 'Error' }
-    if (-not $Online)        { return 'Offline' }
-    if ($OsBuild -ge 26100)  { return 'Already 24H2+' }
-    if ($PendingReboot)      { return 'Pending reboot' }
+    if ($ErrorText)            { return 'Error' }
+    if (-not $Online)          { return 'Offline' }
+    if ($OsBuild -ge $MinBuild){ return "Already $Version+" }
+    if ($PendingReboot)        { return 'Pending reboot' }
     if ($OsBuild -le 0)      { return 'Error' }
     if ($Eligible)           { return 'Ready' }
     $reason = if ($BlockReason) { $BlockReason } else { 'ineligible' }
@@ -399,6 +468,17 @@ $script:WinUpgradeCpuPatterns = @(
     'Snapdragon\s*X\s*(Elite|Plus)'
 )
 
+# --- TARGET FEATURE-UPDATE VERSIONS (v0.4.0 parameterization) ---
+# The 'version' input on fleet-status / diagnose / upgrade-drive / auto-fix / error-report
+# selects one of these; its MinBuild replaces the previously-hardcoded 26100 build gate and
+# its Version string version-derives the verdict text ('Already <version>+' / 'ON <version>').
+# 24H2 = build 26100, 25H2 = build 26200. Default is 24H2 so every existing behaviour is
+# byte-for-byte identical. Add a row here to teach the engine a new target build.
+$script:WinUpgradeTargets = [ordered]@{
+    '24H2' = @{ Product = 'Windows 11'; Version = '24H2'; MinBuild = 26100 }
+    '25H2' = @{ Product = 'Windows 11'; Version = '25H2'; MinBuild = 26200 }
+}
+
 # =============================================================================
 #  DIAGNOSE DECISION HELPERS (fleet-batch lessons: 23H2 -> 24H2, 8 boxes / 7 causes)
 #
@@ -509,6 +589,153 @@ function Test-WinUpgradeNonBootDriverClass {
     return $false
 }
 
+# =============================================================================
+#  v0.4.0 DECISION HELPERS (repair-health / auto-fix / error-report)
+#
+#  Same dual-tested pattern as the diagnose helpers: these are PURE, script-scope,
+#  unit-tested authorities. The worker ops that use them run in bare pool runspaces
+#  and CANNOT call a module function, so they MIRROR this logic INLINE. Keep the two
+#  in sync (a sync-warning comment sits at each inline mirror).
+# =============================================================================
+
+function Get-WinUpgradeRepairVerdict {
+    # PURE: turn a DISM RestoreHealth exit code + the sfc /scannow text into the
+    # repair-health row verdicts. Mirrored inline by the RepairHealth worker branch.
+    #   Dism : 'OK' | 'OK (reboot)' | 'exit N' | 'error'
+    #   Sfc  : 'no violations' | 'repaired' | 'could not fix' | 'blocked (pending repair)' | 'error'
+    #   Status: CLEAN (nothing needed fixing) / REPAIRED / PARTIAL (sfc could not fix) / FAILED
+    #   RebootNeeded: dism 3010 OR sfc 'repaired' (the worker ORs the CBS/WU reboot keys on top)
+    param(
+        $DismExit,
+        [string]$SfcText,
+        [bool]$DismError = $false,
+        [bool]$SfcError  = $false
+    )
+    if ($DismError -or ($null -eq $DismExit)) { $dism = 'error' }
+    else {
+        $dx = 0; [void][int]::TryParse([string]$DismExit, [ref]$dx)
+        if     ($dx -eq 0)    { $dism = 'OK' }
+        elseif ($dx -eq 3010) { $dism = 'OK (reboot)' }
+        else                  { $dism = "exit $dx" }
+    }
+    $t = if ($null -ne $SfcText) { ([string]$SfcText -replace "`0","") } else { '' }
+    if     ($SfcError)                                              { $sfc = 'error' }
+    elseif ($t -match '(?i)did not find any integrity violations')  { $sfc = 'no violations' }
+    elseif ($t -match '(?i)successfully repaired')                  { $sfc = 'repaired' }
+    elseif ($t -match '(?i)unable to fix' -or $t -match '(?i)could not fix') { $sfc = 'could not fix' }
+    elseif ($t -match '(?i)could not perform the requested operation') { $sfc = 'blocked (pending repair)' }
+    else                                                            { $sfc = 'no violations' }
+    $dismFailed = ($dism -eq 'error' -or $dism -match '^exit ')
+    $sfcFailed  = ($sfc -eq 'error')
+    if     ($dismFailed -or $sfcFailed)                                   { $status = 'FAILED' }
+    elseif ($sfc -eq 'could not fix' -or $sfc -eq 'blocked (pending repair)') { $status = 'PARTIAL' }
+    elseif ($sfc -eq 'repaired' -or $dism -eq 'OK (reboot)')             { $status = 'REPAIRED' }
+    else                                                                 { $status = 'CLEAN' }
+    $rebootNeeded = ($dism -eq 'OK (reboot)' -or $sfc -eq 'repaired')
+    return [ordered]@{ Dism = $dism; Sfc = $sfc; Status = $status; RebootNeeded = $rebootNeeded }
+}
+
+function Get-WinUpgradeAutoFixPlan {
+    # PURE: given a device's read-only signals, return the array of fix KEYS that device
+    # NEEDS (order = apply order). The worker intersects this with the operator's enabled
+    # toggles before acting. A device already on/above the target build needs nothing.
+    # Keys: 'policy','bypass','drivers','pause','repair','staging'. Mirrored inline by AutoFix.
+    param(
+        [int]$Build = 0,
+        [int]$MinBuild = 26100,
+        [bool]$PolicyComplete = $false,   # TRV=1 AND ProductVersion AND TargetReleaseVersionInfo all set
+        [bool]$CpuSupported = $false,
+        [bool]$TpmSupported = $false,
+        [bool]$BypassActive = $false,
+        [bool]$FailedDrivers = $false,    # >=1 failed-injection INF parsed from setuperr.log
+        [bool]$PauseExpired = $false,     # an EXPIRED pause value is lingering
+        [bool]$Corruption = $false,       # a registry/component-store corruption signature matched
+        [string]$StagingClass = 'None'    # Get-WinUpgradeStagingClass output
+    )
+    $fixes = New-Object System.Collections.ArrayList
+    # Unary-comma returns: without them PowerShell unrolls a 1-element array to a bare
+    # string, breaking .Count/-contains at call sites (same guard as Get-WinUpgradeErrorRowSet).
+    if ($Build -ge $MinBuild) { return ,@() }
+    if (-not $PolicyComplete)                                              { [void]$fixes.Add('policy') }
+    if ((-not $CpuSupported -or -not $TpmSupported) -and -not $BypassActive) { [void]$fixes.Add('bypass') }
+    if ($FailedDrivers)                                                     { [void]$fixes.Add('drivers') }
+    if ($PauseExpired)                                                      { [void]$fixes.Add('pause') }
+    if ($Corruption)                                                        { [void]$fixes.Add('repair') }
+    if ($StagingClass -eq 'Stale')                                         { [void]$fixes.Add('staging') }
+    return ,($fixes.ToArray())
+}
+
+function Get-WinUpgradeErrorRowSet {
+    # PURE: turn a host's read-only upgrade-error signals into the error-report row set
+    # (Category / Severity / Evidence / Fix). Categories:
+    #   DISK|DRIVER|REGISTRY|COMPONENT_STORE|PAUSED|POLICY|STAGING|MEMORY|ADLDS|SETUPDIAG|NONE
+    # A host already on/above the target build -> one NONE row noting the build; a host with
+    # no detected errors -> one NONE 'No upgrade errors detected' row. Mirrored inline by the
+    # ErrorReport worker's remote scan (which gathers the signals ON the target).
+    param(
+        [int]$Build = 0,
+        [int]$MinBuild = 26100,
+        [string]$Version = '24H2',
+        [double]$FreeGB = 999,
+        [int]$MinDisk = 64,
+        [string[]]$FailedDrivers = @(),
+        $Signatures = @(),           # Get-WinUpgradeSetupErrSignatures output (Code/Message/Rec)
+        [bool]$PauseActive = $false,
+        [bool]$PauseExpired = $false,
+        [string]$StagingClass = 'None',
+        [double]$StagingGB = 0,
+        [bool]$PolicyMissing = $false,
+        [bool]$PolicyHalfWritten = $false,
+        [string]$SetupDiagProfile = ''
+    )
+    $trim = { param($s) $x = [string]$s; if ($x.Length -gt 200) { $x = $x.Substring(0,200) }; $x }
+    if ($Build -ge $MinBuild) {
+        return ,@([ordered]@{ Category='NONE'; Severity='INFO'; Evidence="Already on $Version+ (build $Build)"; Fix='' })
+    }
+    $rows = New-Object System.Collections.ArrayList
+    if ($FreeGB -lt $MinDisk) {
+        [void]$rows.Add([ordered]@{ Category='DISK'; Severity='BLOCK'; Evidence=(& $trim "$FreeGB GB free on the system drive (need $MinDisk+ GB)"); Fix="Free disk to 25+ GB (clearing `$WINDOWS.~BT reclaims staging), then re-trigger." })
+    }
+    foreach ($inf in @($FailedDrivers)) {
+        if ([string]::IsNullOrWhiteSpace($inf)) { continue }
+        [void]$rows.Add([ordered]@{ Category='DRIVER'; Severity='WARN'; Evidence=(& $trim "Failed to inject driver package: $inf"); Fix="Remove the failed driver (pnputil /delete-driver <oemNN.inf> /force), clear `$WINDOWS.~BT, re-trigger." })
+    }
+    foreach ($sig in @($Signatures)) {
+        if (-not $sig) { continue }
+        $code = [string]$sig.Code
+        $cat = switch ($code) {
+            'REGISTRY_CORRUPT' { 'REGISTRY' }
+            'COMPONENT_STORE'  { 'COMPONENT_STORE' }
+            'OOM'              { 'MEMORY' }
+            'ADLDS_MIGRATE'    { 'ADLDS' }
+            'SETUP_CANCELLED'  { 'PAUSED' }
+            default            { 'REGISTRY' }
+        }
+        $sev = if ($code -eq 'ADLDS_MIGRATE' -or $code -eq 'SETUP_CANCELLED') { 'WARN' } else { 'BLOCK' }
+        [void]$rows.Add([ordered]@{ Category=$cat; Severity=$sev; Evidence=(& $trim ([string]$sig.Message)); Fix=(& $trim ([string]$sig.Rec)) })
+    }
+    if ($PauseActive) {
+        [void]$rows.Add([ordered]@{ Category='PAUSED'; Severity='BLOCK'; Evidence='An ACTIVE Windows Update pause window is holding the feature update'; Fix='Wait for the pause to expire or clear it (Force Discovery aggressive), then re-trigger.' })
+    } elseif ($PauseExpired) {
+        [void]$rows.Add([ordered]@{ Category='PAUSED'; Severity='WARN'; Evidence='An EXPIRED pause value is lingering under WindowsUpdate\UX\Settings'; Fix='Clear the expired Pause* values (Auto-Fix / Force Discovery aggressive), then re-trigger.' })
+    }
+    if ($PolicyHalfWritten) {
+        [void]$rows.Add([ordered]@{ Category='POLICY'; Severity='WARN'; Evidence='Target Release Version pin is HALF-WRITTEN (TargetReleaseVersion=1 but Product/Version blank)'; Fix='Re-apply the pin (Pin action / Auto-Fix / Force Discovery re-writes it).' })
+    } elseif ($PolicyMissing) {
+        [void]$rows.Add([ordered]@{ Category='POLICY'; Severity='WARN'; Evidence='Target Release Version policy is not set'; Fix='Apply the Target Release Version policy (Pin action / Auto-Fix).' })
+    }
+    if ($StagingClass -eq 'Stale') {
+        [void]$rows.Add([ordered]@{ Category='STAGING'; Severity='INFO'; Evidence=(& $trim "Stale rolled-back `$WINDOWS.~BT staging (~$StagingGB GB) - nothing is in progress"); Fix="Clear C:\`$WINDOWS.~BT to reclaim disk AFTER fixing the root cause, then re-trigger." })
+    }
+    if ($SetupDiagProfile) {
+        [void]$rows.Add([ordered]@{ Category='SETUPDIAG'; Severity='WARN'; Evidence=(& $trim "SetupDiag matched profile: $SetupDiagProfile"); Fix='Action the SetupDiag remediation for this profile, then re-trigger.' })
+    }
+    if ($rows.Count -eq 0) {
+        return ,@([ordered]@{ Category='NONE'; Severity='INFO'; Evidence='No upgrade errors detected'; Fix='' })
+    }
+    return ,($rows.ToArray())
+}
+
 # Per-host worker. Runs in an isolated runspace -- NO outer-scope vars are
 # visible; everything comes via .AddArgument(). Returns one [ordered] result
 # (Host/Ping/Status/Detail/Ok); the harvest loop turns it into a streamed row.
@@ -570,7 +797,18 @@ $script:WinUpgradeWorker = {
         # --- upgrade-drive appended params (kept at the END so existing positional args are unshifted) ---
         [bool]$RebootWhenStaged,# UpgradeDrive: reboot a CONFIRMED-staged host on a countdown
         [int]$CountdownSeconds, # UpgradeDrive: per-host reboot countdown seconds
-        $PinBlock               # shared pin policy-write scriptblock (reused by Pin + UpgradeDrive)
+        $PinBlock,              # shared pin policy-write scriptblock (reused by Pin + UpgradeDrive)
+        # --- v0.4.0 appended params (kept at the END so existing positional args are unshifted;
+        #     DEFAULTS matter: the Drive test drives the worker with only the pre-v0.4.0 args, so
+        #     $MinBuild MUST default to 26100 to preserve the 24H2 build gate) ---
+        [int]$MinBuild = 26100, # Diagnose/FleetStatus/UpgradeDrive/AutoFix/ErrorReport: target build gate
+        [bool]$FixPolicy = $false,   # AutoFix: write the target-release policy where missing/half-written
+        [bool]$FixBypass = $false,   # AutoFix: set the CPU/TPM bypass only where hardware is unsupported
+        [bool]$FixDrivers = $false,  # AutoFix: remove drivers that failed injection per this device's logs
+        [bool]$DriverSafe = $false,  # AutoFix: skip driver removal when the device is currently connected
+        [bool]$FixPause = $false,    # AutoFix: clear EXPIRED pause values (active pauses respected)
+        [bool]$FixRepair = $false,   # AutoFix: DISM/SFC repair only where setup logs show corruption
+        [bool]$ClearStaging = $false # AutoFix: delete a stale rolled-back $WINDOWS.~BT to reclaim disk
     )
 
     $r = [ordered]@{ Host = $Computer; Ping = ''; Status = ''; Detail = ''; Ok = $false; Report = '' }
@@ -1056,7 +1294,7 @@ $script:WinUpgradeWorker = {
                 # Constants fed via the appended worker params ($CpuPatterns/$MinRAM/$MinDisk/$MinTPM).
                 & $pushStep 'Scanning' 'Running read-only diagnostic scan...'
                 $sb = {
-                    param($cpuPatterns, $minRAM, $minDisk, $minTPM)
+                    param($cpuPatterns, $minRAM, $minDisk, $minTPM, $minBuild, $target)
                     $lines = @()
 
                     # ===== SECTION: SYSTEM INFO =====
@@ -1067,12 +1305,12 @@ $script:WinUpgradeWorker = {
                     $lines += "[INFO] OS          : $($os.Caption) (Build $($os.BuildNumber))"
                     $lines += "[INFO] Model       : $($cs.Manufacturer) $($cs.Model)"
 
-                    # Already on 24H2?
-                    # 24H2 = Build 26100
-                    if ([int]$os.BuildNumber -ge 26100) {
-                        $lines += "[PASS] Already on 24H2 or newer (Build $($os.BuildNumber)) - no action needed"
+                    # Already on the target build?  (v0.4.0: $minBuild/$target replace the
+                    # hardcoded 26100 / '24H2' - default 24H2/26100 keeps the strings identical.)
+                    if ([int]$os.BuildNumber -ge $minBuild) {
+                        $lines += "[PASS] Already on $target or newer (Build $($os.BuildNumber)) - no action needed"
                     } else {
-                        $lines += "[INFO] Not yet on 24H2 (current build $($os.BuildNumber), need 26100+)"
+                        $lines += "[INFO] Not yet on $target (current build $($os.BuildNumber), need $minBuild+)"
                     }
 
                     # ===== SECTION: HARDWARE COMPATIBILITY =====
@@ -1309,12 +1547,15 @@ $script:WinUpgradeWorker = {
                                 $lines += "[INFO] Client Version : $ccmVer"
                             } catch { }
 
-                            # 24H2 deployment visibility
+                            # target-version deployment visibility. v0.4.0: build the SCCM match
+                            # pattern list from the target string + its build number instead of the
+                            # '24H2' literal (default 24H2/26100 keeps the previous match).
                             try {
+                                $sccmPatterns = @([regex]::Escape($target), "Feature update to Windows 11", [string]$minBuild)
                                 $updates = Get-CimInstance -Namespace "root\ccm\ClientSDK" -ClassName CCM_SoftwareUpdate -ErrorAction SilentlyContinue |
-                                    Where-Object { $_.Name -match "24H2" -or $_.Name -match "Feature update to Windows 11" }
+                                    Where-Object { $u = $_; ($sccmPatterns | Where-Object { $u.Name -match $_ } | Select-Object -First 1) }
                                 if ($updates) {
-                                    $lines += "[PASS] 24H2 Deployment : VISIBLE in Software Center ($($updates.Count) matching update(s))"
+                                    $lines += "[PASS] $target Deployment : VISIBLE in Software Center ($($updates.Count) matching update(s))"
                                     foreach ($u in $updates) {
                                         $evalState = switch ($u.EvaluationState) {
                                             0 {"None"} 1 {"Available"} 2 {"Submitted"} 3 {"Detecting"}
@@ -1330,7 +1571,7 @@ $script:WinUpgradeWorker = {
                                         $lines += "[INFO]   -> $($u.Name) | State: $evalState | PercentComplete: $($u.PercentComplete)%"
                                     }
                                 } else {
-                                    $lines += "[WARN] 24H2 Deployment : NOT visible in Software Center"
+                                    $lines += "[WARN] $target Deployment : NOT visible in Software Center"
                                     $lines += "[WARN]   -> Device may not be in the SCCM target collection (server-side fix)"
                                     $lines += "[WARN]   -> Or SCCM policy has not refreshed yet (Apply will trigger refresh)"
                                 }
@@ -1403,7 +1644,7 @@ $script:WinUpgradeWorker = {
                     # (or older than the ~BT log) is from a prior servicing pass - labelled stale and
                     # never parsed for a failure cause. Gated on not-yet-24H2 (no ~BT on a done box).
                     $setupSignatureHit = $false
-                    if ([int]$os.BuildNumber -lt 26100) {
+                    if ([int]$os.BuildNumber -lt $minBuild) {
                         $lines += ""
                         $lines += "=== SETUP FAILURE ANALYSIS ==="
                         $btErr = 'C:\$WINDOWS.~BT\Sources\Panther\setuperr.log'
@@ -1555,8 +1796,8 @@ $script:WinUpgradeWorker = {
                     $lines += ""
                     $lines += "=== RECOMMENDATIONS ==="
 
-                    if ([int]$os.BuildNumber -ge 26100) {
-                        $lines += "[REC] Already on 24H2 - no action needed"
+                    if ([int]$os.BuildNumber -ge $minBuild) {
+                        $lines += "[REC] Already on $target - no action needed"
                     } else {
                         $recs = @()
                         if (-not (Test-Path $wuPol) -or (Get-ItemProperty -Path $wuPol -ErrorAction SilentlyContinue).TargetReleaseVersion -ne 1) {
@@ -1620,11 +1861,13 @@ $script:WinUpgradeWorker = {
                         Pinned         = $pinned
                         PinnedVersion  = $pinnedVersion
                         PendingReboot  = $pendingReboot
+                        FreeGB         = $freeGB     # system-drive GB free (Fleet Status disk column)
+                        TotalGB        = $totalGB
                     }
                 }
                 # SoftwareDistribution recursive size scan can be slow; give the op a wider cap.
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000
-                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($CpuPatterns,$MinRAM,$MinDisk,$MinTPM); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($CpuPatterns,$MinRAM,$MinDisk,$MinTPM,$MinBuild,$Version); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
                 $diag = Invoke-Command @ic
                 $report = [string]$diag.Report
@@ -1660,9 +1903,10 @@ $script:WinUpgradeWorker = {
                     $r.Error          = ''
 
                     # -- skip decisions (report, NEVER act) - mirror Get-WinUpgradeDrivePlan --
-                    if ($osBuild -ge 26100) {
-                        $r.Skipped = 'already 24H2+'; $r.Status = 'Skipped'
-                        $r.Detail  = "Already on 24H2+ (build $osBuild) - nothing to drive."
+                    # ($MinBuild/$Version replace the hardcoded 26100/'24H2'; default 24H2 identical.)
+                    if ($osBuild -ge $MinBuild) {
+                        $r.Skipped = "already $Version+"; $r.Status = 'Skipped'
+                        $r.Detail  = "Already on $Version+ (build $osBuild) - nothing to drive."
                         $r.Ok = $true; return $r
                     }
                     if ((-not $eligible) -and (-not $Bypass)) {
@@ -1824,6 +2068,10 @@ $script:WinUpgradeWorker = {
                     $r.Pinned         = [bool]$diag.Pinned
                     $r.PinnedVersion  = [string]$diag.PinnedVersion
                     $r.PendingReboot  = [bool]$diag.PendingReboot
+                    # -1 = unknown. Explicit null guard: [double]$null casts to 0, which would
+                    # read as "0 GB free" (a full disk) instead of "not read".
+                    $r.FreeGB         = -1
+                    try { if ($null -ne $diag.FreeGB) { $r.FreeGB = [double]$diag.FreeGB } } catch {}
                     $r.Error          = ''
                     $r.Status         = 'SCANNED'
                     $r.Detail         = "Build $([int]$diag.OsBuild) $([string]$diag.DisplayVersion)"
@@ -1837,7 +2085,9 @@ $script:WinUpgradeWorker = {
                 #   3. any [BLOCK] deferral/pause                    -> BLOCKED
                 #   4. policy missing / TargetReleaseVersion != 1    -> NEEDS POLICY
                 #   5. otherwise                                     -> READY
-                $on24     = ($report -match '(?m)^\[PASS\] Already on 24H2')
+                # v0.4.0: the 'Already on ...' marker is version-derived, so match its PREFIX
+                # (not the '24H2' literal) and version-derive the verdict ('ON <version>').
+                $on24     = ($report -match '(?m)^\[PASS\] Already on ')
                 $cpuFail  = ($report -match '(?m)^\[FAIL\] CPU')
                 $tpmFail  = ($report -match '(?m)^\[FAIL\] TPM')
                 $bypassOn = ($report -match '(?m)^\[INFO\] CPU/TPM Bypass : ACTIVE')
@@ -1845,7 +2095,7 @@ $script:WinUpgradeWorker = {
                 $policyOk = ($report -match '(?m)^\[PASS\] Target Release Policy')
                 $buildM   = [regex]::Match($report, '\(Build (\d+)\)')
                 $buildNum = if ($buildM.Success) { $buildM.Groups[1].Value } else { '?' }
-                if     ($on24)                                       { $verdict = 'ON 24H2' }
+                if     ($on24)                                       { $verdict = "ON $Version" }
                 elseif (($cpuFail -or $tpmFail) -and -not $bypassOn) { $verdict = 'HW INCOMPAT' }
                 elseif ($hasBlock)                                   { $verdict = 'BLOCKED' }
                 elseif (-not $policyOk)                              { $verdict = 'NEEDS POLICY' }
@@ -2046,6 +2296,434 @@ $script:WinUpgradeWorker = {
                 $r.Detail = if ($Aggressive) { "Force discovery complete (AGGRESSIVE WU reset) for $Product $Version. Reboot target, then Check for updates." } else { "Force discovery complete (safe re-scan) for $Product $Version. Reboot target, then Check for updates." }
                 $r.Ok = $true
             }
+
+            'RepairHealth' {
+                # Component-store repair: DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow,
+                # each via the module's native-exit ProcessStartInfo pattern (PS 5.1 wraps a native
+                # command's stderr in ErrorRecords that Invoke-Command reports as remote errors, so
+                # the call operator would corrupt the exit code). Two separate remote calls so the
+                # worker can push a live phase step between the long DISM and the long sfc.
+                $rbNote = if ($Reboot) { '; reboot when required and no user is logged on' } else { '' }
+                if ($DryRun) {
+                    $r.Dism = '(dry-run)'; $r.Sfc = '(dry-run)'; $r.RebootNeeded = $false
+                    $r.Status = 'DRY-RUN'
+                    $r.Detail = "Would run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow$rbNote ($authNote)."
+                    $r.Ok = $true; break
+                }
+                $rlines = New-Object System.Collections.ArrayList
+                # DISM + sfc can each run 15-45 min -> no per-operation cap (OperationTimeout 0).
+                $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000
+                $baseIc = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$soLong; ErrorAction='Stop' }
+                if ($credSet) { $baseIc.Credential = $Cred }
+
+                & $pushStep 'DISM' 'DISM /Online /Cleanup-Image /RestoreHealth (15-45 min)...'
+                $dismSb = {
+                    $o = @{ ExitCode=$null; Output=''; Error='' }
+                    try {
+                        $psi = New-Object System.Diagnostics.ProcessStartInfo
+                        $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'
+                        $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
+                        $p=[System.Diagnostics.Process]::Start($psi)
+                        $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit()
+                        $o.ExitCode=$p.ExitCode; $o.Output=(($so+$se).Trim())
+                    } catch { $o.Error=$_.Exception.Message }
+                    return $o
+                }
+                $dismRes=$null; $dismErr=$false
+                try { $icD=$baseIc.Clone(); $icD.ScriptBlock=$dismSb; $dismRes=Invoke-Command @icD } catch { $dismErr=$true; $dismRes=@{ ExitCode=$null; Output=''; Error=$_.Exception.Message } }
+                if ($dismRes.Error) { $dismErr=$true }
+
+                & $pushStep 'sfc' 'sfc /scannow...'
+                $sfcSb = {
+                    $o = @{ ExitCode=$null; Text=''; Error='' }
+                    try {
+                        $psi = New-Object System.Diagnostics.ProcessStartInfo
+                        $psi.FileName='sfc.exe'; $psi.Arguments='/scannow'
+                        $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
+                        $p=[System.Diagnostics.Process]::Start($psi)
+                        $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit()
+                        $o.ExitCode=$p.ExitCode; $o.Text=(($so+$se) -replace "`0","")
+                    } catch { $o.Error=$_.Exception.Message }
+                    return $o
+                }
+                $sfcRes=$null; $sfcErr=$false
+                try { $icS=$baseIc.Clone(); $icS.ScriptBlock=$sfcSb; $sfcRes=Invoke-Command @icS } catch { $sfcErr=$true; $sfcRes=@{ ExitCode=$null; Text=''; Error=$_.Exception.Message } }
+                if ($sfcRes.Error) { $sfcErr=$true }
+
+                # verdict: MIRROR of Get-WinUpgradeRepairVerdict (keep in sync).
+                $dx = $dismRes.ExitCode
+                if ($dismErr -or ($null -eq $dx)) { $dismV='error' }
+                else { $dxi=0; [void][int]::TryParse([string]$dx,[ref]$dxi); if ($dxi -eq 0){$dismV='OK'} elseif($dxi -eq 3010){$dismV='OK (reboot)'} else {$dismV="exit $dxi"} }
+                $stx = [string]$sfcRes.Text
+                if     ($sfcErr) { $sfcV='error' }
+                elseif ($stx -match '(?i)did not find any integrity violations') { $sfcV='no violations' }
+                elseif ($stx -match '(?i)successfully repaired') { $sfcV='repaired' }
+                elseif ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { $sfcV='could not fix' }
+                elseif ($stx -match '(?i)could not perform the requested operation') { $sfcV='blocked (pending repair)' }
+                else { $sfcV='no violations' }
+                $dismFailed=($dismV -eq 'error' -or $dismV -match '^exit ')
+                $sfcFailed=($sfcV -eq 'error')
+                if     ($dismFailed -or $sfcFailed) { $statusV='FAILED' }
+                elseif ($sfcV -eq 'could not fix' -or $sfcV -eq 'blocked (pending repair)') { $statusV='PARTIAL' }
+                elseif ($sfcV -eq 'repaired' -or $dismV -eq 'OK (reboot)') { $statusV='REPAIRED' }
+                else { $statusV='CLEAN' }
+                $rebootNeeded=($dismV -eq 'OK (reboot)' -or $sfcV -eq 'repaired')
+
+                if     ($dismV -eq 'error') { [void]$rlines.Add("[FAIL] DISM RestoreHealth error: $([string]$dismRes.Error)") }
+                elseif ($dismV -eq 'OK (reboot)') { [void]$rlines.Add('[PASS] DISM RestoreHealth completed - REBOOT REQUIRED (exit 3010)') }
+                elseif ($dismV -eq 'OK') { [void]$rlines.Add('[PASS] DISM RestoreHealth completed (exit 0)') }
+                else { $dtail=[string]$dismRes.Output; if ($dtail.Length -gt 200){$dtail=$dtail.Substring(0,200)}; [void]$rlines.Add("[WARN] DISM RestoreHealth $dismV : $dtail") }
+                switch ($sfcV) {
+                    'no violations' { [void]$rlines.Add('[PASS] sfc /scannow: no integrity violations found') }
+                    'repaired'      { [void]$rlines.Add('[PASS] sfc /scannow: found and repaired corrupt files') }
+                    'could not fix' { [void]$rlines.Add('[WARN] sfc /scannow: found corruption it could NOT fully repair - review CBS.log / consider reimage') }
+                    'blocked (pending repair)' { [void]$rlines.Add('[WARN] sfc /scannow: could not run (a pending repair/reboot is needed first)') }
+                    'error'         { [void]$rlines.Add("[FAIL] sfc /scannow error: $([string]$sfcRes.Error)") }
+                }
+
+                & $pushStep 'Checking' 'Reading reboot-pending state / active user...'
+                $stateSb = {
+                    $cbs = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+                    $wu  = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+                    $au  = ''; try { $au=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch { $au='' }
+                    [pscustomobject]@{ Cbs=$cbs; Wu=$wu; ActiveUser=$au }
+                }
+                $activeUser=''
+                try { $icX=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000); ErrorAction='Stop'; ScriptBlock=$stateSb }; if ($credSet) { $icX.Credential=$Cred }; $stRes=Invoke-Command @icX; if ($stRes.Cbs -or $stRes.Wu) { $rebootNeeded=$true }; $activeUser=[string]$stRes.ActiveUser } catch {}
+
+                $rebootTxt=''
+                if ($Reboot -and $rebootNeeded) {
+                    if ($activeUser) { [void]$rlines.Add("[REBOOT] deferred - active user $activeUser"); $rebootTxt=" Reboot required but DEFERRED (active user $activeUser)." }
+                    else {
+                        $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+                        $rbSb = {
+                            param($expected)
+                            $o=@{ ExitCode=$null; Error='' }
+                            # DNS-mismatch guard (HARD ABORT): the box that answered runs this.
+                            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) { $o.Error="DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"; return $o }
+                            try {
+                                $psi=New-Object System.Diagnostics.ProcessStartInfo
+                                $psi.FileName='shutdown.exe'; $psi.Arguments='/r /t 60 /f /c "JANET Web Windows Upgrade: component-store repair complete - reboot to finish"'
+                                $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
+                                $p=[System.Diagnostics.Process]::Start($psi); $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit(); $o.ExitCode=$p.ExitCode; if ($p.ExitCode -ne 0){$o.Error=($so+$se).Trim()}
+                            } catch { $o.Error=$_.Exception.Message }
+                            return $o
+                        }
+                        try { $icR=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000); ErrorAction='Stop'; ScriptBlock=$rbSb; ArgumentList=@($expectedName) }; if ($credSet) { $icR.Credential=$Cred }; $rb=Invoke-Command @icR
+                              if ($rb.Error) { [void]$rlines.Add("[WARN] reboot NOT issued: $($rb.Error)"); $rebootTxt=" Reboot required; NOT issued: $($rb.Error)." }
+                              else { [void]$rlines.Add('[REBOOT] issued (60s)'); $rebootTxt=' Reboot issued (60s).' }
+                        } catch { [void]$rlines.Add("[WARN] reboot FAILED to issue: $($_.Exception.Message)"); $rebootTxt=" Reboot required; FAILED to issue: $($_.Exception.Message)." }
+                    }
+                } elseif ($rebootNeeded) {
+                    [void]$rlines.Add('[REC] A reboot is required to complete the repair - reboot this host, then re-run the upgrade.')
+                    $rebootTxt=' Reboot required (not requested).'
+                }
+                if ($statusV -eq 'REPAIRED' -or $statusV -eq 'PARTIAL') { [void]$rlines.Add('[REC] After repairs, clear $WINDOWS.~BT and re-trigger the upgrade.') }
+
+                $r.Dism=$dismV; $r.Sfc=$sfcV; $r.RebootNeeded=$rebootNeeded
+                $r.Status=$statusV
+                $r.Detail="DISM=$dismV; SFC=$sfcV.$rebootTxt"
+                $r.Report=($rlines -join "`n")
+                $r.Ok=($statusV -ne 'FAILED')
+            }
+
+            'AutoFix' {
+                # Per-device analyse-then-fix, ported from the desktop $sbAutoFix + adapted. The whole
+                # analyse+fix pass runs in ONE remote scriptblock ON the target (so it can read/write
+                # locally). Its decision logic MIRRORS the pure Get-WinUpgradeAutoFixPlan +
+                # Get-WinUpgradeStagingClass / Get-WinUpgradePauseClass / the setup-err rules /
+                # $script:WinUpgradeNonBootDriverClasses (all kept in sync). The reboot carries the
+                # same DNS-mismatch guard as every other reboot here.
+                $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+                & $pushStep 'AutoFix' 'Analysing device and applying only the fixes it needs...'
+                $afSb = {
+                    param($minBuild,$product,$version,$cpuPatterns,$minTPM,$cycles,
+                          $fixPolicy,$fixBypass,$fixDrivers,$driverSafe,$fixPause,$fixRepair,$clearStaging,$sccmRefresh,
+                          $doReboot,$expected,$dryRun)
+                    $report=New-Object System.Collections.ArrayList
+                    $fixes =New-Object System.Collections.ArrayList
+                    $rebootNeeded=$false
+                    $os=Get-CimInstance Win32_OperatingSystem; $build=[int]$os.BuildNumber
+                    [void]$report.Add("[INFO] Build $build")
+                    if ($build -ge $minBuild) {
+                        return [pscustomobject]@{ Build=$build; Status='ALREADY ON TARGET'; Fixes=@(); RebootNeeded=$false; ActiveUser=''; Rebooted=$false; RebootDeferred=$false; Report=@($report) }
+                    }
+                    # hardware eval (drives the bypass decision)
+                    $cpu=(Get-CimInstance Win32_Processor | Select-Object -First 1).Name
+                    $cpuSupported=$false; foreach ($pat in $cpuPatterns) { if ($cpu -match $pat) { $cpuSupported=$true; break } }
+                    $tpmPass=$false; try { $tpm=Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop; if ($tpm) { $tv=($tpm.SpecVersion -split ',')[0].Trim(); if ([version]$tv -ge [version]$minTPM) { $tpmPass=$true } } } catch {}
+                    $moKey='HKLM:\SYSTEM\Setup\MoSetup'; $bypassActive=$false
+                    if (Test-Path $moKey) { $mv=Get-ItemProperty -Path $moKey -Name 'AllowUpgradesWithUnsupportedTPMOrCPU' -ErrorAction SilentlyContinue; if ($mv -and $mv.AllowUpgradesWithUnsupportedTPMOrCPU -eq 1) { $bypassActive=$true } }
+
+                    # FIX policy: TRV=1 + Product + Info, only if missing / inactive / half-written.
+                    if ($fixPolicy) {
+                        $key='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; $needsReg=$true
+                        if (Test-Path $key) { $pp=Get-ItemProperty -Path $key -ErrorAction SilentlyContinue; if ($pp.TargetReleaseVersion -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$pp.ProductVersion) -and -not [string]::IsNullOrWhiteSpace([string]$pp.TargetReleaseVersionInfo)) { $needsReg=$false } }
+                        if ($needsReg) {
+                            [void]$fixes.Add('policy')
+                            if (-not $dryRun) {
+                                if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+                                New-ItemProperty -Path $key -Name 'TargetReleaseVersion' -Value 1 -PropertyType DWord -Force | Out-Null
+                                New-ItemProperty -Path $key -Name 'ProductVersion' -Value $product -PropertyType String -Force | Out-Null
+                                New-ItemProperty -Path $key -Name 'TargetReleaseVersionInfo' -Value $version -PropertyType String -Force | Out-Null
+                                [void]$report.Add("[FIX] Set Target Release Version policy ($product $version)")
+                            } else { [void]$report.Add("[FIX] would set Target Release Version policy ($product $version)") }
+                        } else { [void]$report.Add('[SKIP] Target Release Version policy already complete') }
+                    }
+
+                    # FIX bypass: only where hardware is genuinely unsupported and not already set.
+                    if ($fixBypass) {
+                        if (-not $cpuSupported -or -not $tpmPass) {
+                            if (-not $bypassActive) {
+                                $reason = if (-not $cpuSupported -and -not $tpmPass) { 'CPU+TPM' } elseif (-not $cpuSupported) { 'CPU' } else { 'TPM' }
+                                [void]$fixes.Add("bypass($reason)")
+                                if (-not $dryRun) { if (-not (Test-Path $moKey)) { New-Item -Path $moKey -Force | Out-Null }; New-ItemProperty -Path $moKey -Name 'AllowUpgradesWithUnsupportedTPMOrCPU' -Value 1 -PropertyType DWord -Force | Out-Null; [void]$report.Add("[FIX] Set CPU/TPM bypass ($reason unsupported)") }
+                                else { [void]$report.Add("[FIX] would set CPU/TPM bypass ($reason unsupported)") }
+                            } else { [void]$report.Add('[SKIP] CPU/TPM bypass already active (needed)') }
+                        } else { [void]$report.Add('[SKIP] CPU/TPM supported - bypass not needed') }
+                    }
+
+                    # FIX drivers: remove drivers that failed injection per THIS device's setup logs,
+                    # with the corrected boot-critical guard (mirror $script:WinUpgradeNonBootDriverClasses).
+                    if ($fixDrivers) {
+                        $failedInfs=@()
+                        foreach ($lp in @("$env:SystemDrive\`$WINDOWS.~BT\Sources\Panther","$env:SystemRoot\Panther")) {
+                            $se=Join-Path $lp 'setuperr.log'
+                            if (Test-Path $se) { try { $hits=Select-String -Path $se -Pattern 'Failed to inject driver package.*\\([^\\]+\.inf)' -ErrorAction SilentlyContinue; foreach ($h in $hits) { foreach ($mm in $h.Matches) { if ($mm.Groups.Count -gt 1) { $failedInfs += $mm.Groups[1].Value } } } } catch {} }
+                        }
+                        $failedInfs=@($failedInfs | Sort-Object -Unique)
+                        if ($failedInfs.Count -eq 0) { [void]$report.Add('[SKIP] No driver-injection failures in setup logs') }
+                        else {
+                            # non-boot classes (mirror $script:WinUpgradeNonBootDriverClasses - keep in sync)
+                            $nonBootClasses=@('HIDClass','Mouse','Keyboard','Media','Image','Printer','Camera','SoftwareDevice','Bluetooth')
+                            $allDrv=$null; try { $allDrv=Get-WindowsDriver -Online -ErrorAction Stop } catch {}
+                            foreach ($inf in $failedInfs) {
+                                $pub=@(); if ($allDrv) { $pub=@($allDrv | Where-Object { $_.OriginalFileName -and ([System.IO.Path]::GetFileName($_.OriginalFileName) -ieq $inf) } | ForEach-Object { $_.Driver }) }
+                                if ($pub.Count -eq 0) { try { $pn=& pnputil /enum-drivers 2>$null; $cur=$null; foreach ($ln in $pn) { if ($ln -match 'Published Name\s*:\s*(\S+)') { $cur=$matches[1] } elseif ($ln -match 'Original Name\s*:\s*(\S+)') { if ($matches[1] -ieq $inf -and $cur) { $pub+=$cur } } } } catch {} }
+                                $pub=@($pub | Sort-Object -Unique)
+                                if ($pub.Count -eq 0) { [void]$report.Add("[SKIP] $inf failed injection but not in the driver store (already gone?)"); continue }
+                                foreach ($p in $pub) {
+                                    $present=$false; $drvClass=''
+                                    try { $sd=Get-CimInstance Win32_PnPSignedDriver -Filter "InfName='$p'" -ErrorAction SilentlyContinue; foreach ($row in @($sd)) { if ($row.DeviceClass -and -not $drvClass) { $drvClass=[string]$row.DeviceClass }; if ($row.DeviceID) { $pd=Get-PnpDevice -InstanceId $row.DeviceID -ErrorAction SilentlyContinue; if ($pd) { if ($pd.Present) { $present=$true }; if (-not $drvClass -and $pd.Class) { $drvClass=[string]$pd.Class } } } } } catch {}
+                                    $drvObj=if ($allDrv) { @($allDrv | Where-Object { $_.Driver -ieq $p })[0] } else { $null }
+                                    if (-not $drvClass -and $drvObj -and $drvObj.ClassName) { $drvClass=[string]$drvObj.ClassName }
+                                    $bootCritical=($drvObj -and [bool]$drvObj.BootCritical)
+                                    $isNonBoot=$false; foreach ($nc in $nonBootClasses) { if ($drvClass -ieq $nc) { $isNonBoot=$true; break } }
+                                    # BootCritical + present + boot-class -> skip; BootCritical + (non-boot class OR absent) -> false positive, proceed.
+                                    if ($bootCritical -and $present -and -not $isNonBoot) { [void]$report.Add("[WARN] $inf ($p) boot-critical, present boot-class device - NOT removing"); continue }
+                                    if ($driverSafe -and $present) { [void]$report.Add("[SKIP] $inf ($p) device connected - not removing (driverSafe)"); continue }
+                                    if ($dryRun) { [void]$fixes.Add("driver($p)"); [void]$report.Add("[FIX] would remove failed driver $inf ($p)"); continue }
+                                    $removed=$false
+                                    try { $null=& pnputil /delete-driver $p /uninstall /force 2>&1; if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) { $removed=$true } } catch {}
+                                    if (-not $removed) { try { $null=& pnputil /delete-driver $p /force 2>&1; if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) { $removed=$true } } catch {} }
+                                    if (-not $removed) { try { $null=& dism /online /remove-driver /driver:$p 2>&1; if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) { $removed=$true } } catch {} }
+                                    if ($removed) { [void]$fixes.Add("driver($p)"); [void]$report.Add("[FIX] Removed failed driver $inf ($p)") } else { [void]$report.Add("[FAIL] Could not remove $inf ($p)") }
+                                }
+                            }
+                        }
+                    }
+
+                    # FIX pause: clear ONLY EXPIRED UX pause values (mirror Get-WinUpgradePauseClass).
+                    if ($fixPause) {
+                        $wuUx='HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
+                        $clearedAny=$false; $activeAny=$false
+                        if (Test-Path $wuUx) {
+                            $nowLocal=Get-Date
+                            $pairs=@(
+                                @{ Start='PauseFeatureUpdatesStartTime'; End='PauseFeatureUpdatesEndTime' },
+                                @{ Start='PauseUpdatesStartTime';        End='PauseUpdatesExpiryTime' },
+                                @{ Start='PauseQualityUpdatesStartTime'; End='PauseQualityUpdatesEndTime' }
+                            )
+                            foreach ($pair in $pairs) {
+                                $ev=Get-ItemProperty -Path $wuUx -Name $pair.End -ErrorAction SilentlyContinue
+                                $endVal=if ($ev) { [string]$ev.($pair.End) } else { '' }
+                                if (-not $endVal) { continue }
+                                $dt=[datetime]::MinValue
+                                if ([datetime]::TryParse($endVal,[ref]$dt)) {
+                                    if ($dt -lt $nowLocal) {
+                                        $clearedAny=$true
+                                        if (-not $dryRun) { Remove-ItemProperty -Path $wuUx -Name $pair.End -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $wuUx -Name $pair.Start -ErrorAction SilentlyContinue; [void]$report.Add("[FIX] Cleared EXPIRED pause $($pair.Start)/$($pair.End) (ended $dt)") }
+                                        else { [void]$report.Add("[FIX] would clear EXPIRED pause $($pair.Start)/$($pair.End) (ended $dt)") }
+                                    } else { [void]$report.Add("[SKIP] pause $($pair.End) ACTIVE until $dt - respected"); $activeAny=$true }
+                                }
+                            }
+                        }
+                        if ($clearedAny) { [void]$fixes.Add('pause-cleared') }
+                        elseif (-not $activeAny) { [void]$report.Add('[SKIP] No expired pause values to clear') }
+                    }
+
+                    # FIX repair: DISM+SFC ONLY where the setup log matches a corruption signature.
+                    if ($fixRepair) {
+                        $btErr="$env:SystemDrive\`$WINDOWS.~BT\Sources\Panther\setuperr.log"; $et=''
+                        if (Test-Path $btErr) { try { $et=Get-Content $btErr -Raw -ErrorAction Stop } catch {} }
+                        $needsRepair=($et -match '0x000003F1' -or $et -match '(?i)configuration registry database is corrupt' -or $et -match 'MigPlatformStartupOffline' -or $et -match '(?i)Offline gather failed' -or $et -match '(?i)FOD inventory' -or $et -match '(?i)Failed to enumerate store capabilities' -or $et -match 'CBS_E_INVALID_PACKAGE' -or $et -match '0x800f0805')
+                        if ($needsRepair) {
+                            [void]$fixes.Add('repair')
+                            if (-not $dryRun) {
+                                [void]$report.Add('[FIX] Corruption signature found - running DISM RestoreHealth + sfc (slow)...')
+                                try { $psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true; $pr=[System.Diagnostics.Process]::Start($psi); [void]$pr.StandardOutput.ReadToEnd(); [void]$pr.StandardError.ReadToEnd(); $pr.WaitForExit(); $dc=$pr.ExitCode; if ($dc -eq 0 -or $dc -eq 3010) { [void]$report.Add("[FIX] DISM RestoreHealth done (exit $dc)"); if ($dc -eq 3010) { $rebootNeeded=$true } } else { [void]$report.Add("[WARN] DISM exit $dc") } } catch { [void]$report.Add("[FAIL] DISM error: $($_.Exception.Message)") }
+                                try { $psi2=New-Object System.Diagnostics.ProcessStartInfo; $psi2.FileName='sfc.exe'; $psi2.Arguments='/scannow'; $psi2.UseShellExecute=$false; $psi2.RedirectStandardOutput=$true; $psi2.RedirectStandardError=$true; $psi2.CreateNoWindow=$true; $pr2=[System.Diagnostics.Process]::Start($psi2); $so2=$pr2.StandardOutput.ReadToEnd(); $se2=$pr2.StandardError.ReadToEnd(); $pr2.WaitForExit(); $stx=(($so2+$se2) -replace "`0",''); if ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { [void]$report.Add('[WARN] sfc: corruption not fully repaired (review CBS.log)') } else { [void]$report.Add('[FIX] sfc /scannow done'); if ($stx -match '(?i)successfully repaired') { $rebootNeeded=$true } } } catch { [void]$report.Add("[FAIL] sfc error: $($_.Exception.Message)") }
+                            } else { [void]$report.Add('[FIX] would run DISM RestoreHealth + sfc (corruption signature found)') }
+                        } else { [void]$report.Add('[SKIP] No registry/CBS corruption signature - repair not needed') }
+                    }
+
+                    # clearStaging: delete a STALE (rolled-back) staging tree (mirror Get-WinUpgradeStagingClass).
+                    if ($clearStaging) {
+                        $btPath='C:\$WINDOWS.~BT'
+                        if (Test-Path -LiteralPath $btPath) {
+                            $btItem=Get-Item -LiteralPath $btPath -Force -ErrorAction SilentlyContinue
+                            $ageHours=if ($btItem) { [math]::Round(((Get-Date)-$btItem.LastWriteTime).TotalHours,1) } else { 9999 }
+                            $setupProcs=@(Get-Process -Name 'SetupHost','SetupPrep','Windows10UpgraderApp','SetupPlatformTool' -ErrorAction SilentlyContinue)
+                            $rollbackMarker=$false; $btPanther='C:\$WINDOWS.~BT\Sources\Panther'
+                            if (Test-Path -LiteralPath $btPanther) { foreach ($lg in @('setupact.log','setuperr.log')) { $lp=Join-Path $btPanther $lg; if (Test-Path -LiteralPath $lp) { try { if (Select-String -Path $lp -Pattern 'rollback|roll back|abort' -ErrorAction SilentlyContinue | Select-Object -First 1) { $rollbackMarker=$true; break } } catch {} } } }
+                            if ($rollbackMarker) { $sc='Stale' } elseif ($setupProcs.Count -gt 0) { $sc='Active' } elseif ($ageHours -gt 24) { $sc='Stale' } else { $sc='Recent' }
+                            $gb=0; try { $gb=[math]::Round((Get-ChildItem -LiteralPath $btPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum/1GB,1) } catch {}
+                            if ($sc -eq 'Stale') {
+                                [void]$fixes.Add('staging-cleared')
+                                if (-not $dryRun) { try { Remove-Item -LiteralPath $btPath -Recurse -Force -ErrorAction Stop; [void]$report.Add("[FIX] Cleared stale `$WINDOWS.~BT (~$gb GB reclaimed)") } catch { [void]$report.Add("[WARN] `$WINDOWS.~BT partial removal: $($_.Exception.Message)") } }
+                                else { [void]$report.Add("[FIX] would clear stale `$WINDOWS.~BT (~$gb GB)") }
+                            } else { [void]$report.Add("[SKIP] `$WINDOWS.~BT is $sc (not stale) - not clearing") }
+                        } else { [void]$report.Add('[SKIP] No `$WINDOWS.~BT staging to clear') }
+                    }
+
+                    # sccmRefresh: trigger the client schedule cycles so the above re-evaluates.
+                    if ($sccmRefresh) {
+                        try { $svc=Get-Service -Name CcmExec -ErrorAction Stop; if ($svc.Status -eq 'Running') { if (-not $dryRun) { foreach ($id in $cycles) { try { Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID=$id } -ErrorAction Stop | Out-Null } catch {} }; [void]$fixes.Add('sccm'); [void]$report.Add('[FIX] Triggered SCCM policy/eval cycles') } else { [void]$fixes.Add('sccm'); [void]$report.Add('[FIX] would trigger SCCM policy/eval cycles') } } else { [void]$report.Add('[SKIP] SCCM client not running') } } catch { [void]$report.Add('[SKIP] SCCM client not installed') }
+                    }
+
+                    # reboot state + optional reboot (identical policy to repair-health).
+                    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $rebootNeeded=$true }
+                    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $rebootNeeded=$true }
+                    $activeUser=''; try { $activeUser=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch {}
+                    $rebooted=$false; $rebootDeferred=$false
+                    if ($fixes.Count -gt 0 -and -not $dryRun) { [void]$report.Add('[REC] Fixes applied - clear $WINDOWS.~BT and re-trigger the upgrade') }
+                    if ($doReboot -and $rebootNeeded -and -not $dryRun) {
+                        if ($activeUser) { $rebootDeferred=$true; [void]$report.Add("[REBOOT] deferred - active user $activeUser") }
+                        elseif ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) { [void]$report.Add("[WARN] reboot ABORTED - DNS mismatch (dialed '$expected', am '$($env:COMPUTERNAME)')") }
+                        else { try { $psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName='shutdown.exe'; $psi.Arguments='/r /t 60 /f /c "JANET Web Windows Upgrade: auto-fix applied - reboot to continue"'; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true; $pr=[System.Diagnostics.Process]::Start($psi); [void]$pr.StandardOutput.ReadToEnd(); [void]$pr.StandardError.ReadToEnd(); $pr.WaitForExit(); if ($pr.ExitCode -eq 0) { $rebooted=$true; [void]$report.Add('[REBOOT] issued (60s)') } else { [void]$report.Add("[WARN] reboot NOT issued (shutdown exit $($pr.ExitCode))") } } catch { [void]$report.Add("[WARN] reboot FAILED to issue: $($_.Exception.Message)") } }
+                    }
+                    $status = if ($dryRun) { 'DRY-RUN' } elseif ($fixes.Count -gt 0) { 'FIXED' } else { 'NO CHANGES' }
+                    if ($fixes.Count -eq 0 -and -not $dryRun) { [void]$report.Add('[INFO] No changes were necessary on this device') }
+                    return [pscustomobject]@{ Build=$build; Status=$status; Fixes=@($fixes); RebootNeeded=$rebootNeeded; ActiveUser=$activeUser; Rebooted=$rebooted; RebootDeferred=$rebootDeferred; Report=@($report) }
+                }
+                $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000
+                $ic = @{ ComputerName=$Computer; ScriptBlock=$afSb; Authentication='Negotiate'; SessionOption=$soLong; ErrorAction='Stop'
+                         ArgumentList=@($MinBuild,$Product,$Version,$CpuPatterns,$MinTPM,$Cycles,$FixPolicy,$FixBypass,$FixDrivers,$DriverSafe,$FixPause,$FixRepair,$ClearStaging,$SccmRefresh,$Reboot,$expectedName,$DryRun) }
+                if ($credSet) { $ic.Credential = $Cred }
+                $af = Invoke-Command @ic
+                $fixList = @($af.Fixes)
+                $r.Fixes = if ($fixList.Count -gt 0) { if ($DryRun) { 'would: ' + ($fixList -join '; ') } else { ($fixList -join '; ') } } else { '' }
+                $r.RebootNeeded = [bool]$af.RebootNeeded
+                $r.Status = [string]$af.Status
+                $r.Detail = switch ([string]$af.Status) {
+                    'ALREADY ON TARGET' { "Already on $Version+ (build $([int]$af.Build)) - no changes." }
+                    'NO CHANGES'        { 'Analysed - no fixes were necessary on this device.' }
+                    'DRY-RUN'           { if ($fixList.Count -gt 0) { "DRY-RUN: would apply $($fixList.Count) fix(es): $($fixList -join '; ')." } else { 'DRY-RUN: no fixes needed.' } }
+                    'FIXED'             { "Applied: $($fixList -join '; ')." + $(if ([bool]$af.Rebooted) { ' Reboot issued (60s).' } elseif ([bool]$af.RebootDeferred) { " Reboot required but DEFERRED (active user $([string]$af.ActiveUser))." } elseif ([bool]$af.RebootNeeded) { ' Reboot required (not requested).' } else { '' }) }
+                    default             { 'Auto-fix complete.' }
+                }
+                $r.Report = (@($af.Report) -join "`n")
+                $r.Ok = $true
+            }
+
+            'ErrorReport' {
+                # Read-only per-error scan (changes NOTHING). Gathers the same signals the diagnose
+                # scan uses and builds ONE row per detected error INLINE (mirror of the pure
+                # Get-WinUpgradeErrorRowSet + the setup-err rule table / staging / pause classifiers).
+                # The worker returns a Rows array the dispatcher fans out as individual row events.
+                & $pushStep 'Scanning' 'Read-only upgrade-error scan...'
+                $erSb = {
+                    param($cpuPatterns,$minRAM,$minDisk,$minTPM,$minBuild,$target)
+                    $trim={ param($s) $x=[string]$s; if ($x.Length -gt 200){$x=$x.Substring(0,200)}; $x }
+                    $os=Get-CimInstance Win32_OperatingSystem; $build=[int]$os.BuildNumber
+                    $rows=New-Object System.Collections.ArrayList
+                    if ($build -ge $minBuild) {
+                        [void]$rows.Add([pscustomobject]@{ Category='NONE'; Severity='INFO'; Evidence="Already on $target+ (build $build)"; Fix='' })
+                        return ,@($rows)
+                    }
+                    # DISK
+                    $sysDrive=$env:SystemDrive
+                    $disk=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$sysDrive'"
+                    $freeGB=[math]::Round($disk.FreeSpace/1GB,1)
+                    if ($freeGB -lt $minDisk) { [void]$rows.Add([pscustomobject]@{ Category='DISK'; Severity='BLOCK'; Evidence=(& $trim "$freeGB GB free on $sysDrive (need $minDisk+ GB)"); Fix="Free disk to 25+ GB (clearing `$WINDOWS.~BT reclaims staging), then re-trigger." }) }
+                    # read current setuperr.log (shared open; may be held during an in-flight upgrade)
+                    $btErr='C:\$WINDOWS.~BT\Sources\Panther\setuperr.log'; $et=''
+                    if (Test-Path -LiteralPath $btErr) {
+                        $sr=$null
+                        try { $fs=[System.IO.File]::Open($btErr,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite); try { $sr=New-Object System.IO.StreamReader($fs); $et=$sr.ReadToEnd() } finally { if ($sr){$sr.Dispose()}; $fs.Dispose() } }
+                        catch { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $et='' } }
+                    }
+                    # DRIVER injection failures
+                    $failedInfs=@()
+                    if ($et) { try { foreach ($mm in [regex]::Matches($et,'Failed to inject driver package.*\\([^\\]+\.inf)')) { if ($mm.Groups.Count -gt 1) { $failedInfs+=$mm.Groups[1].Value } } } catch {} }
+                    $failedInfs=@($failedInfs | Sort-Object -Unique)
+                    foreach ($inf in $failedInfs) { [void]$rows.Add([pscustomobject]@{ Category='DRIVER'; Severity='WARN'; Evidence=(& $trim "Failed to inject driver package: $inf"); Fix="Remove the failed driver (pnputil /delete-driver <oemNN.inf> /force), clear `$WINDOWS.~BT, re-trigger." }) }
+                    # SIGNATURE TABLE (mirror $script:WinUpgradeSetupErrRules / Get-WinUpgradeSetupErrSignatures)
+                    if ($et) {
+                        $sigRules=@(
+                            @{ Cat='REGISTRY'; Sev='BLOCK'; Patterns=@('0x000003F1','(?i)configuration registry database is corrupt'); Message='registry hive corrupt'; Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow; if it persists, deeper hive repair.' },
+                            @{ Cat='COMPONENT_STORE'; Sev='BLOCK'; Patterns=@('CBS_E_INVALID_PACKAGE','(?i)Failed to enumerate store capabilities'); Message='component store broken'; Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow to rebuild the component store.' },
+                            @{ Cat='COMPONENT_STORE'; Sev='BLOCK'; All=@('(?i)FOD inventory','E_INVALIDARG'); Message='component store broken (FOD inventory E_INVALIDARG)'; Rec='Run DISM /Online /Cleanup-Image /RestoreHealth then sfc /scannow to rebuild the component store.' },
+                            @{ Cat='MEMORY'; Sev='BLOCK'; Patterns=@('0x8007000E'); Message='out of memory (E_OUTOFMEMORY)'; Rec='Run Set Page File (fixed 16 GB) on this host, then re-run the feature update.' },
+                            @{ Cat='ADLDS'; Sev='WARN'; All=@('adammigrate\.dll','0x80070002'); Message='AD LDS migration plugin (adammigrate.dll) failing'; Rec='Investigate the AD LDS migration plugin AFTER clearing the other blockers, then re-diagnose.' },
+                            @{ Cat='PAUSED'; Sev='WARN'; Patterns=@('0x800704C7'); Message='setup cancelled (0x800704C7)'; Rec='Cross-check pauses - an expired/lingering pause can present as a cancel; clear stale pause values + re-trigger.' }
+                        )
+                        foreach ($rule in $sigRules) {
+                            $hit=$false
+                            if ($rule.ContainsKey('All')) { $hit=$true; foreach ($pp in $rule['All']) { if ($et -notmatch $pp) { $hit=$false; break } } }
+                            else { foreach ($pp in $rule['Patterns']) { if ($et -match $pp) { $hit=$true; break } } }
+                            if ($hit) { [void]$rows.Add([pscustomobject]@{ Category=$rule['Cat']; Severity=$rule['Sev']; Evidence=(& $trim $rule['Message']); Fix=(& $trim $rule['Rec']) }) }
+                        }
+                    }
+                    # PAUSED state (mirror Get-WinUpgradePauseClass)
+                    $wuUx='HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'; $pauseActive=$false; $pauseExpired=$false
+                    if (Test-Path $wuUx) {
+                        $nowLocal=Get-Date
+                        foreach ($en in @('PauseFeatureUpdatesEndTime','PauseUpdatesExpiryTime')) {
+                            $ev=Get-ItemProperty -Path $wuUx -Name $en -ErrorAction SilentlyContinue
+                            if ($ev -and $ev.$en) { $dt=[datetime]::MinValue; if ([datetime]::TryParse([string]$ev.$en,[ref]$dt)) { if ($dt -lt $nowLocal) { $pauseExpired=$true } else { $pauseActive=$true } } }
+                        }
+                    }
+                    if ($pauseActive) { [void]$rows.Add([pscustomobject]@{ Category='PAUSED'; Severity='BLOCK'; Evidence='An ACTIVE Windows Update pause window is holding the feature update'; Fix='Wait for the pause to expire or clear it (Force Discovery aggressive), then re-trigger.' }) }
+                    elseif ($pauseExpired) { [void]$rows.Add([pscustomobject]@{ Category='PAUSED'; Severity='WARN'; Evidence='An EXPIRED pause value is lingering under WindowsUpdate\UX\Settings'; Fix='Clear the expired Pause* values (Auto-Fix / Force Discovery aggressive), then re-trigger.' }) }
+                    # POLICY state
+                    $wuPol='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; $polMissing=$true; $polHalf=$false
+                    if (Test-Path $wuPol) { $pp=Get-ItemProperty -Path $wuPol -ErrorAction SilentlyContinue; if ($pp.TargetReleaseVersion -eq 1) { if ([string]::IsNullOrWhiteSpace([string]$pp.ProductVersion) -or [string]::IsNullOrWhiteSpace([string]$pp.TargetReleaseVersionInfo)) { $polHalf=$true; $polMissing=$false } else { $polMissing=$false } } }
+                    if ($polHalf) { [void]$rows.Add([pscustomobject]@{ Category='POLICY'; Severity='WARN'; Evidence='Target Release Version pin is HALF-WRITTEN (TargetReleaseVersion=1 but Product/Version blank)'; Fix='Re-apply the pin (Pin action / Auto-Fix / Force Discovery re-writes it).' }) }
+                    elseif ($polMissing) { [void]$rows.Add([pscustomobject]@{ Category='POLICY'; Severity='WARN'; Evidence='Target Release Version policy is not set'; Fix='Apply the Target Release Version policy (Pin action / Auto-Fix).' }) }
+                    # STAGING class (mirror Get-WinUpgradeStagingClass)
+                    $btPath='C:\$WINDOWS.~BT'; $stagingClass='None'; $stagingGB=0
+                    if (Test-Path -LiteralPath $btPath) {
+                        $btItem=Get-Item -LiteralPath $btPath -Force -ErrorAction SilentlyContinue
+                        $ageHours=if ($btItem) { [math]::Round(((Get-Date)-$btItem.LastWriteTime).TotalHours,1) } else { 9999 }
+                        $setupProcs=@(Get-Process -Name 'SetupHost','SetupPrep','Windows10UpgraderApp','SetupPlatformTool' -ErrorAction SilentlyContinue)
+                        $rollbackMarker=$false; $btP='C:\$WINDOWS.~BT\Sources\Panther'
+                        if (Test-Path -LiteralPath $btP) { foreach ($lg in @('setupact.log','setuperr.log')) { $lp=Join-Path $btP $lg; if (Test-Path -LiteralPath $lp) { try { if (Select-String -Path $lp -Pattern 'rollback|roll back|abort' -ErrorAction SilentlyContinue | Select-Object -First 1) { $rollbackMarker=$true; break } } catch {} } } }
+                        if ($rollbackMarker) { $stagingClass='Stale' } elseif ($setupProcs.Count -gt 0) { $stagingClass='Active' } elseif ($ageHours -gt 24) { $stagingClass='Stale' } else { $stagingClass='Recent' }
+                        try { $stagingGB=[math]::Round((Get-ChildItem -LiteralPath $btPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum/1GB,1) } catch {}
+                    }
+                    if ($stagingClass -eq 'Stale') { [void]$rows.Add([pscustomobject]@{ Category='STAGING'; Severity='INFO'; Evidence=(& $trim "Stale rolled-back `$WINDOWS.~BT staging (~$stagingGB GB) - nothing is in progress"); Fix="Clear C:\`$WINDOWS.~BT to reclaim disk AFTER fixing the root cause, then re-trigger." }) }
+                    # SETUPDIAG
+                    $sdr="$env:SystemRoot\Logs\SetupDiag\SetupDiagResults.xml"
+                    if (Test-Path -LiteralPath $sdr) { try { [xml]$sdx=Get-Content -LiteralPath $sdr -Raw -ErrorAction Stop; $node=$sdx.SelectSingleNode('//*[local-name()="SetupDiag"]'); if (-not $node) { $node=$sdx.DocumentElement }; $rule=''; foreach ($rn in @('ProfileName','Rule','MatchingProfile')) { try { if ($node.$rn) { $rule=[string]$node.$rn; break } } catch {} }; if ($rule) { [void]$rows.Add([pscustomobject]@{ Category='SETUPDIAG'; Severity='WARN'; Evidence=(& $trim "SetupDiag matched profile: $rule"); Fix='Action the SetupDiag remediation for this profile, then re-trigger.' }) } } catch {} }
+                    if ($rows.Count -eq 0) { [void]$rows.Add([pscustomobject]@{ Category='NONE'; Severity='INFO'; Evidence='No upgrade errors detected'; Fix='' }) }
+                    return ,@($rows)
+                }
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000
+                $ic = @{ ComputerName=$Computer; ScriptBlock=$erSb; ArgumentList=@($CpuPatterns,$MinRAM,$MinDisk,$MinTPM,$MinBuild,$Version); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                if ($credSet) { $ic.Credential = $Cred }
+                $erRows = Invoke-Command @ic
+                $mapped = New-Object System.Collections.ArrayList
+                foreach ($er in @($erRows)) { if ($null -eq $er) { continue }; [void]$mapped.Add([ordered]@{ Host=$Computer; Category=[string]$er.Category; Severity=[string]$er.Severity; Evidence=[string]$er.Evidence; Fix=[string]$er.Fix }) }
+                if ($mapped.Count -eq 0) { [void]$mapped.Add([ordered]@{ Host=$Computer; Category='NONE'; Severity='INFO'; Evidence='No upgrade errors detected'; Fix='' }) }
+                $r.Rows = @($mapped)
+                $r.Status = 'SCANNED'
+                $blockN = @($mapped | Where-Object { $_.Severity -eq 'BLOCK' }).Count
+                $warnN  = @($mapped | Where-Object { $_.Severity -eq 'WARN' }).Count
+                $noneOnly = ($mapped.Count -eq 1 -and [string]$mapped[0].Category -eq 'NONE')
+                $r.Detail = if ($noneOnly) { [string]$mapped[0].Evidence } else { "$($mapped.Count) error row(s): $blockN block, $warnN warn" }
+                $r.Ok = $true
+            }
         }
     }
     catch {
@@ -2080,6 +2758,9 @@ function Invoke-JanetToolAction {
         'installcab'     { 'InstallCab' }
         'checkupgrade'   { 'CheckUpgrade' }
         'setpagefile'    { 'SetPageFile' }
+        'repair-health'  { 'RepairHealth' }
+        'auto-fix'       { 'AutoFix' }
+        'error-report'   { 'ErrorReport' }
         'ping'           { 'Ping' }
         default          { $null }
     }
@@ -2102,6 +2783,11 @@ function Invoke-JanetToolAction {
         'UpgradeDrive'   { 'VulnPatched' }
         'InstallCab'     { 'VulnPatched' }
         'SetPageFile'    { 'TouchHost' }
+        # RepairHealth (DISM/SFC component-store repair) + AutoFix (per-device remediation)
+        # are remediations -> 'VulnPatched'. ErrorReport is a read-only scan -> $null (no audit).
+        'RepairHealth'   { 'VulnPatched' }
+        'AutoFix'        { 'VulnPatched' }
+        'ErrorReport'    { $null }
         default          { $null }
     }
 
@@ -2116,14 +2802,28 @@ function Invoke-JanetToolAction {
     # Common options.
     $attemptOffline = ConvertTo-JanetBool $Params['attemptOffline'] $false
     $dryRun         = ConvertTo-JanetBool $Params['dryRun'] $false
-    $reboot         = ConvertTo-JanetBool $Params['reboot'] $true
+    # InstallCab/SetPageFile reboot defaults ON (their manifest default); the new RepairHealth/
+    # AutoFix reboot defaults OFF (their manifest default) so an absent 'reboot' never arms a
+    # reboot wave / the self-guard for those ops.
+    $rebootDefault  = if ($op -eq 'RepairHealth' -or $op -eq 'AutoFix') { $false } else { $true }
+    $reboot         = ConvertTo-JanetBool $Params['reboot'] $rebootDefault
     $runWu          = ConvertTo-JanetBool $Params['runWu'] $false
     # v0.3.0 options: ForceDiscovery aggressive; Pin bypass + sccmRefresh; Unpin removeBypass
     # (removeBypass DEFAULTS to $true so an Unpin fully reverses a bypassed Pin).
     $aggressive     = ConvertTo-JanetBool $Params['aggressive'] $false
     $bypass         = ConvertTo-JanetBool $Params['bypass'] $false
-    $sccmRefresh    = ConvertTo-JanetBool $Params['sccmRefresh'] $false
+    # sccmRefresh defaults ON for AutoFix (its manifest default), OFF elsewhere (Pin's default).
+    $sccmDefault    = if ($op -eq 'AutoFix') { $true } else { $false }
+    $sccmRefresh    = ConvertTo-JanetBool $Params['sccmRefresh'] $sccmDefault
     $removeBypass   = ConvertTo-JanetBool $Params['removeBypass'] $true
+    # auto-fix per-category toggles (defaults mirror the manifest).
+    $fixPolicy      = ConvertTo-JanetBool $Params['fixPolicy']   $true
+    $fixBypass      = ConvertTo-JanetBool $Params['fixBypass']   $true
+    $fixDrivers     = ConvertTo-JanetBool $Params['fixDrivers']  $true
+    $driverSafe     = ConvertTo-JanetBool $Params['driverSafe']  $true
+    $fixPause       = ConvertTo-JanetBool $Params['fixPause']    $true
+    $fixRepair      = ConvertTo-JanetBool $Params['fixRepair']   $false
+    $clearStaging   = ConvertTo-JanetBool $Params['clearStaging'] $false
     # upgrade-drive options: reboot a CONFIRMED-staged host on a countdown (OFF by default).
     $rebootWhenStaged = ConvertTo-JanetBool $Params['rebootWhenStaged'] $false
     $countdownSeconds = 300
@@ -2141,6 +2841,19 @@ function Invoke-JanetToolAction {
     $cycles         = $script:WinUpgradeCycles
     $product        = if ($Params['product']) { ([string]$Params['product']).Trim() } else { 'Windows 11' }
     $version        = if ($Params['version']) { ([string]$Params['version']).Trim() } else { '24H2' }
+    # v0.4.0 target-version -> MinBuild gate. fleet-status / diagnose / upgrade-drive / auto-fix /
+    # error-report pass a 'version' key resolved against $script:WinUpgradeTargets; default 24H2 /
+    # 26100 keeps every existing behaviour identical. An unknown key on a version-select op falls
+    # back to 24H2 (with a warning); pin / unpin / forcediscovery keep their free-text version.
+    $minBuild       = 26100
+    $versionKey     = $version.ToUpperInvariant()
+    if ($script:WinUpgradeTargets.Contains($versionKey)) {
+        $minBuild = [int]$script:WinUpgradeTargets[$versionKey].MinBuild
+        $version  = [string]$script:WinUpgradeTargets[$versionKey].Version
+    } elseif (@('FleetStatus','Diagnose','UpgradeDrive','AutoFix','ErrorReport') -contains $op) {
+        & $send @{ type='log'; level='warn'; text="Unknown target version '$version' - defaulting to 24H2 (build 26100). Valid: $([string]::Join(', ', @($script:WinUpgradeTargets.Keys)))." }
+        $version = '24H2'; $minBuild = 26100
+    }
     # SetPageFile size: default 16 GB, clamped 1-128 GB (worker re-clamps as a backstop).
     $sizeMb         = 16384
     if ($Params['sizeMb']) { $sm = 0; if ([int]::TryParse([string]$Params['sizeMb'], [ref]$sm)) { $sizeMb = $sm } }
@@ -2168,6 +2881,10 @@ function Invoke-JanetToolAction {
     # UpgradeDrive: heavy per host (readiness read + pin + WU trigger + re-read + optional
     # reboot); low fan-out + a wide watchdog.
     if ($op -eq 'UpgradeDrive')   { $defThreads = 8; $maxJobSeconds = 600 }
+    # RepairHealth (DISM+SFC) + AutoFix-with-repair can run 15-45 min -> a wide watchdog.
+    if ($op -eq 'RepairHealth')   { $defThreads = 4;  $maxJobSeconds = 3600 }
+    if ($op -eq 'AutoFix')        { $defThreads = 8;  $maxJobSeconds = if ($fixRepair) { 3600 } else { 900 } }
+    if ($op -eq 'ErrorReport')    { $defThreads = 16; $maxJobSeconds = 300 }
     if ($op -eq 'Pin' -or $op -eq 'UpgradeDrive') {
         if ([string]::IsNullOrWhiteSpace($product) -or [string]::IsNullOrWhiteSpace($version)) {
             & $send @{ type='log'; level='warn'; text='Product and Version are both required to drive/pin a target release.' }
@@ -2181,8 +2898,10 @@ function Invoke-JanetToolAction {
     #   UpgradeDrive -> reboots a confirmed-staged host when $rebootWhenStaged
     #   InstallCab   -> reboots after a successful DISM feature-update install when $reboot
     #   SetPageFile  -> reboots to apply the page-file change when $reboot
+    #   RepairHealth -> reboots when a repair requires it and no user is logged on ($reboot)
+    #   AutoFix      -> reboots when a fix requires it and no user is logged on ($reboot)
     $rebootIntent = ( ($op -eq 'UpgradeDrive' -and $rebootWhenStaged) -or `
-                      (($op -eq 'InstallCab' -or $op -eq 'SetPageFile') -and $reboot) )
+                      (($op -eq 'InstallCab' -or $op -eq 'SetPageFile' -or $op -eq 'RepairHealth' -or $op -eq 'AutoFix') -and $reboot) )
     if ($rebootIntent -and -not $dryRun) {
         $keptT = New-Object System.Collections.ArrayList
         $selfT = New-Object System.Collections.ArrayList
@@ -2221,7 +2940,9 @@ function Invoke-JanetToolAction {
     # BeginInvoke loop preserves each element (incl. the $cpuPatterns / $cycles arrays)
     # as a single positional argument. New v0.3.0 args appended at the END in the SAME
     # order as the appended worker param() tail (a mismatch silently corrupts every arg).
-    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock) }
+    # v0.4.0 args ($minBuild + the auto-fix toggles) appended at the END in the SAME order as the
+    # worker param() tail (a mismatch silently corrupts every argument).
+    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging) }
     $rowOf       = {
         param($res)
         if ($op -eq 'FleetStatus') {
@@ -2237,13 +2958,17 @@ function Invoke-JanetToolAction {
             $eligible    = [bool]$res.Eligible
             $pending     = [bool]$res.PendingReboot
             $blockReason = [string]$res.BlockReason
-            $win = Get-WinUpgradeFleetStatus -OsBuild $ob -Online $online -Eligible $eligible -BlockReason $blockReason -PendingReboot $pending -ErrorText $errText
+            $win = Get-WinUpgradeFleetStatus -OsBuild $ob -Online $online -Eligible $eligible -BlockReason $blockReason -PendingReboot $pending -ErrorText $errText -MinBuild $minBuild -Version $version
+            $fgb = -1.0
+            try { if ($res.Contains('FreeGB') -and $null -ne $res['FreeGB']) { $fgb = [double]$res['FreeGB'] } } catch {}
             return @{
                 Host          = $res.Host
                 Online        = $online
                 DisplayVersion= [string]$res.DisplayVersion
                 OsBuild       = $ob
+                FreeGB        = $fgb
                 Win24H2Status = $win
+                TargetVersion = $version
                 Eligible      = $eligible
                 BlockReason   = $blockReason
                 Pinned        = [bool]$res.Pinned
@@ -2276,7 +3001,49 @@ function Invoke-JanetToolAction {
                 Skipped        = [string](& $get 'Skipped' '')
                 Error          = if ($isErr) { [string]$res.Detail } else { [string](& $get 'Error' '') }
                 Status         = $status
+                TargetVersion  = $version
                 Detail         = [string]$res.Detail
+            }
+        }
+        if ($op -eq 'RepairHealth') {
+            # Rich repair row. Timeout / cancel / worker-error results arrive as a bare
+            # {Host;Ping;Status;Detail} -> the Dism/Sfc/RebootNeeded getters fall back to defaults.
+            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
+            return @{
+                Host         = $res.Host
+                Ping         = [string]$res.Ping
+                Status       = [string]$res.Status
+                Dism         = [string](& $get 'Dism' '')
+                Sfc          = [string](& $get 'Sfc' '')
+                RebootNeeded = [bool](& $get 'RebootNeeded' $false)
+                Detail       = [string]$res.Detail
+            }
+        }
+        if ($op -eq 'AutoFix') {
+            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
+            return @{
+                Host         = $res.Host
+                Ping         = [string]$res.Ping
+                Status       = [string]$res.Status
+                Fixes        = [string](& $get 'Fixes' '')
+                RebootNeeded = [bool](& $get 'RebootNeeded' $false)
+                Detail       = [string]$res.Detail
+            }
+        }
+        if ($op -eq 'ErrorReport') {
+            # Only reached when the worker returned NO 'Rows' array - i.e. the host was
+            # never scanned (offline skip, timeout, cancel, worker error). Surface that as
+            # one error-schema row so the ERRORS grid shows WHY instead of a blank line
+            # (field lesson: a wedged WU/WMI stack that times out is itself a finding).
+            $status = [string]$res.Status
+            $isOffline = ($status -eq 'OFFLINE' -or $status -eq 'Skipped')
+            return @{
+                Host     = $res.Host
+                Category = if ($isOffline) { 'UNREACHABLE' } else { 'SCAN_FAILED' }
+                Severity = 'WARN'
+                Evidence = [string]$res.Detail
+                Fix      = if ($isOffline) { 'Verify the host is on and reachable (TCP 5985/445), or retry with "Attempt even if offline".' }
+                           else { 'Scan did not complete - the WU/WMI stack may be wedged; run winmgmt /verifyrepository on the host and retry.' }
             }
         }
         @{ Host=$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail }
@@ -2301,10 +3068,15 @@ function Invoke-JanetToolAction {
     # seed Queued rows so the operator sees the whole target list immediately (ping is
     # instant, so it skips straight to Online/Offline rather than flashing Queued).
     if ($op -eq 'FleetStatus') {
-        foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Online=$false; DisplayVersion=''; OsBuild=0; Win24H2Status='Queued'; Eligible=$false; BlockReason=''; Pinned=$false; PinnedVersion=''; PendingReboot=$false; Error='' }) }
+        foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Online=$false; DisplayVersion=''; OsBuild=0; FreeGB=-1; Win24H2Status='Queued'; Eligible=$false; BlockReason=''; Pinned=$false; PinnedVersion=''; PendingReboot=$false; Error='' }) }
     }
     elseif ($op -eq 'UpgradeDrive') {
         foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Online=$false; OsBuild=0; DisplayVersion=''; WasPinned=$false; TriggerResult=''; Staged=$false; Rebooted=$false; CountdownSec=0; Skipped=''; Error=''; Status='Queued'; Detail='waiting for a runspace...' }) }
+    }
+    elseif ($op -eq 'ErrorReport') {
+        # No Queued seed for ErrorReport: its grid is keyed Host|Category|Evidence (one row
+        # per detected error), so a placeholder row can never be replaced by a real row and
+        # would linger as a stale "queued" line. The progress strip covers the feedback.
     }
     elseif ($op -ne 'ping') { foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Detail='waiting for a runspace...' }) } }
     $jobs = New-Object System.Collections.ArrayList
@@ -2336,9 +3108,21 @@ function Invoke-JanetToolAction {
                     if ($null -eq $res) { $res = [ordered]@{ Host=$j.Host; Ping=''; Status='FAILED'; Detail='worker returned no result'; Ok=$false } }
                     $ok = [bool]$res.Ok
                     if ($ok) { $okCount++ } else { $failCount++ }
-                    $row = & $rowOf $res
-                    [void]$rows.Add($row)
-                    & $send (@{ type='row' } + $row)
+                    # Generic multi-row support: when a worker returns a non-empty 'Rows' array
+                    # (error-report emits one row per detected error), stream each entry as its own
+                    # type='row' event instead of the single $rowOf row. Any future op can use this.
+                    $resRows = $null
+                    try { if ($res.Contains('Rows')) { $resRows = $res['Rows'] } } catch { try { $resRows = $res.Rows } catch { $resRows = $null } }
+                    if ($resRows -and @($resRows).Count -gt 0) {
+                        foreach ($rr in @($resRows)) {
+                            [void]$rows.Add($rr)
+                            & $send (@{ type='row' } + $rr)
+                        }
+                    } else {
+                        $row = & $rowOf $res
+                        [void]$rows.Add($row)
+                        & $send (@{ type='row' } + $row)
+                    }
                     # Diagnose / ForceDiscovery return a full multi-line report on $res.Report;
                     # stream it to the activity log line-by-line, colour tags kept as text prefixes
                     # ([PASS]/[FAIL]/[WARN]/[BLOCK]/[REC]/[INFO], mirror of reference lines 884-895)
@@ -2450,7 +3234,7 @@ function Invoke-JanetToolAction {
             $ob = 0; [void][int]::TryParse([string]$row.OsBuild, [ref]$ob)
             if ($ob -gt 0 -and $ob -lt 26100) { $fleet.on23h2OrOlder++ }
             $ws = [string]$row.Win24H2Status
-            if     ($ws -eq 'Already 24H2+')  { $fleet.already24h2++ }
+            if     ($ws -like 'Already *')    { $fleet.already24h2++ }   # 'Already 24H2+' / 'Already 25H2+'
             elseif ($ws -eq 'Ready')          { $fleet.ready++ }
             elseif ($ws -eq 'Pending reboot') { $fleet.pendingReboot++ }
             elseif ($ws -like 'Blocked:*') {
