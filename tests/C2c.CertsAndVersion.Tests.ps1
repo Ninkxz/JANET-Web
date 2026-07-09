@@ -556,18 +556,29 @@ Describe 'C2C fix-pki - shipped-bundle auto-default (Get-C2cDefaultCertBundlePat
     It '(12) fix-pki with a BLANK certBundleFolder resolves the shipped default and PROCEEDS (not rejected); self-target is self-guarded' {
         # Depends on the repo shipping Packages\DoD-Certs; tolerant if it is absent.
         $defOk = & $cm { $p = Get-C2cDefaultCertBundlePath; [bool]((Test-Path -LiteralPath $p) -and (@(Get-ChildItem -LiteralPath $p -Filter '*.cer' -File -Recurse -ErrorAction SilentlyContinue).Count -gt 0)) }
+        # v1.10.0: fix-pki is import-scoped - the import must flag the dispatcher for PKI
+        # Trust Roots so it survives target resolution; the self-guard then drops it.
+        $csv12  = Join-Path ([System.IO.Path]::GetTempPath()) ("c2c_cv12_{0}.csv" -f ([guid]::NewGuid().ToString('N')))
+        $body12 = @"
+C2C Compliance Status:Compliance,C2C Compliance Status:Date,C2C Compliance Status:Age (Bucketed),Computer Name,Count
+"Non-Compliant
+Failed Rule - PKI Trust Roots",,,$($env:COMPUTERNAME).area52.afnoapps.usaf.mil,1
+"@
+        Set-Content -LiteralPath $csv12 -Value $body12 -Encoding UTF8
         $logs  = New-Object System.Collections.ArrayList
         $emit  = { param($e) if ($e -and $e.type -eq 'log') { [void]$logs.Add($e) } }
-        $res   = Invoke-JanetToolAction -ActionId 'fix-pki' -Params @{ targets = $env:COMPUTERNAME; confirm = 'FIX'; certBundleFolder = '' } -Credential $null -Emit $emit
-        if ($defOk) {
-            # blank path fell back to the shipped default -> the action proceeded (was NOT rejected).
-            $res.summary.rejected | Should BeNullOrEmpty
-            @($logs | Where-Object { $_.text -match '(?i)shipped default' }).Count | Should Not Be 0
-            # only the dispatcher host was targeted -> self-guard dropped it, nothing dialed.
-            $res.summary.selfSkipped | Should Not Be 0
-        } else {
-            # no shipped default present -> blank path keeps the abort-with-clear-error path.
-            $res.summary.rejected | Should Be $true
-        }
+        try {
+            $res = Invoke-JanetToolAction -ActionId 'fix-pki' -Params @{ targets = $env:COMPUTERNAME; csvPath = $csv12; confirm = 'FIX'; certBundleFolder = '' } -Credential $null -Emit $emit
+            if ($defOk) {
+                # blank path fell back to the shipped default -> the action proceeded (was NOT rejected).
+                $res.summary.rejected | Should BeNullOrEmpty
+                @($logs | Where-Object { $_.text -match '(?i)shipped default' }).Count | Should Not Be 0
+                # only the dispatcher host was targeted -> self-guard dropped it, nothing dialed.
+                $res.summary.selfSkipped | Should Not Be 0
+            } else {
+                # no shipped default present -> blank path keeps the abort-with-clear-error path.
+                $res.summary.rejected | Should Be $true
+            }
+        } finally { Remove-Item -LiteralPath $csv12 -Force -ErrorAction SilentlyContinue }
     }
 }

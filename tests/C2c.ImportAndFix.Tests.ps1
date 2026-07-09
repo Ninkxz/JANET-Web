@@ -159,11 +159,22 @@ Describe 'C2C per-pillar fix - confirm-word gate' {
 # -----------------------------------------------------------------------------
 Describe 'C2C per-pillar fix - self-guard drops the dispatcher host' {
 
+    # v1.10.0: per-pillar fixes are import-scoped, so the import must FLAG the dispatcher
+    # for AntiMalware for it to survive target resolution - the self-guard then drops it.
+    # 127.0.0.1 / localhost are not import-flagged and fall out of the allow-list first.
+    $sgBody = @"
+C2C Compliance Status:Compliance,C2C Compliance Status:Date,C2C Compliance Status:Age (Bucketed),Computer Name,Count
+"Non-Compliant
+Failed Rule - MDE Health",,,$($env:COMPUTERNAME).area52.afnoapps.usaf.mil,1
+"@
+    $sgCsv = New-C2cTempCsv $sgBody
+
     It 'drops local host targets with a SKIPPED row and never fans out' {
-        # Only dispatcher-local targets -> after the self-guard drop there is nothing
-        # to run, so the action short-circuits with zero WinRM fan-out.
+        # Dispatcher is import-flagged for AntiMalware -> it survives the allow-list, then
+        # the self-guard drops it, so the action short-circuits with zero WinRM fan-out.
         $out = Invoke-C2cAction -ActionId 'fix-antimalware' -Params @{
             targets = ("{0}`n127.0.0.1`nlocalhost" -f $env:COMPUTERNAME)
+            csvPath = $sgCsv
             confirm = 'FIX'
         }
         $skips = @($out.Rows | Where-Object { $_.Status -eq 'SKIPPED' })
@@ -172,6 +183,8 @@ Describe 'C2C per-pillar fix - self-guard drops the dispatcher host' {
         $out.Result.summary.selfSkipped | Should Not Be 0
         $out.Result.summary.total | Should Be 0
     }
+
+    Remove-Item -LiteralPath $sgCsv -Force -ErrorAction SilentlyContinue
 }
 
 # -----------------------------------------------------------------------------
@@ -199,19 +212,66 @@ Describe 'C2C fix-pki - the DoD trust-bundle installer is BACK in v1.6.0' {
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C per-pillar fix - target token regex rejects junk' {
+Describe 'C2C per-pillar fix - target token regex rejects junk (import-scoped)' {
 
-    It 'refuses a run whose targets are all UNC/URL/leading-hyphen junk (0 valid, no fan-out)' {
-        $out = Invoke-C2cAction -ActionId 'fix-monitoring' -Params @{
-            targets = "\\evil\share`n../etc/passwd`n-badname`nhttp://x/y"
-            confirm = 'FIX'
+    # v1.10.0: per-pillar fixes are import-scoped, so the token-regex + intersection now
+    # run only AFTER a usable import loads. A junk-only run with NO csvPath is rejected by
+    # the import gate BEFORE the regex fires - which would leave the regex untested. To
+    # actually exercise it, supply a CSV flagging one legit host (GOODHOST01) for the
+    # pillar, submit that host ALONGSIDE the junk tokens, and prove via the echo-shim that
+    # GOODHOST01 alone is dialed and every junk token is dropped before any fan-out.
+    $cm = Get-Module JanetWeb.c2c
+
+    $junkBody = @"
+C2C Compliance Status:Compliance,C2C Compliance Status:Date,C2C Compliance Status:Age (Bucketed),Computer Name,Count
+"Non-Compliant
+Failed Rule - Continuous Monitoring",,,GOODHOST01.area52.afnoapps.usaf.mil,1
+"@
+    $junkCsv = New-C2cTempCsv $junkBody
+
+    $script:__jrows = New-Object System.Collections.ArrayList
+    $jemit = { param($e) if ($e -and $e.type -eq 'row') { [void]$script:__jrows.Add($e) } }
+
+    # Swap the per-host worker for a self-contained ECHO shim (RunAll idiom) so the runspace
+    # fan-out runs locally and each dialed host row proves exactly what was dispatched.
+    & $cm {
+        $script:__origFixBlock = $script:C2cFixBlock
+        $script:C2cFixBlock = {
+            param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc)
+            $ps = @(@($Pillars) | ForEach-Object { [string]$_ })
+            @{ Host = $Computer; Ping = 'shim'; Status = 'FIXED'; Detail = ('PILLARS=' + ($ps -join '+'));
+               Report = ''; Pillars = @($ps | ForEach-Object { [pscustomobject]@{ Name = $_; Action = 'shim'; Result = 'FIXED'; Detail = 'shim' } }) }
         }
-        $out.Result.summary.total | Should Be 0
-        @($out.Rows).Count | Should Be 0
+    }
+    try {
+        Invoke-JanetToolAction -ActionId 'fix-monitoring' -Params @{
+            targets = "\\evil\share`n../etc/passwd`n-badname`nhttp://x/y`nGOODHOST01"
+            csvPath = $junkCsv
+            confirm = 'FIX'
+        } -Credential $null -Emit $jemit | Out-Null
+    } finally {
+        & $cm { $script:C2cFixBlock = $script:__origFixBlock; Remove-Variable -Name __origFixBlock -Scope Script -ErrorAction SilentlyContinue }
+    }
+    $jrows = @($script:__jrows)
+
+    It 'dials GOODHOST01 - the only import-flagged, regex-valid host - with the Monitoring pillar' {
+        $g = @($jrows | Where-Object { $_.Host -eq 'GOODHOST01' -and $_.Status -eq 'FIXED' })[0]
+        $g | Should Not BeNullOrEmpty
+        $g.Detail | Should Be 'PILLARS=Monitoring'
     }
 
-    It 'requires the exact confirm word even when targets are junk (confirm gate is first)' {
+    It 'dials EXACTLY one host - every junk token is dropped before any fan-out' {
+        @($jrows | Where-Object { $_.Status -eq 'FIXED' }).Count | Should Be 1
+    }
+
+    It 'never dials any UNC / URL / path-traversal / leading-hyphen junk token' {
+        @($jrows | Where-Object { $_.Host -match 'evil|share|passwd|badname|http|\.\.|^-' }).Count | Should Be 0
+    }
+
+    It 'still enforces the confirm-word gate FIRST even when targets are junk (no CSV parse)' {
         $out = Invoke-C2cAction -ActionId 'fix-monitoring' -Params @{ targets = '\\evil\share'; confirm = 'no' }
         $out.Result.summary.rejected | Should Be $true
     }
+
+    Remove-Item -LiteralPath $junkCsv -Force -ErrorAction SilentlyContinue
 }

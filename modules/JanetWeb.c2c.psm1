@@ -11,7 +11,7 @@
 #  short Detail, and runs inside ONE Invoke-Command round-trip ON the target, wrapped in
 #  its own try/catch so one failed check becomes ERROR and never aborts the probe.
 #
-#  v1.8.0 aligns the verdict to the authoritative C2C TASKORD 26-0822 Tanium dashboard,
+#  v1.10.0 aligns the verdict to the authoritative C2C TASKORD 26-0822 Tanium dashboard,
 #  which quarantines on ONLY 5 rules and treats the rest as audit/informational. Each
 #  pillar carries a TIER ($script:C2cPillarTier); the verdict scores ONLY the quarantine
 #  tier, so stricter-than-TASKORD JANET checks stay visible + fixer-remediable but never
@@ -45,9 +45,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.9.0'
+        version  = '1.10.0'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one TAB PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call, then narrowed to the operator''s checked subset - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the operator''s per-pillar host selections (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -80,10 +80,11 @@ function Get-JanetToolManifest {
                 description = 'DESTRUCTIVE (service state). Heal the endpoint-monitoring pillar on each target in one WinRM round-trip. First it verifies the Tanium SOFTWARE is installed by scanning the uninstall registry (HKLM 64- and 32-bit Uninstall keys for a DisplayName matching "Tanium"), then the Tanium client service (name from c2c-baseline.json, default "Tanium Client"): if the service is Running it is left alone (ALREADY MONITORED); if it exists but is Stopped/not-Automatic it is set to StartType Automatic and started, then re-read to verify (MONITORED); if the service is ABSENT but the software is installed it FAILs "repair via Software Center/MECM" (no service is created); if NEITHER the software nor the service is present it FAILs "deploy from Software Center/MECM". Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the Monitoring (Tanium) pillar on the target host(s)? This changes service state. Proceed?'
+                confirm     = 'Fix the Monitoring (Tanium) pillar on the import-flagged host(s) you checked? This changes service state. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='targets';        label='Checked host(s) - a subset of the Monitoring hosts the import flagged'; type='hostlist'; required=$true },
+                    @{ name='csvPath';        label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
@@ -95,10 +96,11 @@ function Get-JanetToolManifest {
                 description = 'DESTRUCTIVE (firewall state). Enable any disabled Windows Firewall profile (Domain/Private/Public) on each target: Set-NetFirewallProfile -Enabled True (netsh advfirewall set <profile>profile state on fallback), then re-read all three profiles to verify. Result FIREWALL ENABLED (turned on) / ALREADY ENABLED (all three were on) / FAIL (a profile would not enable). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the Firewall pillar on the target host(s)? This enables disabled firewall profiles. Proceed?'
+                confirm     = 'Fix the Firewall pillar on the import-flagged host(s) you checked? This enables disabled firewall profiles. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='targets';        label='Checked host(s) - a subset of the Firewall hosts the import flagged'; type='hostlist'; required=$true },
+                    @{ name='csvPath';        label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
@@ -110,10 +112,11 @@ function Get-JanetToolManifest {
                 description = 'DESTRUCTIVE (Defender state). Heal Microsoft Defender on each target using Get-MpComputerStatus.AMRunningMode: always set WinDefend/Sense to Automatic + Started; force Real-Time Protection on (Set-MpPreference) ONLY when AMRunningMode is Active - NEVER in Passive / EDR Block Mode (there MDE/Sense is primary and RTP off is correct, so forcing it would fight the MDE config); Update-MpSignature when the signature age exceeds sigMaxAgeHours (default 24h). A Passive/EDR box with Sense onboarded + fresh signatures reports NOCHANGE (already protected via MDE). The detail reports RunningMode / product+engine versions / last-update / age-hours. A missing MDE Sense service is a note, not a failure, when Defender itself is healthy. Result PROTECTED (something healed) / ALREADY PROTECTED / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the AntiMalware (Defender) pillar on the target host(s)? This changes Defender state. Proceed?'
+                confirm     = 'Fix the AntiMalware (Defender) pillar on the import-flagged host(s) you checked? This changes Defender state. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='targets';        label='Checked host(s) - a subset of the AntiMalware hosts the import flagged'; type='hostlist'; required=$true },
+                    @{ name='csvPath';        label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
@@ -125,10 +128,11 @@ function Get-JanetToolManifest {
                 description = 'DESTRUCTIVE (kicks a scan). Trigger the MECM Software Updates cycle on each target: Invoke-CimMethod root\ccm SMS_Client TriggerSchedule for {..113} (SUM scan) then {..108} (SUM eval). Installs run asynchronously and Tanium clears the finding after its next scan. Result PATCH CYCLE KICKED / FAIL (root\ccm unreachable - not a MECM client). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the Patches pillar on the target host(s)? This kicks the MECM patch cycle. Proceed?'
+                confirm     = 'Fix the Patches pillar on the import-flagged host(s) you checked? This kicks the MECM patch cycle. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='targets';        label='Checked host(s) - a subset of the Patches hosts the import flagged'; type='hostlist'; required=$true },
+                    @{ name='csvPath';        label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
@@ -140,10 +144,11 @@ function Get-JanetToolManifest {
                 description = 'DESTRUCTIVE (BitLocker). Iterates EVERY FIXED VOLUME (C:, D:, E:, ...) - removable/USB (BitLocker To Go), network and optical volumes are NEVER touched. Per fixed volume: On -> ALREADY ENCRYPTED; suspended (Off + FullyEncrypted) -> RESUME -> PROTECTION RESUMED; EncryptionInProgress -> IN PROGRESS(percent); FullyDecrypted with "ENABLE BitLocker" NOT ticked -> SKIP (route desk-side). With "ENABLE BitLocker" ticked, a FullyDecrypted fixed volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED. OS volume (VolumeType OperatingSystem): mirror the enterprise USAF enable script - assert the FVE BitLocker policy once per host (recovery-key escrow + XtsAes256), reuse-or-add a RecoveryPassword protector, escrow Entra-first (BackupToAAD-BitLockerKeyProtector) with on-prem AD fallback (Backup-BitLockerKeyProtector) BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector + XtsAes256 full-volume. Fixed DATA volume (VolumeType Data): the OS volume must be BitLocker-on first (else SKIP - auto-unlock needs it), then escrow-first exactly like the OS path (Add RecoveryPassword protector -> escrow Entra-first / AD-fallback BEFORE Enable) with NO TPM protector, Enable-BitLocker XtsAes256 full-volume, dedup to exactly one escrowed recovery protector, and best-effort Enable-BitLockerAutoUnlock. If BOTH escrow paths fail for a volume, a protector we added is removed and that volume is NEVER encrypted; the recovery password is never emitted. Host rollup: any volume FAIL -> PARTIAL (all-fail -> FAILED), any FIXED/STARTED with no FAIL -> FIXED, all NOCHANGE -> NO CHANGE. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the Encryption (BitLocker) pillar on the target host(s)? This changes BitLocker state. Proceed?'
+                confirm     = 'Fix the Encryption (BitLocker) pillar on the import-flagged host(s) you checked? This changes BitLocker state. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='targets';          label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='targets';          label='Checked host(s) - a subset of the Encryption hosts the import flagged'; type='hostlist'; required=$true },
+                    @{ name='csvPath';          label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted FIXED volumes (OS: TPM; DATA: auto-unlock; RecoveryPassword->escrow, XtsAes256; removable never touched)'; type='bool'; required=$false; default=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
@@ -156,10 +161,11 @@ function Get-JanetToolManifest {
                 description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - nothing is ever removed. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the PKI Trust Roots pillar on the target host(s)? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
+                confirm     = 'Fix the PKI Trust Roots pillar on the import-flagged host(s) you checked? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='targets';          label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='targets';          label='Checked host(s) - a subset of the PKI Trust Roots hosts the import flagged'; type='hostlist'; required=$true },
+                    @{ name='csvPath';          label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='certBundleFolder'; label='DoD trust bundle folder (server-readable path, e.g. a UNC path with root\*.cer, Intermediate\*.cer, Untrusted\*.cer)'; type='text'; required=$true },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
@@ -186,13 +192,14 @@ function Get-JanetToolManifest {
             @{
                 id          = 'run-all'
                 label       = 'RUN ALL - Fix Imported Non-Compliant Hosts'
-                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The "plan" input is the JSON array the Import action produced ([{host,pillars:[...]}, ...]); per host only its planned pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If a host plans PkiRoots and a valid cert bundle folder was supplied it is installed; if PkiRoots is planned but no bundle was given it is SKIPPED for that host (info note) without aborting the run. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
+                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The plan is re-derived from the imported CSV (csvPath) ADMIN-SIDE and the client "plan" input (the JSON array the view built from the operator''s per-pillar host checkboxes, [{host,pillars:[...]}, ...]) is INTERSECTED against it: a client host/pillar pair the import did not flag is dropped with a warn, and a host absent from the import is dropped entirely. With no csvPath (or a CSV that parses to zero findings) the run is refused - nothing is dialed. Per host only its intersected pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If a host plans PkiRoots and a valid cert bundle folder was supplied it is installed; if PkiRoots is planned but no bundle was given it is SKIPPED for that host (info note) without aborting the run. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Run ALL fixes across the imported non-compliant hosts (each host, its own failed pillars)? This changes machines. Proceed?'
+                confirm     = 'Run ALL fixes across the imported non-compliant hosts (each host, its own failed pillars, re-derived from the CSV and intersected with your per-pillar selections)? This changes machines. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
-                    @{ name='plan';             label='Run-all plan (JSON: [{host,pillars:[...]}])'; type='textarea'; required=$true },
+                    @{ name='plan';             label='Run-all plan (JSON: [{host,pillars:[...]}] - the operator''s per-pillar host selections)'; type='textarea'; required=$true },
+                    @{ name='csvPath';          label='C2C Compliance CSV (the plan is re-derived from this import and the client plan intersected against it)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted FIXED volumes (OS + data; only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
                     @{ name='certBundleFolder'; label='DoD trust bundle folder (optional; needed only if a host plans PkiRoots)'; type='text'; required=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
@@ -1942,40 +1949,27 @@ $script:C2cFixBlock = {
     return $r
 }
 
-# --- Action: import ----------------------------------------------------------
-function Invoke-C2cImportAction {
-    param([hashtable]$Params, [scriptblock]$Emit)
-    $send = { param($e) if ($Emit) { & $Emit $e } }
+# --- Shared CSV -> pillar/plan derivation (import action + fix actions) ------
+# ONE code path so the per-pillar fixes, the run-all plan, and the import summary
+# can never DIVERGE in how the CSV maps to pillar host-sets. Pure derivation +
+# read-only local parse (ConvertFrom-C2cComplianceCsv); NOTHING persists server-side.
+# The presentation logging (per-pillar counts) stays in Invoke-C2cImportAction so a
+# fix action re-parsing the CSV does not spam the operator with a second summary.
+# Returns @{ Records; RowCount; PillarHosts; PillarOrdered; AuditPillarHosts;
+#            AuditOrdered; RunAllPlan; PillarFixTargets; NonCompliantHosts }.
+#   PillarHosts       : failed-pillar name  -> @(short hosts)          (display/summary)
+#   AuditPillarHosts  : audit-pillar name   -> @(short hosts)
+#   RunAllPlan        : @(@{ host; pillars=@(fixable failed U audit); auditPillars })
+#   PillarFixTargets  : fixable-pillar name -> @(short hosts)   (failed U fixable-audit;
+#                       the AUTHORITATIVE per-pillar dial set, derived FROM RunAllPlan so
+#                       it is identical to what run-all would fix for that pillar).
+function Get-C2cImportPlan {
+    param([string[]]$Paths, [string]$Text, [scriptblock]$Send)
 
-    $csvPath = [string]$Params['csvPath']
-    $csvText = [string]$Params['csvText']
-    $paths = @()
-    if ($csvPath) { $paths = @($csvPath -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-    if ($paths.Count -eq 0 -and [string]::IsNullOrWhiteSpace($csvText)) {
-        & $send @{ type='log'; level='warn'; text='No CSV file selected and no CSV text pasted.' }
-        return @{ rows=@(); summary=@{ total=0 } }
-    }
+    $parsed = ConvertFrom-C2cComplianceCsv -Paths $Paths -Text $Text -Send $Send
+    $recs   = @($parsed.Records)
 
-    & $send @{ type='status'; text='Parsing C2C Compliance CSV...' }
-    $parsed = ConvertFrom-C2cComplianceCsv -Paths $paths -Text $csvText -Send $send
-    $recs = @($parsed.Records)
-    if ($recs.Count -eq 0) {
-        & $send @{ type='log'; level='warn'; text="Parsed $($parsed.RowCount) row(s) but resolved no hosts - check the CSV headers (a 'Compliance' column and a 'Computer Name' column)." }
-        return @{ rows=@(); summary=@{ total=0 } }
-    }
-
-    $rows = New-Object System.Collections.ArrayList
-    foreach ($rec in ($recs | Sort-Object { $_.Short })) {
-        $row = @{ Host=$rec.Short; Compliance=$rec.Compliance; Failed=(@($rec.Failed) -join ', '); Audit=(@($rec.Audit) -join ', '); Fqdn=$rec.Fqdn }
-        [void]$rows.Add($row)
-        & $send (@{ type='row' } + $row)
-    }
-
-    $total            = $recs.Count
-    $nonCompliantRecs = @($recs | Where-Object { $_.Compliance -match '(?i)^Non-?Compliant' })
-    $nonCompliant     = $nonCompliantRecs.Count
-    $compliant        = $total - $nonCompliant
-    $nonCompliantHosts = @($nonCompliantRecs | ForEach-Object { $_.Short } | Sort-Object -Unique)
+    $nonCompliantHosts = @($recs | Where-Object { $_.Compliance -match '(?i)^Non-?Compliant' } | ForEach-Object { $_.Short } | Sort-Object -Unique)
 
     # Aggregate FAILED pillars -> host lists.
     $pillarHosts = @{}
@@ -2004,37 +1998,91 @@ function Invoke-C2cImportAction {
     foreach ($n in $script:C2cPillarOrder) { if ($auditPillarHosts.ContainsKey($n)) { $auditOrdered += $n } }
     foreach ($n in ($auditPillarHosts.Keys | Sort-Object)) { if ($auditOrdered -notcontains $n) { $auditOrdered += $n } }
 
-    & $send @{ type='log'; level='ok'; text="Imported $total host(s): $compliant Compliant, $nonCompliant Non-Compliant." }
-    $pillars = New-Object System.Collections.ArrayList
-    foreach ($p in $ordered) {
-        $hosts = @($pillarHosts[$p])
-        $route = Get-C2cPillarRouting $p
-        [void]$pillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route })
-        & $send @{ type='log'; level='info'; text=("{0}: {1} host(s) -> {2}" -f $p, $hosts.Count, $route) }
-    }
-    $auditPillars = New-Object System.Collections.ArrayList
-    foreach ($p in $auditOrdered) {
-        $hosts = @($auditPillarHosts[$p])
-        $route = Get-C2cPillarRouting $p
-        [void]$auditPillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route; audit=$true })
-        & $send @{ type='log'; level='info'; text=("AUDIT {0}: {1} host(s) (advisory, non-quarantine) -> {2}" -f $p, $hosts.Count, $route) }
-    }
-
     # Run-all plan: each host + its endpoint-fixable pillars. Includes fixable AUDIT pillars
     # (e.g. PkiRoots) tagged audit=true so run-all can PROACTIVELY remediate the audit
-    # population (per the Cert Deploy investment) without ever calling audit findings a
-    # quarantine cause. Hosts whose only failures route elsewhere (Vuln/OSVersion/STIG) are omitted.
+    # population without ever calling audit findings a quarantine cause. Hosts whose only
+    # failures route elsewhere (Vuln/OSVersion/STIG) are omitted.
     $runAllPlan = New-Object System.Collections.ArrayList
-    $auditFixHostCount = 0
     foreach ($rec in ($recs | Sort-Object { $_.Short })) {
         $fxFailed = @(@($rec.Failed) | Where-Object { $script:C2cFixablePillars -contains $_ })
         $fxAudit  = @(@($rec.Audit)  | Where-Object { $script:C2cFixablePillars -contains $_ })
         $allFx    = @(@($fxFailed + $fxAudit) | Select-Object -Unique)
         if ($allFx.Count -gt 0) {
             [void]$runAllPlan.Add(@{ host=$rec.Short; pillars=@($allFx); auditPillars=@($fxAudit) })
-            if ($fxAudit.Count -gt 0 -and $fxFailed.Count -eq 0) { $auditFixHostCount++ }
         }
     }
+
+    # Per-pillar dial set derived FROM the run-all plan, so the per-pillar fix and run-all
+    # can NEVER disagree about which hosts a pillar targets.
+    $pillarFixTargets = @{}
+    foreach ($entry in $runAllPlan) {
+        foreach ($p in @($entry.pillars)) {
+            if (-not $pillarFixTargets.ContainsKey($p)) { $pillarFixTargets[$p] = New-Object System.Collections.ArrayList }
+            if (-not $pillarFixTargets[$p].Contains([string]$entry.host)) { [void]$pillarFixTargets[$p].Add([string]$entry.host) }
+        }
+    }
+
+    return @{
+        Records=@($recs); RowCount=$parsed.RowCount
+        PillarHosts=$pillarHosts; PillarOrdered=@($ordered)
+        AuditPillarHosts=$auditPillarHosts; AuditOrdered=@($auditOrdered)
+        RunAllPlan=@($runAllPlan); PillarFixTargets=$pillarFixTargets
+        NonCompliantHosts=@($nonCompliantHosts)
+    }
+}
+
+# --- Action: import ----------------------------------------------------------
+function Invoke-C2cImportAction {
+    param([hashtable]$Params, [scriptblock]$Emit)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $csvPath = [string]$Params['csvPath']
+    $csvText = [string]$Params['csvText']
+    $paths = @()
+    if ($csvPath) { $paths = @($csvPath -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    if ($paths.Count -eq 0 -and [string]::IsNullOrWhiteSpace($csvText)) {
+        & $send @{ type='log'; level='warn'; text='No CSV file selected and no CSV text pasted.' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    & $send @{ type='status'; text='Parsing C2C Compliance CSV...' }
+    $plan = Get-C2cImportPlan -Paths $paths -Text $csvText -Send $send
+    $recs = @($plan.Records)
+    if ($recs.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text="Parsed $($plan.RowCount) row(s) but resolved no hosts - check the CSV headers (a 'Compliance' column and a 'Computer Name' column)." }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($rec in ($recs | Sort-Object { $_.Short })) {
+        $row = @{ Host=$rec.Short; Compliance=$rec.Compliance; Failed=(@($rec.Failed) -join ', '); Audit=(@($rec.Audit) -join ', '); Fqdn=$rec.Fqdn }
+        [void]$rows.Add($row)
+        & $send (@{ type='row' } + $row)
+    }
+
+    $total             = $recs.Count
+    $nonCompliant      = @($recs | Where-Object { $_.Compliance -match '(?i)^Non-?Compliant' }).Count
+    $compliant         = $total - $nonCompliant
+    $nonCompliantHosts = @($plan.NonCompliantHosts)
+
+    & $send @{ type='log'; level='ok'; text="Imported $total host(s): $compliant Compliant, $nonCompliant Non-Compliant." }
+    $pillars = New-Object System.Collections.ArrayList
+    foreach ($p in @($plan.PillarOrdered)) {
+        $hosts = @($plan.PillarHosts[$p])
+        $route = Get-C2cPillarRouting $p
+        [void]$pillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route })
+        & $send @{ type='log'; level='info'; text=("{0}: {1} host(s) -> {2}" -f $p, $hosts.Count, $route) }
+    }
+    $auditPillars = New-Object System.Collections.ArrayList
+    foreach ($p in @($plan.AuditOrdered)) {
+        $hosts = @($plan.AuditPillarHosts[$p])
+        $route = Get-C2cPillarRouting $p
+        [void]$auditPillars.Add(@{ name=$p; failedCount=$hosts.Count; hosts=$hosts; routing=$route; audit=$true })
+        & $send @{ type='log'; level='info'; text=("AUDIT {0}: {1} host(s) (advisory, non-quarantine) -> {2}" -f $p, $hosts.Count, $route) }
+    }
+
+    $runAllPlan = @($plan.RunAllPlan)
+    $auditFixHostCount = @($runAllPlan | Where-Object { @($_.auditPillars).Count -gt 0 -and @($_.pillars).Count -eq @($_.auditPillars).Count }).Count
     & $send @{ type='log'; level='info'; text=("Run-all plan: {0} host(s) with >=1 endpoint-fixable pillar ({1} from audit-only findings, proactive)." -f $runAllPlan.Count, $auditFixHostCount) }
 
     & $send @{ type='status'; text="Done. $total host(s) imported ($nonCompliant non-compliant)." }
@@ -2164,8 +2212,9 @@ function Invoke-C2cFixAction {
     if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
 
-    $isRunAll = ($ActionId -eq 'run-all')
-    $verb     = if ($isRunAll) { 'C2C Run-All' } else { "C2C $ActionId" }
+    $isRunAll     = ($ActionId -eq 'run-all')
+    $isLockscreen = ($ActionId -eq 'fix-lockscreen')   # opt-in plain-hostlist utility - NOT import-scoped
+    $verb         = if ($isRunAll) { 'C2C Run-All' } else { "C2C $ActionId" }
 
     # Confirm word - exact 'FIX' (case-sensitive), matching the suite idiom. FIRST gate.
     $confirm = ([string]$Params['confirm']).Trim()
@@ -2228,10 +2277,45 @@ function Invoke-C2cFixAction {
         }
     }
 
+    # --- Import-scoped targeting (per-pillar + run-all) -------------------------
+    # Per-pillar fixes and run-all dial ONLY the hosts the imported CSV flagged for
+    # each pillar - NEVER the whole target list. Re-parse the CSV every call (like the
+    # ACAS remediation flow: nothing persists server-side) and derive the authoritative
+    # pillar/plan sets. No csvPath/csvText - or a CSV with zero findings - REFUSES the
+    # run before the self-guard stage; nothing is dialed. fix-lockscreen BYPASSES this
+    # block entirely (it is an opt-in plain-hostlist utility, NOT a scored/CSV-mapped
+    # pillar) - its plan is built straight from the typed hostlist below (v1.9.0 semantics).
+    $importPlan = $null
+    if (-not $isLockscreen) {
+        $fixCsvPath  = [string]$Params['csvPath']
+        $fixCsvText  = [string]$Params['csvText']
+        $fixCsvPaths = @()
+        if ($fixCsvPath) { $fixCsvPaths = @($fixCsvPath -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+        $noImportMsg = 'No import loaded - per-pillar fixes dial only import-flagged hosts. Import the C2C compliance CSV first.'
+        if ($fixCsvPaths.Count -eq 0 -and [string]::IsNullOrWhiteSpace($fixCsvText)) {
+            & $send @{ type='log'; level='warn'; text=$noImportMsg }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+        }
+        $importPlan = Get-C2cImportPlan -Paths $fixCsvPaths -Text $fixCsvText -Send $send
+        if (@($importPlan.Records).Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text=$noImportMsg }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+        }
+    }
+
     $rows = New-Object System.Collections.ArrayList     # pre-rows (self-guard, zero-fixable info) + result rows
     $plan = New-Object System.Collections.ArrayList     # [ @{ Host; Pillars=@(...) } ] to dial (pre self-guard)
 
     if ($isRunAll) {
+        # Re-derive the AUTHORITATIVE per-host fixable set from the CSV: short(upper) ->
+        # HashSet of fixable pillars flagged for that host. The client plan is an ALLOW-LIST
+        # intersected against this (never trusted as the dispatch list).
+        $derived = @{}
+        foreach ($e in @($importPlan.RunAllPlan)) {
+            $hs = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($p in @($e.pillars)) { [void]$hs.Add([string]$p) }
+            $derived[([string]$e.host).ToUpperInvariant()] = $hs
+        }
         # --- Parse + validate the run-all plan JSON --------------------------
         $planRaw = [string]$Params['plan']
         if ([string]::IsNullOrWhiteSpace($planRaw)) {
@@ -2261,13 +2345,31 @@ function Invoke-C2cFixAction {
             if ($unknown.Count -gt 0) {
                 & $send @{ type='log'; level='warn'; text="Run-all: $short - dropped non-endpoint-fixable pillar(s): $($unknown -join ', ') (route to ACAS / Windows Upgrade / Reports)." }
             }
+            # Import-scoped intersection: narrow the client's fixable pillars to the set the
+            # CSV re-derived for THIS host. A (host,pillar) pair the import did not flag is
+            # dropped (warn); a host absent from the import is dropped entirely (never dialed).
+            $importDropped = $false
+            if ($known.Count -gt 0) {
+                $du = $short.ToUpperInvariant()
+                if ($derived.ContainsKey($du)) {
+                    $dset   = $derived[$du]
+                    $inPlan = @($known | Where-Object { $dset.Contains([string]$_) })
+                    $drop   = @($known | Where-Object { -not $dset.Contains([string]$_) })
+                    foreach ($dp in $drop) { & $send @{ type='log'; level='warn'; text="Run-all: $short - dropped $dp (not flagged for this host by the import)." } }
+                    $known = $inPlan
+                } else {
+                    & $send @{ type='log'; level='warn'; text="Run-all: $short - not in the imported C2C findings; skipped (nothing dialed)." }
+                    $known = @(); $importDropped = $true
+                }
+            }
             # PkiRoots needs a cert bundle; without one, skip it for this host (info note).
             if (-not $bundleOk -and ($known -contains 'PkiRoots')) {
                 $known = @($known | Where-Object { $_ -ne 'PkiRoots' })
                 & $send @{ type='log'; level='info'; text="Run-all: $short - PkiRoots skipped (no valid cert bundle folder supplied); other pillars still run." }
             }
             if ($known.Count -eq 0) {
-                $row = @{ Host=$short; Ping=''; Status='SKIPPED'; Detail='nothing endpoint-fixable (Vuln/OSVersion/STIG route elsewhere)' }
+                $skipDetail = if ($importDropped) { 'not in the imported C2C findings - skipped' } else { 'nothing endpoint-fixable (Vuln/OSVersion/STIG route elsewhere)' }
+                $row = @{ Host=$short; Ping=''; Status='SKIPPED'; Detail=$skipDetail }
                 [void]$rows.Add($row); & $send (@{ type='row' } + $row)
                 [void]$seen.Add($short)
                 continue
@@ -2279,19 +2381,64 @@ function Invoke-C2cFixAction {
             & $send @{ type='log'; level='warn'; text='Run-all: no host has an endpoint-fixable pillar - nothing to run.' }
             return @{ rows=@($rows); summary=@{ total=0; infoSkipped=@($rows).Count } }
         }
+    } elseif ($isLockscreen) {
+        # --- fix-lockscreen: opt-in plain-hostlist utility (v1.9.0 semantics) --------
+        # NOT a scored pillar and NOT CSV-mapped, so it SKIPS the import intersection
+        # entirely: it dials exactly the hosts the operator typed (token-regex parsed,
+        # deduped case-insensitively, short-named), one 'Lockscreen' pillar each, then
+        # joins the SAME self-guard + fan-out path below as every other action.
+        $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+        if ($targets.Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text='No valid host(s) to fix - enter one or more computer names in Target Computers. Nothing was dialed.' }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+        }
+        foreach ($t in $targets) { [void]$plan.Add(@{ Host=($t -split '\.')[0]; Pillars=@('Lockscreen') }) }
     } else {
-        # --- Per-pillar fix: one pillar, applied to every target -------------
+        # --- Per-pillar fix: ONE pillar, dialed at ONLY the hosts the import flagged
+        #     for that pillar (server-re-derived from the CSV), narrowed to the operator's
+        #     checked subset. Mirrors ACAS: the CSV is re-parsed every call and the checked
+        #     hosts are an ALLOW-LIST, never the dispatch list. --------------------------
         $pillar = $script:C2cPillarByAction[$ActionId]
         if (-not $pillar) {
             & $send @{ type='error'; text="Unknown fix action '$ActionId'." }
             return @{ rows=@(); summary=@{} }
         }
-        $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
-        if ($targets.Count -eq 0) {
-            & $send @{ type='log'; level='warn'; text='No valid targets.' }
-            return @{ rows=@(); summary=@{ total=0 } }
+        # Server-derived set S: the hosts the import flagged for THIS pillar (short names).
+        $serverSet   = @(); if ($importPlan.PillarFixTargets.ContainsKey($pillar)) { $serverSet = @($importPlan.PillarFixTargets[$pillar]) }
+        $serverAllow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($h in $serverSet) { if ($h) { [void]$serverAllow.Add(($h -split '\.')[0]) } }
+
+        # The operator's checked subset (token-regex at ingress). Empty -> refuse (the
+        # operator must check hosts in the pillar tab; never silently dial all of S).
+        $submitted = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+        if ($submitted.Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text="No host(s) checked - check the $pillar host(s) to fix in the pillar tab (per-pillar fixes never dial the whole import). Nothing was dialed." }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }
-        foreach ($t in $targets) { [void]$plan.Add(@{ Host=$t; Pillars=@($pillar) }) }
+        # Intersect: dispatch = S (server-recomputed) INTERSECT submitted (allow-list). A
+        # submitted host NOT flagged for this pillar by the import is DROPPED (warn) -
+        # never silently dialed.
+        $dispatch          = New-Object System.Collections.ArrayList
+        $dispatchSeen      = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $droppedNotFlagged = New-Object System.Collections.ArrayList
+        foreach ($t in $submitted) {
+            $short = ($t -split '\.')[0]
+            # Case-INSENSITIVE de-dupe: ArrayList.Contains is ordinal, so 'hostp' + 'HOSTP.dom.mil'
+            # would both dial the same box (destructive double-fix race). HashSet.Add returns
+            # $false when the short name (any case) is already queued - guard the ArrayList add.
+            if ($serverAllow.Contains($short)) { if ($dispatchSeen.Add($short)) { [void]$dispatch.Add($short) } }
+            else { [void]$droppedNotFlagged.Add($t) }
+        }
+        if ($droppedNotFlagged.Count -gt 0) {
+            & $send @{ type='log'; level='warn'; text="Dropped $($droppedNotFlagged.Count) submitted host(s) NOT flagged for $pillar by the import: $($droppedNotFlagged -join ', ')." }
+        }
+        # Re-apply the host-token regex to the FINAL resolved list (never trust the derived list).
+        $dispatch = @(@($dispatch) | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$' })
+        if ($dispatch.Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text="None of the submitted host(s) are flagged for $pillar by the import - nothing to fix." }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+        }
+        foreach ($t in $dispatch) { [void]$plan.Add(@{ Host=$t; Pillars=@($pillar) }) }
     }
 
     # --- Self-guard: drop the dispatcher host from the plan, SKIPPED row each -

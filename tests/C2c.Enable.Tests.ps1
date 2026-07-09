@@ -275,7 +275,7 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - C2C Nemesis v1.9.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
+Describe 'C2C manifest - C2C Nemesis v1.10.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
 
     $man = Get-JanetToolManifest
     $fix = @($man.actions | Where-Object { $_.id -eq 'fix-encryption' })[0]
@@ -290,8 +290,8 @@ Describe 'C2C manifest - C2C Nemesis v1.9.0, per-pillar fix actions (incl. fix-p
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.9.0' {
-        $man.version | Should Be '1.9.0'
+    It 'reports tool version 1.10.0' {
+        $man.version | Should Be '1.10.0'
     }
     It 'exposes 11 actions: scan + import + six per-pillar fixes + fix-lockscreen + run-all + version-check' {
         @($man.actions).Count | Should Be 11

@@ -17,6 +17,37 @@
 $script:Root = Split-Path $PSScriptRoot -Parent
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
 
+# v1.10.0: run-all is import-scoped - it re-derives the plan from a CSV (csvPath) and
+# INTERSECTS the client plan against it. For these tests (which assert the client-plan
+# handling: unknown-pillar drop, per-host isolation, self-guard, PkiRoots bundle) we
+# synthesize a CSV whose re-derived plan is a SUPERSET of the client plan's fixable
+# pillars, so the new intersection is a NO-OP and every legacy assertion holds unchanged.
+# A test can pass -CsvOverride to supply a deliberately-mismatched CSV instead.
+function New-C2cPlanCsv {
+    param([string]$PlanJson)
+    $ruleFor = @{ Monitoring = 'Continuous Monitoring'; Firewall = 'Host Firewall'; Encryption = 'Bitlocker'; AntiMalware = 'MDE Health'; Patches = 'Patching'; PkiRoots = 'PKI Trust Roots' }
+    $fixable = @('Monitoring', 'Firewall', 'Encryption', 'AntiMalware', 'Patches', 'PkiRoots')
+    # PS 5.1 ConvertFrom-Json emits a top-level array as ONE pipeline object, so assign
+    # FIRST then @()-wrap (piping straight into @() would collapse to a 1-element array).
+    $parsed = $null
+    try { $parsed = $PlanJson | ConvertFrom-Json } catch { $parsed = $null }
+    $entries = @($parsed)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('C2C Compliance Status:Compliance,C2C Compliance Status:Date,C2C Compliance Status:Age (Bucketed),Computer Name,Count')
+    foreach ($e in $entries) {
+        $h = ''
+        try { $h = [string]$e.host } catch { $h = '' }
+        if (-not $h) { continue }
+        $fx = @(@($e.pillars | ForEach-Object { [string]$_ }) | Where-Object { $fixable -contains $_ } | Select-Object -Unique)
+        if ($fx.Count -eq 0) { continue }   # a client host with no fixable pillar need not appear
+        $lines = @('Non-Compliant') + @($fx | ForEach-Object { 'Failed Rule - ' + $ruleFor[$_] })
+        [void]$sb.AppendLine('"' + ($lines -join "`n") + '",,,' + $h + '.area52.afnoapps.usaf.mil,1')
+    }
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("c2c_runall_{0}.csv" -f ([guid]::NewGuid().ToString('N')))
+    Set-Content -LiteralPath $p -Value $sb.ToString() -Encoding UTF8
+    return $p
+}
+
 # Run the 'run-all' action with the per-host worker swapped for an ECHO shim that
 # reports the EXACT pillar set each host was dialed with (Detail 'PILLARS=a+b').
 function Invoke-C2cRunAll {
@@ -26,7 +57,7 @@ function Invoke-C2cRunAll {
     # exercise the "no usable bundle -> PkiRoots skipped" path, or a real temp bundle to
     # exercise the "blank path auto-uses the shipped default" path. Restored via the
     # save/restore idiom (never Remove-Item, which would delete the module's real fn).
-    param([string]$Plan, [string]$Confirm = 'FIX', [string]$CertBundleFolder = '', [bool]$Enable = $false, [bool]$Shim = $true, [string]$DefaultBundleOverride)
+    param([string]$Plan, [string]$Confirm = 'FIX', [string]$CertBundleFolder = '', [bool]$Enable = $false, [bool]$Shim = $true, [string]$DefaultBundleOverride, [string]$CsvOverride)
     $script:__rows = New-Object System.Collections.ArrayList
     $script:__logs = New-Object System.Collections.ArrayList
     $emit = {
@@ -50,14 +81,20 @@ function Invoke-C2cRunAll {
             }
         }
     }
+    # Import-scoped run-all needs a csvPath. Synthesize one that matches the plan (so the
+    # server-side intersection is a no-op) unless the caller supplied -CsvOverride.
+    $usingOverride = $PSBoundParameters.ContainsKey('CsvOverride')
+    $csvForPlan = if ($usingOverride) { $CsvOverride } else { New-C2cPlanCsv $Plan }
     try {
         $params = @{ plan = $Plan; confirm = $Confirm; attemptOffline = $true; threads = 4 }
+        if ($csvForPlan) { $params['csvPath'] = $csvForPlan }
         if ($CertBundleFolder) { $params['certBundleFolder'] = $CertBundleFolder }
         if ($Enable)  { $params['enableEncryption'] = $true }
         $res = Invoke-JanetToolAction -ActionId 'run-all' -Params $params -Credential $null -Emit $emit
     } finally {
         if ($Shim) { & $cm { $script:C2cFixBlock = $script:__origFixBlock; Remove-Variable -Name __origFixBlock -Scope Script -ErrorAction SilentlyContinue } }
         if ($overrideDefault) { & $cm { ${function:Get-C2cDefaultCertBundlePath} = $script:__origGDBP; Remove-Variable -Name __origGDBP -Scope Script -ErrorAction SilentlyContinue } }
+        if (-not $usingOverride -and $csvForPlan) { Remove-Item -LiteralPath $csvForPlan -Force -ErrorAction SilentlyContinue }
     }
     [pscustomobject]@{ Result = $res; Rows = @($script:__rows); Logs = @($script:__logs) }
 }
