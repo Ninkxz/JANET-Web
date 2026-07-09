@@ -45,9 +45,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.8.0'
+        version  = '1.9.0'
         category = 'Reporting'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view; (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - fix every imported non-compliant host''s OWN failed pillars only in one pass; (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -168,6 +168,22 @@ function Get-JanetToolManifest {
                 )
             }
             @{
+                id          = 'fix-lockscreen'
+                label       = 'Fix Lock Screen / Wallpaper Cache'
+                description = 'DESTRUCTIVE (HKLM Personalization policy). Remediates the Windows 11 bug where a device keeps showing the CACHED C2C quarantine lock screen / desktop wallpaper after being unquarantined. Per host, over one WinRM round-trip, sets HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization: LockScreenImage (lock screen) and DesktopImagePath / DesktopImageUrl / DesktopImageStatus (desktop wallpaper) to a DEFAULT image resolved ON the target (the unquarantine package''s C:\ProgramData\Microsoft\User Account Pictures\LockScreen.jpg if present, else the built-in C:\Windows\Web defaults) - so Windows stops using the cached quarantine image. Writes a value ONLY where none is already set (never overwrites an operator/GPO value). Result FIXED (set lock and/or desktop) / NO CHANGE (already set) / SKIP (no default image on target) / FAIL. This is an OPT-IN utility fix, NOT a scored C2C pillar and NOT part of run-all. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                kind        = 'stream-table'
+                destructive = $true
+                confirm     = 'Set the default lock screen / wallpaper policy on the target host(s)? Only values that are NOT already set are written (an existing policy is never overwritten). Proceed?'
+                columns     = @('Host','Ping','Status','Detail')
+                inputs      = @(
+                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
+                    @{ name='winrmHeal';      label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
+                )
+            }
+            @{
                 id          = 'run-all'
                 label       = 'RUN ALL - Fix Imported Non-Compliant Hosts'
                 description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The "plan" input is the JSON array the Import action produced ([{host,pillars:[...]}, ...]); per host only its planned pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If a host plans PkiRoots and a valid cert bundle folder was supplied it is installed; if PkiRoots is planned but no bundle was given it is SKIPPED for that host (info note) without aborting the run. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
@@ -215,7 +231,6 @@ function Get-C2cBaselineDefaults {
         graceDays             = 7          # Patching: MECM-deadline/StartTime grace before a pending update counts (TASKORD rule 5)
         taniumService         = 'Tanium Client'
         securityAgentServices = @('masvc','mfemms','macmnsvc','WinDefend','Sense')
-        hostnamePatterns      = @('^MSEKL','^MSEKW')   # dead config: the hostname check was removed (base-specific false-flags)
         dodRootThumbprints    = @()
     }
 }
@@ -264,9 +279,6 @@ function Get-C2cBaseline {
         }
         if ((& $has 'securityAgentServices') -and $obj.securityAgentServices) {
             $cfg.securityAgentServices = @($obj.securityAgentServices | ForEach-Object { [string]$_ } | Where-Object { $_ })
-        }
-        if ((& $has 'hostnamePatterns') -and $obj.hostnamePatterns) {
-            $cfg.hostnamePatterns = @($obj.hostnamePatterns | ForEach-Object { [string]$_ } | Where-Object { $_ })
         }
         if ((& $has 'dodRootThumbprints') -and $obj.dodRootThumbprints) {
             $cfg.dodRootThumbprints = @($obj.dodRootThumbprints | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
@@ -495,6 +507,8 @@ function Get-C2cPillarLabel {
         'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
         'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
         'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
+        'Lockscreen|FIXED'     { 'CACHE FIX APPLIED' }
+        'Lockscreen|NOCHANGE'  { 'ALREADY SET' }
         default                { [string]$Result }
     }
 }
@@ -1809,6 +1823,51 @@ $script:C2cFixBlock = {
             } catch { & $add 'PkiRoots' 'error' 'FAIL' $_.Exception.Message }
         }
 
+        # L. Lockscreen - remediate the Windows 11 CACHED quarantine lock screen / desktop
+        #    wallpaper: force the HKLM Personalization policy to a DEFAULT image so Windows
+        #    stops using the cached quarantine one. Writes a value ONLY where none is already
+        #    set (never overwrites an operator/GPO value). Uses built-in cmdlets only (pool-safe).
+        if ($Pillars -contains 'Lockscreen') {
+            try {
+                $polKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
+                if (-not (Test-Path -LiteralPath $polKey)) { New-Item -Path $polKey -Force | Out-Null }
+                $cur = $null; try { $cur = Get-ItemProperty -LiteralPath $polKey -ErrorAction SilentlyContinue } catch {}
+                $hasVal = { param($n) $cur -and $cur.PSObject.Properties[$n] -and -not [string]::IsNullOrWhiteSpace([string]$cur.$n) }
+                # Resolve default images ON THIS target (the paths must exist here). Prefer the
+                # unquarantine package's LockScreen.jpg, else the built-in Windows defaults.
+                $lockImg = $null
+                foreach ($c in @("$env:ProgramData\Microsoft\User Account Pictures\LockScreen.jpg", "$env:SystemRoot\Web\Screen\img100.jpg")) { if (Test-Path -LiteralPath $c) { $lockImg = $c; break } }
+                if (-not $lockImg) { $g = @(Get-ChildItem -LiteralPath "$env:SystemRoot\Web\Screen" -Filter 'img*.jpg' -ErrorAction SilentlyContinue | Sort-Object Name); if ($g.Count -gt 0) { $lockImg = $g[0].FullName } }
+                $deskImg = $null
+                foreach ($c in @("$env:SystemRoot\Web\Wallpaper\Windows\img0.jpg")) { if (Test-Path -LiteralPath $c) { $deskImg = $c; break } }
+                if (-not $deskImg) { $g = @(Get-ChildItem -LiteralPath "$env:SystemRoot\Web\Wallpaper\Windows" -Filter 'img*.jpg' -ErrorAction SilentlyContinue | Sort-Object Name); if ($g.Count -gt 0) { $deskImg = $g[0].FullName } }
+
+                $set = New-Object System.Collections.ArrayList
+                $skip = New-Object System.Collections.ArrayList
+                # Lock screen (the value the operator named).
+                if (& $hasVal 'LockScreenImage')  { [void]$skip.Add("lock already set ($([string]$cur.LockScreenImage))") }
+                elseif (-not $lockImg)            { [void]$skip.Add('no default lock image on target') }
+                else { New-ItemProperty -LiteralPath $polKey -Name 'LockScreenImage' -Value $lockImg -PropertyType String -Force | Out-Null; [void]$set.Add("lock -> $lockImg") }
+                # Desktop wallpaper (Personalization CSP-style DesktopImage* values).
+                if (& $hasVal 'DesktopImagePath') { [void]$skip.Add("desktop already set ($([string]$cur.DesktopImagePath))") }
+                elseif (-not $deskImg)            { [void]$skip.Add('no default desktop image on target') }
+                else {
+                    New-ItemProperty -LiteralPath $polKey -Name 'DesktopImagePath'   -Value $deskImg -PropertyType String -Force | Out-Null
+                    New-ItemProperty -LiteralPath $polKey -Name 'DesktopImageUrl'    -Value $deskImg -PropertyType String -Force | Out-Null
+                    New-ItemProperty -LiteralPath $polKey -Name 'DesktopImageStatus' -Value 1        -PropertyType DWord  -Force | Out-Null
+                    [void]$set.Add("desktop -> $deskImg")
+                }
+                $skipTxt = if ($skip.Count -gt 0) { " | skipped: $($skip -join '; ')" } else { '' }
+                if ($set.Count -gt 0) {
+                    & $add 'Lockscreen' 'setpolicy' 'FIXED' ("set $($set -join '; ')$skipTxt")
+                } elseif (@($skip | Where-Object { $_ -match 'already set' }).Count -gt 0) {
+                    & $add 'Lockscreen' 'none' 'NOCHANGE' ("already set - $($skip -join '; ')")
+                } else {
+                    & $add 'Lockscreen' 'none' 'SKIP' ($skip -join '; ')
+                }
+            } catch { & $add 'Lockscreen' 'error' 'FAIL' $_.Exception.Message }
+        }
+
         return @{ RemoteName = $env:COMPUTERNAME; Pillars = @($results) }
     }
 
@@ -1837,11 +1896,13 @@ $script:C2cFixBlock = {
     $fixed  = @($pillarResults | Where-Object { $_.Result -eq 'FIXED' -or $_.Result -eq 'STARTED' }).Count
     $failed = @($pillarResults | Where-Object { $_.Result -eq 'FAIL'   }).Count
     $notVer = @($pillarResults | Where-Object { $_.Result -eq 'NOT VERIFIED' }).Count
+    $skip   = @($pillarResults | Where-Object { $_.Result -eq 'SKIP'   }).Count
     $tot    = $pillarResults.Count
     if     ($failed -ge 1 -and $failed -eq $tot)  { $r.Status = 'FAILED' }
     elseif ($notVer -ge 1 -and $failed -eq 0)     { $r.Status = 'NOT VERIFIED' }
     elseif ($fixed -ge 1 -and $failed -eq 0)      { $r.Status = 'FIXED' }
     elseif ($failed -ge 1)                        { $r.Status = 'PARTIAL' }
+    elseif ($skip -ge 1 -and $skip -eq $tot)      { $r.Status = 'SKIPPED' }   # e.g. Lockscreen with no default image on the target
     else                                          { $r.Status = 'NO CHANGE' }
 
     # Per-pillar DISPLAY label map: pillar-flavoured names for the raw FIXED/NOCHANGE/
@@ -1987,6 +2048,7 @@ $script:C2cPillarByAction = @{
     'fix-patches'     = 'Patches'
     'fix-encryption'  = 'Encryption'
     'fix-pki'         = 'PkiRoots'
+    'fix-lockscreen'  = 'Lockscreen'   # dedicated opt-in cache fix; NOT in C2cFixablePillars (never in run-all)
 }
 
 # --- Admin-side cert-bundle reader (fix-pki) ---------------------------------

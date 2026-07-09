@@ -7,10 +7,6 @@
                                   "WinDefend",
                                   "Sense"
                               ],
-    "hostnamePatterns":  [
-                             "^MSEKL",
-                             "^MSEKW"
-                         ],
     "dodRootThumbprints":  [
                                "D9AFEED1CE9E9AFCEC45BBBBF72D3C06586FE04E",
                                "D73CA91102A2204A36459ED32213B467D7CE97FB",

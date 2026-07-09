@@ -275,7 +275,7 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C manifest - C2C Nemesis v1.8.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
+Describe 'C2C manifest - C2C Nemesis v1.9.0, per-pillar fix actions (incl. fix-pki) + run-all + version-check' {
 
     $man = Get-JanetToolManifest
     $fix = @($man.actions | Where-Object { $_.id -eq 'fix-encryption' })[0]
@@ -290,15 +290,15 @@ Describe 'C2C manifest - C2C Nemesis v1.8.0, per-pillar fix actions (incl. fix-p
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.8.0' {
-        $man.version | Should Be '1.8.0'
+    It 'reports tool version 1.9.0' {
+        $man.version | Should Be '1.9.0'
     }
-    It 'exposes 10 actions: scan + import + six per-pillar fixes + run-all + version-check' {
-        @($man.actions).Count | Should Be 10
+    It 'exposes 11 actions: scan + import + six per-pillar fixes + fix-lockscreen + run-all + version-check' {
+        @($man.actions).Count | Should Be 11
     }
     It 'has the exact action id set' {
         $ids = @($man.actions | ForEach-Object { $_.id } | Sort-Object)
-        $expect = @('fix-antimalware','fix-encryption','fix-firewall','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
+        $expect = @('fix-antimalware','fix-encryption','fix-firewall','fix-lockscreen','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
         ($ids -join ',') | Should Be ($expect -join ',')
     }
     It 'has scan + import + version-check (read-only) and all fix-* + run-all (destructive)' {

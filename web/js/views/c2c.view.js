@@ -222,6 +222,25 @@
       fixCard.appendChild(fixBody);
       left.appendChild(fixCard);
 
+      // --- LOCKSCREEN / WALLPAPER CACHE FIX (opt-in, destructive; admin session required) ---
+      var lockCard = sectionCard('LOCKSCREEN / WALLPAPER CACHE FIX (opt-in, destructive)');
+      var lockIntro = el('div'); lockIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
+      lockIntro.textContent = 'Clears the stuck quarantine lock screen / wallpaper after unquarantine: writes the Windows DEFAULT image into HKLM Personalization policy on each Target Computer - ONLY where no value is already set. Not a scored pillar; never part of the run-all. Uses the Type-FIX confirm, Max concurrent and offline options in FIX PILLARS above.';
+      lockCard.appendChild(lockIntro);
+      var lockArm = ui.checkbox('Arm the cache fix (writes HKLM policy only where unset - never overwrites)', { title: "Opt-in. On each target: LockScreenImage (lock screen) + DesktopImagePath/Url/Status (wallpaper) under HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization, pointed at the target's own default image (LockScreen.jpg -> img100.jpg; wallpaper img0.jpg). A value already set by an operator or GPO is NEVER overwritten." });
+      lockArm.style.margin = '0 0 8px';
+      lockArm._cb.addEventListener('change', function () { updateTargetButtons(); });
+      lockCard.appendChild(lockArm);
+      var lockBtn = ui.button('APPLY LOCKSCREEN / WALLPAPER FIX', { variant: 'gold', title: 'Run the cache fix on every host in Target Computers (destructive - writes HKLM policy). Only-if-unset: a host with both values already set reports NO CHANGE; no default image on the target reports SKIPPED.' });
+      lockBtn.style.cssText += ';width:100%;font-weight:700';
+      lockBtn.disabled = true;
+      lockBtn.onclick = function () { doLockscreenFix(); };
+      lockCard.appendChild(lockBtn);
+      var lockFoot = el('div', 'muted', 'Requires an admin session + the FIX confirm above. FIXED / NO CHANGE / SKIPPED / FAILED stream into the results grid like every other fix.');
+      lockFoot.style.cssText = 'font-size:11px;line-height:1.35;margin-top:6px';
+      lockCard.appendChild(lockFoot);
+      left.appendChild(lockCard);
+
       // --- IMPORT C2C COMPLIANCE CSV (optional convenience; local parse, no admin gate) ---
       var importCard = sectionCard('IMPORT C2C COMPLIANCE CSV (optional)', 'cyan');
       var importIntro = el('div'); importIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
@@ -410,6 +429,7 @@
         selAllBtn.disabled = on; selNoneBtn.disabled = on;
         fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
         fixWinrmHeal._cb.disabled = on; pkiBundleInput.disabled = on;
+        lockArm._cb.disabled = on;
         if (encEnableCb) encEnableCb._cb.disabled = on;
         // per-card checkboxes
         Array.prototype.forEach.call(fixBody.querySelectorAll('[data-fixcb]'), function (c) { c.disabled = on; });
@@ -433,6 +453,8 @@
           b.textContent = 'Fix ' + meta.label + ' on ' + n + ' target host' + (n === 1 ? '' : 's');
           b.disabled = locked || n === 0;
         });
+        lockBtn.textContent = 'APPLY LOCKSCREEN / WALLPAPER FIX (' + n + ' host' + (n === 1 ? '' : 's') + ')';
+        lockBtn.disabled = locked || n === 0 || !lockArm._cb.checked;
       }
 
       function summarize() {
@@ -804,6 +826,41 @@
         if (key === 'Encryption') params.enableEncryption = enableEnc;
         if (key === 'PkiRoots') params.certBundleFolder = bundleFolder;
         run = ctx.run(meta.action, params, { keyOf: keyByHost, destructive: true });
+        bindFixRun();
+      }
+
+      // ---- Lockscreen / Wallpaper cache fix (opt-in utility; DESTRUCTIVE; TARGET-driven;
+      // admin session + FIX confirm + arm checkbox). Not a scored pillar - never in run-all. ----
+      async function doLockscreenFix() {
+        if (isRunning()) return;
+        var hosts = targets.hosts();
+        if (!hosts.length) { alertDialog('No target hosts', NEED_TARGETS); return; }
+        if (!lockArm._cb.checked) { alertDialog('Not armed', 'Tick "Arm the cache fix" checkbox first - this utility is opt-in.'); return; }
+        if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
+        if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
+
+        var pf = [
+          { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
+          { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+          { label: 'Only-if-unset: a value already set (operator or GPO) is NEVER overwritten - reports NO CHANGE', ok: true },
+          { label: 'No default image on a target -> SKIPPED (the policy is never pointed at a missing file)', ok: true }
+        ];
+        if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
+
+        var ok = await ctx.arm({
+          title: 'Arm Lockscreen / Wallpaper Cache Fix',
+          banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
+          body: 'About to write the <b>DEFAULT</b> lock screen / wallpaper into <b>HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization</b> on the <b>' + hosts.length + '</b> host(s) in Target Computers.'
+            + '<br><b>Only-if-unset:</b> a value already present (operator or GPO) is NEVER overwritten - the host reports NO CHANGE. No default image found on a target -> SKIPPED.',
+          preflight: pf, okText: 'Run Lockscreen / Wallpaper Fix', cancelText: 'Cancel'
+        });
+        if (!ok) { log.append({ text: '[' + ts() + '] Lockscreen / Wallpaper fix cancelled at the arming dialog.', level: 'warn' }); return; }
+
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C Lockscreen / Wallpaper Cache Fix on ' + hosts.length + ' target host(s)');
+        lockInputs(true);
+        run = ctx.run('fix-lockscreen', { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked }, { keyOf: keyByHost, destructive: true });
         bindFixRun();
       }
 
