@@ -28,7 +28,7 @@
   'use strict';
 
   var HOST_RE = /^[A-Za-z0-9._-]+$/;
-  var EXPORT_COLS = [['Host', 'Host'], ['Ping', 'Ping'], ['Status', 'Status'], ['Missing', 'Missing'], ['Detail', 'Detail']];
+  var EXPORT_COLS = [['Host', 'Host'], ['Ping', 'Ping'], ['Status', 'Status'], ['Missing', 'Missing'], ['Legacy', 'Legacy'], ['Detail', 'Detail']];
 
   function statusCellCls(v) {
     var s = String(v == null ? '' : v);
@@ -186,6 +186,7 @@
           { key: 'Ping', label: 'PING', width: 90 },
           { key: 'Status', label: 'STATUS', width: 160, render: function (r) { return { text: r.Status == null ? '' : String(r.Status), cls: statusCellCls(r.Status) }; } },
           { key: 'Missing', label: 'MISSING', width: 90 },
+          { key: 'Legacy', label: 'LEGACY', width: 80, render: function (r) { var t = String(r.Legacy == null ? '' : r.Legacy); return { text: t, title: 'Allowlisted legacy DoD intermediates present in LocalMachine\\CA (present/total)' }; } },
           { key: 'Detail', label: 'DETAIL', render: function (r) { var t = String(r.Detail == null ? '' : r.Detail); return { text: t, title: t }; } }
         ],
         rowClass: function (r) { return statusRowCls(r.Status); }
@@ -304,7 +305,7 @@
         if (isRunning()) return;
         var hosts = targets.hosts();
         grid.clear(); prog.reset(); stats.reset();
-        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Detail: 'Queued' }); });
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Legacy: '', Detail: 'Queued' }); });
         actlog.append({ text: '[' + ts() + '] Check Trust Certs on ' + hosts.length + ' host(s).', level: 'accent' });
         lockInputs(true);
         run = ctx.run('check', {
@@ -342,7 +343,7 @@
         });
         if (!ok) { actlog.append({ text: '[' + ts() + '] Deploy cancelled at the arming dialog.', level: 'warn' }); return; }
         grid.clear(); prog.reset(); stats.reset();
-        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Detail: 'Queued' }); });
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Legacy: '', Detail: 'Queued' }); });
         actlog.append({ text: '[' + ts() + '] Deploy Trust Certs on ' + hosts.length + ' host(s) (additive; never removes).', level: 'accent' });
         lockInputs(true);
         run = ctx.run('deploy', {

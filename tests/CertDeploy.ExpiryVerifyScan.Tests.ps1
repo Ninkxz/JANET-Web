@@ -176,8 +176,8 @@ Describe 'CertDeploy scan-cert-management - manifest action + reconciler verdict
     $man  = & $cm { Get-JanetToolManifest }
     $scan = @($man.actions | Where-Object { $_.id -eq 'scan-cert-management' })[0]
 
-    It 'manifest version is bumped to 1.1.0' {
-        $man.version | Should Be '1.1.0'
+    It 'manifest version is bumped to 1.2.0' {
+        $man.version | Should Be '1.2.0'
     }
     It '(d) exposes the scan-cert-management action (read-only, correct label + kind)' {
         $scan | Should Not BeNullOrEmpty

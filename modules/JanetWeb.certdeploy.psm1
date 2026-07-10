@@ -46,17 +46,17 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.1.0'
+        version  = '1.2.0'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
             @{
                 id          = 'check'
                 label       = 'Check Trust Certs (read-only)'
-                description = 'READ-ONLY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (root\*.cer -> Root, Intermediate\*.cer -> CA, Untrusted\*.cer -> Disallowed, loose *.cer -> Root; blank folder = the shipped Packages\DoD-Certs), then per host open each LocalMachine store READ-ONLY and compute which bundle roots are MISSING per store. Status ALL PRESENT (0 missing) / MISSING N / OFFLINE / CHECK ERROR. Detail lists the per-store missing counts (Root x / CA y / Disallowed z) plus a few example missing subjects. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes to a store on this path; needs no admin session and no confirm word.'
+                description = 'READ-ONLY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (root\*.cer -> Root, Intermediate\*.cer -> CA, Untrusted\*.cer -> Disallowed, loose *.cer -> Root; blank folder = the shipped Packages\DoD-Certs), then per host open each LocalMachine store READ-ONLY and compute which bundle roots are MISSING per store. Status ALL PRESENT (0 missing) / MISSING N / OFFLINE / CHECK ERROR. Detail lists the per-store missing counts (Root x / CA y / Disallowed z) plus a few example missing subjects. The Legacy column reports present/total for the four allowlisted legacy DoD intermediates (DOD EMAIL/ID CA-59, SW CA-60/61) in LocalMachine\CA - expired-but-required for legacy chain validation - and names any that are missing. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes to a store on this path; needs no admin session and no confirm word.'
                 kind        = 'stream-table'
                 destructive = $false
-                columns     = @('Host','Ping','Status','Missing','Detail')
+                columns     = @('Host','Ping','Status','Missing','Legacy','Detail')
                 inputs      = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='certBundleFolder'; label='DoD/LTMA trust bundle folder (blank = shipped Packages\DoD-Certs)'; type='text'; required=$false },
@@ -119,6 +119,29 @@ function Get-JanetToolManifest {
 # auto-falls-back here (Resolve-CertDeployBundleFolder). Read-only: never written.
 function Get-CertDeployDefaultBundlePath { Join-Path $PSScriptRoot '..\Packages\DoD-Certs' }
 
+# --- LegacyIntermediates: a NARROW, audited exception to the expiry guard --------
+# These four DoD intermediate CAs are EXPIRED but are INTENTIONALLY kept installed on
+# endpoints for legacy chain / signature validation - they signed still-in-use certs and
+# code (e.g. SW CA-60/61 signed legacy software) that must still validate. The expiry
+# guard ("never push a dead trust anchor") consults this allowlist: an expired cert whose
+# thumbprint is on this list is PUSHABLE; anything else expired is STILL refused. This does
+# NOT weaken the guard for any other cert. Do NOT add a thumbprint here without confirming
+# the cert is genuinely required for legacy validation - this is a deliberate exception,
+# not a general "allow expired" switch (that is the separate opt-in includeExpired input).
+# Keyed by exact uppercase SHA-1 thumbprint (no spaces).
+$script:CertDeployLegacyIntermediates = [ordered]@{
+    '53FDE0F40638BD1A68A68D1E91089009B33BAE5E' = 'DOD EMAIL CA-59'  # issuer DoD Root CA 3, expired 2025-04-02
+    '1907FC2B223EE0301B45745BDB59AAD90FE7C5D7' = 'DOD ID CA-59'     # issuer DoD Root CA 3, expired 2025-04-02
+    '5DFFDAB658915FA6B0DB4E0BCF70D5BB1B8425FC' = 'DOD SW CA-60'     # issuer DoD Root CA 3, expired 2025-04-02
+    '5F555AB8A87DD146314171621245CF720BF53B8A' = 'DOD SW CA-61'     # issuer DoD Root CA 5, expired 2025-03-31
+}
+# $true when $Thumbprint (any spacing/case) is an allowlisted legacy intermediate.
+function Test-CertDeployLegacyAllowed {
+    param([string]$Thumbprint)
+    $tp = (([string]$Thumbprint) -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
+    return ($tp -and $script:CertDeployLegacyIntermediates.Contains($tp))
+}
+
 # Admin-side cert-bundle reader (COPIED from Get-C2cCertBundle, extended to also
 # capture each cert's Subject so the read-only Check can show example missing
 # subjects). Enumerates (case-insensitive) <folder>\root\*.cer -> Root,
@@ -128,7 +151,7 @@ function Get-CertDeployDefaultBundlePath { Join-Path $PSScriptRoot '..\Packages\
 #    CertCount; FileCount; Folder }. Ok=$false + Error if missing or ZERO certs.
 function Get-CertDeployBundle {
     param([string]$Folder)
-    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder=''; ExpiredCount=0; Expired=@() }
+    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder=''; ExpiredCount=0; Expired=@(); LegacyAllowed=@(); LegacyAllowedCount=0 }
     $f = ([string]$Folder).Trim().Trim('"')
     $res.Folder = $f
     if (-not $f) { $res.Error = 'no cert bundle folder provided'; return $res }
@@ -173,18 +196,25 @@ function Get-CertDeployBundle {
     # can exclude them by default and the read-only Check can always surface the count.
     $now = Get-Date
     $expired = New-Object System.Collections.ArrayList
+    $legacy  = New-Object System.Collections.ArrayList   # expired BUT allowlisted -> pushable, reported separately
     foreach ($grp in @('Root','CA','Disallowed')) {
         foreach ($c in @($res.$grp)) {
             if (-not $c) { continue }
             $na = $null
             try { if ($c.NotAfter) { $na = [datetime]$c.NotAfter } } catch { $na = $null }
             if ($na -and ($na -lt $now)) {
-                [void]$expired.Add(@{ Thumbprint=[string]$c.Thumbprint; Subject=[string]$c.Subject; NotAfter=$na.ToString('o'); Store=[string]$c.Store })
+                $rec = @{ Thumbprint=[string]$c.Thumbprint; Subject=[string]$c.Subject; NotAfter=$na.ToString('o'); Store=[string]$c.Store }
+                # An expired cert on the LegacyIntermediates allowlist is NOT a dead anchor to
+                # exclude - it is intentionally pushed. Everything else expired is a dead anchor.
+                if (Test-CertDeployLegacyAllowed $c.Thumbprint) { [void]$legacy.Add($rec) }
+                else { [void]$expired.Add($rec) }
             }
         }
     }
     $res.Expired = @($expired)
     $res.ExpiredCount = $expired.Count
+    $res.LegacyAllowed = @($legacy)
+    $res.LegacyAllowedCount = $legacy.Count
     return $res
 }
 
@@ -221,13 +251,19 @@ function Resolve-CertDeployBundleFolder {
 function Convert-CertDeployBundleToJson {
     param($Bundle, [bool]$IncludeExpired = $false)
     $now = Get-Date
+    # Capture the allowlist as a LOCAL set so the GetNewClosure() closure below never depends
+    # on module-function resolution (a closure may not see Test-CertDeployLegacyAllowed).
+    $legacySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($k in $script:CertDeployLegacyIntermediates.Keys) { [void]$legacySet.Add([string]$k) }
     $sel = {
         param($items)
         @(@($items) | Where-Object { $_ } | Where-Object {
             if ($IncludeExpired) { return $true }
             $na = $null
             try { if ($_.NotAfter) { $na = [datetime]$_.NotAfter } } catch { $na = $null }
-            return ((-not $na) -or ($na -ge $now))
+            if ((-not $na) -or ($na -ge $now)) { return $true }         # within validity -> keep
+            $tp = (([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
+            return $legacySet.Contains($tp)                              # expired -> keep ONLY if allowlisted
         } | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
     }.GetNewClosure()
     $payload = @{
@@ -425,7 +461,22 @@ function Get-CertDeployCheckRow {
             if ($ex.Count -gt 0) { $detail += " - e.g. " + ($ex -join '; ') }
         }
     }
-    return @{ Host=[string]$Res.Host; Ping=[string]$Res.Ping; Status=$status; Missing=$missCell; Detail=$detail }
+    # Legacy intermediates (allowlisted expired CAs, LocalMachine\CA): report present/total
+    # for exactly the four. They are bundle-wanted, so each is either present or in MissCA;
+    # blank when the host could not be read (offline / check error).
+    $legacyCell = ''
+    if ($ok -and $script:CertDeployLegacyIntermediates -and $script:CertDeployLegacyIntermediates.Count -gt 0) {
+        $missCaSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($tp in @($Res.MissCA)) { [void]$missCaSet.Add((([string]$tp) -replace '[^0-9A-Fa-f]','')) }
+        $total = $script:CertDeployLegacyIntermediates.Count
+        $missNames = New-Object System.Collections.ArrayList
+        foreach ($k in $script:CertDeployLegacyIntermediates.Keys) {
+            if ($missCaSet.Contains([string]$k)) { [void]$missNames.Add([string]$script:CertDeployLegacyIntermediates[$k]) }
+        }
+        $legacyCell = "$($total - $missNames.Count)/$total"
+        if ($missNames.Count -gt 0) { $detail += "  |  Legacy CA missing: $($missNames -join ', ')" }
+    }
+    return @{ Host=[string]$Res.Host; Ping=[string]$Res.Ping; Status=$status; Missing=$missCell; Legacy=$legacyCell; Detail=$detail }
 }
 
 # --- scan-cert-management verdict + row builder (pure, admin-side) -------------
@@ -760,9 +811,14 @@ function Invoke-CertDeployCheckAction {
     $expiredCount = [int]$bundle.ExpiredCount
     if ($expiredCount -gt 0) {
         $expSubs = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
-        & $send @{ type='log'; level='warn'; text="Bundle contains $expiredCount EXPIRED cert(s) (dead trust anchors): $($expSubs -join '; '). Deploy EXCLUDES these by default." }
+        & $send @{ type='log'; level='warn'; text="Bundle contains $expiredCount EXPIRED cert(s) (dead trust anchors, not allowlisted): $($expSubs -join '; '). Deploy EXCLUDES these by default." }
     } else {
         & $send @{ type='log'; level='info'; text='Bundle contains 0 expired cert(s) - all trust anchors are within validity.' }
+    }
+    $legacyCount = [int]$bundle.LegacyAllowedCount
+    if ($legacyCount -gt 0) {
+        $legSubs = @(@($bundle.LegacyAllowed) | ForEach-Object { [string]$_.Subject })
+        & $send @{ type='log'; level='info'; text="Bundle contains $legacyCount expired-but-ALLOWLISTED legacy intermediate(s) (LegacyIntermediates - kept for legacy chain validation, Deploy pushes these): $($legSubs -join '; '). Legacy column shows present/total per host." }
     }
 
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
@@ -785,7 +841,7 @@ function Invoke-CertDeployCheckAction {
     $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
     $pool.Open()
-    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Missing=''; Detail='waiting for a runspace...' }) }
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Status='Queued'; Missing=''; Legacy=''; Detail='waiting for a runspace...' }) }
     $jobs = New-Object System.Collections.ArrayList
     foreach ($h in $targets) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
@@ -993,13 +1049,20 @@ function Invoke-CertDeployDeployAction {
     $includeExpired  = Get-CertDeployBool $Params['includeExpired'] $false
     $expiredCount    = [int]$bundle.ExpiredCount
     $expiredSubjects = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
+    $legacyCount     = [int]$bundle.LegacyAllowedCount
+    $legacySubjects  = @(@($bundle.LegacyAllowed) | ForEach-Object { [string]$_.Subject })
     $bundleJson      = Convert-CertDeployBundleToJson $bundle $includeExpired
+    # pushCount excludes only the TRULY dead anchors ($expiredCount, which already omits the
+    # allowlisted legacy intermediates - those stay in CertCount and DO push).
     $pushCount       = if ($includeExpired) { [int]$bundle.CertCount } else { ([int]$bundle.CertCount - $expiredCount) }
+    if ($legacyCount -gt 0) {
+        & $send @{ type='log'; level='warn'; text="[LEGACY] $legacyCount expired-but-allowlisted intermediate(s) WILL be pushed (LegacyIntermediates - required for legacy chain/signature validation): $($legacySubjects -join '; ')." }
+    }
     if ($expiredCount -gt 0) {
         if ($includeExpired) {
             & $send @{ type='log'; level='warn'; text="[INCLUDE] $expiredCount expired cert(s) included and flagged (EXPIRED - dead trust anchor): $($expiredSubjects -join '; ')." }
         } else {
-            & $send @{ type='log'; level='warn'; text="[SKIP] $expiredCount expired cert(s) excluded (dead trust anchors): $($expiredSubjects -join '; ')." }
+            & $send @{ type='log'; level='warn'; text="[SKIP] $expiredCount expired cert(s) excluded (dead trust anchors, not allowlisted): $($expiredSubjects -join '; ')." }
         }
     }
     if ($pushCount -le 0) {

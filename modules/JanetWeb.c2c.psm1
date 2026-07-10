@@ -52,8 +52,8 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.12.0'
-        category = 'Reporting'
+        version  = '1.13.0'
+        category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all.'
         actions  = @(
             @{
@@ -2147,9 +2147,21 @@ $script:C2cPillarByAction = @{
 #    FileCount; Folder; ExpiredCount; Expired=@(@{Thumbprint;Subject;NotAfter;Store}) }.
 # CertCount counts only USABLE (non-expired) certs. Ok=$false with a populated Error if
 # the folder is missing, yields ZERO .cer, or yields ONLY expired certs (nothing usable).
+# --- LegacyIntermediates: NARROW, audited exception to the expiry guard (mirrors
+# JanetWeb.certdeploy). Four EXPIRED DoD intermediate CAs intentionally kept installed for
+# legacy chain / signature validation - fix-pki pushes these despite expiry; every other
+# expired cert stays a refused dead anchor. Keyed by exact uppercase SHA-1 thumbprint. Do
+# NOT add a thumbprint here without confirming the cert is required for legacy validation.
+$script:C2cLegacyIntermediates = [ordered]@{
+    '53FDE0F40638BD1A68A68D1E91089009B33BAE5E' = 'DOD EMAIL CA-59'  # issuer DoD Root CA 3, expired 2025-04-02
+    '1907FC2B223EE0301B45745BDB59AAD90FE7C5D7' = 'DOD ID CA-59'     # issuer DoD Root CA 3, expired 2025-04-02
+    '5DFFDAB658915FA6B0DB4E0BCF70D5BB1B8425FC' = 'DOD SW CA-60'     # issuer DoD Root CA 3, expired 2025-04-02
+    '5F555AB8A87DD146314171621245CF720BF53B8A' = 'DOD SW CA-61'     # issuer DoD Root CA 5, expired 2025-03-31
+}
+
 function Get-C2cCertBundle {
     param([string]$Folder)
-    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder=''; ExpiredCount=0; Expired=@() }
+    $res = @{ Ok=$false; Error=''; Root=@(); CA=@(); Disallowed=@(); CertCount=0; FileCount=0; Folder=''; ExpiredCount=0; Expired=@(); LegacyAllowed=@(); LegacyAllowedCount=0 }
     $f = ([string]$Folder).Trim().Trim('"')
     $res.Folder = $f
     if (-not $f) { $res.Error = 'no cert bundle folder provided'; return $res }
@@ -2160,16 +2172,27 @@ function Get-C2cCertBundle {
         Disallowed = New-Object System.Collections.ArrayList
     }
     $expired = New-Object System.Collections.ArrayList
+    $legacy  = New-Object System.Collections.ArrayList   # expired BUT allowlisted -> pushed, tracked separately
+    # Local set so $loadCer never depends on module-function resolution (mirrors certdeploy).
+    $legacySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($k in $script:C2cLegacyIntermediates.Keys) { [void]$legacySet.Add([string]$k) }
     $loadCer = {
         param($file, $store)
         try {
             $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
             $cert.Import($file)
             # Expired = NotAfter < now (admin-side clock). A dead trust anchor is never
-            # serialized/pushed - record it in Expired[] and skip the usable group.
+            # serialized/pushed - record it in Expired[] and skip the usable group - UNLESS
+            # it is an allowlisted legacy intermediate (kept for legacy chain validation),
+            # in which case it is tracked in LegacyAllowed[] and pushed like a valid cert.
             if ($cert.NotAfter -lt (Get-Date)) {
-                [void]$expired.Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; Subject=[string]$cert.Subject; NotAfter=$cert.NotAfter.ToString('o'); Store=$store })
-                return $true
+                $rec = [pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; Subject=[string]$cert.Subject; NotAfter=$cert.NotAfter.ToString('o'); Store=$store }
+                $tp  = (([string]$cert.Thumbprint) -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
+                if (-not $legacySet.Contains($tp)) {
+                    [void]$expired.Add($rec)
+                    return $true
+                }
+                [void]$legacy.Add($rec)   # allowlisted -> fall through and push it
             }
             $b64  = [Convert]::ToBase64String($cert.RawData)
             [void]$groups[$store].Add([pscustomobject]@{ Thumbprint=[string]$cert.Thumbprint; B64=$b64; File=(Split-Path $file -Leaf) })
@@ -2191,6 +2214,8 @@ function Get-C2cCertBundle {
     }
     $res.ExpiredCount = $expired.Count
     $res.Expired      = @($expired)
+    $res.LegacyAllowed = @($legacy)
+    $res.LegacyAllowedCount = $legacy.Count
     $total = $groups.Root.Count + $groups.CA.Count + $groups.Disallowed.Count
     if ($total -eq 0) {
         if ($expired.Count -gt 0) {
@@ -2298,7 +2323,11 @@ function Invoke-C2cFixAction {
                 # excluded from the pushed set by Get-C2cCertBundle; report the exclusion.
                 if ([int]$bundle.ExpiredCount -gt 0) {
                     $expSubjects = (@($bundle.Expired | ForEach-Object { [string]$_.Subject }) -join ', ')
-                    & $send @{ type='log'; level='warn'; text="[SKIP] $($bundle.ExpiredCount) expired cert(s) excluded (dead trust anchors): $expSubjects" }
+                    & $send @{ type='log'; level='warn'; text="[SKIP] $($bundle.ExpiredCount) expired cert(s) excluded (dead trust anchors, not allowlisted): $expSubjects" }
+                }
+                if ([int]$bundle.LegacyAllowedCount -gt 0) {
+                    $legSubjects = (@($bundle.LegacyAllowed | ForEach-Object { [string]$_.Subject }) -join ', ')
+                    & $send @{ type='log'; level='warn'; text="[LEGACY] $($bundle.LegacyAllowedCount) expired-but-allowlisted intermediate(s) WILL be pushed (LegacyIntermediates - legacy chain/signature validation): $legSubjects" }
                 }
                 $bundleJson = Convert-C2cBundleToJson $bundle
                 $bundleOk   = $true
