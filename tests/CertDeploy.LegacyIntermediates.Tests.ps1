@@ -106,6 +106,22 @@ Describe 'c2c Get-C2cCertBundle census - fix-pki pushes the four despite expiry'
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Describe 'certdeploy Check Legacy column - gated on bundle CA membership (no false 4/4)' {
+    $resAll   = @{ Host='H1'; Ping='TCP 5985'; Status='OK'; Ok=$true; MissRoot=@(); MissCA=@(); MissDis=@() }
+    $resMiss1 = @{ Host='H2'; Ping='TCP 5985'; Status='OK'; Ok=$true; MissRoot=@(); MissCA=@('5F555AB8A87DD146314171621245CF720BF53B8A'); MissDis=@() }
+    It 'blank when NO legacy certs are in the bundle CA group (custom folder lacking them) - no false 4/4' {
+        (& $cd { param($res) Get-CertDeployCheckRow -Res $res -BundleCertCount 5 -SubjectMap @{} -LegacyInBundleCa @() } $resMiss1).Legacy | Should Be ''
+    }
+    It 'reports present/total for the legacy certs that ARE in the bundle CA group' {
+        (& $cd { param($res,$leg) Get-CertDeployCheckRow -Res $res -BundleCertCount 5 -SubjectMap @{} -LegacyInBundleCa $leg } $resAll $script:Four).Legacy | Should Be '4/4'
+    }
+    It 'a host missing one legacy cert -> 3/4 and names it' {
+        $r = & $cd { param($res,$leg) Get-CertDeployCheckRow -Res $res -BundleCertCount 5 -SubjectMap @{} -LegacyInBundleCa $leg } $resMiss1 $script:Four
+        $r.Legacy | Should Be '3/4'
+        $r.Detail | Should Match 'DOD SW CA-61'
+    }
+}
+
 Describe 'Shipped bundle - the four legacy certs are present + allowlisted end to end' {
     It 'each of the four .cer files exists in Packages\DoD-Certs\Intermediate' {
         foreach ($n in 'DOD_EMAIL_CA-59','DOD_ID_CA-59','DOD_SW_CA-60','DOD_SW_CA-61') {

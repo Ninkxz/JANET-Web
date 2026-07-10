@@ -435,7 +435,7 @@ try { . ([scriptblock]::Create($script:CertDeployStoreReadSrc)) } catch {}
 # into the display row (Status ALL PRESENT / MISSING N / OFFLINE / CHECK ERROR, the
 # Missing cell, and a Detail with per-store counts + example missing subjects).
 function Get-CertDeployCheckRow {
-    param($Res, [int]$BundleCertCount, $SubjectMap)
+    param($Res, [int]$BundleCertCount, $SubjectMap, [string[]]$LegacyInBundleCa = @())
     $status = [string]$Res.Status
     $detail = [string]$Res.Detail
     $missTotal = 0
@@ -464,14 +464,23 @@ function Get-CertDeployCheckRow {
     # Legacy intermediates (allowlisted expired CAs, LocalMachine\CA): report present/total
     # for exactly the four. They are bundle-wanted, so each is either present or in MissCA;
     # blank when the host could not be read (offline / check error).
+    # Legacy intermediates present/total: ONLY the allowlisted legacy certs actually in THIS
+    # bundle's CA group ($LegacyInBundleCa, computed admin-side from the resolved bundle). This
+    # avoids a false "4/4" when a custom certBundleFolder lacks them (or has them under root\
+    # rather than Intermediate\): certs not in the CA want-set can never be in MissCA. Blank
+    # when the host could not be read or no legacy certs are in this bundle's CA group.
     $legacyCell = ''
-    if ($ok -and $script:CertDeployLegacyIntermediates -and $script:CertDeployLegacyIntermediates.Count -gt 0) {
+    $legInBundle = @($LegacyInBundleCa | ForEach-Object { (([string]$_) -replace '[^0-9A-Fa-f]','').ToUpperInvariant() } | Where-Object { $_ })
+    if ($ok -and $legInBundle.Count -gt 0) {
         $missCaSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($tp in @($Res.MissCA)) { [void]$missCaSet.Add((([string]$tp) -replace '[^0-9A-Fa-f]','')) }
-        $total = $script:CertDeployLegacyIntermediates.Count
+        $total = $legInBundle.Count
         $missNames = New-Object System.Collections.ArrayList
-        foreach ($k in $script:CertDeployLegacyIntermediates.Keys) {
-            if ($missCaSet.Contains([string]$k)) { [void]$missNames.Add([string]$script:CertDeployLegacyIntermediates[$k]) }
+        foreach ($k in $legInBundle) {
+            if ($missCaSet.Contains($k)) {
+                $nm = if ($script:CertDeployLegacyIntermediates.Contains($k)) { [string]$script:CertDeployLegacyIntermediates[$k] } else { $k }
+                [void]$missNames.Add($nm)
+            }
         }
         $legacyCell = "$($total - $missNames.Count)/$total"
         if ($missNames.Count -gt 0) { $detail += "  |  Legacy CA missing: $($missNames -join ', ')" }
@@ -805,6 +814,11 @@ function Invoke-CertDeployCheckAction {
     }
     $thumbJson  = Convert-CertDeployBundleToThumbJson $bundle
     $subjectMap = Get-CertDeploySubjectMap $bundle
+    # The allowlisted legacy intermediates that are ACTUALLY in THIS bundle's CA group - the
+    # only ones the per-host Legacy column may report (avoids a false 4/4 on a bundle lacking them).
+    $bundleCaTp = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($c in @($bundle.CA)) { if ($c) { [void]$bundleCaTp.Add((([string]$c.Thumbprint) -replace '[^0-9A-Fa-f]','')) } }
+    $legacyInBundleCa = @($script:CertDeployLegacyIntermediates.Keys | Where-Object { $bundleCaTp.Contains([string]$_) })
     & $send @{ type='log'; level='info'; text="Cert bundle: $($bundle.CertCount) cert(s) [Root $(@($bundle.Root).Count)/CA $(@($bundle.CA).Count)/Disallowed $(@($bundle.Disallowed).Count)] from $($bundle.Folder) [$bundleSource]." }
     # Always surface the bundle's expired-cert census (SHARED CONTRACT), regardless of
     # includeExpired - Check is the read-only truth about dead anchors in the bundle.
@@ -854,7 +868,7 @@ function Invoke-CertDeployCheckAction {
 
     $emitResult = {
         param($res)
-        $row = Get-CertDeployCheckRow -Res $res -BundleCertCount ([int]$bundle.CertCount) -SubjectMap $subjectMap
+        $row = Get-CertDeployCheckRow -Res $res -BundleCertCount ([int]$bundle.CertCount) -SubjectMap $subjectMap -LegacyInBundleCa $legacyInBundleCa
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
         $status = [string]$row.Status

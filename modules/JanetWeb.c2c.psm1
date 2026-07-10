@@ -2145,8 +2145,10 @@ $script:C2cPillarByAction = @{
 # Expired[]. Returns
 # @{ Ok; Error; Root=@(@{Thumbprint;B64;File}); CA=@(...); Disallowed=@(...); CertCount;
 #    FileCount; Folder; ExpiredCount; Expired=@(@{Thumbprint;Subject;NotAfter;Store}) }.
-# CertCount counts only USABLE (non-expired) certs. Ok=$false with a populated Error if
-# the folder is missing, yields ZERO .cer, or yields ONLY expired certs (nothing usable).
+# CertCount counts the PUSHABLE certs = non-expired PLUS allowlisted legacy intermediates
+# (LegacyAllowedCount), since those are pushed despite expiry; non-allowlisted expired certs
+# (ExpiredCount) are excluded. Ok=$false with a populated Error if the folder is missing,
+# yields ZERO .cer, or yields ONLY non-allowlisted expired certs (nothing usable).
 # --- LegacyIntermediates: NARROW, audited exception to the expiry guard (mirrors
 # JanetWeb.certdeploy). Four EXPIRED DoD intermediate CAs intentionally kept installed for
 # legacy chain / signature validation - fix-pki pushes these despite expiry; every other
