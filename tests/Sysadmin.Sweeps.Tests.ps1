@@ -48,7 +48,7 @@ Describe 'SysadminSweepBlock worker (shimmed - no real WinRM)' {
             param($SweepId, $Days, $InvokeReturn, $Reachable, $AttemptOffline)
             Set-Variable -Name __ir -Scope script -Value $InvokeReturn
             Set-Variable -Name __reach -Scope script -Value $Reachable
-            function script:Test-SysadminReachable { param($ComputerName, $Ports, $TimeoutMs) return [bool]$script:__reach }
+            function script:Test-SysadminReachable { param($ComputerName, $Ports, $TimeoutMs, $UseSsl) if ($UseSsl -is [ref]) { $UseSsl.Value = $false }; return [bool]$script:__reach }
             function script:New-PSSession { param($ComputerName, $SessionOption, $ErrorAction, $Credential, $Authentication) return ([pscustomobject]@{ Id = 1; Name = 'shim' }) }
             function script:Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, $ErrorAction) return (& $script:__ir) }
             function script:Remove-PSSession { param($Session, $ErrorAction) }

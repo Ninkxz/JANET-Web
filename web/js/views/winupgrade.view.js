@@ -454,7 +454,7 @@
       var optCard = sectionCard('OPTIONS');
       var dryCb = ui.checkbox('Dry-run (no changes - reports "Would..." instead of acting)', { color: 'var(--warn)', title: 'Probe + report the intended change without writing the policy or installing the CAB.' });
       optCard.appendChild(dryCb);
-      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 reachability probe (e.g. firewalled but WinRM up). Reachability is TCP-only - AFNET drops ICMP.' });
+      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/5986/445 reachability probe (e.g. firewalled but WinRM up). Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
       offlineCb.style.marginTop = '4px';
       optCard.appendChild(offlineCb);
       var threadsRow = el('div'); threadsRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:8px';
@@ -941,7 +941,7 @@
         fVersion.style.width = '110px';
         fVersion.addEventListener('change', function () { fGrid.rows().length && recount(); });
         fverRow.appendChild(fVersion); fOpt.appendChild(fverRow);
-        var fOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Scan a host that fails the TCP 5985/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP.' });
+        var fOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Scan a host that fails the TCP 5985/5986/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
         fOpt.appendChild(fOffline);
         var ftr = el('div'); ftr.style.cssText = 'display:flex;align-items:center;gap:10px';
         ftr.appendChild(ui.label('Max concurrent:'));
@@ -1156,7 +1156,7 @@
 
           var dDry = ui.checkbox('Dry-run (no changes - reports what WOULD happen)', { color: 'var(--warn)', title: 'Reads readiness and reports the intended change per host without writing or rebooting anything. Applies to Drive, Auto-Fix and Repair Health (Error Report is always read-only).' });
           dOpt.appendChild(dDry);
-          var dOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 probe. Reachability is TCP-only - AFNET drops ICMP.' });
+          var dOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/5986/445 probe. Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
           dOpt.appendChild(dOffline);
           var dThrRow = el('div'); dThrRow.style.cssText = 'display:flex;align-items:center;gap:10px';
           dThrRow.appendChild(ui.label('Max concurrent:'));

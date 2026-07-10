@@ -113,7 +113,7 @@
             daysIn.style.width = '90px';
             optCard.appendChild(ctrlRow('Expiring within (days)', daysIn));
           }
-          var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP.' });
+          var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/5986/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
           optCard.appendChild(offlineCb);
           var threadsRow = el('div'); threadsRow.style.cssText = 'display:flex;align-items:center;gap:10px';
           threadsRow.appendChild(ui.label('Max concurrent:'));

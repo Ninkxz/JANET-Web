@@ -12,8 +12,10 @@
 #    ("JANET C2C Quarantine Killer") that runs every 90 minutes (tunable) and, at
 #    boot when a run was missed, deletes the "C2C Quarantine" task whenever it comes
 #    back. Install also fires the watchdog once so the task is gone immediately.
-#      status   (read-only) - per host: is "C2C Quarantine" present? is our killer
-#                             installed? Safe preview / verification, changes nothing.
+#      status   (read-only) - per host: is "C2C Quarantine" present? and is our killer
+#                             actually RUNNING (not just installed)? Reports watchdog
+#                             run-health from Get-ScheduledTaskInfo (last run / result /
+#                             next run). Safe verification, changes nothing.
 #      install  (DESTRUCTIVE -> admin session + confirm word INSTALL) - register the
 #                             SYSTEM watchdog (every N min) and run it once now.
 #      remove   (DESTRUCTIVE -> admin session + confirm word REMOVE) - unregister the
@@ -42,17 +44,17 @@ function Get-JanetToolManifest {
     @{
         id       = 'beta'
         name     = 'Beta Lab'
-        version  = '0.6.0'
+        version  = '0.7.0'
         category = 'Beta'
-        summary  = 'Experimental fleet features that bake here before graduating. ACTIVE: C2C Quarantine Killer - install a persistent SYSTEM watchdog scheduled task on each host that deletes the recreated "C2C Quarantine" task every 90 minutes (tunable), so a one-shot delete that would just come back is replaced by a self-healing kill. Status is read-only; Install/Remove are admin-gated + confirm-worded and self-guard the JANET host out.'
+        summary  = 'Experimental fleet features that bake here before graduating. ACTIVE: C2C Quarantine Killer - install a persistent SYSTEM watchdog scheduled task on each host that deletes the recreated "C2C Quarantine" task every 90 minutes (tunable), so a one-shot delete that would just come back is replaced by a self-healing kill. Status is read-only and CONFIRMS the watchdog is actually running (a Watchdog column: HEALTHY / RUNNING / NEVER RAN / DISABLED / LAST FAILED / NOT INSTALLED, from the task''s real last-run/next-run history), not merely installed. Install/Remove are admin-gated + confirm-worded and self-guard the JANET host out.'
         actions  = @(
             @{
                 id          = 'status'
                 label       = 'Check Status (read-only)'
-                description = "READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip: is the ""$defTarget"" scheduled task present (the thing we want gone), and is the JANET C2C Quarantine Killer watchdog installed and what state is it in. Status QUARANTINE PRESENT (target task still there) / CLEAN (target absent), with the watchdog install state in Detail. Reachability is TCP-only (5985/445); never writes anything."
+                description = "READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip: is the ""$defTarget"" scheduled task present (the thing we want gone), and - crucially - is the JANET C2C Quarantine Killer watchdog actually RUNNING, not just installed. The Watchdog column reports run-health from the task's real history (Get-ScheduledTaskInfo): HEALTHY (last run OK) / RUNNING / NEVER RAN / DISABLED / LAST FAILED / NOT INSTALLED, and the Detail shows last run time, result and next scheduled run. Status QUARANTINE PRESENT (target task still there) / CLEAN (target absent). Reachability is TCP-only (5985/5986/445); never writes anything."
                 kind        = 'stream-table'
                 destructive = $false
-                columns     = @('Host','Ping','Status','Detail')
+                columns     = @('Host','Ping','Status','Watchdog','Detail')
                 inputs      = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='targetTask'; label='Target task name to hunt'; type='text'; required=$false; default=$defTarget },
@@ -121,6 +123,39 @@ function Get-BetaKillerCommand {
     return "Get-ScheduledTask -TaskName '$t' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:`$false -ErrorAction SilentlyContinue"
 }
 
+# Classify whether the installed watchdog is actually RUNNING, from Get-ScheduledTaskInfo
+# fields (LastRunTime / LastTaskResult / NextRunTime). "Installed" is not "running": a
+# Disabled task, a task that has never fired, or one whose last run failed are all
+# INSTALLED but not confirmed running. PURE + unit-tested; computed ADMIN-SIDE (the worker
+# returns the raw fields) so there is no bare-runspace mirror to keep in sync.
+#   NOT INSTALLED - no watchdog task
+#   DISABLED      - present but the task State is Disabled (will not run)
+#   NEVER RAN     - present + enabled but LastRunTime is empty / result = task-has-not-run
+#   LAST FAILED   - last run returned a non-zero, non-running result code
+#   RUNNING       - executing right now
+#   HEALTHY       - last run completed with result 0 (confirmed running on schedule)
+function Get-BetaWatchdogHealth {
+    param([bool]$Present, [string]$State, [string]$LastRun, $LastResult, [string]$NextRun, [int]$MissedRuns = 0, [string]$Interval = '')
+    if (-not $Present) { return @{ Word = 'NOT INSTALLED'; Detail = 'watchdog NOT installed on this host' } }
+    $st  = [string]$State
+    $res = $null
+    if ($null -ne $LastResult -and "$LastResult" -ne '') { try { $res = [int64]$LastResult } catch { $res = $null } }
+    $nextTxt = if ($NextRun) { "next run $NextRun" } else { 'NO next run scheduled' }
+    $repTxt  = if ($Interval) { " (repeats $Interval)" } else { '' }
+    if ($st -match '(?i)disabled') { return @{ Word = 'DISABLED'; Detail = 'watchdog is INSTALLED but DISABLED - it will NOT run' } }
+    if (-not $LastRun -or $res -eq 267011) {   # 0x00041303 SCHED_S_TASK_HAS_NOT_RUN
+        return @{ Word = 'NEVER RAN'; Detail = "watchdog INSTALLED (State $st) but has NOT run yet; $nextTxt$repTxt" }
+    }
+    if ($st -match '(?i)running' -or $res -eq 267009) {   # 0x00041301 SCHED_S_TASK_RUNNING
+        return @{ Word = 'RUNNING'; Detail = "watchdog is RUNNING now; last completed $LastRun; $nextTxt$repTxt" }
+    }
+    if ($null -ne $res -and $res -ne 0) {
+        return @{ Word = 'LAST FAILED'; Detail = "watchdog INSTALLED but its LAST RUN FAILED (result $res) at $LastRun; $nextTxt$repTxt" }
+    }
+    $missTxt = if ($MissedRuns -gt 0) { "; $MissedRuns missed run(s)" } else { '' }
+    return @{ Word = 'HEALTHY'; Detail = "watchdog HEALTHY - last ran $LastRun (result OK); $nextTxt$repTxt$missTxt" }
+}
+
 # --- self-guard (COPIED from JanetWeb.certdeploy.psm1) -------------------------
 # Identities that resolve to THIS dispatcher host - dropped from every state-changing
 # run so JANET never registers/removes a task on the box it is running on.
@@ -181,24 +216,32 @@ $script:BetaWorker = {
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Ok=$false; Audit='Failure' }
     $errStatus = if ($Mode -eq 'status') { 'CHECK ERROR' } else { 'FAILED' }
 
-    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). 5985 then 445, 1.5s.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). WinRM HTTP 5985, then WinRM
+    # HTTPS 5986, then SMB 445 (liveness only), 1.5s, break on first connect (5985 tried
+    # first so HTTP wins when both are open). $useSsl tracks whether ONLY 5986 answered,
+    # so the session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
-        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Audit = 'Skipped'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Audit = 'Skipped'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common
+    # on AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = $errStatus; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -225,17 +268,38 @@ $script:BetaWorker = {
     try {
         switch ($Mode) {
             'status' {
+                # RUN-PROOF: don't just report the watchdog is present - pull its actual run
+                # history (Get-ScheduledTaskInfo: LastRunTime / LastTaskResult / NextRunTime)
+                # and the real repeat interval off the trigger, so the operator can confirm it
+                # is genuinely firing, not merely registered. A never-run task's LastRunTime is
+                # a pre-2000 sentinel -> normalize to empty.
                 $raw = Invoke-Command -Session $sess -ArgumentList $TargetTask, $KillerTask -ErrorAction Stop -ScriptBlock {
                     param($TargetTask, $KillerTask)
                     $q = [bool](Get-ScheduledTask -TaskName $TargetTask -ErrorAction SilentlyContinue)
                     $k = Get-ScheduledTask -TaskName $KillerTask -ErrorAction SilentlyContinue
-                    [pscustomobject]@{ QuarantinePresent=$q; KillerPresent=[bool]$k; KillerState=$(if ($k) { [string]@($k)[0].State } else { '' }) }
+                    $state=''; $lastRun=''; $lastRes=$null; $nextRun=''; $missed=0; $interval=''
+                    if ($k) {
+                        $k0 = @($k)[0]; $state = [string]$k0.State
+                        try { $interval = [string]$k0.Triggers[0].Repetition.Interval } catch {}
+                        try {
+                            $info = Get-ScheduledTaskInfo -TaskName $KillerTask -ErrorAction SilentlyContinue
+                            if ($info) {
+                                if ($info.LastRunTime -and $info.LastRunTime.Year -ge 2000) { $lastRun = $info.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss') }
+                                if ($null -ne $info.LastTaskResult) { $lastRes = [int64]$info.LastTaskResult }
+                                if ($info.NextRunTime -and $info.NextRunTime.Year -ge 2000) { $nextRun = $info.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') }
+                                try { $missed = [int]$info.NumberOfMissedRuns } catch {}
+                            }
+                        } catch {}
+                    }
+                    [pscustomobject]@{ QuarantinePresent=$q; KillerPresent=[bool]$k; KillerState=$state; LastRun=$lastRun; LastResult=$lastRes; NextRun=$nextRun; Missed=$missed; Interval=$interval }
                 }
                 if ($null -eq $raw) { $r.Status = 'CHECK ERROR'; $r.Detail = 'probe returned no result'; return $r }
-                $killerTxt = if ([bool]$raw.KillerPresent) { "watchdog INSTALLED ($([string]$raw.KillerState), every ${IntervalMinutes}m)" } else { 'watchdog NOT installed' }
                 $r.Ok = $true; $r.Audit = 'Skipped'
-                if ([bool]$raw.QuarantinePresent) { $r.Status = 'QUARANTINE PRESENT'; $r.Detail = "'$TargetTask' task is present; $killerTxt." }
-                else { $r.Status = 'CLEAN'; $r.Detail = "'$TargetTask' task absent; $killerTxt." }
+                # Stash the raw watchdog fields; the fan-out driver (module scope) classifies
+                # health via Get-BetaWatchdogHealth and fills the Watchdog column + Detail.
+                $r.Wd = @{ Present=[bool]$raw.KillerPresent; State=[string]$raw.KillerState; LastRun=[string]$raw.LastRun; LastResult=$raw.LastResult; NextRun=[string]$raw.NextRun; Missed=[int]$raw.Missed; Interval=[string]$raw.Interval }
+                if ([bool]$raw.QuarantinePresent) { $r.Status = 'QUARANTINE PRESENT'; $r.Detail = "'$TargetTask' task is present" }
+                else { $r.Status = 'CLEAN'; $r.Detail = "'$TargetTask' task absent" }
                 return $r
             }
             'install' {
@@ -257,13 +321,20 @@ $script:BetaWorker = {
                     Start-ScheduledTask -TaskName $KillerTask -ErrorAction SilentlyContinue
                     Start-Sleep -Milliseconds 500
                     $existsAfter = [bool](Get-ScheduledTask -TaskName $TargetTask -ErrorAction SilentlyContinue)
-                    [pscustomobject]@{ ExistedBefore=$existedBefore; KillerBefore=$killerBefore; ExistsAfter=$existsAfter }
+                    # Confirm the watchdog is now registered + scheduled (proof the install took).
+                    $kState=''; $kNext=''
+                    try { $kt = Get-ScheduledTask -TaskName $KillerTask -ErrorAction SilentlyContinue; if ($kt) { $kState = [string]@($kt)[0].State } } catch {}
+                    try { $ki = Get-ScheduledTaskInfo -TaskName $KillerTask -ErrorAction SilentlyContinue; if ($ki -and $ki.NextRunTime -and $ki.NextRunTime.Year -ge 2000) { $kNext = $ki.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } } catch {}
+                    [pscustomobject]@{ ExistedBefore=$existedBefore; KillerBefore=$killerBefore; ExistsAfter=$existsAfter; KillerState=$kState; KillerNext=$kNext }
                 }
                 if ($null -eq $raw) { $r.Status = 'FAILED'; $r.Detail = 'installer returned no result'; return $r }
                 $r.Ok = $true; $r.Audit = 'Success'
                 $r.Status = if ([bool]$raw.KillerBefore) { 'UPDATED' } else { 'INSTALLED' }
                 $bits = New-Object System.Collections.ArrayList
-                [void]$bits.Add("watchdog runs every ${IntervalMinutes}m as SYSTEM")
+                # Confirm the schedule took: report the registered State + the actual next run.
+                $schedTxt = "watchdog runs every ${IntervalMinutes}m as SYSTEM"
+                if ([string]$raw.KillerState) { $schedTxt += " (State $([string]$raw.KillerState)" + $(if ([string]$raw.KillerNext) { "; next run $([string]$raw.KillerNext))" } else { ')' }) }
+                [void]$bits.Add($schedTxt)
                 if ([bool]$raw.ExistedBefore) {
                     if ([bool]$raw.ExistsAfter) { [void]$bits.Add("'$TargetTask' was present but STILL present after first run (recreated or in a folder the delete missed)") }
                     else { [void]$bits.Add("'$TargetTask' was present and deleted now") }
@@ -394,7 +465,14 @@ function Invoke-BetaAction {
 
     $emitResult = {
         param($res)
-        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail }
+        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail; Watchdog='' }
+        # Watchdog run-health (status mode carries the raw $res.Wd fields). Classified here,
+        # in module scope, so Get-BetaWatchdogHealth is reused (not mirrored into the worker).
+        if ($res.Wd) {
+            $h = Get-BetaWatchdogHealth -Present ([bool]$res.Wd.Present) -State ([string]$res.Wd.State) -LastRun ([string]$res.Wd.LastRun) -LastResult $res.Wd.LastResult -NextRun ([string]$res.Wd.NextRun) -MissedRuns ([int]$res.Wd.Missed) -Interval ([string]$res.Wd.Interval)
+            $row.Watchdog = [string]$h.Word
+            $row.Detail   = (([string]$row.Detail).TrimEnd('.',' ') + '; ' + [string]$h.Detail)
+        }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
         $st = [string]$row.Status
@@ -461,8 +539,18 @@ function Invoke-BetaAction {
     $offline  = @($rows | Where-Object { [string]$_.Status -eq 'OFFLINE' }).Count
     $errors   = @($rows | Where-Object { @('CHECK ERROR','SKIPPED','Cancelled') -contains [string]$_.Status }).Count
     & $send @{ type='log'; level='ok'; text="$verb done - OK: $ok, ATTENTION: $attn, OFFLINE: $offline, SKIPPED/ERROR: $errors (of $($rows.Count) row(s))." }
+    # Status mode also rolls up watchdog RUN-health so a fleet check confirms it is firing.
+    $wdSummary = @{}
+    if ($Mode -eq 'status') {
+        $wdRunning = @($rows | Where-Object { @('HEALTHY','RUNNING') -contains [string]$_.Watchdog }).Count
+        $wdNotRun  = @($rows | Where-Object { @('DISABLED','NEVER RAN','LAST FAILED') -contains [string]$_.Watchdog }).Count
+        $wdMissing = @($rows | Where-Object { [string]$_.Watchdog -eq 'NOT INSTALLED' }).Count
+        $wdSummary = @{ running=$wdRunning; notRunning=$wdNotRun; notInstalled=$wdMissing }
+        $lvl = if (($wdNotRun + $wdMissing) -gt 0) { 'warn' } else { 'ok' }
+        & $send @{ type='log'; level=$lvl; text="Watchdog run-health: $wdRunning CONFIRMED RUNNING, $wdNotRun installed-but-not-running (disabled/never-ran/last-failed), $wdMissing NOT installed." }
+    }
     & $send @{ type='status'; text="Done. $ok ok, $attn attention, $offline offline of $($rows.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; ok=$ok; attention=$attn; offline=$offline; errors=$errors; mode=$Mode; intervalMinutes=$intervalMinutes; targetTask=$targetTask } }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; ok=$ok; attention=$attn; offline=$offline; errors=$errors; mode=$Mode; intervalMinutes=$intervalMinutes; targetTask=$targetTask; watchdog=$wdSummary } }
 }
 
 function Invoke-JanetToolAction {
@@ -485,4 +573,4 @@ function Invoke-JanetToolAction {
     }
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Invoke-BetaAction, Test-BetaTaskName, Get-BetaKillerCommand, Get-BetaKillerTaskName, Get-BetaDefaultTargetTask, Test-JanetBetaHostIsSelf, Get-BetaBool
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Invoke-BetaAction, Test-BetaTaskName, Get-BetaKillerCommand, Get-BetaWatchdogHealth, Get-BetaKillerTaskName, Get-BetaDefaultTargetTask, Test-JanetBetaHostIsSelf, Get-BetaBool

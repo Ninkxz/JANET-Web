@@ -28,7 +28,7 @@ function Get-JanetToolManifest {
         actions  = @(
             @{
                 id='bulk-scan'; label='Bulk Scan'; kind='stream-table'; destructive=$false
-                description='Parallel scan of each target: online (TCP 5985/445), logged-on user, C: disk space, reboot-pending, MECM/WUA/app pending counts.'
+                description='Parallel scan of each target: online (TCP 5985/5986/445), logged-on user, C: disk space, reboot-pending, MECM/WUA/app pending counts.'
                 columns=@('Host','LoggedOnUser','Online','OsName','OsBuild','DriveSize','DriveFree','DriveFreePercent','RebootPending','LastBootTime','MECMUpdateCount','WindowsUpdateCount','AppCount','Error')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -84,7 +84,7 @@ function Get-JanetToolManifest {
             },
             @{
                 id='ping-sweep'; label='Ping Sweep'; kind='stream-table'; destructive=$false
-                description='TCP reachability test (ports 5985/445) across the target list.'
+                description='TCP reachability test (ports 5985/5986/445) across the target list.'
                 columns=@('Host','Reachable')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -1647,20 +1647,25 @@ $script:WptScanBlock = {
             RebootOK=$false; RebootPending=$false; LastBoot=''; LoggedOnUser=''; UpdatesOK=$false; UpdateCount=0
             WuOK=$false; WuCount=0; AppsOK=$false; AppCount=0
             UpdateNames=@(); WuNames=@(); AppNames=@(); Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { return $r }
     $r.Online = $true
-    $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error = "Session: $($_.Exception.Message)"; return $r }
@@ -1767,20 +1772,25 @@ $script:WptScanBlock = {
 $script:WptPatchBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$Mode = 'noninvasive')
     $r = @{ Host=$Computer; Reachable=$false; UpdatesTriggered=0; AppsTriggered=0; Mode=$Mode; Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     $r.Reachable = $true
-    $wsOpt = New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error = "Session: $($_.Exception.Message)"; return $r }
@@ -1970,17 +1980,17 @@ $script:WptRebootAbortBlock = {
 # --- Ping Sweep (inline TcpClient.BeginConnect:12360) ---
 $script:WptPingBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
-    return @{ Host=$Computer; Reachable=$reachable }
+    return @{ Host=$Computer; Reachable=$reachable; UseSsl=$useSsl }
 }
 
 # --- WinRM Bootstrap over DCOM (WinRMBootstrapBlock:5663) ---
@@ -2055,20 +2065,25 @@ $script:WptHealthScanBlock = {
     $r = @{ Host=$Computer; Online=$false; MecmState='Unknown'; ClientVer=''; SwCenter='Missing'
             WmiState='Unknown'; WuState='Unknown'; RebootState='Unknown'; RebootAge=''
             LastCheckIn=''; Overall='Unknown'; Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Overall='Offline'; $r.Error='Unreachable'; return $r }
     $r.Online = $true
-    $opt = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 30000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OpenTimeout=15000; OperationTimeout=30000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error="Session: $($_.Exception.Message)"; $r.Overall='Broken'; return $r }
@@ -2261,20 +2276,25 @@ $script:WptVerifyPatchBlock = {
     $r = @{ Host=$Computer; Updates=@(); Error=''; NoSccm=$false }
     if ($MaxPolls -lt 1) { $MaxPolls = 1 }
     if ($IntervalSeconds -lt 1) { $IntervalSeconds = 1 }
-    # TCP reachability (bare worker runspace -> inline, never ICMP).
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability (bare worker runspace -> inline, never ICMP): WinRM HTTP
+    # 5985, then WinRM HTTPS 5986, then SMB 445 (liveness). $useSsl set when ONLY
+    # 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
-    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error = "Session: $($_.Exception.Message)"; return $r }
@@ -2445,19 +2465,24 @@ $script:WptGpUpdateBlock = {
 $script:WptKbScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
     $r = @{ Host=$Computer; KBs=@(); Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
-    $wsOpt = New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
         $sess = New-PSSession @splat
@@ -2477,15 +2502,20 @@ $script:WptKbScanBlock = {
 $script:WptKbInstallBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string[]]$KBs, [string]$MsuPath, [bool]$NoReboot)
     $r = @{ Host=$Computer; MECMFound=0; MECMInstalled=0; MSUInstalled=0; Skipped=0; Errors=@(); Details=@() }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc=$null
-        try { $tc=New-Object System.Net.Sockets.TcpClient; $iar=$tc.BeginConnect($Computer,$port,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(1500,$false) -and $tc.Connected) { $reachable=$true } } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        try { $tc=New-Object System.Net.Sockets.TcpClient; $iar=$tc.BeginConnect($Computer,$port,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(1500,$false) -and $tc.Connected) { $reachable=$true; if ($port -eq 5986) { $useSsl=$true } } } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Errors += 'Offline'; return $r }
-    $wsOpt = New-PSSessionOption -OperationTimeout 1800000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    $soP = @{ OperationTimeout=1800000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null; try { $sess = New-PSSession @splat } catch { $r.Errors += "Session failed: $($_.Exception.Message)"; return $r }
     try {
@@ -2652,19 +2682,24 @@ $script:WptMessageBlock = {
 $script:WptCleanBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [bool]$DoTemp, [bool]$DoProfiles, [int]$DaysThreshold, [bool]$DryRun, [bool]$DoCache)
     $r = @{ Host=$Computer; TempMB=0; TempFiles=0; CacheMB=0; ProfilesFound=0; ProfilesRemoved=0; Skipped=0; ProfileNames=@(); FreeBeforeGB=$null; FreeAfterGB=$null; FreedMB=0; Events=@(); Status='Failed'; Detail='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Detail = 'Offline'; return $r }
-    $wsOpt = New-PSSessionOption -OperationTimeout 300000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -2905,20 +2940,25 @@ $script:WptCleanBlock = {
 $script:WptRegScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$RegPath, [object[]]$Defs)
     $r = @{ Host=$Computer; Reachable=$false; RegValues=@{}; Status='Unreachable'; Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     try {
-        $wsOpt = New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+        $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+        if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+        $wsOpt = New-PSSessionOption @soP
         $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+        if ($useSsl) { $splat['UseSSL']=$true }
         if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
         $remote = Invoke-Command @splat -ArgumentList $RegPath, $Defs -ScriptBlock {
             param($p, $defs)
@@ -2952,20 +2992,25 @@ $script:WptRegScanBlock = {
 $script:WptRegApplyBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$RegPath, [object[]]$Defs, [bool]$DoReboot, [string]$Cve)
     $r = @{ Host=$Computer; Reachable=$false; Success=$false; PostValues=@{}; RebootScheduled=$false; Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     try {
-        $wsOpt = New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+        $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+        if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+        $wsOpt = New-PSSessionOption @soP
         $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+        if ($useSsl) { $splat['UseSSL']=$true }
         if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
         # DNS-mismatch guard (HARD ABORT): never write registry keys on a box that
         # isn't the one we dialed. One quick WinRM round-trip; name compare (no PTR).
@@ -3070,20 +3115,25 @@ $script:WptRegApplyBlock = {
 $script:WptAppUpdateBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [scriptblock]$Remote, [string]$Method, [string]$Arg, [bool]$IsVerify)
     $r = @{ Host=$Computer; Reachable=$false; Version=''; LastUpdated=''; Verified=$null; Status=''; Detail='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
-    if (-not $reachable) { $r.Status = 'Unreachable (TCP 5985/445)'; $r.Detail = 'Offline'; return $r }
+    if (-not $reachable) { $r.Status = 'Unreachable (TCP 5985/5986/445)'; $r.Detail = 'Offline'; return $r }
     $r.Reachable = $true
-    $opt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
         # DNS-mismatch guard (HARD ABORT on a confirmed mismatch): a verify on the
@@ -3116,17 +3166,20 @@ $script:WptAppUpdateBlock = {
 # in-process in the worker runspace) so an offline target fast-fails instead of
 # waiting out New-PSSession's 15s open-timeout. (Pool-runspace fan-out workers
 # carry their own inline probe since they can't see module functions.)
+# Returns @{ Reachable; UseSsl }. UseSsl is $true ONLY when the host answered
+# on 5986 (not 5985, not 445) - the single-host blocks below MUST pass it to
+# their session so a reachable-on-5986-only host doesn't dial HTTP and fail.
 function Test-WptHostReachable {
     param([string]$Computer)
-    foreach ($port in 5985, 445) {
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { return $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { return @{ Reachable=$true; UseSsl=($port -eq 5986) } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
     }
-    return $false
+    return @{ Reachable=$false; UseSsl=$false }
 }
 
 # Cancel-aware wrapper for the single-host blocks (software-scan / scan-detail /
@@ -3205,19 +3258,24 @@ function Expand-WptSingleHostResult {
 $script:WptCleanUserAppsBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$AppsCsv, [bool]$DryRun)
     $r = @{ Host=$Computer; AppsRemoved=0; Bytes=0; FreedMB=0; Events=@(); Status='Failed'; Detail='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Detail = 'Offline'; return $r }
-    $wsOpt = New-PSSessionOption -OperationTimeout 300000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -3488,9 +3546,13 @@ SeInteractiveLogonRight = $orig
 # --- Available Deployments (single-host unified MECM available list) ---
 $script:WptSccmAvailableBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
-    if (-not (Test-WptHostReachable $Computer)) { throw 'unreachable (TCP 5985/445)' }
-    $opt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { throw 'unreachable (TCP 5985/5986/445)' }
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $rows = Invoke-Command @splat -ScriptBlock {
         $out = New-Object System.Collections.ArrayList
@@ -3517,9 +3579,13 @@ $script:WptSccmAvailableBlock = {
 # --- Install Available (single-host deploy: apps + updates routed by type) ---
 $script:WptSccmInstallBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$ItemsText)
-    if (-not (Test-WptHostReachable $Computer)) { return ,@(@{ Type=''; Name=$Computer; Result='Failed'; Detail='unreachable (TCP 5985/445)' }) }
-    $opt = New-PSSessionOption -OperationTimeout 300000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { return ,@(@{ Type=''; Name=$Computer; Result='Failed'; Detail='unreachable (TCP 5985/5986/445)' }) }
+    $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
         # DNS-mismatch guard (HARD ABORT): never deploy to a box that isn't the one
@@ -3573,9 +3639,13 @@ $script:WptSccmInstallBlock = {
 # --- Host Info (single-host snapshot; PIRS "Get Info" parity, over WinRM) ---
 $script:WptHostInfoBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
-    if (-not (Test-WptHostReachable $Computer)) { throw 'unreachable (TCP 5985/445)' }
-    $opt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { throw 'unreachable (TCP 5985/5986/445)' }
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $info = Invoke-Command @splat -ScriptBlock {
         $cs   = Get-CimInstance Win32_ComputerSystem -EA SilentlyContinue
@@ -3701,10 +3771,14 @@ $script:WptHostInfoBlock = {
 # --- Event Log error scan (single-host; PIRS error-log parity, over WinRM) ---
 $script:WptEventLogBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$LogsCsv, [int]$Hours)
-    if (-not (Test-WptHostReachable $Computer)) { throw 'unreachable (TCP 5985/445)' }
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { throw 'unreachable (TCP 5985/5986/445)' }
     if ($Hours -le 0) { $Hours = 12 }
-    $opt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $rows = Invoke-Command @splat -ArgumentList $LogsCsv, $Hours -ScriptBlock {
         param($logsCsv, $hours)
@@ -3739,9 +3813,13 @@ $script:WptEventLogBlock = {
 # --- Software Scan (single-host; Populate-SwGrid remote block:6921) ---
 $script:WptSoftwareScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
-    if (-not (Test-WptHostReachable $Computer)) { throw 'unreachable (TCP 5985/445)' }
-    $opt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { throw 'unreachable (TCP 5985/5986/445)' }
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     return Invoke-Command @splat -ScriptBlock {
         $allApps = @()
@@ -3803,9 +3881,13 @@ $script:WptSoftwareScanBlock = {
 #  Tanium leaves a stale WOW6432Node key behind; clean it on success.
 $script:WptSoftwareUninstallBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string[]]$AppNames)
-    if (-not (Test-WptHostReachable $Computer)) { throw 'unreachable (TCP 5985/445)' }
-    $opt = New-PSSessionOption -OperationTimeout 600000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { throw 'unreachable (TCP 5985/5986/445)' }
+    $soP = @{ OperationTimeout=600000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     # DNS-mismatch guard (HARD ABORT): never uninstall on a box that isn't the one
     # we dialed. Name compare (no PTR on AFNET); if the probe can't run, proceed.
@@ -4000,9 +4082,13 @@ $script:WptSoftwareUninstallBlock = {
 # --- Software Center App List (CCM_Application, mirrors WPT 6018-6029) ---------
 $script:WptAppListBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
-    if (-not (Test-WptHostReachable $Computer)) { throw 'unreachable (TCP 5985/445)' }
-    $opt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { throw 'unreachable (TCP 5985/5986/445)' }
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     return Invoke-Command @splat -ScriptBlock {
         # Full App Manager EvaluationState map (desktop $script:EvalMap, 9036).
@@ -4027,19 +4113,24 @@ $script:WptAppListBlock = {
 $script:WptAppActionBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$AppId, [string]$Revision, $IsMachineTarget, [string]$Method, [string]$AppName)
     $r = @{ Host=$Computer; App=$AppName; Method=$Method; Result='Failed'; Detail='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Detail = 'Offline'; return $r }
-    $opt = New-PSSessionOption -OperationTimeout 1800000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    $soP = @{ OperationTimeout=1800000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
         # DNS-mismatch guard (HARD ABORT): never fire a CCM app action on a box that
@@ -4123,20 +4214,25 @@ $script:WptAppActionBlock = {
 $script:WptLog4jBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
     $r = @{ Host=$Computer; Online=$false; ScanOK=$false; Jars=@(); Error='' }
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     $r.Online = $true
-    $wsOpt = New-PSSessionOption -OperationTimeout 300000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error = "Session: $($_.Exception.Message)"; return $r }
@@ -4750,7 +4846,7 @@ function Invoke-JanetToolAction {
                 -Work $script:WptPingBlock -AuditAction 'TouchHost' `
                 -ArgFactory { param($h) ,@($h, $null, 'Default') } `
                 -OkOf { param($r) [bool]$r.Reachable } `
-                -AuditDetail { param($r) if ($r.Reachable) { 'reachable' } else { 'no TCP reply on 5985/445' } } `
+                -AuditDetail { param($r) if ($r.Reachable) { 'reachable' } else { 'no TCP reply on 5985/5986/445' } } `
                 -RowOf { param($r) @{ Host=$r.Host; Reachable=[bool]$r.Reachable } }
         }
         'bulk-scan' {

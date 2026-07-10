@@ -134,16 +134,24 @@ function Join-SysadminReasons {
 
 # --- Reachability (AFNET-safe: TCP only, NEVER ICMP) ------------------------
 # A named function (not inlined) so the Pester suite can shim it and drive the
-# worker's post-reachability path without a real socket.
+# worker's post-reachability path without a real socket. Probes WinRM HTTP 5985,
+# then WinRM HTTPS 5986, then SMB 445 (liveness only), breaking on first connect
+# (5985 preferred when both are open). $UseSsl (a [ref] out param) is set $true
+# only when the host answered ONLY on 5986, so the caller's session can switch to
+# -UseSSL (mirrors the C2C pattern).
 function Test-SysadminReachable {
-    param([string]$ComputerName, [int[]]$Ports = @(5985, 445), [int]$TimeoutMs = 1500)
+    param([string]$ComputerName, [int[]]$Ports = @(5985, 5986, 445), [int]$TimeoutMs = 1500, [ref]$UseSsl)
+    if ($UseSsl) { $UseSsl.Value = $false }
     if ([string]::IsNullOrWhiteSpace($ComputerName)) { return $false }
     foreach ($port in $Ports) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($ComputerName, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tc.Connected) { return $true }
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tc.Connected) {
+                if ($port -eq 5986 -and $UseSsl) { $UseSsl.Value = $true }
+                return $true
+            }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
     }
     return $false
@@ -249,12 +257,14 @@ $script:SysadminSweepBlock = {
         }
     }
 
-    # Reachability (TCP 5985/445). Offline + not forcing -> one offline row.
-    $reachable = Test-SysadminReachable -ComputerName $Computer
+    # Reachability (TCP 5985/5986/445; $useSsl set when ONLY 5986 answered, so the
+    # session below auto-switches to -UseSSL). Offline + not forcing -> one offline row.
+    $useSsl = $false
+    $reachable = Test-SysadminReachable -ComputerName $Computer -UseSsl ([ref]$useSsl)
     if (-not $reachable -and -not $AttemptOffline) {
-        $r.Error = 'Offline (no TCP on 5985/445)'
-        $r.Rows = @((& $baseRow $false 'Offline (no TCP on 5985/445)'))
-        $r.Report = "$Computer : OFFLINE - no TCP on 5985/445"
+        $r.Error = 'Offline (no TCP on 5985/5986/445)'
+        $r.Rows = @((& $baseRow $false 'Offline (no TCP on 5985/5986/445)'))
+        $r.Report = "$Computer : OFFLINE - no TCP on 5985/5986/445"
         return $r
     }
     $r.Online = [bool]$reachable
@@ -266,8 +276,13 @@ $script:SysadminSweepBlock = {
         return $r
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is
+    # common on AFNET, so skip CA/CN validation; port 5986 is implicit).
+    $soP = @{ OperationTimeout = 120000; OpenTimeout = 15000; CancelTimeout = 5000; IdleTimeout = 60000 }
+    if ($useSsl) { $soP['SkipCACheck'] = $true; $soP['SkipCNCheck'] = $true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName = $Computer; SessionOption = $wsOpt; ErrorAction = 'Stop' }
+    if ($useSsl) { $splat['UseSSL'] = $true }
     if ($Cred) { $splat['Credential'] = $Cred; $splat['Authentication'] = $Auth }
     $sess = $null
     try { $sess = New-PSSession @splat }

@@ -163,7 +163,7 @@
           "Read the scan results. Check 'Select With Updates' button to auto-select all rows that have pending updates, reboot-pending, or offline status.",
           "Check the rows you want to patch, then click 'Patch Selected' (triggers MECM + app installs, reboot suppressed).",
           "Or check rows and click 'Reboot Selected' for immediate forced reboot (after confirmation).",
-          "Optionally click 'Ping Sweep' (TCP 5985/445 check) or 'Repair WinRM' (for offline hosts) as follow-on fixes.",
+          "Optionally click 'Ping Sweep' (TCP 5985/5986/445 check) or 'Repair WinRM' (for offline hosts) as follow-on fixes.",
           "Export the scan grid to CSV using the 'Export CSV' button for audit/hand-off."
         ],
         "patch": "<b>Bulk Scan</b> (read-only): probes 5985/445 TCP, reads online/drive/counts over WinRM into per-host rows. Success row shows Online=true, DriveFree with % free and size (green if >20%, orange if lower, red if error), RebootPending (YES or No), and MECM/WU/APP update counts. <b>Bulk Patch</b> (destructive): triggers MECM CCM_SoftwareUpdate + CCM_Application installs on checked hosts. Success row shows Reachable=true, UpdatesTriggered count, AppsTriggered count. Reboot is suppressed (IsRebootIfNeeded=false); machines may end up reboot-pending. <b>Reboot Selected</b> (destructive): issues Restart-Computer -Force. Success row shows Success=true, Detail='Reboot command sent'. <b>Ping Sweep</b> (read-only): TCP port test. Success row shows Reachable=true/false. <b>Repair WinRM</b> (destructive): connects over DCOM, sets WinRM service Automatic, runs winrm quickconfig, re-probes 5985. Success row shows Success=true, PostProbeOk=true (5985 now answers).",
@@ -1163,7 +1163,7 @@
       "what": "<b>DHCP Scope Options</b> edits IP option values (006 DNS, 003 Router, 042 NTP, 044 WINS, 045 NetBIOS NBDD, or custom ID) per DHCP scope in an ordered list. Two workflows: single-scope edit (pick scope, load option, reorder/add/remove IPs, Apply), and bulk operations (check scopes, Append/Prepend/Remove IPs across all checked). A 3-column layout shows Scopes (left), Scope Option editor (middle), and Activity Log (full-width dock). The tool connects to a DHCP server first.",
       "steps": [
         "Type the DHCP server hostname/FQDN in the DHCP SERVER field (top strip).",
-        "Click Connect. The tool probes TCP 5985 (WinRM) and lists all scopes on that server in the left SCOPES card.",
+        "Click Connect. The tool probes TCP 5985 then 5986 (WinRM HTTP/HTTPS) and lists all scopes on that server in the left SCOPES card.",
         "For single-scope edit: click a scope row to select it. The middle card shows the scope subnet/name/state.",
         "Set the Option dropdown (006 DNS, 003 Router, etc.) or choose 'Other' and type a custom ID (1-254).",
         "Click Load Values to fetch the current option values for that scope. They appear in the IP ADDRESS LIST as an ordered list.",

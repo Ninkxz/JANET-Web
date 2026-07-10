@@ -20,13 +20,16 @@
 #  remote round-trips; bulk actions process every scope serially inside ONE
 #  remote session (the original tool's discipline -- avoids WSMan queue
 #  saturation) and stream a row per scope as results come back.
+#
+#  v1.1.8 Connect's WSMan reachability preflight also probes HTTPS 5986 (after
+#  HTTP 5985, before SMB 445 liveness), auto-switching that session to -UseSSL.
 # =============================================================================
 
 function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.7'
+        version  = '1.1.8'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -175,20 +178,33 @@ function Get-JanetValidIpList {
 }
 
 function Test-JanetWsmanReachable {
-    # TCP pre-flight against WSMan 5985 (line 1681) -- surfaces a specific
-    # "unreachable" error instead of the generic Invoke-Command timeout.
+    # TCP pre-flight against WSMan HTTP 5985, then WSMan HTTPS 5986, then SMB 445
+    # (liveness only) (line 1681) -- surfaces a specific "unreachable" error
+    # instead of the generic Invoke-Command timeout. Breaks on first connect (5985
+    # preferred when both WinRM ports are open). Returns UseSsl=$true ONLY when the
+    # server answered on 5986 (not 5985, not 445), so the caller can dial the
+    # session over HTTPS.
     param([string]$Server, [int]$TimeoutMs = 3000)
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    try {
-        $iar = $tcp.BeginConnect($Server, 5985, $null, $null)
-        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
-            throw "WSMan port 5985 on $Server did not respond within $([Math]::Round($TimeoutMs/1000,0))s."
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985, 5986, 445) {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        try {
+            $iar = $tcp.BeginConnect($Server, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                $tcp.EndConnect($iar)
+                $reachable = $true
+                if ($port -eq 5986) { $useSsl = $true }
+            }
+        } catch {
+        } finally {
+            try { $tcp.Close() } catch {}
         }
-        $tcp.EndConnect($iar)
-    } finally {
-        try { $tcp.Close() } catch {}
+        if ($reachable) { break }
     }
-    return $true
+    if (-not $reachable) {
+        throw "WSMan port 5985/5986 (or SMB 445) on $Server did not respond within $([Math]::Round($TimeoutMs/1000,0))s."
+    }
+    return @{ Reachable = $true; UseSsl = $useSsl }
 }
 
 # Shared WinRM session options for every dhcp remote call. dhcp was the only
@@ -205,23 +221,34 @@ function Invoke-JanetOnDhcp {
     # current process's Kerberos/NTLM identity (the tool's 'Use current session'
     # path). NOTE: the param is named $Arguments (not $Args) -- the original
     # 1.1.3 fix; $Args collides with the automatic variable and binds the remote
-    # param() to empty positional slots.
+    # param() to empty positional slots. $UseSsl (set by Test-JanetWsmanReachable
+    # when the server answered ONLY on 5986) dials over HTTPS with a fresh
+    # SkipCACheck/SkipCNCheck session option instead of the shared HTTP one.
     param(
         [string]$Server,
         [scriptblock]$Script,
         [object[]]$Arguments = @(),
-        [System.Management.Automation.PSCredential]$Credential
+        [System.Management.Automation.PSCredential]$Credential,
+        [bool]$UseSsl = $false
     )
     if ([string]::IsNullOrWhiteSpace($Server)) { throw "No DHCP server specified." }
-    if ($Credential) {
-        Invoke-Command -ComputerName $Server -Credential $Credential -Authentication Default `
-                       -SessionOption $script:DhcpSessionOption `
-                       -ScriptBlock $Script -ArgumentList $Arguments -ErrorAction Stop
-    } else {
-        Invoke-Command -ComputerName $Server `
-                       -SessionOption $script:DhcpSessionOption `
-                       -ScriptBlock $Script -ArgumentList $Arguments -ErrorAction Stop
+    $sessOpt = $script:DhcpSessionOption
+    if ($UseSsl) {
+        $sessOpt = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 300000 -CancelTimeout 5000 -IdleTimeout 60000 -SkipCACheck -SkipCNCheck
     }
+    $icParams = @{
+        ComputerName  = $Server
+        SessionOption = $sessOpt
+        ScriptBlock   = $Script
+        ArgumentList  = $Arguments
+        ErrorAction   = 'Stop'
+    }
+    if ($UseSsl) { $icParams['UseSSL'] = $true }
+    if ($Credential) {
+        $icParams['Credential']     = $Credential
+        $icParams['Authentication'] = 'Default'
+    }
+    Invoke-Command @icParams
 }
 
 function Invoke-JanetOnDhcpCancelable {
@@ -241,22 +268,25 @@ function Invoke-JanetOnDhcpCancelable {
         [scriptblock]$Script,
         [object[]]$Arguments = @(),
         [System.Management.Automation.PSCredential]$Credential,
-        [scriptblock]$CancelCheck
+        [scriptblock]$CancelCheck,
+        [bool]$UseSsl = $false
     )
     # $inner runs in a fresh [powershell] runspace that does NOT inherit the
     # module script scope, so the session option is passed in as an argument
     # (NOT referenced via $script:) and applied to both Invoke-Command branches.
+    # $useSslInner (set by Test-JanetWsmanReachable when the server answered ONLY on
+    # 5986) dials HTTPS - MUST match the destructive Apply/Bulk write to the same
+    # transport the reachability probe green-lit, or a 5986-only server hangs on HTTP.
     $inner = {
-        param($srv, $scr, $argList, $cred, $sessOpt)
-        if ($cred) {
-            Invoke-Command -ComputerName $srv -Credential $cred -Authentication Default `
-                           -SessionOption $sessOpt `
-                           -ScriptBlock $scr -ArgumentList $argList -ErrorAction Stop
-        } else {
-            Invoke-Command -ComputerName $srv `
-                           -SessionOption $sessOpt `
-                           -ScriptBlock $scr -ArgumentList $argList -ErrorAction Stop
-        }
+        param($srv, $scr, $argList, $cred, $sessOpt, $useSslInner)
+        $ic = @{ ComputerName=$srv; SessionOption=$sessOpt; ScriptBlock=$scr; ArgumentList=$argList; ErrorAction='Stop' }
+        if ($useSslInner) { $ic['UseSSL'] = $true }
+        if ($cred) { $ic['Credential']=$cred; $ic['Authentication']='Default' }
+        Invoke-Command @ic
+    }
+    $sessOpt = $script:DhcpSessionOption
+    if ($UseSsl) {
+        $sessOpt = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 300000 -CancelTimeout 5000 -IdleTimeout 60000 -SkipCACheck -SkipCNCheck
     }
     $ps = [powershell]::Create()
     [void]$ps.AddScript($inner)
@@ -264,7 +294,8 @@ function Invoke-JanetOnDhcpCancelable {
     [void]$ps.AddArgument($Script)
     [void]$ps.AddArgument([object[]]$Arguments)
     [void]$ps.AddArgument($Credential)
-    [void]$ps.AddArgument($script:DhcpSessionOption)
+    [void]$ps.AddArgument($sessOpt)
+    [void]$ps.AddArgument($UseSsl)
     $async = $ps.BeginInvoke()
     $cancelled = $false
     try {
@@ -503,8 +534,8 @@ function Invoke-JanetDhcpConnect {
     & $Send @{ type='status'; text="Connecting to $Server ..." }
     & $Send @{ type='progress'; done=0; total=1 }
     try {
-        [void](Test-JanetWsmanReachable -Server $Server)
-        $probe  = Invoke-JanetOnDhcp -Server $Server -Script $script:DhcpConnectScript -Credential $Credential
+        $wsmanCheck = Test-JanetWsmanReachable -Server $Server
+        $probe  = Invoke-JanetOnDhcp -Server $Server -Script $script:DhcpConnectScript -Credential $Credential -UseSsl $wsmanCheck.UseSsl
         $scopes = @($probe.Scopes)
         $module = [string]$probe.Module
         if ($scopes.Count -eq 0) {
@@ -551,8 +582,11 @@ function Invoke-JanetDhcpLoad {
     & $Send @{ type='progress'; done=0; total=1 }
     try {
         if ([string]::IsNullOrWhiteSpace($ScopeId)) { throw "Scope ID is required." }
+        # Non-throwing reachability probe: dial HTTPS when the server answered ONLY on 5986,
+        # else let the Invoke-Command below surface the real error (preserves prior semantics).
+        $useSsl = $false; try { $useSsl = [bool](Test-JanetWsmanReachable -Server $Server).UseSsl } catch {}
         $result = Invoke-JanetOnDhcp -Server $Server -Script $script:DhcpLoadScript `
-                    -Arguments @($ScopeId, $OptionId) -Credential $Credential
+                    -Arguments @($ScopeId, $OptionId) -Credential $Credential -UseSsl $useSsl
         # FAIL-CLOSED: a read error (Ok=$false) is NOT "option not set" -- surface it
         # as a failure row rather than a misleading empty/NotSet result.
         if ($result -and ($result.PSObject.Properties['Ok']) -and (-not $result.Ok)) {
@@ -600,6 +634,11 @@ function Invoke-JanetDhcpApply {
 
     $new = @($NewValues | ForEach-Object { [string]$_ })
 
+    # Reachability/transport probe ONCE for this action: dial HTTPS on both the pre-read AND
+    # the destructive write when the server answered only on 5986 (non-throwing - a probe
+    # failure falls through to HTTP and the Invoke-Command surfaces the real error).
+    $useSsl = $false; try { $useSsl = [bool](Test-JanetWsmanReachable -Server $Server).UseSsl } catch {}
+
     # Read current values first so we can compute and report the diff (the
     # original computed this in-memory from the loaded list; we re-read so the
     # web action is self-contained).
@@ -607,7 +646,7 @@ function Invoke-JanetDhcpApply {
     $readErr = $null
     try {
         $loadRes = Invoke-JanetOnDhcp -Server $Server -Script $script:DhcpLoadScript `
-                     -Arguments @($ScopeId, $OptionId) -Credential $Credential
+                     -Arguments @($ScopeId, $OptionId) -Credential $Credential -UseSsl $useSsl
         # FAIL-CLOSED: the load script now reports Ok=$false on a genuine READ ERROR
         # (vs. Ok=$true/NotSet=$true for a legitimately unset option). Treat Ok=$false
         # as a read failure so we ABORT below instead of computing a fabricated diff
@@ -788,7 +827,7 @@ function Invoke-JanetDhcpApply {
             throw "Internal: ScopeId is empty -- supply a scope and try again."
         }
         $applyCall = Invoke-JanetOnDhcpCancelable -Server $Server -Script $script:DhcpApplyScript `
-                      -Arguments @($ScopeId, $OptionId, $new) -Credential $Credential -CancelCheck $CancelCheck
+                      -Arguments @($ScopeId, $OptionId, $new) -Credential $Credential -CancelCheck $CancelCheck -UseSsl $useSsl
         if ($applyCall.Cancelled) {
             # Cancelled mid-flight: the WinRM child was BeginStop'd. We cannot know
             # whether the remote Set/Remove completed, so audit the scope as
@@ -874,6 +913,10 @@ function Invoke-JanetDhcpBulk {
     $ipList      = @($Ips)
     $total = $scopeIdList.Count
 
+    # Transport probe once: dial the bulk write over HTTPS when the server answered only on
+    # 5986 (non-throwing - a probe failure falls through to HTTP and the write surfaces it).
+    $useSsl = $false; try { $useSsl = [bool](Test-JanetWsmanReachable -Server $Server).UseSsl } catch {}
+
     $bulkLabel = $(if ($DryRun) { "DRY RUN bulk $Mode" } else { "Bulk $Mode" })
     & $Send @{ type='status'; text="$bulkLabel on $total scope(s), option $OptionId, $($ipList.Count) IP(s) on $Server ..." }
     & $Send @{ type='progress'; done=0; total=([Math]::Max(1,$total)) }
@@ -917,7 +960,7 @@ function Invoke-JanetDhcpBulk {
         # tool's discipline -- avoids WSMan queue saturation). We get the full
         # result set back, then stream a row per scope.
         $bulkCall = Invoke-JanetOnDhcpCancelable -Server $Server -Script $script:DhcpBulkScript `
-                     -Arguments @($scopeIdList, $OptionId, $ipList, $Mode, $DryRun) -Credential $Credential -CancelCheck $CancelCheck
+                     -Arguments @($scopeIdList, $OptionId, $ipList, $Mode, $DryRun) -Credential $Credential -CancelCheck $CancelCheck -UseSsl $useSsl
         if ($bulkCall.Cancelled) {
             # Cancelled mid-flight: the WinRM child was BeginStop'd before results
             # came back, so we have no per-scope record -- abandon every scope.

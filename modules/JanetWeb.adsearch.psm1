@@ -207,12 +207,12 @@ $script:AdSearchEngine = {
         return New-Object System.DirectoryServices.DirectoryEntry($Path, $u, $p)
     }
 
-    # Reachability (AFNET-safe): reachable = TCP 5985 (WinRM) OR TCP 445 (SMB)
-    # succeeds. Never uses ICMP (blocked on AFNET; a DC that answers only ICMP cannot
-    # serve the WinRM/SMB Security-log query anyway); short timeouts.
+    # Reachability (AFNET-safe): reachable = TCP 5985 (WinRM), 5986 (WinRM HTTPS)
+    # OR 445 (SMB) succeeds. Never uses ICMP (blocked on AFNET; a DC that answers
+    # only ICMP cannot serve the WinRM/SMB Security-log query anyway); short timeouts.
     function Test-AdReachable {
         param([string]$ComputerName)
-        foreach ($port in 5985, 445) {
+        foreach ($port in 5985, 5986, 445) {
             $tcp = $null
             try {
                 $tcp = New-Object System.Net.Sockets.TcpClient
@@ -829,22 +829,24 @@ $script:AdSearchEngine = {
             if ($dcs.Count -lt $poolSize) { $poolSize = $dcs.Count }
             if ($poolSize -lt 1) { $poolSize = 1 }
 
-            # Worker (one per DC): AFNET-safe reachability (TCP 5985/445, never ICMP)
-            # then read the DC Security log over WinRM (Invoke-Command) under the
+            # Worker (one per DC): AFNET-safe reachability (TCP 5985/5986/445, never
+            # ICMP) then read the DC Security log over WinRM (Invoke-Command) under the
             # operator credential, falling back to RPC/135 (Get-WinEvent -ComputerName)
             # only if WinRM is unavailable. Both honor $cred. Reachability runs inside
-            # the worker so unreachable DCs are probed in parallel too. Returns a
+            # the worker so unreachable DCs are probed in parallel too. $useSsl tracks
+            # whether ONLY 5986 answered (5985 is tried first and wins on tie), so the
+            # Invoke-Command below auto-switches that DC to -UseSSL. Returns a
             # structured result the harvest loop turns into hits or a DC-error line.
             $dcWorker = {
                 param($c, $x, $cred)
-                $reachable = $false
-                foreach ($port in 5985, 445) {
+                $reachable = $false; $useSsl = $false
+                foreach ($port in 5985, 5986, 445) {
                     $tcp = $null
                     try {
                         $tcp = New-Object System.Net.Sockets.TcpClient
                         $iar = $tcp.BeginConnect($c, $port, $null, $null)
                         if ($iar.AsyncWaitHandle.WaitOne(1000, $false)) {
-                            try { $tcp.EndConnect($iar); $reachable = $true } catch {}
+                            try { $tcp.EndConnect($iar); $reachable = $true; if ($port -eq 5986) { $useSsl = $true } } catch {}
                         }
                     } catch {} finally { if ($tcp) { try { $tcp.Close() } catch {} } }
                     if ($reachable) { break }
@@ -853,6 +855,7 @@ $script:AdSearchEngine = {
                 try {
                     $icArgs = @{ ComputerName = $c; ErrorAction = 'Stop'; ArgumentList = $x;
                                  ScriptBlock = { param($xf) Get-WinEvent -FilterXml $xf -MaxEvents 2000 -ErrorAction Stop } }
+                    if ($useSsl) { $icArgs['UseSSL'] = $true; $icArgs['SessionOption'] = New-PSSessionOption -SkipCACheck -SkipCNCheck }
                     if ($cred) { $icArgs['Credential'] = $cred }
                     $ev = Invoke-Command @icArgs
                     return @{ DC = $c; Reachable = $true; Events = $ev; Error = $null }

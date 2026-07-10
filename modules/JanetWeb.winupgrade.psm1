@@ -839,15 +839,18 @@ $script:WinUpgradeWorker = {
     if (& $isCancelled) { $r.Status = 'Cancelled'; $r.Detail = 'cancelled before start'; return $r }
 
     # ---- reachability pre-check: pure-TCP probe (AFNET-safe; never ICMP). Loop
-    # WinRM 5985 then SMB 445, TcpClient.BeginConnect with a 1500ms connect timeout,
-    # break on first connect. (mirrors the wpt ping-sweep TcpClient.BeginConnect probe.)
-    $online = $false
-    foreach ($port in 5985, 445) {
+    # WinRM 5985, then WinRM HTTPS 5986, then SMB 445, TcpClient.BeginConnect with a
+    # 1500ms connect timeout, break on first connect. (mirrors the wpt ping-sweep
+    # TcpClient.BeginConnect probe.) $useSsl tracks whether ONLY 5986 answered, so
+    # every session/command dial below auto-switches to -UseSSL (HTTP 5985 stays
+    # preferred when both are open; SMB 445 is a liveness signal only).
+    $online = $false; $useSsl = $false
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc  = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $online = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $online = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($online) { break }
     }
@@ -855,12 +858,12 @@ $script:WinUpgradeWorker = {
 
     if ($Op -eq 'Ping') {
         if ($online) { $r.Status = 'Online';  $r.Detail = "Reachable ($($r.Ping))"; $r.Ok = $true }
-        else         { $r.Status = 'Offline'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts)' }
+        else         { $r.Status = 'Offline'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts)' }
         return $r
     }
 
     if (-not $online -and -not $AttemptOffline) {
-        $r.Status = 'Skipped'; $r.Detail = 'Offline (TCP 5985/445 unreachable). Enable "Attempt even if offline" to force.'
+        $r.Status = 'Skipped'; $r.Detail = 'Offline (TCP 5985/5986/445 unreachable). Enable "Attempt even if offline" to force.'
         return $r
     }
 
@@ -884,9 +887,10 @@ $script:WinUpgradeWorker = {
                 # write the 'upgrade-drive' action pins with. $doBypass is the last remote
                 # param() arg (matches the call-site ArgumentList order).
                 $sb = $PinBlock
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($Version,$Product,$Bypass); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $out = Invoke-Command @ic
                 $detailParts = @("Pinned: $out")
                 # VERIFY the pin actually stuck: re-read the three policy values on the target
@@ -895,6 +899,7 @@ $script:WinUpgradeWorker = {
                 # NOT report DONE (audit: "reports success without verifying").
                 $icv = @{ ComputerName=$Computer; ScriptBlock=$pinReadSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $icv.Credential = $Cred }
+                if ($useSsl) { $icv['UseSSL'] = $true }
                 $rb = $null
                 try { $rb = Invoke-Command @icv } catch { $rb = $null }
                 $pinOk = ($null -ne $rb -and [int]$rb.TargetReleaseVersion -eq 1 -and "$($rb.ProductVersion)" -eq "$Product" -and "$($rb.TargetReleaseVersionInfo)" -eq "$Version")
@@ -919,6 +924,7 @@ $script:WinUpgradeWorker = {
                     }
                     $icw = @{ ComputerName=$Computer; ScriptBlock=$wuSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                     if ($credSet) { $icw.Credential = $Cred }
+                    if ($useSsl) { $icw['UseSSL'] = $true }
                     $wuOut = ''
                     try { $wuOut = [string](Invoke-Command @icw) } catch { $wuOut = "WU trigger error: $($_.Exception.Message)" }
                     $detailParts += $wuOut
@@ -943,6 +949,7 @@ $script:WinUpgradeWorker = {
                     }
                     $ics = @{ ComputerName=$Computer; ScriptBlock=$sccmSb; ArgumentList=@(,$Cycles); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                     if ($credSet) { $ics.Credential = $Cred }
+                    if ($useSsl) { $ics['UseSSL'] = $true }
                     $sccmOut = ''
                     try { $sccmOut = [string](Invoke-Command @ics) } catch { $sccmOut = "SCCM refresh error: $($_.Exception.Message)" }
                     $detailParts += $sccmOut
@@ -994,9 +1001,10 @@ $script:WinUpgradeWorker = {
                     }
                     $msg
                 }
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($RemoveBypass); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $out = Invoke-Command @ic
                 # VERIFY removal: re-read the three SPECIFIC pin value names on the target and
                 # confirm they are actually gone. Remove-ItemProperty -EA SilentlyContinue can
@@ -1004,6 +1012,7 @@ $script:WinUpgradeWorker = {
                 # (audit: "reports success without verifying").
                 $icv = @{ ComputerName=$Computer; ScriptBlock=$pinReadSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $icv.Credential = $Cred }
+                if ($useSsl) { $icv['UseSSL'] = $true }
                 $rb = $null
                 try { $rb = Invoke-Command @icv } catch { $rb = $null }
                 if ($null -eq $rb) {
@@ -1029,9 +1038,10 @@ $script:WinUpgradeWorker = {
                     $r.Status = 'DRY-RUN'; $r.Detail = "Would copy $CabName to C:\Temp and run DISM /Add-Package; $rb ($authNote)."; $r.Ok = $true; break
                 }
                 # OperationTimeout 0 = no per-operation cap (DISM can run for minutes).
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $sp = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $sp.Credential = $Cred }
+                if ($useSsl) { $sp['UseSSL'] = $true }
                 $session = New-PSSession @sp
                 try {
                     & $pushStep 'Copying' "Copying $CabName to C:\Temp on the target..."
@@ -1178,9 +1188,10 @@ $script:WinUpgradeWorker = {
                     if ($oom) { return [pscustomobject]@{ Code = 'OOM'; Line = ([string]$oom).Trim() } }
                     return [pscustomobject]@{ Code = 'ERRORS'; Line = ([string]($lines | Select-Object -Last 1)).Trim() }
                 }
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $res = Invoke-Command @ic
                 $line = [string]$res.Line
                 if ($line.Length -gt 300) { $line = $line.Substring(0, 300) }
@@ -1231,15 +1242,17 @@ $script:WinUpgradeWorker = {
                     }
                     ($notes -join '; ')
                 }
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($mb); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $out = [string](Invoke-Command @ic)
                 if ($Reboot -and -not (& $isCancelled)) {
                     & $pushStep 'Rebooting' 'Page file set; issuing reboot (10s)...'
                     try {
                         $icr = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                         if ($credSet) { $icr.Credential = $Cred }
+                        if ($useSsl) { $icr['UseSSL'] = $true }
                         # DNS-mismatch guard: mirror the upgrade-drive reboot (~1298-1307).
                         # An IPv4-literal target has no shortname to compare -> pass '' to skip.
                         $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
@@ -1866,9 +1879,10 @@ $script:WinUpgradeWorker = {
                     }
                 }
                 # SoftwareDistribution recursive size scan can be slow; give the op a wider cap.
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($CpuPatterns,$MinRAM,$MinDisk,$MinTPM,$MinBuild,$Version); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $diag = Invoke-Command @ic
                 $report = [string]$diag.Report
                 $r.Report = $report
@@ -1933,9 +1947,10 @@ $script:WinUpgradeWorker = {
                         $r.Ok = $true; return $r
                     }
 
-                    $so2 = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000
+                    $so2 = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                     $baseIc = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so2; ErrorAction='Stop' }
                     if ($credSet) { $baseIc.Credential = $Cred }
+                    if ($useSsl) { $baseIc['UseSSL'] = $true }
 
                     # -- 3) PIN to the target (REUSE the shared pin policy-write $PinBlock) --
                     & $pushStep 'Pinning' "Pinning $Product $Version..."
@@ -2287,9 +2302,10 @@ $script:WinUpgradeWorker = {
                     return ($log -join "`n")
                 }
                 # Aggressive mode stops services + re-registers DLLs; no per-op cap (can run minutes).
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($Product,$Version,$Cycles,$Aggressive); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $report = [string](Invoke-Command @ic)
                 $r.Report = $report
                 $r.Status = if ($Aggressive) { 'RESET' } else { 'DONE' }
@@ -2312,9 +2328,10 @@ $script:WinUpgradeWorker = {
                 }
                 $rlines = New-Object System.Collections.ArrayList
                 # DISM + sfc can each run 15-45 min -> no per-operation cap (OperationTimeout 0).
-                $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000
+                $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $baseIc = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$soLong; ErrorAction='Stop' }
                 if ($credSet) { $baseIc.Credential = $Cred }
+                if ($useSsl) { $baseIc['UseSSL'] = $true }
 
                 & $pushStep 'DISM' 'DISM /Online /Cleanup-Image /RestoreHealth (15-45 min)...'
                 $dismSb = {
@@ -2389,7 +2406,7 @@ $script:WinUpgradeWorker = {
                     [pscustomobject]@{ Cbs=$cbs; Wu=$wu; ActiveUser=$au }
                 }
                 $activeUser=''
-                try { $icX=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000); ErrorAction='Stop'; ScriptBlock=$stateSb }; if ($credSet) { $icX.Credential=$Cred }; $stRes=Invoke-Command @icX; if ($stRes.Cbs -or $stRes.Wu) { $rebootNeeded=$true }; $activeUser=[string]$stRes.ActiveUser } catch {}
+                try { $icX=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl); ErrorAction='Stop'; ScriptBlock=$stateSb }; if ($credSet) { $icX.Credential=$Cred }; if ($useSsl) { $icX['UseSSL']=$true }; $stRes=Invoke-Command @icX; if ($stRes.Cbs -or $stRes.Wu) { $rebootNeeded=$true }; $activeUser=[string]$stRes.ActiveUser } catch {}
 
                 $rebootTxt=''
                 if ($Reboot -and $rebootNeeded) {
@@ -2409,7 +2426,7 @@ $script:WinUpgradeWorker = {
                             } catch { $o.Error=$_.Exception.Message }
                             return $o
                         }
-                        try { $icR=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000); ErrorAction='Stop'; ScriptBlock=$rbSb; ArgumentList=@($expectedName) }; if ($credSet) { $icR.Credential=$Cred }; $rb=Invoke-Command @icR
+                        try { $icR=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl); ErrorAction='Stop'; ScriptBlock=$rbSb; ArgumentList=@($expectedName) }; if ($credSet) { $icR.Credential=$Cred }; if ($useSsl) { $icR['UseSSL']=$true }; $rb=Invoke-Command @icR
                               if ($rb.Error) { [void]$rlines.Add("[WARN] reboot NOT issued: $($rb.Error)"); $rebootTxt=" Reboot required; NOT issued: $($rb.Error)." }
                               else { [void]$rlines.Add('[REBOOT] issued (60s)'); $rebootTxt=' Reboot issued (60s).' }
                         } catch { [void]$rlines.Add("[WARN] reboot FAILED to issue: $($_.Exception.Message)"); $rebootTxt=" Reboot required; FAILED to issue: $($_.Exception.Message)." }
@@ -2606,10 +2623,11 @@ $script:WinUpgradeWorker = {
                     if ($fixes.Count -eq 0 -and -not $dryRun) { [void]$report.Add('[INFO] No changes were necessary on this device') }
                     return [pscustomobject]@{ Build=$build; Status=$status; Fixes=@($fixes); RebootNeeded=$rebootNeeded; ActiveUser=$activeUser; Rebooted=$rebooted; RebootDeferred=$rebootDeferred; Report=@($report) }
                 }
-                $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000
+                $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$afSb; Authentication='Negotiate'; SessionOption=$soLong; ErrorAction='Stop'
                          ArgumentList=@($MinBuild,$Product,$Version,$CpuPatterns,$MinTPM,$Cycles,$FixPolicy,$FixBypass,$FixDrivers,$DriverSafe,$FixPause,$FixRepair,$ClearStaging,$SccmRefresh,$Reboot,$expectedName,$DryRun) }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $af = Invoke-Command @ic
                 $fixList = @($af.Fixes)
                 $r.Fixes = if ($fixList.Count -gt 0) { if ($DryRun) { 'would: ' + ($fixList -join '; ') } else { ($fixList -join '; ') } } else { '' }
@@ -2709,9 +2727,10 @@ $script:WinUpgradeWorker = {
                     if ($rows.Count -eq 0) { [void]$rows.Add([pscustomobject]@{ Category='NONE'; Severity='INFO'; Evidence='No upgrade errors detected'; Fix='' }) }
                     return ,@($rows)
                 }
-                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 180000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
                 $ic = @{ ComputerName=$Computer; ScriptBlock=$erSb; ArgumentList=@($CpuPatterns,$MinRAM,$MinDisk,$MinTPM,$MinBuild,$Version); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
                 $erRows = Invoke-Command @ic
                 $mapped = New-Object System.Collections.ArrayList
                 foreach ($er in @($erRows)) { if ($null -eq $er) { continue }; [void]$mapped.Add([ordered]@{ Host=$Computer; Category=[string]$er.Category; Severity=[string]$er.Severity; Evidence=[string]$er.Evidence; Fix=[string]$er.Fix }) }
@@ -3042,7 +3061,7 @@ function Invoke-JanetToolAction {
                 Category = if ($isOffline) { 'UNREACHABLE' } else { 'SCAN_FAILED' }
                 Severity = 'WARN'
                 Evidence = [string]$res.Detail
-                Fix      = if ($isOffline) { 'Verify the host is on and reachable (TCP 5985/445), or retry with "Attempt even if offline".' }
+                Fix      = if ($isOffline) { 'Verify the host is on and reachable (TCP 5985/5986/445), or retry with "Attempt even if offline".' }
                            else { 'Scan did not complete - the WU/WMI stack may be wedged; run winmgmt /verifyrepository on the host and retry.' }
             }
         }

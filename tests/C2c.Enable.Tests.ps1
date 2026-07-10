@@ -290,8 +290,8 @@ Describe 'C2C manifest - C2C Nemesis v1.10.0, per-pillar fix actions (incl. fix-
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.11.0' {
-        $man.version | Should Be '1.11.0'
+    It 'reports tool version 1.12.0' {
+        $man.version | Should Be '1.12.0'
     }
     It 'exposes 11 actions: scan + import + six per-pillar fixes + fix-lockscreen + run-all + version-check' {
         @($man.actions).Count | Should Be 11

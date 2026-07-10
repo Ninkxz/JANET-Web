@@ -192,15 +192,25 @@ function Remove-RemoteAdminSelfTargets {
 
 # --- Reachability (AFNET-safe: TCP only, NEVER ICMP) ------------------------
 # Named so the Pester suite can shim it and drive the post-reachability path.
+# Default ladder is the WinRM pair (5985 HTTP, 5986 HTTPS) + SMB 445 liveness;
+# break on first connect, so 5985 wins when both WinRM ports are open. Callers
+# that only want the SMB-445 share-reachability signal (open-cshare) pass
+# -Ports @(445) and never see $UseSsl. $UseSsl is an optional [ref] out-param -
+# set $true ONLY when the port that answered is 5986 - so a caller that opens a
+# WinRM session afterwards (the run-script worker) knows to dial -UseSSL.
 function Test-RemoteAdminReachable {
-    param([string]$ComputerName, [int[]]$Ports = @(5985, 445), [int]$TimeoutMs = 1500)
+    param([string]$ComputerName, [int[]]$Ports = @(5985, 5986, 445), [int]$TimeoutMs = 1500, [ref]$UseSsl)
+    if ($UseSsl) { $UseSsl.Value = $false }
     if ([string]::IsNullOrWhiteSpace($ComputerName)) { return $false }
     foreach ($port in $Ports) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($ComputerName, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tc.Connected) { return $true }
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tc.Connected) {
+                if ($UseSsl -and $port -eq 5986) { $UseSsl.Value = $true }
+                return $true
+            }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
     }
     return $false
@@ -228,16 +238,25 @@ $script:RemoteAdminScriptBlock = {
 
     $r = @{ Host = $Computer; Online = $false; Status = 'Failed'; Output = ''; Error = '' }
 
-    $reachable = Test-RemoteAdminReachable -ComputerName $Computer
+    # $useSsl comes back via the [ref] out-param: $true ONLY when the host answered
+    # ONLY on WinRM HTTPS 5986 (5985 is tried first and wins on a break when both are
+    # open), so the session below auto-switches to -UseSSL for a 5986-only host.
+    $useSsl = $false
+    $reachable = Test-RemoteAdminReachable -ComputerName $Computer -UseSsl ([ref]$useSsl)
     if (-not $reachable) {
-        $r.Status = 'Offline'; $r.Error = 'Offline (no TCP on 5985/445)'
+        $r.Status = 'Offline'; $r.Error = 'Offline (no TCP on 5985/5986/445)'
         return $r
     }
     $r.Online = $true
 
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is
+    # common on AFNET, so skip CA/CN validation - the transport stays encrypted).
     $opTimeout = [Math]::Max(15000, $TimeoutSeconds * 1000)
-    $wsOpt = New-PSSessionOption -OperationTimeout $opTimeout -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout = $opTimeout; OpenTimeout = 15000; CancelTimeout = 5000; IdleTimeout = 60000 }
+    if ($useSsl) { $soP['SkipCACheck'] = $true; $soP['SkipCNCheck'] = $true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName = $Computer; SessionOption = $wsOpt; ErrorAction = 'Stop' }
+    if ($useSsl) { $splat['UseSSL'] = $true }
     if ($Cred) { $splat['Credential'] = $Cred; $splat['Authentication'] = $Auth }
 
     $sess = $null

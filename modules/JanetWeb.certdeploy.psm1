@@ -53,7 +53,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'check'
                 label       = 'Check Trust Certs (read-only)'
-                description = 'READ-ONLY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (root\*.cer -> Root, Intermediate\*.cer -> CA, Untrusted\*.cer -> Disallowed, loose *.cer -> Root; blank folder = the shipped Packages\DoD-Certs), then per host open each LocalMachine store READ-ONLY and compute which bundle roots are MISSING per store. Status ALL PRESENT (0 missing) / MISSING N / OFFLINE / CHECK ERROR. Detail lists the per-store missing counts (Root x / CA y / Disallowed z) plus a few example missing subjects. Reachability is TCP-only (5985/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes to a store on this path; needs no admin session and no confirm word.'
+                description = 'READ-ONLY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (root\*.cer -> Root, Intermediate\*.cer -> CA, Untrusted\*.cer -> Disallowed, loose *.cer -> Root; blank folder = the shipped Packages\DoD-Certs), then per host open each LocalMachine store READ-ONLY and compute which bundle roots are MISSING per store. Status ALL PRESENT (0 missing) / MISSING N / OFFLINE / CHECK ERROR. Detail lists the per-store missing counts (Root x / CA y / Disallowed z) plus a few example missing subjects. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes to a store on this path; needs no admin session and no confirm word.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','Status','Missing','Detail')
@@ -84,7 +84,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'scan-cert-management'
                 label       = 'SCAN CERT MANAGEMENT (what manages trust)'
-                description = 'READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip that inspects WHAT MANAGES the LocalMachine trust store so you know whether a scripted .Default push will actually persist. Detects the DISA InstallRoot agent (uninstall registry DisplayName, a scheduled task, and the %ProgramFiles%\DoD-PKE path), counts the GPO physical Root/CA store (HKLM Policies SystemCertificates), and reads the LocalMachine Root store count for context. Reconciler verdict InstallRoot / GPO / InstallRoot+GPO / None detected / OFFLINE / CHECK ERROR - when a reconciler is present a scripted push may be pruned on reboot (align with InstallRoot/GPO instead); None detected means a manual .Default push WILL persist. Reachability is TCP-only (5985/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes anything.'
+                description = 'READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip that inspects WHAT MANAGES the LocalMachine trust store so you know whether a scripted .Default push will actually persist. Detects the DISA InstallRoot agent (uninstall registry DisplayName, a scheduled task, and the %ProgramFiles%\DoD-PKE path), counts the GPO physical Root/CA store (HKLM Policies SystemCertificates), and reads the LocalMachine Root store count for context. Reconciler verdict InstallRoot / GPO / InstallRoot+GPO / None detected / OFFLINE / CHECK ERROR - when a reconciler is present a scripted push may be pruned on reboot (align with InstallRoot/GPO instead); None detected means a manual .Default push WILL persist. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes anything.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','InstallRoot','GPRoots','Reconciler','Detail')
@@ -649,27 +649,35 @@ $script:CertDeployCheckBlock = {
 
     $r = @{ Host=$Computer; Ping=''; Status=''; MissRoot=@(); MissCA=@(); MissDis=@(); PresRoot=0; PresCA=0; PresDis=0; Ok=$false; Detail='' }
 
-    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). 5985 then 445, 1.5s.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). WinRM HTTP 5985, then WinRM
+    # HTTPS 5986, then SMB 445 (liveness only), 1.5s, break on first connect. $useSsl
+    # tracks whether ONLY 5986 answered so the session below auto-switches to -UseSSL
+    # (HTTP 5985 is preferred when both are open).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
         if (-not $AttemptOffline) {
-            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
+            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
             return $r
         }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on
+    # AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -868,24 +876,31 @@ $script:CertDeployDeployBlock = {
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Missing=''; Detail=''; Added=0; Total=0 }
 
-    # TCP reachability (WinRM 5985 then SMB 445, 1.5s). Never ICMP.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability (WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 liveness,
+    # 1.5s, break on first connect). Never ICMP. $useSsl tracks whether ONLY 5986
+    # answered so the session below auto-switches to -UseSSL (5985 preferred when both open).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
-        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on
+    # AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'FAILED'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -1134,27 +1149,35 @@ $script:CertDeployScanBlock = {
 
     $r = @{ Host=$Computer; Ping=''; Status=''; InstallRootPresent=$false; InstallRootToken='no'; GpRoots=0; DefaultRootCount=0; Ok=$false; Detail='' }
 
-    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). 5985 then 445, 1.5s.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # Reachability: pure-TCP probe (AFNET-safe; never ICMP). WinRM HTTP 5985, then WinRM
+    # HTTPS 5986, then SMB 445 (liveness only), 1.5s, break on first connect. $useSsl
+    # tracks whether ONLY 5986 answered so the session below auto-switches to -UseSSL
+    # (HTTP 5985 is preferred when both are open).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
         if (-not $AttemptOffline) {
-            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
+            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
             return $r
         }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on
+    # AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }

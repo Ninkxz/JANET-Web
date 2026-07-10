@@ -20,7 +20,7 @@
 
   var HOST_RE = /^[A-Za-z0-9._-]+$/;
   var TASK_RE = /^[A-Za-z0-9 ._-]+$/;
-  var EXPORT_COLS = [['Host', 'Host'], ['Ping', 'Ping'], ['Status', 'Status'], ['Detail', 'Detail']];
+  var EXPORT_COLS = [['Host', 'Host'], ['Ping', 'Ping'], ['Status', 'Status'], ['Watchdog', 'Watchdog'], ['Detail', 'Detail']];
   var OK = ['INSTALLED', 'UPDATED', 'REMOVED', 'CLEAN', 'NOT PRESENT'];
   var WARN = ['QUARANTINE PRESENT', 'OFFLINE', 'SKIPPED'];
   var BAD = ['FAILED', 'CHECK ERROR', 'Cancelled'];
@@ -31,6 +31,16 @@
     if (WARN.indexOf(s) >= 0) return 'st-warn';
     if (BAD.indexOf(s) >= 0) return 'st-bad';
     if (s === 'Queued') return 'st-info';
+    return '';
+  }
+  // Watchdog RUN-health (status action): green = confirmed running, red = installed but
+  // not running, amber = installed-unproven, blank/muted = not installed / not applicable.
+  function watchdogCellCls(v) {
+    var s = String(v == null ? '' : v);
+    if (s === 'HEALTHY' || s === 'RUNNING') return 'st-ok';
+    if (s === 'DISABLED' || s === 'LAST FAILED') return 'st-bad';
+    if (s === 'NEVER RAN') return 'st-warn';
+    if (s === 'NOT INSTALLED') return 'st-warn';
     return '';
   }
   function statusRowCls(v) {
@@ -82,7 +92,7 @@
       intRow.appendChild(intIn);
       optCard.appendChild(intRow);
 
-      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP.' });
+      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/5986/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
       optCard.appendChild(offlineCb);
 
       var threadsRow = el('div'); threadsRow.style.cssText = 'display:flex;align-items:center;gap:10px';
@@ -148,7 +158,7 @@
       head.appendChild(exportBtn); head.appendChild(clearBtn);
       right.appendChild(head);
 
-      var results = ui.namedCard('C2C QUARANTINE KILLER RESULTS', 'One row per host: Status reports presence; Install/Remove report the watchdog change.');
+      var results = ui.namedCard('C2C QUARANTINE KILLER RESULTS', 'One row per host. On a Status check the WATCHDOG column confirms it is actually running (HEALTHY / RUNNING = firing; NEVER RAN / DISABLED / LAST FAILED = installed but not running); Detail shows last run, result and next run.');
       results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
       var grid = C.ResultsGrid({
         title: 'C2C Quarantine Killer results',
@@ -157,7 +167,8 @@
         columns: [
           { key: 'Host', label: 'HOST', width: 150 },
           { key: 'Ping', label: 'PING', width: 90 },
-          { key: 'Status', label: 'STATUS', width: 170, render: function (r) { return { text: r.Status == null ? '' : String(r.Status), cls: statusCellCls(r.Status) }; } },
+          { key: 'Status', label: 'STATUS', width: 160, render: function (r) { return { text: r.Status == null ? '' : String(r.Status), cls: statusCellCls(r.Status) }; } },
+          { key: 'Watchdog', label: 'WATCHDOG', width: 120, render: function (r) { var t = String(r.Watchdog == null ? '' : r.Watchdog); return { text: t, cls: watchdogCellCls(r.Watchdog), title: t ? ('Watchdog run-health: ' + t) : '' }; } },
           { key: 'Detail', label: 'DETAIL', render: function (r) { var t = String(r.Detail == null ? '' : r.Detail); return { text: t, title: t }; } }
         ],
         rowClass: function (r) { return statusRowCls(r.Status); }

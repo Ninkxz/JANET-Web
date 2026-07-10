@@ -556,7 +556,7 @@
         var tab = makeRunTab(panel, {
           actionId: 'bulk-scan', runLabel: 'SCAN ALL', cancelLabel: 'CANCEL SCAN',
           title: 'BULK SCAN & PATCH', logName: 'WPT_BulkScan',
-          description: 'Parallel scan: online (TCP 5985/445), logged-on user, C: free space, reboot-pending, MECM / Windows Update / app pending counts. Double-click a row for Host Details. Select rows then Patch / Reboot.',
+          description: 'Parallel scan: online (TCP 5985/5986/445), logged-on user, C: free space, reboot-pending, MECM / Windows Update / app pending counts. Double-click a row for Host Details. Select rows then Patch / Reboot.',
           columns: bulkScanColumns(),
           keyMode: { hostCol: 'Host' },   // 1 row per host (default Host key)
           selectable: true,
@@ -621,7 +621,7 @@
         var patchBtn = ui.button('Patch Selected', { variant: 'gold', title: 'Trigger MECM updates + pending apps on the checked hosts, using the selected posture.' });
         var patchAllBtn = ui.button('Patch All Needing', { variant: 'gold', title: 'Select hosts with work, then patch them in one click (selected posture).' });
         var rebootBtn = ui.button('Reboot Selected', { variant: 'danger', title: 'Force an immediate reboot on the checked hosts.' });
-        var pingBtn = ui.button('Ping Sweep', { variant: 'cyan', title: 'TCP reachability test (5985/445) across the target list.' });
+        var pingBtn = ui.button('Ping Sweep', { variant: 'cyan', title: 'TCP reachability test (5985/5986/445) across the target list.' });
         var winrmBtn = ui.button('Repair WinRM', { variant: 'cyan', title: 'Bootstrap WinRM over DCOM on the checked (offline) hosts.' });
         actBar.appendChild(ui.eyebrow('POSTURE')); actBar.appendChild(patchModeSel);
         [patchBtn, patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { actBar.appendChild(b); });

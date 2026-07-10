@@ -9,6 +9,9 @@
 #  inline WinRM-via-DCOM bootstrap repair, per-host exit-code parsing, and live
 #  per-host streaming.
 #
+#  v2.5.7 reachability also probes WinRM HTTPS 5986 (after HTTP 5985, before the
+#  SMB/DCOM repair fallback), auto-switching that host's session to -UseSSL.
+#
 #  Contract:
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -19,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.6'
+        version  = '2.5.7'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -123,11 +126,13 @@ $script:RpiDeployHostScript = {
         [string]$PkgName,
         [System.Management.Automation.PSCredential]$Credential,
         $WSManOpt,
+        $WSManOptSsl,
         $StepQueue,
         [string]$Mode = 'PSADT',
         [string[]]$MsiList = @(),
         [string]$MsiArgs = '/qn /norestart',
-        $PathMap
+        $PathMap,
+        $UseSslMap
     )
 
     $pushStep = {
@@ -168,10 +173,13 @@ $script:RpiDeployHostScript = {
     $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
 
     try {
-        ## 1. Probe 5985 (the port we actually need for WinRM). Inlined because
-        ## the runspace can't see Test-RpiReachable from outer scope.
-        & $pushStep 'Probing' 'TCP probe 5985'
+        ## 1. Probe WinRM: 5985 (HTTP, preferred), then 5986 (HTTPS backup).
+        ## Inlined because the runspace can't see Test-RpiReachable from outer
+        ## scope. $useSsl is set ONLY when 5985 is closed and 5986 answers, so
+        ## the session below (step 4) dials HTTPS for an SSL-only host.
+        & $pushStep 'Probing' 'TCP probe 5985/5986'
         $winrmOpen = $false
+        $useSsl    = $false
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
@@ -183,8 +191,22 @@ $script:RpiDeployHostScript = {
         finally { if ($tc) { try { $tc.Close() } catch {} } }
 
         if (-not $winrmOpen) {
-            ## 1a. WinRM closed. Probe SMB (445) -- if THAT's open we have a
-            ## DCOM-repair side-channel.
+            ## 1a. WinRM 5985 (HTTP) closed -- try 5986 (HTTPS) before falling
+            ## back to the SMB/DCOM repair path.
+            $tc = $null
+            try {
+                $tc = New-Object System.Net.Sockets.TcpClient
+                $iar = $tc.BeginConnect($Computer, 5986, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) {
+                    $winrmOpen = $true; $useSsl = $true; $tc.Close()
+                }
+            } catch {}
+            finally { if ($tc) { try { $tc.Close() } catch {} } }
+        }
+
+        if (-not $winrmOpen) {
+            ## 1b. WinRM closed (5985 and 5986). Probe SMB (445) -- if THAT's
+            ## open we have a DCOM-repair side-channel.
             $smbOpen = $false
             $tc = $null
             try {
@@ -197,14 +219,16 @@ $script:RpiDeployHostScript = {
             finally { if ($tc) { try { $tc.Close() } catch {} } }
 
             if (-not $smbOpen) {
-                $r.Reason = 'Machine is offline or unreachable (no TCP on 5985 or 445)'
+                $r.Reason = 'Machine is offline or unreachable (no TCP on 5985, 5986 or 445)'
                 return $r
             }
 
-            ## 1b. SMB open + WinRM closed -> attempt DCOM bootstrap of WinRM.
+            ## 1c. SMB open + WinRM closed -> attempt DCOM bootstrap of WinRM.
             ## Two-attempt CIM connect, then ChangeStartMode + StartService +
             ## winrm quickconfig (with -skipNetworkProfileCheck), then re-probe
             ## 5985 with a 30s budget. Requires a credential for the DCOM session.
+            ## (quickconfig provisions the HTTP listener only, so the re-probe
+            ## stays 5985 -- 5986 needs a cert quickconfig does not create.)
             & $pushStep 'Repairing' 'DCOM bootstrap of WinRM'
             $r.RepairAttempted = $true
             if (-not $Credential) {
@@ -297,7 +321,10 @@ $script:RpiDeployHostScript = {
         # Publish the on-target staged path so the driver can sweep it if the
         # wall-clock watchdog or an operator-cancel abandons this host (its
         # finally cleanup below never runs in that case, leaking the copy).
+        # Publish $useSsl alongside it so a post-loop cleanup sweep (below,
+        # driver-side) dials an SSL-only host over HTTPS too.
         if ($PathMap) { $PathMap[$Computer] = $remoteLocalPath }
+        if ($UseSslMap) { $UseSslMap[$Computer] = $useSsl }
 
         if ($Mode -eq 'MSI' -and @($MsiList).Count -gt 0) {
             New-Item -ItemType Directory -Force -Path $remoteSharePath -EA Stop | Out-Null
@@ -361,11 +388,14 @@ $script:RpiDeployHostScript = {
         } else {
             & $pushStep 'Deploying' 'Running Deploy-Application.ps1'
         }
-        if ($Credential) {
-            $session = New-PSSession -ComputerName $Computer -Credential $Credential -Authentication Negotiate -SessionOption $WSManOpt -EA Stop
-        } else {
-            $session = New-PSSession -ComputerName $Computer -Authentication Negotiate -SessionOption $WSManOpt -EA Stop
-        }
+        ## -UseSSL only when the probe found the host reachable ONLY on 5986
+        ## (WSManOptSsl carries SkipCACheck/SkipCNCheck for the common
+        ## self-signed WinRM HTTPS cert; port 5986 is implicit).
+        $sessOpt = if ($useSsl) { $WSManOptSsl } else { $WSManOpt }
+        $sessSplat = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$sessOpt; ErrorAction='Stop' }
+        if ($Credential) { $sessSplat['Credential'] = $Credential }
+        if ($useSsl) { $sessSplat['UseSSL'] = $true }
+        $session = New-PSSession @sessSplat
 
         if ($Mode -eq 'MSI') {
             ## MSI bundle mode. For each selected MSI (filename relative to the
@@ -757,8 +787,11 @@ function Invoke-JanetToolAction {
     # Bounded session options: OperationTimeout is sized to the install budget
     # above (a blocking deploy yields no output for its full duration), while
     # OpenTimeout/CancelTimeout stay modest so connect and cancel remain snappy.
-    # Lifted from v2.5.4 $script:WSManOpt.
-    $wsManOpt = New-PSSessionOption -OperationTimeout $opTimeoutMs -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # Lifted from v2.5.4 $script:WSManOpt. $wsManOptSsl is the same budget with
+    # SkipCACheck/SkipCNCheck added for a host the per-host probe finds
+    # reachable ONLY on WinRM HTTPS 5986 (self-signed cert is common on AFNET).
+    $wsManOpt    = New-PSSessionOption -OperationTimeout $opTimeoutMs -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $wsManOptSsl = New-PSSessionOption -OperationTimeout $opTimeoutMs -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000 -SkipCACheck -SkipCNCheck
 
     # Per-host wall-clock watchdog (Wave-3). The WinRM OperationTimeout above
     # bounds ONLY the deploy phase; the SMB mount (New-PSDrive \\host\C$) and the
@@ -797,6 +830,10 @@ function Invoke-JanetToolAction {
     # target. The driver consults it to sweep staged payloads left behind when
     # the watchdog or an operator-cancel abandons a host (its finally never ran).
     $pathMap    = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new()
+    # Thread-safe map of host -> $useSsl (WinRM reachable ONLY on 5986), published
+    # by each per-host scriptblock alongside $pathMap so the post-loop cleanup
+    # sweep (below) can dial an abandoned SSL-only host over HTTPS too.
+    $useSslMap  = [System.Collections.Concurrent.ConcurrentDictionary[string,bool]]::new()
     $dispatched = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     # Per-host start stamps (Wave-3 watchdog): a host is stamped the FIRST time it
     # pushes a step (i.e. when it actually starts executing, not when submitted to
@@ -828,11 +865,13 @@ function Invoke-JanetToolAction {
             [void]$ps.AddArgument($pkgName)
             [void]$ps.AddArgument($Credential)
             [void]$ps.AddArgument($wsManOpt)
+            [void]$ps.AddArgument($wsManOptSsl)
             [void]$ps.AddArgument($stepQueue)
             [void]$ps.AddArgument($mode)
             [void]$ps.AddArgument($msiList)
             [void]$ps.AddArgument($msiArgs)
             [void]$ps.AddArgument($pathMap)
+            [void]$ps.AddArgument($useSslMap)
             [void]$jobs.Add([pscustomobject]@{ Host=$comp; PS=$ps; Async=$ps.BeginInvoke(); Done=$false })
         }
 
@@ -1048,18 +1087,23 @@ function Invoke-JanetToolAction {
     # already in the row detail so the operator can clean it manually.
     if ($leaked.Count -gt 0) {
         & $send @{ type='log'; level=''; text="[CLEANUP] sweeping staged payload(s) on $($leaked.Count) abandoned host(s)..." }
-        $sweepOpt = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000 -CancelTimeout 5000
+        $sweepOpt    = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000 -CancelTimeout 5000
+        # SSL variant for a host the per-host probe found reachable ONLY on 5986
+        # ($useSslMap, published alongside $pathMap) -- otherwise this sweep would
+        # dial HTTP 5985 on a host that never had it open.
+        $sweepOptSsl = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000 -CancelTimeout 5000 -SkipCACheck -SkipCNCheck
         foreach ($lk in $leaked) {
             $lkHost = [string]$lk.Host
             $lkPath = [string]$lk.Path
             if ([string]::IsNullOrWhiteSpace($lkPath)) { continue }
+            $lkUseSsl = $false
+            if ($useSslMap.ContainsKey($lkHost)) { $lkUseSsl = [bool]$useSslMap[$lkHost] }
             $sweepSess = $null
             try {
-                if ($Credential) {
-                    $sweepSess = New-PSSession -ComputerName $lkHost -Credential $Credential -Authentication Negotiate -SessionOption $sweepOpt -EA Stop
-                } else {
-                    $sweepSess = New-PSSession -ComputerName $lkHost -Authentication Negotiate -SessionOption $sweepOpt -EA Stop
-                }
+                $sweepSplat = @{ ComputerName=$lkHost; Authentication='Negotiate'; SessionOption=$(if ($lkUseSsl) { $sweepOptSsl } else { $sweepOpt }); ErrorAction='Stop' }
+                if ($Credential) { $sweepSplat['Credential'] = $Credential }
+                if ($lkUseSsl) { $sweepSplat['UseSSL'] = $true }
+                $sweepSess = New-PSSession @sweepSplat
                 Invoke-Command -Session $sweepSess -ArgumentList $lkPath -ScriptBlock {
                     param($p)
                     if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -EA SilentlyContinue }

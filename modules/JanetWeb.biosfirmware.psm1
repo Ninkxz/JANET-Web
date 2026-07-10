@@ -111,20 +111,26 @@ $script:BiosFirmwareScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
     $r = @{ Host=$Computer; Online=$false; Manufacturer=''; Model=''; ProductName=''; InstalledBIOS=''; BiosDate=''; Error='' }
     # Inline TCP reachability probe (workers can't see module functions) - fail fast.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness only), break on first
+    # connect (HTTP preferred when both open). $useSsl tracks whether ONLY 5986 answered so
+    # the session below auto-switches to -UseSSL (self-signed WinRM HTTPS is common on AFNET).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
-    if (-not $reachable) { $r.Error = 'Offline (no TCP 5985/445)'; return $r }
+    if (-not $reachable) { $r.Error = 'Offline (no TCP 5985/5986/445)'; return $r }
     $r.Online = $true
-    $wsOpt = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    $soP = @{ OperationTimeout=60000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error = "Session: $($_.Exception.Message)"; return $r }

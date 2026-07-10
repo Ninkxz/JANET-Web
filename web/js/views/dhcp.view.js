@@ -39,7 +39,7 @@
       // ===== DHCP SERVER connect strip =====
       var connStrip = ui.card({}); connStrip.style.cssText += ';margin:12px 14px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap';
       connStrip.appendChild(ui.eyebrow('DHCP SERVER'));
-      var serverInput = ui.input({ placeholder: 'hostname or FQDN of the authorized DHCP server', title: 'The Microsoft DHCP server to manage (WinRM/5985).' });
+      var serverInput = ui.input({ placeholder: 'hostname or FQDN of the authorized DHCP server', title: 'The Microsoft DHCP server to manage (WinRM 5985, HTTPS 5986 fallback).' });
       serverInput.style.width = '300px';
       var connectBtn = ui.button('Connect', { variant: 'go', size: 'sm' });
       var disconnectBtn = ui.ghostButton('Disconnect', { size: 'sm' }); disconnectBtn.disabled = true;

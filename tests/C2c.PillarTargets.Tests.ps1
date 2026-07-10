@@ -94,13 +94,44 @@ Failed Rule 2 - Host Firewall",,,HOSTX.area52.afnoapps.usaf.mil,1
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C per-pillar fix - REFUSES without a usable import (never dials an unreviewed set)' {
+Describe 'C2C per-pillar fix - MANUAL mode (no import) dials EXACTLY the typed hosts' {
 
-    It 'with targets but NO csvPath -> rejected, zero rows dialed' {
-        $out = Invoke-C2cFix -ActionId 'fix-patches' -Params @{ targets = 'HOSTP'; confirm = 'FIX' }
-        $out.Result.summary.rejected | Should Be $true
-        @($out.Rows).Count | Should Be 0
+    # v1.12.0 dual-mode: with NO csvPath there is no import to scope against, so the fix
+    # dials exactly the typed Target Computers for the chosen pillar (the operator owns the
+    # list) - it is NOT rejected. Every other guard (confirm word, self-guard) still applies.
+    $out = Invoke-C2cFix -ActionId 'fix-patches' -Params @{ targets = "HOSTP`nHOSTZ"; confirm = 'FIX'; attemptOffline = $true; threads = 4 }
+
+    It 'with targets but NO csvPath -> MANUAL mode: dials the typed host(s), NOT rejected' {
+        $out.Result.summary.rejected | Should Not Be $true
+        @($out.Rows | Where-Object { $_.Status -eq 'FIXED' }).Count | Should Be 2
+        (@($out.Rows | Where-Object { $_.Host -eq 'HOSTP' -and $_.Status -eq 'FIXED' })[0]).Detail | Should Be 'PILLARS=Patches'
+        (@($out.Rows | Where-Object { $_.Host -eq 'HOSTZ' -and $_.Status -eq 'FIXED' })[0]).Detail | Should Be 'PILLARS=Patches'
     }
+
+    It 'MANUAL mode announces itself in the activity log' {
+        @($out.Logs | Where-Object { $_.text -match 'MANUAL MODE' }).Count | Should Not Be 0
+    }
+
+    It 'MANUAL mode de-dupes a short + FQDN of the same box (no destructive double-fix)' {
+        $dd = Invoke-C2cFix -ActionId 'fix-firewall' -Params @{ targets = "HOSTP`nHOSTP.area52.afnoapps.usaf.mil"; confirm = 'FIX'; attemptOffline = $true }
+        @($dd.Rows | Where-Object { $_.Host -eq 'HOSTP' -and $_.Status -eq 'FIXED' }).Count | Should Be 1
+    }
+
+    It 'MANUAL mode preserves an IPv4-literal target (never mangled to its first octet)' {
+        # An operator types the IP of a DNS-broken box - the fix must dial 10.20.30.40, not "10".
+        $ip = Invoke-C2cFix -ActionId 'fix-firewall' -Params @{ targets = '10.20.30.40'; confirm = 'FIX'; attemptOffline = $true }
+        (@($ip.Rows | Where-Object { $_.Status -eq 'FIXED' })[0]).Host | Should Be '10.20.30.40'
+    }
+
+    It 'MANUAL mode still applies the self-guard (dispatcher/local host dropped)' {
+        $sg = Invoke-C2cFix -ActionId 'fix-patches' -Params @{ targets = $env:COMPUTERNAME; confirm = 'FIX'; attemptOffline = $true }
+        @($sg.Rows | Where-Object { $_.Status -eq 'FIXED' }).Count | Should Be 0
+        (@($sg.Rows | Where-Object { $_.Status -eq 'SKIPPED' })[0]).Detail | Should Match 'self-guard'
+    }
+}
+
+# -----------------------------------------------------------------------------
+Describe 'C2C per-pillar fix - REFUSES a SUPPLIED-but-bad import / empty selection' {
 
     It 'with a csvPath pointing at an EMPTY / invalid CSV -> rejected, zero rows dialed' {
         $empty = New-C2cTempCsv ''
@@ -180,13 +211,46 @@ Failed Rule - Bitlocker",,,hostC.area52.afnoapps.usaf.mil,1
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C run-all - REFUSES without a usable import' {
+Describe 'C2C run-all - MANUAL mode (no import) trusts the client plan verbatim' {
 
-    It 'with a plan but NO csvPath -> rejected, zero rows dialed' {
-        $plan = '[{"host":"hostA","pillars":["Patches"]}]'
-        $out = Invoke-C2cFix -ActionId 'run-all' -Params @{ plan = $plan; confirm = 'FIX' }
-        $out.Result.summary.rejected | Should Be $true
-        @($out.Rows).Count | Should Be 0
+    # v1.12.0 dual-mode: run-all with NO csvPath dials each planned host for its own listed
+    # fixable pillars, WITHOUT intersecting against a CSV (there is none). hostA gets both its
+    # planned pillars; a plan host is no longer dropped for being "not in the import".
+    It 'with a plan but NO csvPath -> MANUAL: dials each host for its planned pillars, NOT rejected' {
+        $plan = '[{"host":"hostA","pillars":["Patches","Firewall"]},{"host":"hostB","pillars":["Encryption"]}]'
+        $out = Invoke-C2cFix -ActionId 'run-all' -Params @{ plan = $plan; confirm = 'FIX'; attemptOffline = $true; threads = 4 }
+        $out.Result.summary.rejected | Should Not Be $true
+        $a = @($out.Rows | Where-Object { $_.Host -eq 'hostA' -and $_.Status -eq 'FIXED' })[0]
+        $a | Should Not BeNullOrEmpty
+        $a.Detail | Should Be 'PILLARS=Patches+Firewall'
+        (@($out.Rows | Where-Object { $_.Host -eq 'hostB' -and $_.Status -eq 'FIXED' })[0]).Detail | Should Be 'PILLARS=Encryption'
+    }
+
+    It 'MANUAL run-all still drops non-endpoint-fixable pillars (Vuln/OSVersion route elsewhere)' {
+        $plan = '[{"host":"hostA","pillars":["Patches","Vuln"]}]'
+        $out = Invoke-C2cFix -ActionId 'run-all' -Params @{ plan = $plan; confirm = 'FIX'; attemptOffline = $true }
+        (@($out.Rows | Where-Object { $_.Host -eq 'hostA' -and $_.Status -eq 'FIXED' })[0]).Detail | Should Be 'PILLARS=Patches'
+    }
+}
+
+# -----------------------------------------------------------------------------
+Describe 'C2C reachability probes WinRM HTTPS 5986 + auto -UseSSL (all three workers)' {
+    # v1.12.0: the scan, fix and version workers each probe 5985 -> 5986 -> 445 and switch
+    # that host's session to -UseSSL when only 5986 answered. The decision is inline in each
+    # pool-runspace scriptblock (no live listener to unit-test), so guard the wiring at source.
+    $src = Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
+
+    It 'every worker probes the 5985,5986,445 ladder (3 sites)' {
+        ([regex]::Matches($src, '5985,5986,445')).Count | Should Be 3
+    }
+    It 'every worker arms -UseSSL for a 5986-only host (3 sites)' {
+        ([regex]::Matches($src, "splat\['UseSSL'\]")).Count | Should Be 3
+    }
+    It 'every SSL session skips CA/CN validation for self-signed WinRM HTTPS (3 sites)' {
+        ([regex]::Matches($src, "SkipCACheck")).Count | Should Be 3
+    }
+    It 'no worker still uses the old 5985,445-only ladder' {
+        ([regex]::Matches($src, '5985,445')).Count | Should Be 0
     }
 }
 

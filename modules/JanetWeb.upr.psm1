@@ -718,7 +718,7 @@ function Parse-ReportTextRelaxed {
 
 # -----------------------------------------------------------------------------
 #  Remote worker scriptblock.
-#  One worker per host: TCP 5985 precheck, open ONE session, enumerate installed
+#  One worker per host: TCP 5985/5986/445 precheck, open ONE session, enumerate installed
 #  software ONCE, match every applicable profile (regex + VersionMaxExclusive),
 #  compute Decision via the proven gate, and (when $DoUninstall) run the per-
 #  product uninstall handler for each Uninstall-decision candidate (skipped on
@@ -737,26 +737,38 @@ $UprWorkerBlock = {
     }
 
     try {
-        ## --- Reachability precheck (TCP 5985, 3s) ---
-        try {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            $iar = $tcp.BeginConnect($ConnectTarget, 5985, $null, $null)
-            $ok  = $iar.AsyncWaitHandle.WaitOne(3000, $false)
-            if ($ok -and $tcp.Connected) { $tcp.EndConnect($iar); $tcp.Close(); $r.Reachable = $true }
-            else { try { $tcp.Close() } catch {} }
-        } catch { }
+        ## --- Reachability precheck (TCP 5985, then WinRM HTTPS 5986, then SMB 445
+        ## liveness, 3s connect timeout, break on first connect). $useSsl tracks
+        ## whether ONLY 5986 answered so the session below auto-switches to -UseSSL
+        ## (HTTP 5985 is preferred when both open).
+        $useSsl = $false
+        foreach ($port in 5985,5986,445) {
+            $tcp = $null
+            try {
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $iar = $tcp.BeginConnect($ConnectTarget, $port, $null, $null)
+                $ok  = $iar.AsyncWaitHandle.WaitOne(3000, $false)
+                if ($ok -and $tcp.Connected) { $tcp.EndConnect($iar); $tcp.Close(); $r.Reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
+                else { try { $tcp.Close() } catch {} }
+            } catch { }
+            if ($r.Reachable) { break }
+        }
 
         if (-not $r.Reachable) { return $r }
 
         ## --- Open ONE session ---
-        $opt = New-PSSessionOption -OperationTimeout 300000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+        ## -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS
+        ## is common on AFNET, so skip CA/CN validation -- the transport stays
+        ## encrypted; port 5986 is implicit).
+        $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+        if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+        $opt = New-PSSessionOption @soP
+        $splat = @{ ComputerName=$ConnectTarget; SessionOption=$opt; ErrorAction='Stop' }
+        if ($useSsl) { $splat['UseSSL']=$true }
+        if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
         $session = $null
         try {
-            if ($Cred) {
-                $session = New-PSSession -ComputerName $ConnectTarget -Credential $Cred -Authentication $Auth -SessionOption $opt -ErrorAction Stop
-            } else {
-                $session = New-PSSession -ComputerName $ConnectTarget -SessionOption $opt -ErrorAction Stop
-            }
+            $session = New-PSSession @splat
         } catch {
             $r.Error = "session open failed: $($_.Exception.Message)"
             return $r
@@ -1359,7 +1371,7 @@ function New-UprEmitRows {
         $attempted = 0
 
         if (-not $res.Reachable) {
-            $detailTxt = if ($res.Error) { [string]$res.Error } else { 'no TCP reply on 5985' }
+            $detailTxt = if ($res.Error) { [string]$res.Error } else { 'no TCP reply on 5985/5986/445' }
             $row = @{ _rk="$hostName|unreachable"; Host=$hostName; Plugin=''; Product=''; Version=''; Decision='Unreachable'; Detail=$detailTxt }
             if ($DoUninstall) { $row.Remove('Detail'); $row['Result'] = $detailTxt }
             [void]$outRows.Add($row)

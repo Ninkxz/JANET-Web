@@ -42,7 +42,7 @@ function Get-JanetToolManifest {
                     @{ name='requireOK'; label='Require user to click OK (popup stays until dismissed)'; type='bool'; required=$false; default=$false },
                     @{ name='timeout';   label='Auto-dismiss after (seconds)'; type='int';  required=$false; default=60 },
                     @{ name='parallel';  label='Send in parallel (faster for large target lists)'; type='bool'; required=$false; default=$true },
-                    @{ name='requirePing'; label='Skip hosts that fail the TCP 5985/445 probe'; type='bool'; required=$false; default=$false },
+                    @{ name='requirePing'; label='Skip hosts that fail the TCP 5985/5986/445 probe'; type='bool'; required=$false; default=$false },
                     @{ name='threads';   label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
             },
@@ -89,35 +89,41 @@ $script:MessageWorker = {
     $isCancelled = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }
 
     # Reachability is TCP-only (AFNET convention): reachable = a short TCP probe to
-    # WinRM(5985) or SMB(445) connects. NEVER ICMP/Test-Connection - it is dropped on
-    # AFNET, so it only adds a per-host timeout for a result that gets OR'd away.
-    # Mirrors the wpt ping-sweep TcpClient style.
-    $tcpUp = $false
-    foreach ($port in 5985, 445) {
+    # WinRM HTTP(5985), WinRM HTTPS(5986), or SMB(445) connects. NEVER ICMP/Test-Connection
+    # - it is dropped on AFNET, so it only adds a per-host timeout for a result that gets
+    # OR'd away. Mirrors the wpt ping-sweep TcpClient style. $useSsl is set when the host
+    # answered ONLY on 5986 so the session below auto-switches to -UseSSL (HTTP 5985 is
+    # preferred when both are open).
+    $tcpUp = $false; $useSsl = $false
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc  = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($hostname, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $tcpUp = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $tcpUp = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($tcpUp) { break }
     }
     $r.Pingable = $tcpUp
     # requirePing (opt-in): when the operator chose to skip hosts that fail the TCP
-    # 5985/445 probe, bail before WinRM instead of attempting delivery. Rebased onto
+    # 5985/5986/445 probe, bail before WinRM instead of attempting delivery. Rebased onto
     # the TCP probe (an ICMP gate is meaningless on a no-ICMP network).
-    if ($requirePing -and -not $tcpUp) { $r.Detail = 'Host not reachable (skipped: failed TCP 5985/445 probe)'; return $r }
+    if ($requirePing -and -not $tcpUp) { $r.Detail = 'Host not reachable (skipped: failed TCP 5985/5986/445 probe)'; return $r }
     # Ping is advisory by default: attempt WinRM even when ICMP is blocked (hardened
     # hosts often allow WinRM while dropping ICMP); mark Unreachable only if WinRM fails.
     if (& $isCancelled) { $r.Detail = 'cancelled by operator'; return $r }
 
     try {
-        $opt = New-PSSessionOption -OpenTimeout $openMs -OperationTimeout $opMs -CancelTimeout 5000
-        $session = if ($cred) {
-            New-PSSession -ComputerName $hostname -Credential $cred -SessionOption $opt -ErrorAction Stop
-        } else {
-            New-PSSession -ComputerName $hostname -SessionOption $opt -ErrorAction Stop
-        }
+        # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is
+        # common on AFNET, so skip CA/CN validation - the transport stays encrypted;
+        # port 5986 is implicit).
+        $soP = @{ OpenTimeout=$openMs; OperationTimeout=$opMs; CancelTimeout=5000 }
+        if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+        $opt = New-PSSessionOption @soP
+        $splat = @{ ComputerName=$hostname; SessionOption=$opt; ErrorAction='Stop' }
+        if ($useSsl) { $splat['UseSSL']=$true }
+        if ($cred) { $splat['Credential']=$cred }
+        $session = New-PSSession @splat
         # Reconcile reachability with delivery: a host we can open a WinRM session to
         # is definitively reachable, so the advisory Pingable must reflect that even if
         # the short pre-probe (ICMP/TCP) missed it (fixes Pingable=No on delivered rows).
@@ -227,13 +233,15 @@ $script:MessageWorker = {
 
 # Lightweight reachability worker for the Ping All action.
 # Reachability is TCP-only (AFNET convention): a host is reachable if a short TCP
-# probe to WinRM(5985) or SMB(445) connects (mirrors the wpt ping-sweep TcpClient
-# style). NEVER ICMP/Test-Connection - it is dropped on AFNET and only adds a
-# per-host timeout; WinRM/SMB-reachable hosts are what actually matter here.
+# probe to WinRM HTTP(5985), WinRM HTTPS(5986), or SMB(445) connects (mirrors the
+# wpt ping-sweep TcpClient style). NEVER ICMP/Test-Connection - it is dropped on
+# AFNET and only adds a per-host timeout; WinRM/SMB-reachable hosts are what
+# actually matter here. This worker only reports Pingable (no session is opened),
+# so there is no $useSsl to thread anywhere.
 $script:PingWorker = {
     param($hostname)
     $up = $false
-    foreach ($port in 5985, 445) {
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc  = New-Object System.Net.Sockets.TcpClient
@@ -311,7 +319,7 @@ function Invoke-JanetToolAction {
         $timeout = [Math]::Max(5, [Math]::Min(3600, $timeout))
         $openMs = 20000; $opMs = 45000
         $requireOK   = Get-MessageBool $Params['requireOK'] $false     # popup stays until dismissed
-        $requirePing = Get-MessageBool $Params['requirePing'] $false   # skip hosts that fail the TCP 5985/445 probe instead of trying WinRM
+        $requirePing = Get-MessageBool $Params['requirePing'] $false   # skip hosts that fail the TCP 5985/5986/445 probe instead of trying WinRM
         $work = $script:MessageWorker
         $argFactory = { param($h) ,@($h, $title, $body, $timeout, $requireOK, $requirePing, $Credential, $openMs, $opMs, $cancelJob) }
         $auditDetail = { param($r) $r.Detail }

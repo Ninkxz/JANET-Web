@@ -85,7 +85,7 @@
       scanThreadsWrap.appendChild(scanThreads);
       scanBar.appendChild(scanThreadsWrap);
       // attempt offline
-      var offlineCb = ui.checkbox('Attempt even if offline', { title: 'Probe over WinRM even when TCP 5985/445 did not answer (slower).' });
+      var offlineCb = ui.checkbox('Attempt even if offline', { title: 'Probe over WinRM even when TCP 5985/5986/445 did not answer (slower). A host answering only on 5986 uses WinRM-over-HTTPS.' });
       scanBar.appendChild(offlineCb);
       var scanStatus = el('span', 'muted', 'Ready'); scanStatus.style.minWidth = '160px';
       scanBar.appendChild(scanStatus);

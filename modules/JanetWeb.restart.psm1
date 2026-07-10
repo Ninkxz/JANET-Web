@@ -127,7 +127,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'ping'
                 label       = 'Ping All (Reachability)'
-                description  = 'Read-only TCP reachability sweep (WinRM 5985 then SMB 445, never ICMP - AFNET drops ICMP) across the target list. Backs the Targets-tab "Ping All" button; reports each host online/offline without touching it.'
+                description  = 'Read-only TCP reachability sweep (WinRM 5985/5986 then SMB 445, never ICMP - AFNET drops ICMP) across the target list. Backs the Targets-tab "Ping All" button; reports each host online/offline without touching it.'
                 kind         = 'stream-table'
                 destructive  = $false
                 columns      = @('Host','Pingable')
@@ -343,7 +343,7 @@ try {
 # serialize in ~ceil(hosts/threads) prompt-window batches when consent is on.
 # -----------------------------------------------------------------------------
 $script:DispatchWorker = {
-    param($hostname, $restartTicks, $mode, $leadMinutes, $rollingGraceSeconds, $message, $dryRun, $cred, $consentRequired, $agentTemplate, $promptSeconds, $consentGraceSeconds, $pollInterval, $consentFailMode, $cancelJob, $onlyIfPending)
+    param($hostname, $restartTicks, $mode, $leadMinutes, $rollingGraceSeconds, $message, $dryRun, $cred, $consentRequired, $agentTemplate, $promptSeconds, $consentGraceSeconds, $pollInterval, $consentFailMode, $cancelJob, $onlyIfPending, $useSsl)
 
     $r = [ordered]@{
         Host         = $hostname
@@ -363,7 +363,7 @@ $script:DispatchWorker = {
 
     # ----- shutdown dispatch helper (shared by direct + post-consent paths) -----
     $doShutdown = {
-        param($targetHost, $sec, $msg, $isDry, $credential, $session)
+        param($targetHost, $sec, $msg, $isDry, $credential, $session, $useSslDial)
         $o = @{ Success = $false; ExitCode = $null; Detail = '' }
         try {
             if ($isDry) {
@@ -430,9 +430,15 @@ $script:DispatchWorker = {
                 $icArgs['Session'] = $session
             } else {
                 # Direct path (consent off): open a per-call WinRM connection, as before.
+                # -UseSSL only when the pre-flight ping determined this host answers ONLY
+                # on 5986 (self-signed WinRM HTTPS is common on AFNET, so skip CA/CN
+                # validation - the transport stays encrypted; port 5986 is implicit).
+                $soDial = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+                if ($useSslDial) { $soDial['SkipCACheck']=$true; $soDial['SkipCNCheck']=$true }
                 $icArgs['ComputerName']   = $targetHost
                 $icArgs['Authentication'] = 'Negotiate'
-                $icArgs['SessionOption']  = (New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000)
+                $icArgs['SessionOption']  = (New-PSSessionOption @soDial)
+                if ($useSslDial) { $icArgs['UseSSL'] = $true }
                 if ($null -ne $credential) { $icArgs['Credential'] = $credential }
             }
             $remote = Invoke-Command @icArgs
@@ -471,7 +477,11 @@ $script:DispatchWorker = {
         if ($onlyIfPending -and -not $dryRun) {
             $pendingState = $null
             try {
-                $wsOpt = New-PSSessionOption -OperationTimeout 30000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+                # -UseSSL only when the pre-flight ping determined this host answers ONLY
+                # on 5986 (self-signed WinRM HTTPS common on AFNET; skip CA/CN validation).
+                $soPend = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+                if ($useSsl) { $soPend['SkipCACheck']=$true; $soPend['SkipCNCheck']=$true }
+                $wsOpt = New-PSSessionOption @soPend
                 $icArgs = @{
                     ComputerName   = $hostname
                     Authentication = 'Negotiate'
@@ -485,6 +495,7 @@ $script:DispatchWorker = {
                         return [bool]($cbs -or $wu -or $pfro)
                     }
                 }
+                if ($useSsl) { $icArgs['UseSSL'] = $true }
                 if ($null -ne $cred) { $icArgs['Credential'] = $cred }
                 $pendingState = [bool](Invoke-Command @icArgs | Select-Object -First 1)
             } catch {
@@ -543,8 +554,13 @@ $script:DispatchWorker = {
             # fails to Launch-Failed, so the existing consentFailMode (proceed/skip)
             # path decides exactly as before.
             try {
-                $nsOpt = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+                # -UseSSL only when the pre-flight ping determined this host answers ONLY
+                # on 5986 (self-signed WinRM HTTPS common on AFNET; skip CA/CN validation).
+                $soNs = @{ OperationTimeout=60000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+                if ($useSsl) { $soNs['SkipCACheck']=$true; $soNs['SkipCNCheck']=$true }
+                $nsOpt = New-PSSessionOption @soNs
                 $nsArgs = @{ ComputerName = $hostname; Authentication = 'Negotiate'; SessionOption = $nsOpt; ErrorAction = 'Stop' }
+                if ($useSsl) { $nsArgs['UseSSL'] = $true }
                 if ($null -ne $cred) { $nsArgs['Credential'] = $cred }
                 $consentSession = New-PSSession @nsArgs
             } catch { $consentSession = $null }
@@ -732,7 +748,7 @@ $script:DispatchWorker = {
         # ----- dispatch the restart -----
         # Pass the reused consent session (or $null when consent is off / dry run -
         # the direct path then opens its own per-call connection, unchanged).
-        $sd = & $doShutdown $hostname $leadSeconds $message $dryRun $cred $consentSession
+        $sd = & $doShutdown $hostname $leadSeconds $message $dryRun $cred $consentSession $useSsl
         $r.ExitCode = $sd.ExitCode
         $r.Success  = [bool]$sd.Success
         $r.Detail   = [string]$sd.Detail
@@ -844,28 +860,33 @@ $script:AbortWorker = {
 }
 
 # -----------------------------------------------------------------------------
-# Reachability worker - AFNET-safe TCP connect probe to WinRM (5985) then SMB
-# (445), NOT ICMP echo: workstation GPOs routinely block inbound ICMP echo while
-# leaving WinRM open, so an ICMP gate would falsely drop reachable hosts from a
-# destructive reboot wave and never see a rebooted host return. Mirrors the
-# proven wpt Ping Sweep / bulk-scan probe (JanetWeb.wpt.psm1). $timeoutMs is the
+# Reachability worker - AFNET-safe TCP connect probe to WinRM HTTP (5985), then
+# WinRM HTTPS (5986), then SMB (445), NOT ICMP echo: workstation GPOs routinely
+# block inbound ICMP echo while leaving WinRM open, so an ICMP gate would falsely
+# drop reachable hosts from a destructive reboot wave and never see a rebooted
+# host return. Mirrors the proven wpt Ping Sweep / bulk-scan probe
+# (JanetWeb.wpt.psm1) and the c2c reachability pre-check; 5985 stays first +
+# break-on-first-connect so HTTP wins when both are open. $timeoutMs is the
 # per-port connect timeout (kept short, 1000-1500ms, so the parallel gate stays
-# fast). Used by both the pre-flight gate and the reboot monitor; the returned
-# shape ({Host;Up;At}) is unchanged so the gate and reboot state machine are not.
+# fast). Used by the pre-flight gate, the "Ping All" action, and the reboot
+# monitor. The returned shape ({Host;Up;At}) is unchanged plus an added UseSsl
+# flag, set only when the host answered ONLY on 5986 - the pre-flight gate
+# threads it into the dispatch worker so a reachable-on-5986 host's WinRM
+# session dials HTTPS instead of a doomed HTTP 5985 attempt.
 # -----------------------------------------------------------------------------
 $script:PingWorker = {
     param($hostname, $timeoutMs)
-    $up = $false
-    foreach ($port in 5985, 445) {
+    $up = $false; $useSsl = $false
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($hostname, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne([int]$timeoutMs, $false) -and $tc.Connected) { $up = $true }
+            if ($iar.AsyncWaitHandle.WaitOne([int]$timeoutMs, $false) -and $tc.Connected) { $up = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch { } finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($up) { break }
     }
-    [PSCustomObject]@{ Host = $hostname; Up = $up; At = (Get-Date) }
+    [PSCustomObject]@{ Host = $hostname; Up = $up; At = (Get-Date); UseSsl = $useSsl }
 }
 
 # Single WinRM boot-time probe: Win32_OperatingSystem.LastBootUpTime, compared
@@ -1239,8 +1260,8 @@ function Invoke-JanetToolAction {
         # ---------------------------------------------------------------------
         # Reachability sweep behind the Targets-tab "Ping All" button (read-only).
         # The view's doPing only needs one row per host with { Host, Pingable };
-        # fan $script:PingWorker out (parallel, cap 64) - same TCP 5985/445 probe
-        # the pre-flight gate uses - and stream a row + progress per host.
+        # fan $script:PingWorker out (parallel, cap 64) - same TCP 5985/5986/445
+        # probe the pre-flight gate uses - and stream a row + progress per host.
         'ping' {
             $targets = ConvertTo-JanetHostList ([string]$Params['targets'])
             if ($targets.Count -eq 0) {
@@ -1437,6 +1458,12 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level=''; text="Server skip gate: $skippedServer server-named host(s) excluded." }
             }
 
+            # Per-host UseSsl flag from the pre-flight ping (set only when a host answered
+            # ONLY on 5986), threaded into the dispatch worker below (Rule 4: probe and
+            # session live in different scopes here). Stays empty - default HTTP - when the
+            # gate is skipped (skipUnreachablePing off, or dry run): unchanged prior behavior.
+            $useSslMap = New-Object 'System.Collections.Generic.Dictionary[string,bool]' ([System.StringComparer]::OrdinalIgnoreCase)
+
             # --- Pre-flight ping gate (parallel, cap 64). Skipped on dry runs. ---
             if ($skipPing -and -not $dryRun -and $pending.Count -gt 0) {
                 & $send @{ type='status'; text="Pre-flight ping of $($pending.Count) host(s)..." }
@@ -1462,7 +1489,7 @@ function Invoke-JanetToolAction {
                             try { $rp = $jp.PS.EndInvoke($jp.Async) | Select-Object -First 1 } catch { $rp = $null }
                             try { $jp.PS.Dispose() } catch {}
                             $pjobs.Remove($k)
-                            if ($rp -and [bool]$rp.Up) { [void]$reachable.Add([string]$rp.Host) }
+                            if ($rp -and [bool]$rp.Up) { [void]$reachable.Add([string]$rp.Host); $useSslMap[[string]$rp.Host] = [bool]$rp.UseSsl }
                         }
                         if ($pjobs.Count -gt 0) {
                             # Honor the server cancel contract during the pre-flight gate too:
@@ -1537,8 +1564,10 @@ function Invoke-JanetToolAction {
                 param($h)
                 # The per-host /t is computed INSIDE the worker at dispatch time
                 # (post-hold, post-consent) from the shared restart time, so
-                # every mode except rolling converges on RestartAt.
-                ,@($h, $restartTicks, $mode, $leadMinutes, $rollingGrace, $message, $dryRun, $Credential, $consent, $agentTemplate, $promptSec, $graceSec, $pollInt, $consentFail, $cancelJob, $onlyIfPending)
+                # every mode except rolling converges on RestartAt. UseSsl comes
+                # from the pre-flight ping (false when the gate was skipped/dry-run).
+                $hUseSsl = $false; if ($useSslMap.ContainsKey($h)) { $hUseSsl = $useSslMap[$h] }
+                ,@($h, $restartTicks, $mode, $leadMinutes, $rollingGrace, $message, $dryRun, $Credential, $consent, $agentTemplate, $promptSec, $graceSec, $pollInt, $consentFail, $cancelJob, $onlyIfPending, $hUseSsl)
             }
             $rowOf = {
                 param($res)

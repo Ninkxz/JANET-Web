@@ -45,7 +45,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'enable-secure-boot'
                 label       = 'Enable Secure Boot'
-                description = 'Enable Secure Boot across target machines with OEM-specific WMI payloads (Dell/HP/Lenovo). Validates UEFI+GPT boot safety, detects manufacturer, writes the firmware setting, and polls the result JSON from the C$ admin share. Dry Run does a TCP (5985/445) reachability + WinRM manufacturer preflight only.'
+                description = 'Enable Secure Boot across target machines with OEM-specific WMI payloads (Dell/HP/Lenovo). Validates UEFI+GPT boot safety, detects manufacturer, writes the firmware setting, and polls the result JSON from the C$ admin share. Dry Run does a TCP (5985/5986/445) reachability + WinRM manufacturer preflight only.'
                 kind        = 'stream-table'
                 destructive = $true
                 columns     = @('Host','Status','Manufacturer','Before','After','SetResult','Error')
@@ -411,24 +411,27 @@ if ($PSCommandPath) { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorActio
 '@
 
 # ----------------------------------------------------------------------------
-# Dry-run per-host worker: AFNET-safe TCP (5985/445) reachability + WinRM
+# Dry-run per-host worker: AFNET-safe TCP (5985/5986/445) reachability + WinRM
 # manufacturer detection only. No firmware write, no scheduled task, no DCOM.
 # A red dry-run predicts a live failure.
 # ----------------------------------------------------------------------------
 $script:SbeDryWorker = {
     param($comp, $cred)
-    # Reachability over TCP - probe 5985 (WinRM) then 445 (SMB) with a short
-    # connect budget. NEVER ICMP (AFNET GPO blocks echo) and NEVER a DCOM/RPC CIM
-    # session: where the host firewall exposes 5985/445 but not the RPC range (the
-    # stated AFNET posture) a DCOM probe reported reachable hosts 'unreachable' and
-    # burned the full OperationTimeout per offline host.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # Reachability over TCP - probe 5985 (WinRM HTTP) then 5986 (WinRM HTTPS) then
+    # 445 (SMB) with a short connect budget, break on first connect (HTTP preferred
+    # when both are open). NEVER ICMP (AFNET GPO blocks echo) and NEVER a DCOM/RPC
+    # CIM session: where the host firewall exposes 5985/5986/445 but not the RPC range
+    # (the stated AFNET posture) a DCOM probe reported reachable hosts 'unreachable'
+    # and burned the full OperationTimeout per offline host. $useSsl is set ONLY
+    # when the port that answered is 5986, so the WinRM call below auto-switches to
+    # -UseSSL (SMB answering alone is a liveness signal, not a WinRM transport).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($comp, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
@@ -440,15 +443,19 @@ $script:SbeDryWorker = {
             Before       = 'N/A (Dry Run)'
             After        = 'N/A (Dry Run)'
             SetResult    = 'N/A (Dry Run)'
-            Error        = 'Unreachable: no TCP on 5985 (WinRM) or 445 (SMB) within 1.5s.'
+            Error        = 'Unreachable: no TCP on 5985/5986 (WinRM) or 445 (SMB) within 1.5s.'
             Skipped      = $false
         }
     }
     # Manufacturer over WinRM: Get-CimInstance runs LOCALLY on the target inside
     # Invoke-Command (no DCOM CIM session). Mirror the suite splat - Negotiate
-    # always, Credential only when the operator supplied one.
+    # always, Credential only when the operator supplied one. -UseSSL only when the
+    # host answered ONLY on 5986 (self-signed WinRM HTTPS is common on AFNET, so
+    # skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
     try {
-        $wsOpt  = New-PSSessionOption -OperationTimeout 20000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+        $soP = @{ OperationTimeout=20000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+        if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+        $wsOpt  = New-PSSessionOption @soP
         $icArgs = @{
             ComputerName   = $comp
             Authentication = 'Negotiate'
@@ -456,6 +463,7 @@ $script:SbeDryWorker = {
             ErrorAction    = 'Stop'
             ScriptBlock    = { (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).Manufacturer }
         }
+        if ($useSsl) { $icArgs['UseSSL'] = $true }
         if ($cred) { $icArgs['Credential'] = $cred }
         $mfr = Invoke-Command @icArgs
         return [ordered]@{
@@ -476,7 +484,7 @@ $script:SbeDryWorker = {
             Before       = 'N/A (Dry Run)'
             After        = 'N/A (Dry Run)'
             SetResult    = 'N/A (Dry Run)'
-            Error        = "WinRM unreachable (TCP open but WinRM/5985 did not answer): $($_.Exception.Message)"
+            Error        = "WinRM unreachable (TCP open but WinRM/5985/5986 did not answer): $($_.Exception.Message)"
             Skipped      = $false
         }
     }
@@ -530,8 +538,24 @@ $script:SbeLiveWorker = {
         # Mirror the suite splat - Authentication=Negotiate always, Credential only
         # when supplied. IdleTimeout exceeds the 90s poll so the session is still
         # alive for the finally Unregister.
-        $wsOpt    = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 300000
+        # Transport probe (TCP, non-throwing): dial this session over HTTPS when the box
+        # answers ONLY on WinRM 5986 (not 5985). The SCAN's READY-TO-ENABLE verdict + Dry Run
+        # were widened to 5986, so the live enable MUST follow the same transport or a
+        # 5986-only host green-lights then fails at New-PSSession. 5985 preferred when both open.
+        $useSsl = $false
+        foreach ($p in 5985,5986) {
+            $tc = $null
+            try {
+                $tc = New-Object System.Net.Sockets.TcpClient
+                $iar = $tc.BeginConnect($comp, $p, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { if ($p -eq 5986) { $useSsl = $true }; break }
+            } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        }
+        $soArgs = @{ OperationTimeout=60000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=300000 }
+        if ($useSsl) { $soArgs['SkipCACheck']=$true; $soArgs['SkipCNCheck']=$true }
+        $wsOpt    = New-PSSessionOption @soArgs
         $sessArgs = @{ ComputerName=$comp; Authentication='Negotiate'; SessionOption=$wsOpt; ErrorAction='Stop' }
+        if ($useSsl) { $sessArgs['UseSSL'] = $true }
         if ($cred) { $sessArgs['Credential'] = $cred }
         $session = New-PSSession @sessArgs
 
@@ -645,8 +669,11 @@ $script:SbeLiveWorker = {
                 }
             } else {
                 try {
-                    $cuOpt  = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 15000 -CancelTimeout 5000
+                    $cuSoArgs = @{ OperationTimeout=60000; OpenTimeout=15000; CancelTimeout=5000 }
+                    if ($useSsl) { $cuSoArgs['SkipCACheck']=$true; $cuSoArgs['SkipCNCheck']=$true }
+                    $cuOpt  = New-PSSessionOption @cuSoArgs
                     $cuArgs = @{ ComputerName=$comp; Authentication='Negotiate'; SessionOption=$cuOpt; ErrorAction='Stop' }
+                    if ($useSsl) { $cuArgs['UseSSL'] = $true }
                     if ($cred) { $cuArgs['Credential'] = $cred }
                     $cleanupSess = New-PSSession @cuArgs
                     try {
@@ -705,7 +732,7 @@ $script:SbeLiveWorker = {
 
 # ----------------------------------------------------------------------------
 # SCAN (v1.6.0) - read-only fleet Secure Boot posture. Mirrors the c2c 'scan'
-# shape (plain WinRM Invoke-Command, TCP 5985/445 pre-check, DNS-mismatch soft
+# shape (plain WinRM Invoke-Command, TCP 5985/5986/445 pre-check, DNS-mismatch soft
 # skip, per-host watchdog) - NONE of the C$-payload/scheduled-task machinery
 # that the firmware WRITE needs. No 50-host cap, no admin-session gate.
 # ----------------------------------------------------------------------------
@@ -758,24 +785,34 @@ $script:SbeScanWorker = {
         Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail=''
     }
 
-    # TCP reachability (WinRM 5985 then SMB 445, 1.5s). NEVER ICMP (AFNET GPO).
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability (WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445, 1.5s;
+    # break on first connect so HTTP wins when both are open). NEVER ICMP (AFNET
+    # GPO). $useSsl is set ONLY when the port that answered is 5986, so the session
+    # below auto-switches to -UseSSL (SMB answering alone is a liveness signal, not
+    # a WinRM transport).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
-        if (-not $AttemptOffline) { $r.HostStatus = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
+        if (-not $AttemptOffline) { $r.HostStatus = 'OFFLINE'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'; return $r }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 90000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is
+    # common on AFNET, so skip CA/CN validation - the transport stays encrypted;
+    # port 5986 is implicit).
+    $soP = @{ OperationTimeout=90000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.HostStatus = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -1272,7 +1309,7 @@ function Invoke-JanetToolAction {
     }
 
     if ($isDry) {
-        & $send @{ type='status'; text="Dry run complete: $($jobs.Count) host(s) probed for TCP (5985/445) reachability + WinRM manufacturer only, $failCount unreachable. A reachable result does NOT confirm the live enable will succeed - UEFI/GPT brick-safety and the BIOS password are only checked during a live run." }
+        & $send @{ type='status'; text="Dry run complete: $($jobs.Count) host(s) probed for TCP (5985/5986/445) reachability + WinRM manufacturer only, $failCount unreachable. A reachable result does NOT confirm the live enable will succeed - UEFI/GPT brick-safety and the BIOS password are only checked during a live run." }
     } else {
         & $send @{ type='status'; text="Done. $okCount enabled, $skipCount already-enabled/skipped, $failCount error/timeout of $($jobs.Count)." }
     }

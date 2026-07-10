@@ -1569,27 +1569,34 @@ $script:AcasUpdateWorker = {
         return "FAIL: Log4j staging source not available (drop log4j-api/core-2.25.4.jar where the JANET Web host can read them, or set a staging path)."
     }
 
-    # Inline TCP reachability probe (5985 then 445, 3s each).
-    $reachable = $false
-    foreach ($port in 5985, 445) {
+    # Inline TCP reachability probe: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445
+    # (liveness only), 3s each, break on first connect. $useSsl set only when ONLY 5986
+    # answered, so the session below auto-switches to -UseSSL (5985 preferred when open).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc  = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($TargetIn, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {}
         finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
-    if (-not $reachable) { return "FAIL: unreachable (TCP 5985/445)" }
+    if (-not $reachable) { return "FAIL: unreachable (TCP 5985/5986/445)" }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common
+    # on AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $sessArgs = @{
         ComputerName   = $TargetIn
         SessionOption  = $wsOpt
         Authentication = 'Negotiate'
         ErrorAction    = 'Stop'
     }
+    if ($useSsl) { $sessArgs['UseSSL'] = $true }
     if ($CredIn) { $sessArgs['Credential'] = $CredIn }
     $sess = $null
     try { $sess = New-PSSession @sessArgs }
@@ -1815,14 +1822,16 @@ $script:AcasRebootVerifyWorker = {
     param($TargetIn, $CredIn)
 
     $deadline = (Get-Date).AddMinutes(10)
-    $reachable = $false
+    # WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness). $useSsl set when
+    # ONLY 5986 answered, so the session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
     while ((Get-Date) -lt $deadline) {
-        foreach ($port in 5985, 445) {
+        foreach ($port in 5985, 5986, 445) {
             $tc = $null
             try {
                 $tc  = New-Object System.Net.Sockets.TcpClient
                 $iar = $tc.BeginConnect($TargetIn, $port, $null, $null)
-                if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tc.Connected) { $reachable = $true }
+                if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
             } catch {}
             finally { if ($tc) { try { $tc.Close() } catch {} } }
             if ($reachable) { break }
@@ -1832,16 +1841,21 @@ $script:AcasRebootVerifyWorker = {
     }
 
     if (-not $reachable) {
-        return "FAIL: UNREACHABLE after 10min wait (TCP 5985/445 - still rebooting or offline) <<REACH=No>><<PENDING=?>><<BUILD=?>>"
+        return "FAIL: UNREACHABLE after 10min wait (TCP 5985/5986/445 - still rebooting or offline) <<REACH=No>><<PENDING=?>><<BUILD=?>>"
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common
+    # on AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $sessArgs = @{
         ComputerName   = $TargetIn
         SessionOption  = $wsOpt
         Authentication = 'Negotiate'
         ErrorAction    = 'Stop'
     }
+    if ($useSsl) { $sessArgs['UseSSL'] = $true }
     if ($CredIn) { $sessArgs['Credential'] = $CredIn }
     $sess = $null
     try { $sess = New-PSSession @sessArgs }
@@ -1903,32 +1917,38 @@ $script:AcasRebootVerifyWorker = {
 # -----------------------------------------------------------------------------
 $script:AcasPreflightWorker = {
     param($Target, $Cred, $Auth)
-    # WinRM-only transport (AFNET-safe), credential-honoring: probe 5985/445 (3s
+    # WinRM-only transport (AFNET-safe), credential-honoring: probe 5985/5986/445 (3s
     # each) to fail a dead host fast, then open a Negotiate PSSession under the
     # OPERATOR credential and start/repair the services LOCALLY via Invoke-Command.
     # We never call Get-Service/Set-Service -ComputerName: that drives the SCM over
     # RPC (TCP 135 + dynamic high ports) and runs as the host's own service-account
     # identity - both disallowed here (mirrors every other worker in this file).
-    $reachable = $false
-    foreach ($port in 5985, 445) {
+    # $useSsl set when ONLY 5986 answered, so the session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985, 5986, 445) {
         $tc = $null
         try {
             $tc  = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Target, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tc.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {}
         finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
-    if (-not $reachable) { return 'FAIL: unreachable (TCP 5985/445) <<CHANGES=>>' }
+    if (-not $reachable) { return 'FAIL: unreachable (TCP 5985/5986/445) <<CHANGES=>>' }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common
+    # on AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $sessArgs = @{
         ComputerName   = $Target
         SessionOption  = $wsOpt
         Authentication = $(if ($Auth) { $Auth } else { 'Negotiate' })
         ErrorAction    = 'Stop'
     }
+    if ($useSsl) { $sessArgs['UseSSL'] = $true }
     if ($Cred) { $sessArgs['Credential'] = $Cred }
     $sess = $null
     try { $sess = New-PSSession @sessArgs }
@@ -2237,15 +2257,19 @@ $script:AcasKbInstallBlock = {
     $errors = New-Object System.Collections.ArrayList
     $details = New-Object System.Collections.ArrayList
     $kbList = ($KBs -join ',')
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc=$null
-        try { $tc=New-Object System.Net.Sockets.TcpClient; $iar=$tc.BeginConnect($Computer,$port,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(1500,$false) -and $tc.Connected) { $reachable=$true } } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        try { $tc=New-Object System.Net.Sockets.TcpClient; $iar=$tc.BeginConnect($Computer,$port,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(1500,$false) -and $tc.Connected) { $reachable=$true; if ($port -eq 5986) { $useSsl=$true } } } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
-    if (-not $reachable) { return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Offline (no TCP 5985/445)" }
-    $wsOpt = New-PSSessionOption -OperationTimeout 1800000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    if (-not $reachable) { return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Offline (no TCP 5985/5986/445)" }
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on AFNET).
+    $soP = @{ OperationTimeout=1800000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$(if ($Auth) { $Auth } else { 'Negotiate' }) }
     $sess = $null; try { $sess = New-PSSession @splat } catch { return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Session failed: $($_.Exception.Message)" }
     try {

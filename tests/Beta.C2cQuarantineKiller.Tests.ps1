@@ -58,4 +58,37 @@ Describe 'Manifest - three actions, correct gates' {
         ($man.actions | Where-Object { $_.id -eq 'install' }).destructive | Should Be $true
         ($man.actions | Where-Object { $_.id -eq 'remove' }).destructive  | Should Be $true
     }
+    It 'status exposes a Watchdog run-health column' {
+        @(($man.actions | Where-Object { $_.id -eq 'status' }).columns) -contains 'Watchdog' | Should Be $true
+    }
+    It 'reports version 0.7.0' { $man.version | Should Be '0.7.0' }
+}
+
+Describe 'Get-BetaWatchdogHealth - confirms the watchdog is RUNNING, not just installed' {
+    It 'absent watchdog -> NOT INSTALLED' {
+        (Get-BetaWatchdogHealth -Present $false).Word | Should Be 'NOT INSTALLED'
+    }
+    It 'present but Disabled -> DISABLED (will not run)' {
+        (Get-BetaWatchdogHealth -Present $true -State 'Disabled' -LastRun '2026-07-09 14:00:00' -LastResult 0 -NextRun '2026-07-09 15:30:00').Word | Should Be 'DISABLED'
+    }
+    It 'present + enabled but never fired (empty LastRun) -> NEVER RAN' {
+        (Get-BetaWatchdogHealth -Present $true -State 'Ready' -LastRun '' -LastResult 267011 -NextRun '2026-07-09 15:30:00').Word | Should Be 'NEVER RAN'
+    }
+    It 'the has-not-run result code 267011 -> NEVER RAN even if a LastRun sneaks through' {
+        (Get-BetaWatchdogHealth -Present $true -State 'Ready' -LastRun '2026-07-09 14:00:00' -LastResult 267011 -NextRun '2026-07-09 15:30:00').Word | Should Be 'NEVER RAN'
+    }
+    It 'last run returned a non-zero failure code -> LAST FAILED' {
+        $h = Get-BetaWatchdogHealth -Present $true -State 'Ready' -LastRun '2026-07-09 14:00:00' -LastResult 1 -NextRun '2026-07-09 15:30:00'
+        $h.Word | Should Be 'LAST FAILED'
+        $h.Detail | Should Match 'result 1'
+    }
+    It 'currently executing -> RUNNING' {
+        (Get-BetaWatchdogHealth -Present $true -State 'Running' -LastRun '2026-07-09 14:00:00' -LastResult 267009 -NextRun '2026-07-09 15:30:00').Word | Should Be 'RUNNING'
+    }
+    It 'last run completed with result 0 -> HEALTHY, and the detail confirms last + next run' {
+        $h = Get-BetaWatchdogHealth -Present $true -State 'Ready' -LastRun '2026-07-09 14:00:00' -LastResult 0 -NextRun '2026-07-09 15:30:00' -Interval 'PT90M'
+        $h.Word | Should Be 'HEALTHY'
+        $h.Detail | Should Match 'last ran 2026-07-09 14:00:00'
+        $h.Detail | Should Match 'next run 2026-07-09 15:30:00'
+    }
 }

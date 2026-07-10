@@ -39,8 +39,13 @@ Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb
             $script:__cur     = @($Current)
             $script:__readOk  = $ReadOk
             $script:__setCnt  = 0
+            # Shadow the reachability probe so Apply stays offline + deterministic (no real
+            # 5985/5986/445 dial to the synthetic 'TESTSRV') and dials HTTP (UseSsl=$false).
+            function script:Test-JanetWsmanReachable { param($Server, $TimeoutMs = 3000) @{ Reachable = $true; UseSsl = $false } }
+            # Both seams gained a -UseSsl param (v1.1.8 5986 sweep); the strict [CmdletBinding()]
+            # mocks must accept it or Apply's -UseSsl pass-through throws "parameter cannot be found".
             function script:Invoke-JanetOnDhcp {
-                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential)
+                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $UseSsl)
                 [pscustomobject]@{
                     Ok     = $script:__readOk
                     Values = $script:__cur
@@ -49,7 +54,7 @@ Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb
                 }
             }
             function script:Invoke-JanetOnDhcpCancelable {
-                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $CancelCheck)
+                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $CancelCheck, $UseSsl)
                 $script:__setCnt++
                 [pscustomobject]@{ Cancelled = $false; Result = @([pscustomobject]@{ Removed = $false }) }
             }
@@ -64,7 +69,7 @@ Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb
                     SetCalls = [int]$script:__setCnt
                 }
             } finally {
-                Remove-Item function:script:Invoke-JanetOnDhcp, function:script:Invoke-JanetOnDhcpCancelable -EA SilentlyContinue
+                Remove-Item function:script:Invoke-JanetOnDhcp, function:script:Invoke-JanetOnDhcpCancelable, function:script:Test-JanetWsmanReachable -EA SilentlyContinue
             }
         } $Current $Desired $ReadOk
     }

@@ -8,19 +8,24 @@
       (action 'version-check'): read-only probes across the Target Computers.
       Change NOTHING and are NOT gated on an admin session.
 
-   2. TARGET-DRIVEN FIX (destructive, admin-session gated): the six endpoint-
-      fixable pillars (Monitoring / Firewall / Encryption / AntiMalware / Patches
-      / PKI Trust Roots) are ALWAYS shown as fix cards. Each per-card Fix, and the
-      "FIX SELECTED PILLARS ON TARGET LIST" run-all, dial the TARGET COMPUTERS
-      list - no import required. Anything you can put in Target Computers is
-      fixable. Every fixer is VERIFY-FIRST (NOCHANGE on a host already compliant),
-      so running a pillar against a host that does not need it is safe.
+   2. DUAL-MODE FIX (destructive, admin-session gated): the six endpoint-fixable
+      pillars (Monitoring / Firewall / Encryption / AntiMalware / Patches / PKI
+      Trust Roots) are ALWAYS shown as fix cards.
+        - MANUAL MODE (no import): each per-card Fix, and RUN ALL, dial the TARGET
+          COMPUTERS list - load machines and run a manual C2C patch, no import
+          required. The engine runs manual mode (no allow-list) when no csvPath is
+          sent, dialing exactly the typed hosts.
+        - IMPORT MODE (a CSV is imported): each card fixes ONLY the hosts the import
+          flagged for that pillar (server-re-derived + intersected as an allow-list;
+          never the whole list).
+      Every fixer is VERIFY-FIRST (NOCHANGE on a host already compliant), so running
+      a pillar against a host that does not need it is safe.
 
-   3. OPTIONAL IMPORT of the Tanium "C2C Compliance Status" CSV: a convenience
-      that (a) auto-loads the non-compliant hosts into Target Computers, (b) checks
-      + badges the pillars each host failed, and (c) shows the routed-elsewhere
-      pillars (Vuln -> ACAS/KEV, OSVersion -> Windows Upgrade, STIG -> Reports) as
-      info notes. The import NEVER gates the fix cards or the ability to run a fix.
+   3. OPTIONAL IMPORT of the Tanium "C2C Compliance Status" CSV: (a) auto-loads the
+      non-compliant hosts into Target Computers, (b) checks + badges the pillars each
+      host failed and switches the fix cards to import-scoped targeting, and (c) shows
+      the routed-elsewhere pillars (Vuln -> ACAS/KEV, OSVersion -> Windows Upgrade,
+      STIG -> Reports) as info notes.
 
    Credentials are UNIVERSAL (shell header top-right) - this view renders NO
    per-tool credential control; it only READS ctx.session.state.credSet.
@@ -162,10 +167,10 @@
       compCard.appendChild(tgHolder);
       left.appendChild(compCard);
 
-      // --- FIX PILLARS (import-flagged hosts per pillar; destructive; admin session required) ---
-      var fixCard = sectionCard('FIX PILLARS (import-flagged hosts, per pillar)', 'cyan');
+      // --- FIX PILLARS (dual-mode: manual Target list OR import-flagged; destructive; admin session) ---
+      var fixCard = sectionCard('FIX PILLARS (per pillar - manual or import-scoped)', 'cyan');
       var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      fixIntro.textContent = 'Import the C2C compliance CSV to load one CARD per fixable pillar. Each card fixes ALL the hosts the import flagged for that pillar - click its host count to review them. Type FIX once, then Fix a pillar - or check the pillar cards and RUN ALL to fix every host across the checked cards in one pass. Per-pillar fixes and RUN ALL dial ONLY the import-flagged hosts - never the whole Target Computers list. Every fixer is verify-first (NO CHANGE where a host is already compliant). Requires an admin session.';
+      fixIntro.textContent = 'DUAL MODE. With NO import (MANUAL): each pillar card fixes the hosts in Target Computers - load machines, type FIX, then Fix a pillar or check cards and RUN ALL. Import the C2C compliance CSV to switch to IMPORT-SCOPED: one card per flagged pillar, dialing ONLY the hosts the import flagged for that pillar (never the whole list) - click a host count to review them. Every fixer is verify-first (NO CHANGE where a host is already compliant). Requires an admin session.';
       fixCard.appendChild(fixIntro);
 
       // controls row (shared across every pillar card)
@@ -197,7 +202,7 @@
       ctlRow2.appendChild(fixThreads);
       fixControls.appendChild(ctlRow2);
 
-      var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/445 probe fails.' });
+      var fixOffline = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Try a session even if the TCP 5985/5986/445 probe fails.' });
       fixOffline.style.margin = '0'; fixControls.appendChild(fixOffline);
 
       var fixWinrmHeal = ui.checkbox('Recover WinRM via RPC if 5985 is down (best-effort; often blocked - default off)', { title: 'Opt-in. For a host whose TCP 5985 probe fails, try remote SCM recovery over RPC (Get-Service / Start-Service / Set-Service Automatic against the target) then re-probe. RPC is frequently blocked on AFNET, so leave this off unless you know it is allowed. Never acts on the dispatcher host.' });
@@ -251,6 +256,20 @@
       var importBtn = ui.ctaButton('IMPORT C2C CSV', { title: 'Choose the Tanium C2C Compliance Status CSV export, upload it to the JANET Web host, and parse it (auto-load targets + badge pillars).' });
       importBtn.style.maxWidth = '260px';
       var importRow = el('div'); importRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap'; importRow.appendChild(importBtn);
+      // Escape hatch back to MANUAL targeting once a CSV has been imported (else you are stuck
+      // in import-scoped mode until reload). Hidden until an import is live.
+      var clearImportBtn = ui.ghostButton('Clear import (manual mode)', { size: 'sm', title: 'Drop the loaded C2C import and return the fix cards to MANUAL mode (dial the Target Computers list). Does not clear Target Computers.' });
+      clearImportBtn.style.display = 'none';
+      clearImportBtn.onclick = function () {
+        if (isRunning()) return;
+        importCsvPath = null; lastImport = null;
+        importTiles.setAll({ total: 0, noncompliant: 0, fixable: 0, routed: 0 });
+        importStatus.textContent = 'Import cleared - MANUAL mode.'; importStatus.className = 'muted';
+        clearImportBtn.style.display = 'none';
+        showFixPlaceholder();   // rebuild manual cards
+        log.append({ text: '[' + ts() + '] Import cleared - fixes are MANUAL (dial the Target Computers list).', level: 'info' });
+      };
+      importRow.appendChild(clearImportBtn);
       importCard.appendChild(importRow); importCard.appendChild(importFileInput);
       // hero StatCards (populate after import)
       importTiles = C.StatCards({ cards: [
@@ -298,7 +317,7 @@
 
       // --- Scan options (attempt-offline + concurrency) ---
       var optCard = sectionCard('SCAN OPTIONS');
-      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 reachability probe (e.g. firewalled but WinRM up). Reachability is TCP-only - AFNET drops ICMP.' });
+      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/5986/445 reachability probe (e.g. firewalled but WinRM up). Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
       optCard.appendChild(offlineCb);
       var threadsRow = el('div'); threadsRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:8px';
       threadsRow.appendChild(ui.label('Max concurrent:'));
@@ -419,11 +438,18 @@
       function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
       function alertDialog(title, bodyTxt) { ctx.confirm({ title: title, body: bodyTxt, okText: 'OK', cancelText: null }); }
       function keyByHost(ev) { return ev.Host != null ? String(ev.Host) : (ev.host != null ? String(ev.host) : null); }
+      // Short name that PRESERVES an IPv4 literal (mirrors the backend Get-C2cShortHost). The
+      // engine short-names every dial target, so seeding the results grid with short names keeps
+      // display == dispatch (an FQDN-typed host would otherwise leave a phantom 'Queued' row that
+      // the short-named result row never overwrites). IPv6 has no dots so split('.') keeps it whole.
+      function shortHost(h) { h = String(h == null ? '' : h); return /^(\d{1,3}\.){3}\d{1,3}$/.test(h) ? h : h.split('.')[0]; }
+      // Case-insensitive de-dupe of a short-named host list (one machine -> one grid row / one dial).
+      function shortUniq(list) { var seen = {}, out = []; (list || []).forEach(function (h) { var s = shortHost(h); if (!s) return; var k = s.toLowerCase(); if (!seen[k]) { seen[k] = 1; out.push(s); } }); return out; }
       var NEED_TARGETS = 'Add hosts to Target Computers first (type / paste / Import TXT, or Import a C2C CSV to auto-load them).';
 
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsInput.disabled = on; clearBtn.disabled = on;
-        importBtn.disabled = on;
+        importBtn.disabled = on; clearImportBtn.disabled = on;
         verBtn.disabled = on; verMatchInput.disabled = on; verTgtInput.disabled = on; verHeal._cb.disabled = on;
         fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
         fixWinrmHeal._cb.disabled = on;
@@ -446,30 +472,34 @@
         updateTargetButtons();
       }
 
-      // Live-update every per-pillar Fix button (N = the pillar's FULL import-flagged count)
-      // + the RUN ALL label/enabled state from the CHECKED cards (union). Called on mount, on
-      // any card checkbox change, and whenever a run starts/stops (via lockInputs). Returns the
-      // computed union.
+      // Live-update every per-pillar Fix button + the RUN ALL label/enabled state. Mode-aware:
+      // IMPORT mode - N = the pillar's FULL import-flagged count (frozen per card). MANUAL mode
+      // (no import) - N = the LIVE Target Computers count for every pillar, and each checked
+      // pillar maps every target host. Called on mount, on any card checkbox change, on Target
+      // Computers edits, and whenever a run starts/stops (via lockInputs). Returns the union.
       function updateFixCounts() {
         var locked = isRunning();
-        var haveImport = !!importCsvPath;
+        var manual = !importCsvPath;
+        var tHosts = manual ? targets.hosts() : null;
+        var manualN = manual ? tHosts.length : 0;
         var union = {};       // host -> { pillar: true }
         var totalPairs = 0;
         FIXABLE.forEach(function (k) {
           var c = pillarCards[k]; if (!c) return;
-          var n = c.hosts.length;
+          var n = manual ? manualN : c.hosts.length;
+          if (c.hostLbl) c.hostLbl.textContent = n + ' host' + (n === 1 ? '' : 's');
           if (c.fixBtn) {
             c.fixBtn.textContent = 'Fix ' + PILLAR_TAB[k] + ' on ' + n + ' host' + (n === 1 ? '' : 's');
-            c.fixBtn.disabled = locked || !haveImport;
+            c.fixBtn.disabled = locked || n === 0;
           }
           if (c.cb && c.cb.checked) {
-            c.hosts.forEach(function (h) { if (!h) return; (union[h] = union[h] || {})[k] = true; totalPairs++; });
+            (manual ? tHosts : c.hosts).forEach(function (h) { if (!h) return; (union[h] = union[h] || {})[k] = true; totalPairs++; });
           }
         });
         var hostCount = Object.keys(union).length;
         runAllBtn.textContent = 'RUN ALL - ' + hostCount + ' host' + (hostCount === 1 ? '' : 's') + ' / ' + totalPairs + ' pillar fix' + (totalPairs === 1 ? '' : 'es');
-        runAllBtn.disabled = locked || !haveImport || totalPairs === 0;
-        return { union: union, totalPairs: totalPairs, hostCount: hostCount };
+        runAllBtn.disabled = locked || totalPairs === 0;
+        return { union: union, totalPairs: totalPairs, hostCount: hostCount, manual: manual };
       }
 
       // Lockscreen / scan / version still key off the Target Computers count (unchanged).
@@ -622,9 +652,8 @@
               importStatus.textContent = 'Import failed'; importStatus.className = 'st-bad';
               log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' });
               // A failed re-import invalidates the previous targeting state: clear the path
-              // and rebuild the pre-import placeholder so UI and dispatch state agree.
-              // showFixPlaceholder() calls updateFixCounts(), which re-disables the fix buttons.
-              importCsvPath = null; showFixPlaceholder();  // rebuild the pre-import placeholder (clears the pillar cards)
+              // and rebuild the MANUAL cards so UI and dispatch state agree.
+              importCsvPath = null; clearImportBtn.style.display = 'none'; showFixPlaceholder();
             },
             active: function (a) { importBtn.disabled = a; },
             // The run bus delivers the action's return value ({rows,summary}) as the
@@ -633,11 +662,13 @@
             // instead of silently doing nothing (dispatch swallows handler throws).
             final: function (res) {
               try {
+                importCsvPath = pendingCsvPath;   // set BEFORE building cards so they build import-scoped (not manual)
                 applyImportSummary((res && res.summary) || {});
-                importCsvPath = pendingCsvPath;   // parse APPLIED - the path is now live for fixes
-                updateFixCounts();                // reflect haveImport=true in the fix-button state
+                updateFixCounts();                // reflect import-scoped state in the fix-button counts
+                clearImportBtn.style.display = '';   // offer the escape back to MANUAL mode
               }
               catch (err) {
+                importCsvPath = null; clearImportBtn.style.display = 'none'; showFixPlaceholder();   // roll back so UI/dispatch agree
                 importStatus.textContent = 'Import parsed but the summary could not be applied.'; importStatus.className = 'st-bad';
                 log.append({ text: '[' + ts() + '] Import summary apply error: ' + (err && err.message ? err.message : err), level: 'err' });
               }
@@ -702,12 +733,23 @@
         if (routedTxt.length) log.append({ text: '[' + ts() + '] Routed elsewhere: ' + routedTxt.join('  |  '), level: 'info' });
       }
 
-      // Muted placeholder shown in the FIX PILLARS body before any import loads the cards.
+      // MANUAL-mode fix cards, shown whenever NO C2C CSV is imported. Every fixable pillar gets
+      // a card whose host set is the LIVE Target Computers list (not an import subset) - its Fix
+      // and RUN ALL dial exactly those. This is the "load machines + run a manual C2C patch"
+      // path; the backend runs in manual mode (no import allow-list) when no csvPath is sent.
       function showFixPlaceholder() {
         fixBody.innerHTML = ''; pillarCards = {};
-        var ph = el('div', 'muted', 'Import the C2C compliance CSV to load per-pillar fix cards. Each fixable pillar gets a card that fixes ALL the hosts it flagged - click its host count to review them, then Fix that pillar or check its card and RUN ALL.');
-        ph.style.cssText = 'font-size:12px;line-height:1.45;padding:14px 8px;text-align:center;border:1px dashed var(--edge);border-radius:4px';
-        fixBody.appendChild(ph);
+        // Entering MANUAL mode (mount / FAILED re-import / explicit Clear import) RE-ARMS from
+        // scratch: clear the FIX confirm word and the persisted ENABLE-BitLocker tick. Without this
+        // a failed re-import would fall open into MANUAL with the previous import's auto-loaded hosts
+        // still in Target Computers AND a live "FIX" + ENABLE tick - a near one-click destructive run.
+        if (confirmInput) confirmInput.value = '';
+        encEnableChecked = false;
+        var intro = el('div', 'muted', 'MANUAL MODE - no C2C import. Each pillar below fixes the hosts in Target Computers (verify-first: an already-compliant host reports NO CHANGE). Check pillars then RUN ALL, or Fix one pillar. Import a C2C CSV to switch to import-scoped targeting (dial only the flagged hosts).');
+        intro.style.cssText = 'font-size:11.5px;line-height:1.45;padding:9px 10px;margin-bottom:2px;border:1px dashed var(--edge);border-radius:4px';
+        fixBody.appendChild(intro);
+        var live = targets.hosts();
+        FIXABLE.forEach(function (k) { fixBody.appendChild(buildPillarCard(k, live, {}, true)); });
         updateFixCounts(); updateTargetButtons();
       }
 
@@ -750,7 +792,7 @@
       // desc + a clickable host-count that opens the read-only drill-down; the pillar extras
       // (Encryption ENABLE / PKI bundle); row2 = the Fix button. Registered in pillarCards so
       // the shared controls + RUN ALL read its state. The Fix dials the pillar's FULL flagged set.
-      function buildPillarCard(key, hosts, via) {
+      function buildPillarCard(key, hosts, via, manual) {
         var meta = FIX_META[key];
         var failedCount = 0, auditCount = 0;
         hosts.forEach(function (h) { if (via[h] === 'audit') auditCount++; else failedCount++; });
@@ -770,13 +812,19 @@
         var titleLbl = el('span'); titleLbl.style.cssText = 'font-family:var(--mono);font-size:13px;color:var(--text);font-weight:700';
         titleLbl.textContent = PILLAR_TAB[key];
         badges.appendChild(titleLbl);
-        var failPill = ui.pill(failedCount + ' failed');
-        failPill.style.cssText += ';background:transparent;border:1px solid var(--sev-crit,#E0505A);color:var(--sev-crit,#E0505A)';
-        badges.appendChild(failPill);
-        if (auditCount > 0) {
-          var auditPill = ui.pill(auditCount + ' audit');
-          auditPill.style.cssText += ';background:transparent;border:1px solid var(--gold,#d0a848);color:var(--gold,#d0a848)';
-          badges.appendChild(auditPill);
+        if (manual) {
+          var manPill = ui.pill('manual');
+          manPill.style.cssText += ';background:transparent;border:1px solid var(--cyan,#3aa0c0);color:var(--cyan,#3aa0c0)';
+          badges.appendChild(manPill);
+        } else {
+          var failPill = ui.pill(failedCount + ' failed');
+          failPill.style.cssText += ';background:transparent;border:1px solid var(--sev-crit,#E0505A);color:var(--sev-crit,#E0505A)';
+          badges.appendChild(failPill);
+          if (auditCount > 0) {
+            var auditPill = ui.pill(auditCount + ' audit');
+            auditPill.style.cssText += ';background:transparent;border:1px solid var(--gold,#d0a848);color:var(--gold,#d0a848)';
+            badges.appendChild(auditPill);
+          }
         }
         textWrap.appendChild(badges);
         var desc = el('div', 'muted', meta.desc); desc.style.cssText = 'font-size:11.5px;line-height:1.35;overflow:hidden;text-overflow:ellipsis';
@@ -787,13 +835,13 @@
         var right = el('div'); right.style.cssText = 'display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:0 0 auto';
         var hostLbl = el('div'); hostLbl.style.cssText = 'font-family:var(--mono);font-size:11px;color:var(--cyan);cursor:pointer;text-decoration:underline dotted';
         hostLbl.textContent = hosts.length + ' host' + (hosts.length === 1 ? '' : 's');
-        hostLbl.title = 'Click to review the import-flagged host list.';
+        hostLbl.title = manual ? 'Click to review the Target Computers this Fix will dial.' : 'Click to review the import-flagged host list.';
         hostLbl.onclick = function () { showPillarHosts(key); };
         right.appendChild(hostLbl);
         r1.appendChild(right);
         box.appendChild(r1);
 
-        var entry = pillarCards[key] = { hosts: hosts.slice(), via: via, cb: cb, fixBtn: null, enableCb: null, bundleInput: null };
+        var entry = pillarCards[key] = { hosts: hosts.slice(), via: via, manual: !!manual, cb: cb, fixBtn: null, hostLbl: hostLbl, enableCb: null, bundleInput: null };
 
         // Encryption extra: the ENABLE-BitLocker opt-in (stays on its pillar's card)
         if (key === 'Encryption') {
@@ -821,7 +869,7 @@
         // row 2: the Fix button (dials the pillar's FULL import-flagged host set)
         var r2 = el('div'); r2.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px';
         var sp = el('div'); sp.style.flex = '1'; r2.appendChild(sp);
-        var fixBtn = ui.button('Fix ' + PILLAR_TAB[key] + ' on ' + hosts.length + ' host' + (hosts.length === 1 ? '' : 's'), { variant: 'danger', size: 'sm', title: 'Run the ' + meta.label + ' remediation on ALL ' + hosts.length + ' import-flagged host(s) for this pillar (destructive). Verify-first: a host already compliant reports NO CHANGE.' });
+        var fixBtn = ui.button('Fix ' + PILLAR_TAB[key] + ' on ' + hosts.length + ' host' + (hosts.length === 1 ? '' : 's'), { variant: 'danger', size: 'sm', title: 'Run the ' + meta.label + ' remediation on ' + (manual ? 'the Target Computers list' : 'ALL ' + hosts.length + ' import-flagged host(s) for this pillar') + ' (destructive). Verify-first: a host already compliant reports NO CHANGE.' });
         fixBtn.onclick = function () { doPillarFix(key); };
         r2.appendChild(fixBtn);
         box.appendChild(r2);
@@ -830,14 +878,18 @@
         return box;
       }
 
-      // Read-only drill-down: review the exact import-flagged host set a pillar Fix will dial
-      // (acas showCardHosts idiom). Not selectable - the Fix always dials the whole set.
+      // Read-only drill-down: review the exact host set a pillar Fix will dial. IMPORT mode ->
+      // the frozen import-flagged set; MANUAL mode -> the LIVE Target Computers list.
       function showPillarHosts(key) {
         var c = pillarCards[key]; if (!c) return;
-        var hosts = c.hosts || [], via = c.via || {};
+        var manual = c.manual;
+        var hosts = manual ? targets.hosts() : (c.hosts || []);
+        var via = manual ? {} : (c.via || {});
         var body = el('div');
         var d = el('div'); d.style.cssText = 'font-size:11.5px;color:var(--text-dim);margin-bottom:8px';
-        d.textContent = hosts.length + ' import-flagged host(s). Fix ' + PILLAR_TAB[key] + ' dials ONLY these.';
+        d.textContent = manual
+          ? hosts.length + ' Target Computer(s). Fix ' + PILLAR_TAB[key] + ' dials these (verify-first).'
+          : hosts.length + ' import-flagged host(s). Fix ' + PILLAR_TAB[key] + ' dials ONLY these.';
         body.appendChild(d);
         var listBox = el('div'); listBox.style.cssText = 'max-height:300px;overflow:auto;font-family:var(--mono);font-size:11.5px;border:1px solid var(--edge);border-radius:3px;padding:6px 8px;background:var(--bg)';
         if (hosts.length) {
@@ -846,29 +898,33 @@
             if (via[h] === 'audit') { var a = el('span', 'muted', '  (audit)'); r.appendChild(a); }
             listBox.appendChild(r);
           });
-        } else { var em = el('div', 'muted'); em.textContent = '(no hosts flagged - re-import the C2C CSV)'; listBox.appendChild(em); }
+        } else { var em = el('div', 'muted'); em.textContent = manual ? '(no hosts - add computers to Target Computers)' : '(no hosts flagged - re-import the C2C CSV)'; listBox.appendChild(em); }
         body.appendChild(listBox);
-        ctx.confirm({ title: 'Import-flagged hosts - ' + PILLAR_TAB[key], body: body, okText: 'Close', cancelText: null });
+        ctx.confirm({ title: (manual ? 'Target Computers - ' : 'Import-flagged hosts - ') + PILLAR_TAB[key], body: body, okText: 'Close', cancelText: null });
       }
 
-      // ---- Per-pillar fix (DESTRUCTIVE; import-scoped; admin session + FIX confirm) ----
-      // Dials the pillar's FULL import-flagged host set (pillarCards[key].hosts), re-sending
-      // the CSV so the engine re-derives + intersects (safety unchanged - a host not flagged
-      // for the pillar is dropped server-side).
+      // ---- Per-pillar fix (DESTRUCTIVE; admin session + FIX confirm) ----
+      // IMPORT mode: dials the pillar's FULL import-flagged set (re-sending the CSV so the engine
+      // re-derives + intersects - a host not flagged for the pillar is dropped server-side).
+      // MANUAL mode (no import): dials the LIVE Target Computers list, no csvPath -> the engine
+      // runs manual mode and dials exactly those hosts for this pillar.
       async function doPillarFix(key) {
         if (isRunning()) return;
         var meta = FIX_META[key];
         var c = pillarCards[key];
-        if (!importCsvPath) { alertDialog('No import loaded', 'Import the C2C compliance CSV first - per-pillar fixes dial only the import-flagged hosts.'); return; }
-        var hosts = (c && c.hosts) ? c.hosts.slice() : [];
-        if (!hosts.length) { alertDialog('No flagged hosts', 'No import-flagged hosts for the ' + PILLAR_TAB[key] + ' pillar.'); return; }
+        var manual = !importCsvPath;
+        // Short-name + de-dupe the dial list so display == dispatch (the engine short-names every
+        // target). Import hosts are already short/unique; manual hosts (typed) may be FQDNs.
+        var hosts = shortUniq(manual ? targets.hosts() : ((c && c.hosts) ? c.hosts.slice() : []));
+        if (!hosts.length) { alertDialog('No hosts', manual ? NEED_TARGETS : 'No import-flagged hosts for the ' + PILLAR_TAB[key] + ' pillar.'); return; }
         if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
         if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
         var bundleFolder = (c && c.bundleInput) ? String(c.bundleInput.value || '').trim() : '';
         var enableEnc = key === 'Encryption' && c && c.enableCb && c.enableCb._cb.checked;
+        var scopeTxt = manual ? 'Target Computer(s)' : 'import-flagged host(s) for ' + PILLAR_TAB[key];
 
         var pf = [
-          { label: hosts.length + ' import-flagged host(s) for ' + PILLAR_TAB[key], ok: hosts.length > 0 },
+          { label: hosts.length + ' ' + scopeTxt + (manual ? ' (MANUAL mode - no import scoping)' : ''), ok: hosts.length > 0 },
           { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
           { label: 'Verify-first: a host already compliant for ' + meta.label + ' reports NO CHANGE', ok: true }
         ];
@@ -879,7 +935,8 @@
         var ok = await ctx.arm({
           title: 'Arm Fix ' + meta.label,
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
-          body: 'About to run <b>Fix ' + esc(meta.label) + '</b> on ALL <b>' + hosts.length + '</b> import-flagged host(s) for this pillar.'
+          body: 'About to run <b>Fix ' + esc(meta.label) + '</b> on <b>' + hosts.length + '</b> ' + scopeTxt + '.'
+            + (manual ? '<br><b>MANUAL mode</b> (no C2C import): this dials exactly the hosts in Target Computers - there is no import allow-list.' : '')
             + '<br>This fixer is <b>verify-first</b>: a host already compliant for this pillar is reported NO CHANGE and left untouched.'
             + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START XtsAes256 FULL-VOLUME encryption on <b>every FullyDecrypted FIXED volume</b> of the <b>' + hosts.length + '</b> host(s) - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock). Removable / USB drives are never touched. Escrow-first, fail-closed; the OS volume needs TPM-ready + domain-joined. Encryption runs for hours in the background.' : ''),
           preflight: pf, okText: 'Run Fix ' + meta.label, cancelText: 'Cancel'
@@ -888,9 +945,10 @@
 
         grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
-        log.banner('C2C Fix ' + meta.label + ' on ' + hosts.length + ' import-flagged host(s)');
+        log.banner('C2C Fix ' + meta.label + ' on ' + hosts.length + ' ' + (manual ? 'target host(s) [MANUAL]' : 'import-flagged host(s)'));
         lockInputs(true);
-        var params = { targets: hosts.join('\n'), csvPath: importCsvPath, confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked };
+        var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked };
+        if (!manual) params.csvPath = importCsvPath;   // omit csvPath -> engine runs MANUAL mode
         if (key === 'Encryption') params.enableEncryption = enableEnc;
         if (key === 'PkiRoots') params.certBundleFolder = bundleFolder;
         run = ctx.run(meta.action, params, { keyOf: keyByHost, destructive: true });
@@ -901,7 +959,7 @@
       // admin session + FIX confirm + arm checkbox). Not a scored pillar - never in run-all. ----
       async function doLockscreenFix() {
         if (isRunning()) return;
-        var hosts = targets.hosts();
+        var hosts = shortUniq(targets.hosts());   // engine short-names each target; keep display == dispatch
         if (!hosts.length) { alertDialog('No target hosts', NEED_TARGETS); return; }
         if (!lockArm._cb.checked) { alertDialog('Not armed', 'Tick "Arm the cache fix" checkbox first - this utility is opt-in.'); return; }
         if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
@@ -937,11 +995,11 @@
       // the re-derived CSV). ----
       async function doRunAll() {
         if (isRunning()) return;
-        if (!importCsvPath) { alertDialog('No import loaded', 'Import the C2C compliance CSV first - RUN ALL fixes only the import-flagged hosts in the checked pillar cards.'); return; }
         var info = updateFixCounts();
+        var manual = info.manual;
         var union = info.union;
         var hosts = Object.keys(union);
-        if (!hosts.length) { alertDialog('Nothing checked', 'Check at least one pillar card before RUN ALL.'); return; }
+        if (!hosts.length) { alertDialog('Nothing to run', manual ? 'Add hosts to Target Computers and check at least one pillar card before RUN ALL.' : 'Check at least one pillar card before RUN ALL.'); return; }
         if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running - it changes machines.'); return; }
         if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the run-all.'); return; }
 
@@ -962,32 +1020,38 @@
         ];
         if (pillarsUsed.Encryption) pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
         if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs)', ok: true });
+        if (manual) pf.push({ label: 'MANUAL mode - no C2C import: dials exactly the Target Computers you checked pillars for', ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
         var ok = await ctx.arm({
           title: 'Arm RUN ALL',
           banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
           body: 'About to fix <b>' + hosts.length + '</b> host(s) across <b>' + pillarList.length + '</b> pillar(s) (<b>' + info.totalPairs + '</b> host-pillar fix(es)): <b>' + esc(pillarList.join(', ')) + '</b>.'
+            + (manual ? '<br><b>MANUAL mode</b> (no C2C import): dials exactly the Target Computers checked under each pillar - no import allow-list.' : '')
             + '<br>Each host is fixed for exactly the pillars it is checked under. Every fixer is <b>verify-first</b> - a host already compliant for a pillar is reported NO CHANGE and left untouched.'
             + (enableEnc ? '<br><b>ENABLE BitLocker:</b> hosts will START XtsAes256 full-volume encryption on <b>every FullyDecrypted FIXED volume</b> - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock); removable / USB drives are never touched. Runs for hours in the background.' : (pillarsUsed.Encryption ? '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).' : '')),
           preflight: pf, okText: 'RUN ALL', cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: '[' + ts() + '] Run-all cancelled at the arming dialog.', level: 'warn' }); return; }
 
-        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
-        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
-        log.banner('C2C RUN ALL on ' + hosts.length + ' host(s) [' + pillarList.join(', ') + ']');
+        // Seed the grid with SHORT names (the engine short-names every plan host), so a manual
+        // FQDN-typed target does not leave a phantom 'Queued' row its short result row can't key to.
+        var dialHosts = shortUniq(hosts);
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + dialHosts.length;
+        dialHosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C RUN ALL on ' + dialHosts.length + ' host(s) [' + pillarList.join(', ') + ']');
         lockInputs(true);
-        run = ctx.run('run-all', {
+        var raParams = {
           plan: JSON.stringify(plan),
-          csvPath: importCsvPath,
           enableEncryption: enableEnc,
           certBundleFolder: bundleFolder,
           winrmHeal: fixWinrmHeal._cb.checked,
           confirm: confirmInput.value,
           threads: threadsFix(),
           attemptOffline: fixOffline._cb.checked
-        }, { keyOf: keyByHost, destructive: true });
+        };
+        if (!manual) raParams.csvPath = importCsvPath;   // omit csvPath -> engine runs MANUAL mode (trusts the plan)
+        run = ctx.run('run-all', raParams, { keyOf: keyByHost, destructive: true });
         bindFixRun();
       }
 
@@ -1036,11 +1100,13 @@
       }
 
       // =================== init ===================
-      showFixPlaceholder();                               // muted placeholder until a C2C CSV import loads the per-pillar cards
-      offTargets = targets.model.onChange(function () { updateTargetButtons(); });   // live lockscreen/scan button counts
+      showFixPlaceholder();                               // MANUAL-mode fix cards until a C2C CSV import switches to import-scoped
+      // Live-refresh the lockscreen/scan counts AND (in manual mode) every per-pillar Fix / RUN ALL
+      // host count as the Target Computers list changes.
+      offTargets = targets.model.onChange(function () { updateTargetButtons(); updateFixCounts(); });
       updateTargetButtons();
 
-      log.append({ text: 'C2C Nemesis ready. Import the Tanium C2C Compliance CSV to load one card per fixable pillar (each fixes ALL the hosts it flagged - click its host count to review them); type FIX, then Fix that pillar or check its card and RUN ALL. Per-pillar fixes + RUN ALL dial ONLY the import-flagged hosts.', level: 'accent' });
+      log.append({ text: 'C2C Nemesis ready. DUAL-mode fixes: with NO import, each pillar card fixes the hosts in Target Computers (MANUAL) - type FIX, then Fix a pillar or check cards + RUN ALL. Import the Tanium C2C Compliance CSV to switch to import-scoped targeting (one card per flagged pillar; dials ONLY the flagged hosts).', level: 'accent' });
       log.append({ text: 'Read-only side (no import needed): C2C Readiness Scan + Version Check across the Target Computers list (11 TASKORD-tiered checks: 5 QUARANTINE, 2 AUDIT, 3 INFO, Monitoring=ATTEST). The full per-check report streams here.', level: 'dim' });
 
       host.appendChild(root);

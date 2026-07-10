@@ -101,7 +101,7 @@
       var importStatus = el('div', 'muted', ''); importStatus.style.fontSize = '11px';
       optCard.appendChild(importBtn); optCard.appendChild(importFileInput); optCard.appendChild(importStatus);
 
-      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP.' });
+      var offlineCb = ui.checkbox('Attempt even if offline (host unreachable)', { title: 'Proceed against a host that fails the TCP 5985/5986/445 reachability probe. Reachability is TCP-only - AFNET drops ICMP. A host answering only on 5986 uses WinRM-over-HTTPS.' });
       optCard.appendChild(offlineCb);
       var includeExpiredCb = ui.checkbox('Include expired certs (dead anchors - normally skipped)', { title: 'Also push certificates whose NotAfter has already passed. Off by default - expired certs are dead trust anchors and are excluded from the bundle read + push unless ticked.' });
       optCard.appendChild(includeExpiredCb);

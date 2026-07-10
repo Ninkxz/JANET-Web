@@ -24,13 +24,18 @@
 #    Attest     : Monitoring (Tanium)            (a dead client cannot attest -> NOT ATTESTING)
 #
 #  v1.11.0 reworks the view fix surface to one CARD per fixable pillar (view-only; targeting semantics unchanged).
+#  v1.12.0 DUAL-MODE fixes: with a CSV imported, fixes stay import-scoped (allow-list). With NO import,
+#          fixes run in MANUAL mode - dialing EXACTLY the typed Target Computers for the chosen pillar(s),
+#          so you can load machines and run a manual C2C patch without an import (fix-lockscreen already did
+#          this). Every guard is unchanged (FIX confirm, self-guard, wrong-box abort, verify-first). Reachability
+#          also probes WinRM HTTPS 5986 (after HTTP 5985), auto-switching that host's session to -UseSSL.
 #
 #  Verdict (computed admin-side, quarantine-tier only):
 #    QUARANTINE RISK  = >= 1 quarantine-tier FAIL   (Detail lists the failing pillars)
 #    CHECK ERRORS     = 0 quarantine FAIL but >= 1 quarantine-tier ERROR
 #    NOT ATTESTING    = only Monitoring (Tanium) failing - box invisible to the dashboard
 #    READY            = 0 of the above (audit/info fails are advisory, shown in Detail)
-#    OFFLINE          = host unreachable (TCP 5985/445)
+#    OFFLINE          = host unreachable (TCP 5985/5986/445)
 #  Vuln + COAMS are EXT (server-side ARAD/ACAS/ePO) - reported, never scored.
 #
 #  Baseline config (UPR/biosfirmware pattern): an editable JanetLocal\c2c-baseline.json
@@ -47,7 +52,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.11.0'
+        version  = '1.12.0'
         category = 'Reporting'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all.'
         actions  = @(
@@ -614,22 +619,24 @@ $script:C2cProbeBlock = {
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Ok=$false; Report=''; Checks=@() }
 
-    # Reachability pre-check: pure-TCP probe (AFNET-safe; never ICMP). WinRM 5985
-    # then SMB 445, 1500ms connect timeout, break on first connect (wpt/biosfirmware idiom).
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # Reachability pre-check: pure-TCP probe (AFNET-safe; never ICMP). WinRM HTTP 5985,
+    # then WinRM HTTPS 5986, then SMB 445 (liveness only), 1500ms connect timeout, break
+    # on first connect (wpt/biosfirmware idiom). $useSsl tracks whether ONLY 5986 answered
+    # so the session below auto-switches to -UseSSL (HTTP 5985 is preferred when both open).
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
         if (-not $AttemptOffline) {
-            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
+            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
             return $r
         }
     }
@@ -647,8 +654,13 @@ $script:C2cProbeBlock = {
     $secAgents     = @($Config['securityAgentServices'])
     $dodRoots      = @($Config['dodRootThumbprints'])
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 180000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on
+    # AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -1024,9 +1036,12 @@ $script:C2cProbeBlock = {
 
     # DNS-mismatch guard (read-only soft-warn, wpt/biosfirmware idiom): a wrong box
     # would report the wrong readiness. Session name compare, never a PTR lookup.
+    # An IP-literal target has no name to compare (its short name would be the first octet),
+    # so skip the compare for IPs - mirrors the fix worker's wrong-box IP carve-out. Manual
+    # mode invites typing the IP of a DNS-broken box; without this every IP scan false-skips.
     $actualName  = ([string]$probe.RemoteName).Trim()
-    $targetShort = ($Computer -split '\.')[0]
-    if ($actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+    $targetShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+    if ($targetShort -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
         $r.Status = 'DNS MISMATCH'; $r.Detail = "dialed '$targetShort' but remote is '$actualName' - skipped (would report the wrong machine)"
         return $r
     }
@@ -1234,6 +1249,19 @@ function Test-JanetC2cHostIsSelf {
     return $false
 }
 
+# Dispatch/de-dupe short name that PRESERVES an IP literal. An operator can type the IP of a
+# DNS-broken box as a fix target (the fix worker's wrong-box guard has an explicit IP carve-out),
+# so 'HOSTP.area52.mil' -> 'HOSTP' but '10.20.30.40' -> '10.20.30.40' (never mangled to '10').
+# Mirrors the IP-literal handling in Test-JanetC2cHostIsSelf, so a typed dispatcher IP is still
+# caught by the self-guard (Get-JanetC2cLocalIdentity holds this box's IPs).
+function Get-C2cShortHost {
+    param([string]$Name)
+    $n = [string]$Name
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($n, [ref]$ip)) { return $n }
+    return ($n -split '\.')[0]
+}
+
 # --- Per-host Mass Fix worker (runs in a pool runspace) ----------------------
 # Returns @{ Host; Ping; Status; Detail; Report; Pillars }. All enabled pillar
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
@@ -1249,14 +1277,15 @@ $script:C2cFixBlock = {
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Detail=''; Report=''; Pillars=@() }
 
-    # TCP reachability (WinRM 5985 then SMB 445, 1.5s). Never ICMP.
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # TCP reachability (WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 liveness, 1.5s).
+    # Never ICMP. $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
@@ -1276,11 +1305,15 @@ $script:C2cFixBlock = {
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
-        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = (@('No TCP on 5985/445 (1.5s timeouts). Enable "Attempt even if offline" to force.', $healNote) | Where-Object { $_ }) -join ' | '; return $r }
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = (@('No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.', $healNote) | Where-Object { $_ }) -join ' | '; return $r }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 280000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 120000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS common on AFNET).
+    $soP = @{ OperationTimeout=280000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'FAILED'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
@@ -2279,29 +2312,39 @@ function Invoke-C2cFixAction {
         }
     }
 
-    # --- Import-scoped targeting (per-pillar + run-all) -------------------------
-    # Per-pillar fixes and run-all dial ONLY the hosts the imported CSV flagged for
-    # each pillar - NEVER the whole target list. Re-parse the CSV every call (like the
-    # ACAS remediation flow: nothing persists server-side) and derive the authoritative
-    # pillar/plan sets. No csvPath/csvText - or a CSV with zero findings - REFUSES the
-    # run before the self-guard stage; nothing is dialed. fix-lockscreen BYPASSES this
-    # block entirely (it is an opt-in plain-hostlist utility, NOT a scored/CSV-mapped
-    # pillar) - its plan is built straight from the typed hostlist below (v1.9.0 semantics).
+    # --- Dual-mode targeting (per-pillar + run-all) ----------------------------
+    # IMPORT MODE (a CSV was supplied): per-pillar fixes and run-all dial ONLY the hosts
+    # the import flagged for each pillar - NEVER the whole list. Re-parse the CSV every
+    # call (like ACAS: nothing persists server-side) and derive the authoritative
+    # pillar/plan sets; the operator's checked/typed hosts are an ALLOW-LIST intersected
+    # against it.
+    # MANUAL MODE (NO csvPath/csvText): there is no import to scope against, so the fix
+    # dials EXACTLY the operator's typed host list for the chosen pillar(s) - the operator
+    # owns the list. Every other guard is unchanged (FIX confirm above, self-guard,
+    # wrong-box DNS abort, verify-first fixers). This is what makes "load machines + run a
+    # manual C2C patch" work without an import.
+    # A CSV that was SUPPLIED but parses to ZERO findings still REFUSES (the operator meant
+    # to scope by import but the CSV was bad - do not silently fall through to dialing all
+    # typed hosts). Note "supplied but bad" = a real empty/garbage CSV *file*: it has a path,
+    # so it lands in the else-branch below and Get-C2cImportPlan's zero-records check refuses
+    # it. Only content-less input (no path AND no/whitespace text) is MANUAL - there is
+    # genuinely no CSV to scope against. fix-lockscreen BYPASSES this block (plain-hostlist).
     $importPlan = $null
+    $manualMode = $false
     if (-not $isLockscreen) {
         $fixCsvPath  = [string]$Params['csvPath']
         $fixCsvText  = [string]$Params['csvText']
         $fixCsvPaths = @()
         if ($fixCsvPath) { $fixCsvPaths = @($fixCsvPath -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-        $noImportMsg = 'No import loaded - per-pillar fixes dial only import-flagged hosts. Import the C2C compliance CSV first.'
         if ($fixCsvPaths.Count -eq 0 -and [string]::IsNullOrWhiteSpace($fixCsvText)) {
-            & $send @{ type='log'; level='warn'; text=$noImportMsg }
-            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
-        }
-        $importPlan = Get-C2cImportPlan -Paths $fixCsvPaths -Text $fixCsvText -Send $send
-        if (@($importPlan.Records).Count -eq 0) {
-            & $send @{ type='log'; level='warn'; text=$noImportMsg }
-            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+            $manualMode = $true
+            & $send @{ type='log'; level='info'; text='MANUAL MODE: no C2C import loaded - dialing EXACTLY the host(s) you provided for the selected pillar(s). No import allow-list; FIX confirm, self-guard, wrong-box guard and verify-first fixers still apply.' }
+        } else {
+            $importPlan = Get-C2cImportPlan -Paths $fixCsvPaths -Text $fixCsvText -Send $send
+            if (@($importPlan.Records).Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='A C2C CSV was supplied but parsed to ZERO findings - refusing (nothing dialed). Remove the CSV to run in MANUAL mode against your typed host list, or re-export a valid C2C compliance CSV.' }
+                return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+            }
         }
     }
 
@@ -2311,17 +2354,23 @@ function Invoke-C2cFixAction {
     if ($isRunAll) {
         # Re-derive the AUTHORITATIVE per-host fixable set from the CSV: short(upper) ->
         # HashSet of fixable pillars flagged for that host. The client plan is an ALLOW-LIST
-        # intersected against this (never trusted as the dispatch list).
+        # intersected against this (never trusted as the dispatch list). MANUAL mode has no
+        # import, so $derived stays empty and the intersection below is skipped ($manualMode)
+        # - guarded here too so a null $importPlan is never dereferenced (strict-mode safe).
         $derived = @{}
-        foreach ($e in @($importPlan.RunAllPlan)) {
-            $hs = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($p in @($e.pillars)) { [void]$hs.Add([string]$p) }
-            $derived[([string]$e.host).ToUpperInvariant()] = $hs
+        if (-not $manualMode) {
+            foreach ($e in @($importPlan.RunAllPlan)) {
+                $hs = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($p in @($e.pillars)) { [void]$hs.Add([string]$p) }
+                $derived[([string]$e.host).ToUpperInvariant()] = $hs
+            }
         }
         # --- Parse + validate the run-all plan JSON --------------------------
         $planRaw = [string]$Params['plan']
         if ([string]::IsNullOrWhiteSpace($planRaw)) {
-            & $send @{ type='log'; level='err'; text='Run-all plan is empty. Import a C2C CSV first, then Run All. Nothing was changed.' }
+            $emptyPlanMsg = if ($manualMode) { 'Run-all plan is empty. Add hosts to Target Computers and check at least one pillar card, then Run All. Nothing was changed.' }
+                            else { 'Run-all plan is empty. Import a C2C CSV first, then Run All. Nothing was changed.' }
+            & $send @{ type='log'; level='err'; text=$emptyPlanMsg }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }
         $parsed = $null
@@ -2338,7 +2387,7 @@ function Invoke-C2cFixAction {
                 & $send @{ type='log'; level='warn'; text="Run-all: dropped a plan entry with an invalid host token ('$eh')." }
                 continue
             }
-            $short = ($eh -split '\.')[0]
+            $short = Get-C2cShortHost $eh
             if ($seen.Contains($short)) { continue }   # de-dupe by host (first wins)
             $rawPillars = @()
             try { $rawPillars = @($entry.pillars | ForEach-Object { [string]$_ } | Where-Object { $_ }) } catch { $rawPillars = @() }
@@ -2350,8 +2399,10 @@ function Invoke-C2cFixAction {
             # Import-scoped intersection: narrow the client's fixable pillars to the set the
             # CSV re-derived for THIS host. A (host,pillar) pair the import did not flag is
             # dropped (warn); a host absent from the import is dropped entirely (never dialed).
+            # MANUAL MODE skips this entirely: with no import there is nothing to intersect
+            # against - the client plan's fixable pillars are dialed as-is for the typed hosts.
             $importDropped = $false
-            if ($known.Count -gt 0) {
+            if (-not $manualMode -and $known.Count -gt 0) {
                 $du = $short.ToUpperInvariant()
                 if ($derived.ContainsKey($du)) {
                     $dset   = $derived[$du]
@@ -2394,50 +2445,55 @@ function Invoke-C2cFixAction {
             & $send @{ type='log'; level='warn'; text='No valid host(s) to fix - enter one or more computer names in Target Computers. Nothing was dialed.' }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }
-        foreach ($t in $targets) { [void]$plan.Add(@{ Host=($t -split '\.')[0]; Pillars=@('Lockscreen') }) }
+        foreach ($t in $targets) { [void]$plan.Add(@{ Host=(Get-C2cShortHost $t); Pillars=@('Lockscreen') }) }
     } else {
-        # --- Per-pillar fix: ONE pillar, dialed at ONLY the hosts the import flagged
+        # --- Per-pillar fix: ONE pillar. IMPORT MODE dials ONLY the hosts the import flagged
         #     for that pillar (server-re-derived from the CSV), narrowed to the operator's
-        #     checked subset. Mirrors ACAS: the CSV is re-parsed every call and the checked
-        #     hosts are an ALLOW-LIST, never the dispatch list. --------------------------
+        #     checked subset (ACAS pattern - the checked hosts are an ALLOW-LIST). MANUAL MODE
+        #     (no import) dials EXACTLY the operator's typed hosts for the pillar. -----------
         $pillar = $script:C2cPillarByAction[$ActionId]
         if (-not $pillar) {
             & $send @{ type='error'; text="Unknown fix action '$ActionId'." }
             return @{ rows=@(); summary=@{} }
         }
-        # Server-derived set S: the hosts the import flagged for THIS pillar (short names).
-        $serverSet   = @(); if ($importPlan.PillarFixTargets.ContainsKey($pillar)) { $serverSet = @($importPlan.PillarFixTargets[$pillar]) }
-        $serverAllow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($h in $serverSet) { if ($h) { [void]$serverAllow.Add(($h -split '\.')[0]) } }
-
-        # The operator's checked subset (token-regex at ingress). Empty -> refuse (the
-        # operator must check hosts in the pillar tab; never silently dial all of S).
+        # The operator's host list (token-regex at ingress). Empty -> refuse.
         $submitted = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
         if ($submitted.Count -eq 0) {
-            & $send @{ type='log'; level='warn'; text="No host(s) checked - check the $pillar host(s) to fix in the pillar tab (per-pillar fixes never dial the whole import). Nothing was dialed." }
+            $emptyMsg = if ($manualMode) { "No host(s) to fix - enter computer name(s) in Target Computers for the $pillar fix. Nothing was dialed." }
+                        else { "No host(s) checked - check the $pillar host(s) to fix in the pillar tab (per-pillar fixes never dial the whole import). Nothing was dialed." }
+            & $send @{ type='log'; level='warn'; text=$emptyMsg }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }
-        # Intersect: dispatch = S (server-recomputed) INTERSECT submitted (allow-list). A
-        # submitted host NOT flagged for this pillar by the import is DROPPED (warn) -
-        # never silently dialed.
-        $dispatch          = New-Object System.Collections.ArrayList
-        $dispatchSeen      = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-        $droppedNotFlagged = New-Object System.Collections.ArrayList
-        foreach ($t in $submitted) {
-            $short = ($t -split '\.')[0]
-            # Case-INSENSITIVE de-dupe: ArrayList.Contains is ordinal, so 'hostp' + 'HOSTP.dom.mil'
-            # would both dial the same box (destructive double-fix race). HashSet.Add returns
-            # $false when the short name (any case) is already queued - guard the ArrayList add.
-            if ($serverAllow.Contains($short)) { if ($dispatchSeen.Add($short)) { [void]$dispatch.Add($short) } }
-            else { [void]$droppedNotFlagged.Add($t) }
-        }
-        if ($droppedNotFlagged.Count -gt 0) {
-            & $send @{ type='log'; level='warn'; text="Dropped $($droppedNotFlagged.Count) submitted host(s) NOT flagged for $pillar by the import: $($droppedNotFlagged -join ', ')." }
+        # Case-INSENSITIVE de-dupe throughout: ArrayList.Contains is ordinal, so 'hostp' +
+        # 'HOSTP.dom.mil' would both dial the same box (destructive double-fix race). HashSet.Add
+        # returns $false when the short name (any case) is already queued - guard the ArrayList add.
+        $dispatch     = New-Object System.Collections.ArrayList
+        $dispatchSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        if ($manualMode) {
+            # MANUAL: no import to intersect against - dial exactly the typed hosts (short-named).
+            foreach ($t in $submitted) { $short = Get-C2cShortHost $t; if ($dispatchSeen.Add($short)) { [void]$dispatch.Add($short) } }
+        } else {
+            # IMPORT: dispatch = S (server-re-derived for THIS pillar) INTERSECT submitted (allow-
+            # list). A submitted host NOT flagged for this pillar by the import is DROPPED (warn).
+            $serverSet   = @(); if ($importPlan.PillarFixTargets.ContainsKey($pillar)) { $serverSet = @($importPlan.PillarFixTargets[$pillar]) }
+            $serverAllow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($h in $serverSet) { if ($h) { [void]$serverAllow.Add((Get-C2cShortHost $h)) } }
+            $droppedNotFlagged = New-Object System.Collections.ArrayList
+            foreach ($t in $submitted) {
+                $short = Get-C2cShortHost $t
+                if ($serverAllow.Contains($short)) { if ($dispatchSeen.Add($short)) { [void]$dispatch.Add($short) } }
+                else { [void]$droppedNotFlagged.Add($t) }
+            }
+            if ($droppedNotFlagged.Count -gt 0) {
+                & $send @{ type='log'; level='warn'; text="Dropped $($droppedNotFlagged.Count) submitted host(s) NOT flagged for $pillar by the import: $($droppedNotFlagged -join ', ')." }
+            }
         }
         # Re-apply the host-token regex to the FINAL resolved list (never trust the derived list).
         $dispatch = @(@($dispatch) | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$' })
         if ($dispatch.Count -eq 0) {
-            & $send @{ type='log'; level='warn'; text="None of the submitted host(s) are flagged for $pillar by the import - nothing to fix." }
+            $noneMsg = if ($manualMode) { "No valid host(s) to fix for $pillar. Nothing was dialed." }
+                       else { "None of the submitted host(s) are flagged for $pillar by the import - nothing to fix." }
+            & $send @{ type='log'; level='warn'; text=$noneMsg }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }
         foreach ($t in $dispatch) { [void]$plan.Add(@{ Host=$t; Pillars=@($pillar) }) }
@@ -2602,13 +2658,14 @@ $script:C2cVersionBlock = {
 
     $r = @{ Host=$Computer; Ping=''; Installed=''; Version=''; Status=''; Detail='' }
 
-    $reachable = $false
-    foreach ($port in 5985,445) {
+    # WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness). $useSsl set when ONLY 5986 answered.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
         $tc = $null
         try {
             $tc = New-Object System.Net.Sockets.TcpClient
             $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port" }
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
         if ($reachable) { break }
     }
@@ -2626,11 +2683,15 @@ $script:C2cVersionBlock = {
     }
     if (-not $reachable) {
         $r.Ping = 'Unreachable'
-        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = (@('No TCP on 5985/445 (1.5s timeouts).', $healNote) | Where-Object { $_ }) -join ' | '; return $r }
+        if (-not $AttemptOffline) { $r.Status = 'OFFLINE'; $r.Detail = (@('No TCP on 5985/5986/445 (1.5s timeouts).', $healNote) | Where-Object { $_ }) -join ' | '; return $r }
     }
 
-    $wsOpt = New-PSSessionOption -OperationTimeout 120000 -OpenTimeout 15000 -CancelTimeout 5000 -IdleTimeout 60000
+    # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS common on AFNET).
+    $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'OFFLINE'; $r.Detail = (@("Session: $($_.Exception.Message)", $healNote) | Where-Object { $_ }) -join ' | '; return $r }

@@ -2837,17 +2837,20 @@ $script:Dirty30LastUserWorker = {
     $valName = 'LastLoggedOnUser'
 
     # Reachability gate (TCP-only, AFNET-safe): reachable if a TCP probe to WinRM
-    # (5985) or SMB (445) connects. Never ICMP - AFNET blocks it, and the user can
-    # only be read over WinRM / CIM-WSMan (5985), so an ICMP-only host yields
-    # nothing anyway. Short per-port timeout (700-1500 ms) so a filtered host fails fast.
-    $reachable = $false
+    # HTTP (5985), WinRM HTTPS (5986), or SMB (445) connects. Never ICMP - AFNET
+    # blocks it, and the user can only be read over WinRM / CIM-WSMan, so an
+    # ICMP-only host yields nothing anyway. Short per-port timeout (700-1500 ms) so
+    # a filtered host fails fast. $useSsl tracks whether ONLY 5986 answered, so the
+    # WinRM/CIM calls below auto-switch to -UseSSL (5985 stays preferred when both
+    # are open).
+    $reachable = $false; $useSsl = $false
     $tcpTimeout = [Math]::Max(700, [Math]::Min(1500, [int]$TimeoutSec * 1000))
-    foreach ($port in 5985, 445) {
+    foreach ($port in 5985, 5986, 445) {
         $tcp = $null
         try {
             $tcp = New-Object System.Net.Sockets.TcpClient
             $iar = $tcp.BeginConnect($Target, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne($tcpTimeout) -and $tcp.Connected) { $reachable = $true }
+            if ($iar.AsyncWaitHandle.WaitOne($tcpTimeout) -and $tcp.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
         } catch {} finally {
             if ($tcp) { try { $tcp.Close() } catch {} }
         }
@@ -2856,7 +2859,9 @@ $script:Dirty30LastUserWorker = {
     if (-not $reachable) { return @{ Host = $Target; User = '- offline -' } }
 
     # Preferred path: WinRM / Invoke-Command with the operator credential when one
-    # was supplied (falls back to the calling identity when not).
+    # was supplied (falls back to the calling identity when not). -UseSSL only when
+    # the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on AFNET, so
+    # skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
     try {
         $icmArgs = @{
             ComputerName = $Target
@@ -2865,6 +2870,7 @@ $script:Dirty30LastUserWorker = {
             ErrorAction  = 'Stop'
         }
         if ($Cred) { $icmArgs['Credential'] = $Cred }
+        if ($useSsl) { $icmArgs['UseSSL'] = $true; $icmArgs['SessionOption'] = New-PSSessionOption -SkipCACheck -SkipCNCheck }
         $val = Invoke-Command @icmArgs
         if ($val -and -not [string]::IsNullOrWhiteSpace([string]$val)) {
             return @{ Host = $Target; User = [string]$val }
@@ -2875,9 +2881,13 @@ $script:Dirty30LastUserWorker = {
 
     # Fall back to CIM-over-WSMan (StdRegProv) with the same credential. RPC/DCOM
     # is commonly filtered on AFNET; WinRM-over-WSMan is the supported transport.
+    # Same -UseSsl auto-switch as the Invoke-Command path above.
     $cim = $null
     try {
-        $sopt = New-CimSessionOption -Protocol Wsman
+        # -UseSsl and -Protocol live in MUTUALLY EXCLUSIVE New-CimSessionOption parameter sets
+        # (combining them throws "Unable to resolve the parameter set name"), so BRANCH: -UseSsl
+        # already implies WSMan (skip CA/CN for self-signed 5986); else the explicit WSMan set.
+        $sopt = if ($useSsl) { New-CimSessionOption -UseSsl -SkipCACheck -SkipCNCheck } else { New-CimSessionOption -Protocol Wsman }
         $csParams = @{ ComputerName = $Target; SessionOption = $sopt; OperationTimeoutSec = $TimeoutSec; ErrorAction = 'Stop' }
         if ($Cred) { $csParams['Credential'] = $Cred }
         $cim = New-CimSession @csParams
@@ -2921,7 +2931,7 @@ $script:TargetIpResolveWorker = {
     # timeout (700-1500 ms) so a filtered port cannot stall the worker.
     if (-not $r.Online) {
         $tcpTimeout = [Math]::Max(700, [Math]::Min(1500, [int]$TimeoutMs))
-        foreach ($port in 5985, 445) {
+        foreach ($port in 5985, 5986, 445) {   # WinRM HTTP, WinRM HTTPS, then SMB - reachability union only (no session)
             $tcp = $null
             try {
                 $tcp = New-Object System.Net.Sockets.TcpClient

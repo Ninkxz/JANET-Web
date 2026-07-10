@@ -111,7 +111,7 @@
       var sendThreads = ui.number({ value: 16, min: 1, max: 64, title: 'How many hosts to message at once (when Send in parallel is on).' }); sendThreads.style.width = '90px';
       sendThreadsRow.appendChild(ui.label('Parallel hosts')); sendThreadsRow.appendChild(sendThreads);
       opt.appendChild(sendThreadsRow);
-      var reqPing = ui.checkbox('Skip hosts that fail the TCP 5985/445 probe', { title: 'When checked, a host that fails the TCP 5985/445 reachability probe is skipped instead of attempting WinRM. (AFNET drops ICMP, so reachability is TCP-only.)' });
+      var reqPing = ui.checkbox('Skip hosts that fail the TCP 5985/5986/445 probe', { title: 'When checked, a host that fails the TCP 5985/5986/445 reachability probe is skipped instead of attempting WinRM (a host answering only on 5986 uses WinRM-over-HTTPS). (AFNET drops ICMP, so reachability is TCP-only.)' });
       opt.appendChild(reqPing);
       mid.appendChild(opt);
 
