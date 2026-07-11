@@ -52,9 +52,9 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.13.0'
+        version  = '1.15.0'
         category = 'Remediation'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
         actions  = @(
             @{
                 id          = 'scan'
@@ -116,7 +116,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-antimalware'
                 label       = 'Fix AntiMalware (Defender)'
-                description = 'DESTRUCTIVE (Defender state). Heal Microsoft Defender on each target using Get-MpComputerStatus.AMRunningMode: always set WinDefend/Sense to Automatic + Started; force Real-Time Protection on (Set-MpPreference) ONLY when AMRunningMode is Active - NEVER in Passive / EDR Block Mode (there MDE/Sense is primary and RTP off is correct, so forcing it would fight the MDE config); Update-MpSignature when the signature age exceeds sigMaxAgeHours (default 24h). A Passive/EDR box with Sense onboarded + fresh signatures reports NOCHANGE (already protected via MDE). The detail reports RunningMode / product+engine versions / last-update / age-hours. A missing MDE Sense service is a note, not a failure, when Defender itself is healthy. Result PROTECTED (something healed) / ALREADY PROTECTED / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (Defender state). Heal Microsoft Defender on each target using Get-MpComputerStatus.AMRunningMode: always set WinDefend/Sense to Automatic + Started; force Real-Time Protection on (Set-MpPreference) ONLY when AMRunningMode is Active - NEVER in Passive / EDR Block Mode (there MDE/Sense is primary and RTP off is correct, so forcing it would fight the MDE config); Update-MpSignature when the signature age exceeds sigMaxAgeHours (default 24h) via a SOURCE CHAIN (Defender-ScanFix v2.1): wuauserv+BITS pre-started, then default channel (WSUS/ConfigMgr) -> Microsoft Update -> MMPC HTTP, verified by re-reading the signature age after each rung (an all-sources failure reports the real 0x error from Defender event 2001; if a Microsoft-signed mpam-fe.exe full offline package is staged in Packages\DefenderDefinitions - shipped empty - it is Authenticode-validated admin-side and pushed over the same session as the LAST rung to exactly those all-sources-failed hosts, executed locally, verified by age re-read, then deleted from the target). A Passive/EDR box with Sense onboarded + fresh signatures reports NOCHANGE (already protected via MDE). The detail reports RunningMode / product+engine versions / last-update / age-hours. A missing MDE Sense service is a note, not a failure, when Defender itself is healthy. When the MDE Org ID is missing/mismatched (the TASKORD-scored value) a POLICY-DRIVEN onboarding heal ladder also runs: DiagTrack/Sense start types fixed (Sense depends on DiagTrack), onboarding blob present -> Sense restarted, blob missing -> gpupdate /force, STILL missing -> the embedded tenant OnboardingInfo blob is written as a bridge (the GPO asserts the same value) - with gateway-443 reachability diagnosed so a CONNECTIVITY-BLOCKED host is called out as a firewall/proxy problem, not retried locally. Result PROTECTED (something healed) / MDE ONBOARDED / ALREADY PROTECTED / IN PROGRESS (onboarding pending) / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the AntiMalware (Defender) pillar on the import-flagged host(s) you checked? This changes Defender state. Proceed?'
@@ -148,7 +148,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-encryption'
                 label       = 'Fix Encryption (BitLocker)'
-                description = 'DESTRUCTIVE (BitLocker). Iterates EVERY FIXED VOLUME (C:, D:, E:, ...) - removable/USB (BitLocker To Go), network and optical volumes are NEVER touched. Per fixed volume: On -> ALREADY ENCRYPTED; suspended (Off + FullyEncrypted) -> RESUME -> PROTECTION RESUMED; EncryptionInProgress -> IN PROGRESS(percent); FullyDecrypted with "ENABLE BitLocker" NOT ticked -> SKIP (route desk-side). With "ENABLE BitLocker" ticked, a FullyDecrypted fixed volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED. OS volume (VolumeType OperatingSystem): mirror the enterprise USAF enable script - assert the FVE BitLocker policy once per host (recovery-key escrow + XtsAes256), reuse-or-add a RecoveryPassword protector, escrow Entra-first (BackupToAAD-BitLockerKeyProtector) with on-prem AD fallback (Backup-BitLockerKeyProtector) BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, then Enable-BitLocker with a TPM protector + XtsAes256 full-volume. Fixed DATA volume (VolumeType Data): the OS volume must be BitLocker-on first (else SKIP - auto-unlock needs it), then escrow-first exactly like the OS path (Add RecoveryPassword protector -> escrow Entra-first / AD-fallback BEFORE Enable) with NO TPM protector, Enable-BitLocker XtsAes256 full-volume, dedup to exactly one escrowed recovery protector, and best-effort Enable-BitLockerAutoUnlock. If BOTH escrow paths fail for a volume, a protector we added is removed and that volume is NEVER encrypted; the recovery password is never emitted. Host rollup: any volume FAIL -> PARTIAL (all-fail -> FAILED), any FIXED/STARTED with no FAIL -> FIXED, all NOCHANGE -> NO CHANGE. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (BitLocker). Iterates EVERY FIXED VOLUME (C:, D:, E:, ...) - removable/USB (BitLocker To Go), network and optical volumes are NEVER touched. Per fixed volume: On -> ALREADY ENCRYPTED; suspended (Off + FullyEncrypted) -> RESUME -> PROTECTION RESUMED (an encrypted OS volume MISSING its TPM protector gets one added first when the TPM is present+ready - BitLocker-TPM-ScanFix v7.11 port); EncryptionInProgress -> IN PROGRESS(percent); FullyDecrypted with "ENABLE BitLocker" NOT ticked -> SKIP (route desk-side). With "ENABLE BitLocker" ticked, a FullyDecrypted fixed volume is encrypted from here - ESCROW-FIRST and FAIL-CLOSED. OS volume (VolumeType OperatingSystem): mirror the enterprise USAF enable script - assert the FVE BitLocker policy once per host (recovery-key escrow + XtsAes256), reuse-or-add a RecoveryPassword protector, escrow Entra-first (BackupToAAD-BitLockerKeyProtector) with on-prem AD fallback (Backup-BitLockerKeyProtector) BEFORE any Enable-BitLocker, TPM-gated (TpmPresent+TpmReady) and domain-joined only, stale TPM protectors from prior failed attempts removed (safe: the volume is FullyDecrypted; prevents FVE_E_PROTECTOR_EXISTS), then Enable-BitLocker with a TPM protector + XtsAes256 full-volume. Fixed DATA volume (VolumeType Data): the OS volume must be BitLocker-on first (else SKIP - auto-unlock needs it), then escrow-first exactly like the OS path (Add RecoveryPassword protector -> escrow Entra-first / AD-fallback BEFORE Enable) with NO TPM protector, Enable-BitLocker XtsAes256 full-volume, dedup to exactly one escrowed recovery protector, and best-effort Enable-BitLockerAutoUnlock. If BOTH escrow paths fail for a volume, a protector we added is removed and that volume is NEVER encrypted; the recovery password is never emitted. Host rollup: any volume FAIL -> PARTIAL (all-fail -> FAILED), any FIXED/STARTED with no FAIL -> FIXED, all NOCHANGE -> NO CHANGE. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the Encryption (BitLocker) pillar on the import-flagged host(s) you checked? This changes BitLocker state. Proceed?'
@@ -165,7 +165,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-pki'
                 label       = 'Fix PKI Trust Roots'
-                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - nothing is ever removed. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. Two PKI-Fix-ScanFix v1.9 companions then run on each host: (a) EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Client Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the PKI Trust Roots pillar on the import-flagged host(s) you checked? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
@@ -187,6 +187,22 @@ function Get-JanetToolManifest {
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Set the default lock screen / wallpaper policy on the target host(s)? Only values that are NOT already set are written (an existing policy is never overwritten). Proceed?'
+                columns     = @('Host','Ping','Status','Detail')
+                inputs      = @(
+                    @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='confirm';        label='Type FIX to confirm'; type='text'; required=$true },
+                    @{ name='winrmHeal';      label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads';        label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
+                )
+            }
+            @{
+                id          = 'fix-java'
+                label       = 'Fix Java (remove outdated)'
+                description = 'DESTRUCTIVE (uninstall + registry + filesystem). Java-Cleanup-ScanFix v1.1 port: C2C/vulnerability scanners flag hosts on stale Java registry keys even after the product is gone, and on genuinely old installs. Per host, over one WinRM round-trip, three evidence sources are scanned and anything OLDER than Java 8 Update 491 is removed: (1) INSTALLED PRODUCTS - the 64- and 32-bit Uninstall registry hives, Oracle/Sun PUBLISHER ONLY (OpenJDK / Temurin / Corretto are NEVER touched), uninstalled via msiexec /x {GUID} /qn /norestart (exit 0 and 3010=reboot-pending are success; a non-MSI entry is flagged for manual review); (2) REGISTRY RESIDUE - old version subkeys under HKLM JavaSoft (native + WOW6432Node) removed, a CurrentVersion value pointing at a removed version repointed to the newest remaining one, a product key emptied BY THIS CLEANUP dropped; (3) FILESYSTEM RESIDUE - old folders under Program Files\Java (both hives; in-use folders report FAILED). Verdicts: OLD (below 1.8.0_491) removed; OK (1.8.0_491+, any modern JDK 9/11/17/21) kept; UNKNOWN (unparseable version) NEVER auto-removed - listed for manual review. No reboots are forced. Result JAVA CLEANED / NO OLD JAVA / FAIL. An OPT-IN utility fix, NOT a scored C2C pillar and NOT part of run-all (it clears Vulnerability/AQC findings on the next scanner pass). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                kind        = 'stream-table'
+                destructive = $true
+                confirm     = 'Remove all Oracle/Sun Java OLDER than 8u491 (installed products, JavaSoft registry residue, Program Files folders) from the target host(s)? OpenJDK/Temurin/Corretto and unknown versions are never touched. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
                     @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -521,6 +537,11 @@ function Get-C2cPillarLabel {
         'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
         'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
         'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
+        'PkiExpired|FIXED'     { 'EXPIRED PRUNED' }
+        'PkiRdp|FIXED'         { 'RDP CERT REBOUND' }
+        'MdeOnboard|FIXED'     { 'MDE ONBOARDED' }
+        'Java|FIXED'           { 'JAVA CLEANED' }
+        'Java|NOCHANGE'        { 'NO OLD JAVA' }
         'Lockscreen|FIXED'     { 'CACHE FIX APPLIED' }
         'Lockscreen|NOCHANGE'  { 'ALREADY SET' }
         default                { [string]$Result }
@@ -540,6 +561,50 @@ try { . ([scriptblock]::Create($script:C2cAddCertsSrc)) } catch {}
 # tenant (identical for every base under this TASKORD), NOT a base-specific value like
 # the removed hostname patterns - so it can never false-flag another base.
 $script:C2cMdeOrgId = '99557BCC-8DC2-443B-AF2E-08C9162C01BB'
+
+# MDE OnboardingInfo blob (Defender-ScanFix v2.1 port). This is the TENANT-WIDE value the
+# ATP GPO deploys - identical on every machine in the org (captured from a correctly
+# onboarded host 10 Jul 2026; the signing cert inside expires Jan 2027 - re-capture from a
+# good host if Microsoft rotates the payload). The AntiMalware fixer uses it as the LAST
+# rung of the onboarding heal ladder (deps -> gpupdate -> blob): written ONLY when the ATP
+# policy key is still empty after gpupdate, as a bridge until the GPO asserts the SAME value.
+$script:C2cMdeOnboardingBlob = @'
+{"body":"{\"previousOrgIds\":[],\"orgId\":\"99557bcc-8dc2-443b-af2e-08c9162c01bb\",\"geoLocationUrl\":\"https://winatp-gw-usgv.microsoft.com/\",\"datacenter\":\"UsGovVirginia\",\"vortexGeoLocation\":\"FFL4\",\"partnerGeoLocation\":\"FFL5\",\"version\":\"2.03\",\"packageGuid\":\"5ddb3710-4895-44a3-a42e-adb14bd8ce3a\"}","sig":"MiMFsO374dVHT6vhzUCAzwY21Rr4dJZZS90C4EsjHCWpCXCjKlpa7pSfI8b07rp1Xe2D5IJNh5wERf13SDSTa8C45qTOuDsgmS+H/IiKOy0GVZk1wHiq40H0jgaC+SfacldUPaCYtfu5e3kukB/ZtPDpgXt95Jqblyg7QzTPX37nWCKFfdx6RqH9cU2fKw51MRjGCX0680ce3YgiWTAszBUlRsENGJxztjSZmbZQ0thw4I20NPufdL+RBhA8S582d6qvxxNM8ssoNUpeNuhtmaMli10pbaNKVIhViGdY07C0E82BZmMjBuLWt6w/Zv7enM684cAvmchwY/muV7gWfA==","sha256sig":"MiMFsO374dVHT6vhzUCAzwY21Rr4dJZZS90C4EsjHCWpCXCjKlpa7pSfI8b07rp1Xe2D5IJNh5wERf13SDSTa8C45qTOuDsgmS+H/IiKOy0GVZk1wHiq40H0jgaC+SfacldUPaCYtfu5e3kukB/ZtPDpgXt95Jqblyg7QzTPX37nWCKFfdx6RqH9cU2fKw51MRjGCX0680ce3YgiWTAszBUlRsENGJxztjSZmbZQ0thw4I20NPufdL+RBhA8S582d6qvxxNM8ssoNUpeNuhtmaMli10pbaNKVIhViGdY07C0E82BZmMjBuLWt6w/Zv7enM684cAvmchwY/muV7gWfA==","cert":"MIIFuTCCA6GgAwIBAgITMwAAA1KuP8phV63bpgAAAAADUjANBgkqhkiG9w0BAQsFADB+MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSgwJgYDVQQDEx9NaWNyb3NvZnQgU2VjdXJlIFNlcnZlciBDQSAyMDExMB4XDTI1MDEwNzE4MjYzM1oXDTI2MDEwNzE4MjYzM1owOTE3MDUGA1UEAxMuQ2xvdWRDbGllbnRBdXRoZW50aWNhdGlvbi1GRi51c2dvdmNsb3VkYXBwLm5ldDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALIDBWZFbZbGsF/cDf0K4w4mqXXj9LB11sgg7kYkqABowL3N/lwUjfp2PY/jr/1mAzSgSGX5p4cp23mFOHNt7jisRqifVN1Vc1M9ZlA6BnVs9TndKTkEfpEshsr/eM92/hYFdyMUoxkgs6+GybvHId1tm7pgR45ZBOgtE/+IWC2AqIT6xUyKjOJkK3y4MPEnm3x7kKyTbElwPnqElyG3WJOfQtqZbT0D6B/bZUc+ucUIHObHp0XKK3PMMUkUACdu0hoqYTW7xsQ/u8F6xs1lY2QmHl5mM7yilKVcVt+Pl7Na72UA9fX+NAtd6Y8YQGn/NrNBUM0f9cH9EqNcAKhy39kCAwEAAaOCAXMwggFvMA4GA1UdDwEB/wQEAwIFIDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADA5BgNVHREEMjAwgi5DbG91ZENsaWVudEF1dGhlbnRpY2F0aW9uLUZGLnVzZ292Y2xvdWRhcHAubmV0MB0GA1UdDgQWBBRzIMpwRp9unotSJTdGI1PhGOkWzDAfBgNVHSMEGDAWgBQ2VollSctbmy88rEIWUE2RuTPXkTBTBgNVHR8ETDBKMEigRqBEhkJodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNTZWNTZXJDQTIwMTFfMjAxMS0xMC0xOC5jcmwwYAYIKwYBBQUHAQEEVDBSMFAGCCsGAQUFBzAChkRodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRzL01pY1NlY1NlckNBMjAxMV8yMDExLTEwLTE4LmNydDANBgkqhkiG9w0BAQsFAAOCAgEAMFkb2XuiBz+1dgYqNzr7H2WLKmv+44Jcw6xEzLT3qxDb5YyVGOFtE9x5tYwShJflGLok/H7OiHfphVXjTIufJPsr4yRGtdnfkK/ehuingNCLNh9UEHWdpylgpH/snZ203ljlmMkGefHjLJ7iZ+tZ+rip0jeUtdd/qepSuuCU9juRxfSHhVdZLqcoZRIxyTOocE0sv87vswfq1ps+9CGlWZHMYcJAyu4oN0ftu2g29JzWMfYbj06p811lmtP/1IclIt8zlb9NF+S/KV6/6xxTaLHhyC7257QmHqMM+G7PxPffWrEWB2TLwcFNSPfnkvSnd6Q6YJSciDtLMtg530a7kHWx25TVHlBkEEIcOnaDYeDx4qEfVB/071a+9tgLZ4L+yHhAL3v0JQVs68jRnhWawfbA4il1ckospnC3XoVbm4xWwmsYReWzSHxie0QPlIIP728WEJqTGx7yS+FSTMt4tpmaLJg78iurOlKu5PjgYVCOaiKB1D0F2oMEQTCW90BZ0I7Tjtnx0rnELxE13O49o5xf8QvtCc6LjyRYk3gTNHSFkUUNTgirWrvFfKz0vHGiR1sAhOVxay5fdW+DqH1sqfpBUVhsZEQ63IG8zkhMYYl/xUFfLGFnXrjzaOn58+GdPqDUuTR2NwFuGiI4zYPabM97sklmbBAYZIH/JcPOUAA=","chain":["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"]}
+'@
+
+# Java verdict (Java-Cleanup-ScanFix v1.1 port). SOURCE STRING so the same classifier runs
+# in module scope (unit tests) AND inside the remote fix worker (dot-sourced there). OLD /
+# OK / UNKNOWN relative to 1.8.0_<MinUpdate>; UNKNOWN is NEVER auto-removed.
+$script:C2cJavaSrc = @'
+function Get-C2cJavaVerdict {
+    param([string]$Version, [int]$MinUpdate = 491)
+    $s = "$Version".Trim()
+    if (-not $s) { return 'UNKNOWN' }
+    # Old scheme: 1.8.0_281, 1.7.0, 1.2, 1.0.1 (legacy Java Web Start keys land here too)
+    if ($s -match '^1\.(\d+)(?:\.(\d+))?(?:_(\d+))?$') {
+        $maj = [int]$Matches[1]
+        $upd = 0; if ($Matches[3]) { $upd = [int]$Matches[3] }
+        if ($maj -lt 8) { return 'OLD' }
+        if ($maj -eq 8 -and $upd -lt $MinUpdate) { return 'OLD' }
+        return 'OK'
+    }
+    # Dotted scheme: 11.0.2 (modern JDK), 8.0.2810.9 (Oracle DisplayVersion), 2.8.281.9 (auto updater)
+    if ($s -match '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') {
+        $maj = [int]$Matches[1]
+        if ($maj -ge 9) { return 'OK' }
+        if ($maj -eq 8) {
+            $u = [math]::Floor([int]$Matches[3] / 10)
+            if ($u -lt $MinUpdate) { return 'OLD' }
+            return 'OK'
+        }
+        return 'OLD'
+    }
+    # Bare major: 17, 21
+    if ($s -match '^(\d+)$') { if ([int]$Matches[1] -ge 9) { return 'OK' } return 'OLD' }
+    return 'UNKNOWN'
+}
+'@
+try { . ([scriptblock]::Create($script:C2cJavaSrc)) } catch {}
 
 # Per-pillar TIER + tiered verdict + display tag. Defined as a SOURCE STRING so it can be
 # dot-sourced BOTH in module scope (admin-side use + unit tests) AND inside each pool worker
@@ -1267,7 +1332,7 @@ function Get-C2cShortHost {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$PkiCompanions, [string]$OfflineDefPath)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
@@ -1338,7 +1403,7 @@ $script:C2cFixBlock = {
     $fixSb = {
         # Pillars cross as a '|'-delimited string (never an array) so no ArgumentList
         # flattening/serialization ambiguity over the WinRM boundary.
-        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours)
+        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$PkiCompanions)
         if ($SigMaxAgeHours -le 0) { $SigMaxAgeHours = 24 }
         $Pillars = @(($PillarCsv -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
@@ -1639,6 +1704,14 @@ $script:C2cFixBlock = {
                                     $ef = & $escrowFirst $mp $bv
                                     if (-not $ef.Ok) { & $add 'Encryption' 'enable' 'FAIL' "$mp $($ef.Detail)"; continue }
                                     $escrowTarget = [string]$ef.Target
+                                    # v7.11 port: drop stale TPM protectors left by prior failed attempts -
+                                    # Enable-BitLocker -TpmProtector throws FVE_E_PROTECTOR_EXISTS (0x8031001D)
+                                    # if one already exists. Safe HERE only: the volume is FullyDecrypted, so
+                                    # no protector is guarding anything.
+                                    try {
+                                        $staleTpm = @((Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop).KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)Tpm' })
+                                        foreach ($spk in $staleTpm) { Remove-BitLockerKeyProtector -MountPoint $mp -KeyProtectorId ([string]$spk.KeyProtectorId) -ErrorAction Stop | Out-Null }
+                                    } catch {}
                                     try {
                                         Enable-BitLocker -MountPoint $mp -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
                                         Start-Sleep -Milliseconds 500
@@ -1701,12 +1774,31 @@ $script:C2cFixBlock = {
                                 continue
                             }
                             # Off + FullyEncrypted (classic post-firmware suspended-protectors) -> resume.
+                            # v7.11 port: an encrypted OS volume with NO TPM protector can never turn
+                            # protection On by resuming alone - add the TPM protector first (TPM must be
+                            # present + ready; best-effort, the resume below still runs either way).
+                            $tpmProtTxt = ''
+                            if ($isOsVol) {
+                                $hasTpmProt = $false
+                                try { $hasTpmProt = @($bv.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)Tpm' }).Count -gt 0 } catch { $hasTpmProt = $false }
+                                if (-not $hasTpmProt) {
+                                    try {
+                                        if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
+                                            $tpR = Get-Tpm -ErrorAction Stop
+                                            if ([bool]$tpR.TpmPresent -and [bool]$tpR.TpmReady) {
+                                                Add-BitLockerKeyProtector -MountPoint $mp -TpmProtector -ErrorAction Stop | Out-Null
+                                                $tpmProtTxt = '; missing TPM protector added'
+                                            } else { $tpmProtTxt = '; NOTE: no TPM protector and TPM not present/ready - resume may not stick' }
+                                        }
+                                    } catch { $tpmProtTxt = "; TPM protector add failed ($($_.Exception.Message))" }
+                                }
+                            }
                             $act = 'Resume-BitLocker'
                             try { Resume-BitLocker -MountPoint $mp -ErrorAction Stop | Out-Null }
                             catch { $act = 'manage-bde -protectors -enable'; & manage-bde -protectors -enable $mp 2>&1 | Out-Null }
                             Start-Sleep -Milliseconds 500
                             $bl2 = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
-                            if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "$mp protection resumed -> On; $($bl2.VolumeStatus)"; if ($isOsVol) { $osEncOrPlanned = $true } }
+                            if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "$mp protection resumed -> On; $($bl2.VolumeStatus)$tpmProtTxt"; if ($isOsVol) { $osEncOrPlanned = $true } }
                             elseif ($vsv -match '(?i)FullyEncrypted')     { & $add 'Encryption' $act 'FAIL' "$mp resume attempted but protection still $($bl2.ProtectionStatus)" }
                             else { & $add 'Encryption' $act 'SKIP' "$mp protection $($bl2.ProtectionStatus); volume $($bl2.VolumeStatus) - not a resumable state; route to MECM/desk-side" }
                         }
@@ -1762,9 +1854,40 @@ $script:C2cFixBlock = {
                         catch { $failDet += "RTP enable failed: $($_.Exception.Message); " }
                     }
                     # Update stale signatures (age budget in HOURS) regardless of running mode.
+                    # Defender-ScanFix v2.1 port: the default channel needs wuauserv + BITS (a
+                    # stopped update service is a common silent cause of "completed with errors"),
+                    # then a SOURCE CHAIN - default (WSUS/ConfigMgr on this network) -> Microsoft
+                    # Update direct -> the MMPC HTTP source. Success = age drops under budget.
                     if (($null -ne $ageHours) -and ($ageHours -gt $SigMaxAgeHours)) {
-                        try { Update-MpSignature -ErrorAction Stop; [void]$changed.Add('signatures updated') }
-                        catch { $failDet += "sig update failed: $($_.Exception.Message); " }
+                        foreach ($usvc in @('wuauserv', 'BITS')) {
+                            $u = Get-Service -Name $usvc -ErrorAction SilentlyContinue
+                            if ($u -and $u.Status -ne 'Running') { try { Start-Service -Name $usvc -ErrorAction Stop } catch {} }
+                        }
+                        $sigFixed = $false; $sigTried = New-Object System.Collections.ArrayList
+                        foreach ($src in @('(default)', 'MicrosoftUpdateServer', 'MMPCUpdateServer')) {
+                            try {
+                                if ($src -eq '(default)') { Update-MpSignature -ErrorAction Stop }
+                                else { Update-MpSignature -UpdateSource $src -ErrorAction Stop }
+                            } catch {}
+                            Start-Sleep -Seconds 3
+                            $mpS = Get-MpComputerStatus -ErrorAction SilentlyContinue
+                            $luS = $null; if ($mpS) { try { $luS = $mpS.AntivirusSignatureLastUpdated } catch { $luS = $null } }
+                            if ($luS -and ($luS -as [datetime])) {
+                                $ageHours = [math]::Round(((Get-Date) - ([datetime]$luS)).TotalHours, 1)
+                                if ($ageHours -le $SigMaxAgeHours) { $sigFixed = $true; [void]$changed.Add("signatures updated via $src"); break }
+                            }
+                            [void]$sigTried.Add($src)
+                        }
+                        if (-not $sigFixed) {
+                            # The cmdlet's error is a useless generic - pull the real failure code
+                            # from Defender event 2001 (definition update failure) for the report.
+                            $sigDiag = ''
+                            try {
+                                $evS = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 2001 } -MaxEvents 1 -ErrorAction Stop
+                                if ($evS -and ("$($evS.Message)" -match '(0x[0-9A-Fa-f]{8})')) { $sigDiag = " (last update error $($Matches[1]))" }
+                            } catch {}
+                            $failDet += "sig update failed via all sources [$($sigTried -join ', ')]$sigDiag; "
+                        }
                     }
                     Start-Sleep -Milliseconds 300
                     $mp2 = Get-MpComputerStatus -ErrorAction SilentlyContinue
@@ -1818,6 +1941,85 @@ $script:C2cFixBlock = {
             } catch { & $add 'AntiMalware' 'error' 'FAIL' $_.Exception.Message }
         }
 
+        # 2b. MdeOnboard (Defender-ScanFix v2.1 port) - runs with the AntiMalware pillar.
+        #     TASKORD scores the MDE Org ID; a healthy Defender with the WRONG/missing OrgId
+        #     still fails Anti-Malware. POLICY-DRIVEN escalation ladder (this fleet is GPO
+        #     managed): (0) diagnose gateway 443 reachability, (1) fix deps - DiagTrack
+        #     Disabled->Automatic+start (Sense depends on it), Sense Disabled->Automatic,
+        #     (2) onboarding blob present -> restart Sense, (3) blob missing -> gpupdate
+        #     /target:computer /force + re-check, (4) STILL missing -> write the embedded
+        #     tenant blob (bridge; the GPO asserts the SAME value) + restart Sense. Emits a
+        #     row ONLY when the OrgId is missing/mismatched; a matching OrgId is silent.
+        if (($Pillars -contains 'AntiMalware') -and $MdeOrgId) {
+            try {
+                $statusKey = 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status'
+                $policyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Advanced Threat Protection'
+                $orgId = ''
+                try { $pAtp = Get-ItemProperty $statusKey -ErrorAction Stop; if ($pAtp.OrgId) { $orgId = [string]$pAtp.OrgId } } catch {}
+                if ($orgId.Trim().ToUpper() -ne $MdeOrgId.Trim().ToUpper()) {
+                    # Blob sanity: refuse to ever write a blob whose embedded orgId is not the target.
+                    $blobUsable = $false
+                    try {
+                        $bo = "$MdeBlob" | ConvertFrom-Json; $bb = $bo.body | ConvertFrom-Json
+                        $blobUsable = ("$($bb.orgId)".Trim().ToUpper() -eq $MdeOrgId.Trim().ToUpper())
+                    } catch { $blobUsable = $false }
+                    # Gateway reachability (blob geoLocationUrl, else the USGov default) - the WHY
+                    # for a fail: nothing local can complete onboarding if 443 is blocked.
+                    $gwHost = 'winatp-gw-usgv.microsoft.com'
+                    try { if ($bb -and $bb.geoLocationUrl) { $gwHost = ([uri]$bb.geoLocationUrl).Host } } catch {}
+                    $gwOpen = $false
+                    $tcpG = New-Object System.Net.Sockets.TcpClient
+                    try {
+                        $iarG = $tcpG.BeginConnect($gwHost, 443, $null, $null)
+                        if ($iarG.AsyncWaitHandle.WaitOne(5000, $false) -and $tcpG.Connected) { $tcpG.EndConnect($iarG); $gwOpen = $true }
+                    } catch {} finally { try { $tcpG.Close() } catch {} }
+
+                    $blobPresent = $false
+                    try { $ppAtp = Get-ItemProperty $policyKey -ErrorAction Stop; $blobPresent = -not [string]::IsNullOrWhiteSpace([string]$ppAtp.OnboardingInfo) } catch {}
+
+                    # 1. Dependencies: DiagTrack (Sense depends on it) + Sense start types.
+                    $depNotes = New-Object System.Collections.ArrayList
+                    foreach ($dep in @('DiagTrack', 'Sense')) {
+                        $dsvc = Get-Service -Name $dep -ErrorAction SilentlyContinue
+                        if (-not $dsvc) { [void]$depNotes.Add("$dep MISSING"); continue }
+                        if ([string]$dsvc.StartType -eq 'Disabled') { try { Set-Service -Name $dep -StartupType Automatic -ErrorAction Stop; [void]$depNotes.Add("$dep enabled (was Disabled)") } catch {} }
+                        if ($dep -eq 'DiagTrack' -and $dsvc.Status -ne 'Running') { try { Start-Service -Name $dep -ErrorAction Stop; [void]$depNotes.Add('DiagTrack started') } catch {} }
+                    }
+                    # 2/3/4. Blob present -> bounce Sense; else gpupdate -> re-check -> write blob.
+                    $usedLocalBlob = $false; $gpNote = 'gpupdate skipped (blob already present)'
+                    if ($blobPresent) {
+                        Restart-Service -Name Sense -Force -ErrorAction SilentlyContinue
+                    } else {
+                        try {
+                            $gpProc = Start-Process -FilePath "$env:windir\System32\gpupdate.exe" -ArgumentList '/target:computer /force' -Wait -PassThru -ErrorAction Stop
+                            $gpNote = "gpupdate exit $($gpProc.ExitCode)"
+                        } catch { $gpNote = "gpupdate failed: $($_.Exception.Message)" }
+                        try { $pp2 = Get-ItemProperty $policyKey -ErrorAction Stop; $blobPresent = -not [string]::IsNullOrWhiteSpace([string]$pp2.OnboardingInfo) } catch { $blobPresent = $false }
+                        if (-not $blobPresent -and $blobUsable) {
+                            if (-not (Test-Path $policyKey)) { New-Item -Path $policyKey -Force -ErrorAction Stop | Out-Null }
+                            Set-ItemProperty -Path $policyKey -Name 'OnboardingInfo' -Value ([string]$MdeBlob) -Type String -Force -ErrorAction Stop
+                            $usedLocalBlob = $true; $blobPresent = $true
+                        }
+                        if ($blobPresent) { Restart-Service -Name Sense -Force -ErrorAction SilentlyContinue }
+                    }
+                    Start-Sleep -Seconds 15
+                    $orgNow = ''
+                    try { $p2Atp = Get-ItemProperty $statusKey -ErrorAction Stop; if ($p2Atp.OrgId) { $orgNow = [string]$p2Atp.OrgId } } catch {}
+                    $depTxt = if ($depNotes.Count -gt 0) { ' [deps: ' + ($depNotes -join ', ') + ']' } else { '' }
+                    $wasTxt = if ($orgId) { "OrgId was '$orgId' (mismatch)" } else { 'OrgId was missing' }
+                    if ($orgNow.Trim().ToUpper() -eq $MdeOrgId.Trim().ToUpper()) {
+                        & $add 'MdeOnboard' 'onboard' 'FIXED' ("$wasTxt - MDE onboarded, OrgId now matches" + $(if ($usedLocalBlob) { ' (via local blob; the GPO asserts the same value)' } else { " ($gpNote)" }) + $depTxt)
+                    } elseif (-not $gwOpen) {
+                        & $add 'MdeOnboard' 'onboard' 'FAIL' ("$wasTxt and gateway $gwHost 443 is UNREACHABLE - firewall/proxy fix required; no local action can complete onboarding$depTxt")
+                    } elseif ($blobPresent) {
+                        & $add 'MdeOnboard' 'onboard' 'IN PROGRESS' ("$wasTxt - onboarding pending: blob in place ($gpNote$(if ($usedLocalBlob) { '; embedded tenant blob written' } else { '' })), Sense restarted, OrgId not yet populated; re-scan in a few minutes$depTxt")
+                    } else {
+                        & $add 'MdeOnboard' 'onboard' 'FAIL' ("$wasTxt - POLICY GAP: no ATP onboarding policy after $gpNote - check GPO scoping$depTxt")
+                    }
+                }
+            } catch { & $add 'MdeOnboard' 'onboard' 'FAIL' ("MDE onboarding heal error: " + $_.Exception.Message) }
+        }
+
         # 3. Patches - kick the MECM Software Updates scan (113) then eval (108).
         if ($Pillars -contains 'Patches') {
             try {
@@ -1863,6 +2065,203 @@ $script:C2cFixBlock = {
                     }
                 }
             } catch { & $add 'PkiRoots' 'error' 'FAIL' $_.Exception.Message }
+
+            # Pb. PkiExpired (PKI-Fix-ScanFix v1.9 port) - prune EXPIRED retired DoD
+            #     intermediates. SAFETY MODEL: expired does NOT mean deletable (roots,
+            #     timestamping and machine-identity certs are often expired-but-required),
+            #     so deletion is gated on an ALLOWLIST: subject must match the retired DoD
+            #     intermediate pattern AND the store is CA ONLY (never My/Root/
+            #     TrustedPublisher/Disallowed). The four LegacyIntermediates thumbprints
+            #     are EXCLUDED - fix-pki intentionally pushes those despite expiry (guard
+            #     copy of $script:C2cLegacyIntermediates; keep the two lists in sync).
+            #     Emits a row only when something matched; a clean CA store is silent.
+            #     $PkiCompanions gates both companions: only the REAL dispatcher passes it,
+            #     so direct fix-block callers (unit tests) never touch live machine state.
+            if ($PkiCompanions) {
+            try {
+                $allowSubject = '^CN=DOD (EMAIL|ID|SW|DERILITY) CA-\d+, OU=PKI, OU=DoD'
+                $legacyKeep = @(
+                    '53FDE0F40638BD1A68A68D1E91089009B33BAE5E'  # DOD EMAIL CA-59
+                    '1907FC2B223EE0301B45745BDB59AAD90FE7C5D7'  # DOD ID CA-59
+                    '5DFFDAB658915FA6B0DB4E0BCF70D5BB1B8425FC'  # DOD SW CA-60
+                    '5F555AB8A87DD146314171621245CF720BF53B8A'  # DOD SW CA-61
+                )
+                $nowPk = Get-Date
+                $prunable = @(Get-ChildItem 'Cert:\LocalMachine\CA' -ErrorAction SilentlyContinue | Where-Object {
+                    $_.NotAfter -lt $nowPk -and $_.Subject -match $allowSubject -and
+                    ($legacyKeep -notcontains ((([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]', '').ToUpper()))
+                })
+                if ($prunable.Count -gt 0) {
+                    $delOk = 0; $delFail = ''
+                    foreach ($pc in $prunable) {
+                        try { Remove-Item -Path $pc.PSPath -Force -ErrorAction Stop; $delOk++ }
+                        catch { $delFail += "$($pc.Thumbprint): $($_.Exception.Message); " }
+                    }
+                    if ($delFail) { & $add 'PkiExpired' 'prune' 'FAIL' ("removed $delOk of $($prunable.Count) expired retired DoD intermediate(s) from the CA store; errors: " + $delFail.TrimEnd('; ')) }
+                    else { & $add 'PkiExpired' 'prune' 'FIXED' ("removed $delOk expired retired DoD intermediate(s) from the CA store (allowlisted DOD EMAIL/ID/SW/DERILITY subjects only; the four legacy-keep intermediates untouched)") }
+                }
+            } catch { & $add 'PkiExpired' 'prune' 'FAIL' ("expired-intermediate prune error: " + $_.Exception.Message) }
+
+            # Pc. PkiRdp (PKI-Fix-ScanFix v1.9 port) - repair a BROKEN RDP-tcp listener
+            #     certificate (self-signed / expired / missing). A healthy CA-issued
+            #     listener is NEVER touched (silent). Reordered SAFE for auto-run: the
+            #     replacement cert (newest valid My-store cert matching this computer with
+            #     the Client Authentication EKU 1.3.6.1.5.5.7.3.2) is located FIRST - with
+            #     no candidate the listener is left alone (SKIP), nothing is cleared.
+            try {
+                $tsgs = Get-CimInstance -Namespace 'root/cimv2/terminalservices' -ClassName 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'" -ErrorAction Stop
+                $rdpHash = (([string]$tsgs.SSLCertificateSHA1Hash) -replace '[^0-9A-Fa-f]', '').ToUpper()
+                $nowRd = Get-Date
+                $lcert = $null
+                if ($rdpHash -and $rdpHash -ne ('0' * 40)) {
+                    foreach ($stN in @('My', 'Remote Desktop')) {
+                        $lcert = Get-ChildItem "Cert:\LocalMachine\$stN" -ErrorAction SilentlyContinue |
+                                 Where-Object { ((([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]', '').ToUpper()) -eq $rdpHash } |
+                                 Select-Object -First 1
+                        if ($lcert) { break }
+                    }
+                }
+                $rdpState = if (-not $lcert) { 'missing' } elseif ($lcert.NotAfter -lt $nowRd) { 'expired' } elseif ($lcert.Subject -eq $lcert.Issuer) { 'self-signed' } else { 'healthy' }
+                if ($rdpState -ne 'healthy') {
+                    $cand = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
+                        $_.DnsNameList -match $env:COMPUTERNAME -and $_.NotAfter -gt $nowRd -and
+                        @($_.EnhancedKeyUsageList | Where-Object { [string]$_.ObjectId -eq '1.3.6.1.5.5.7.3.2' }).Count -gt 0
+                    } | Sort-Object NotAfter -Descending | Select-Object -First 1
+                    if (-not $cand) {
+                        & $add 'PkiRdp' 'none' 'SKIP' "RDP listener cert is $rdpState but no valid CA-issued My-store cert (Client Auth EKU) matches this host - left untouched"
+                    } else {
+                        Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name 'SelfSignedCertStore' -Value '' -Force -ErrorAction SilentlyContinue
+                        Set-CimInstance -InputObject $tsgs -Property @{ SSLCertificateSHA1Hash = [string]$cand.Thumbprint } -ErrorAction Stop | Out-Null
+                        & $add 'PkiRdp' 'rebind' 'FIXED' "RDP listener was $rdpState - bound CA-issued cert $($cand.Thumbprint) (expires $($cand.NotAfter.ToShortDateString()))"
+                    }
+                }
+            } catch { & $add 'PkiRdp' 'rebind' 'FAIL' ("RDP listener check/repair error: " + $_.Exception.Message) }
+            }
+        }
+
+        # J. Java (Java-Cleanup-ScanFix v1.1 port; opt-in fix-java action - never in run-all).
+        #    C2C/vuln scanners flag hosts on stale Java registry keys even after the product
+        #    is gone, and on genuinely old installs. Three evidence sources, then remove
+        #    anything OLDER than 1.8.0_491: (1) installed products - Uninstall registry
+        #    (native + WOW6432Node), Oracle/Sun PUBLISHER ONLY (OpenJDK/Temurin/Corretto are
+        #    NEVER touched) -> msiexec /x {GUID} /qn /norestart; (2) JavaSoft registry residue
+        #    (+ CurrentVersion repair, empty product keys dropped); (3) Program Files\Java
+        #    folders. UNKNOWN versions are never auto-removed. No reboots forced (3010 =
+        #    reboot pending). One 'Java' row per host with the rollup.
+        if ($Pillars -contains 'Java') {
+            try {
+                if ($JavaSrc) { try { . ([scriptblock]::Create($JavaSrc)) } catch {} }
+                $minUpd = 491
+                if (-not (Get-Command Get-C2cJavaVerdict -ErrorAction SilentlyContinue)) {
+                    & $add 'Java' 'none' 'FAIL' 'Java verdict helper unavailable on target - nothing removed (fail-closed)'
+                } else {
+                    $jFinds = New-Object System.Collections.ArrayList
+                    $jAdd = { param($src, $name, $ver, $path) $jf = [pscustomobject]@{ Source=$src; Name=[string]$name; Version=[string]$ver; Path=[string]$path; Verdict=(Get-C2cJavaVerdict $ver $minUpd); Result=$null }; [void]$jFinds.Add($jf); $jf }
+
+                    # 1. Installed products (Uninstall keys, Oracle/Sun publisher only)
+                    foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
+                        if (-not (Test-Path $root)) { continue }
+                        foreach ($key in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+                            $pJ = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
+                            if (-not $pJ) { continue }
+                            if ("$($pJ.DisplayName)" -notmatch '(?i)\bjava\b|\bj2se\b|\bjre\b|\bjdk\b') { continue }
+                            if ("$($pJ.Publisher)" -notmatch '(?i)oracle|sun microsystems') { continue }
+                            $jf = & $jAdd 'Installed' "$($pJ.DisplayName)" "$($pJ.DisplayVersion)" $key.PSPath
+                            if ($jf.Verdict -eq 'OLD') {
+                                if ($key.PSChildName -match '^\{[0-9A-Fa-f-]+\}$') {
+                                    try {
+                                        $prc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $($key.PSChildName) /qn /norestart" -Wait -PassThru -ErrorAction Stop
+                                        switch ($prc.ExitCode) {
+                                            0       { $jf.Result = 'OK - uninstalled' }
+                                            3010    { $jf.Result = 'OK - uninstalled, reboot pending' }
+                                            1605    { $jf.Result = 'OK - orphan key (product was not actually installed)' }
+                                            default { $jf.Result = "FAILED: msiexec exit $($prc.ExitCode)" }
+                                        }
+                                    } catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
+                                } else { $jf.Result = 'MANUAL: non-MSI uninstall entry - review manually' }
+                            }
+                        }
+                    }
+
+                    # 2. JavaSoft registry residue (native + WOW6432Node) + CurrentVersion repair
+                    foreach ($root in @('HKLM:\SOFTWARE\JavaSoft', 'HKLM:\SOFTWARE\WOW6432Node\JavaSoft')) {
+                        if (-not (Test-Path $root)) { continue }
+                        foreach ($product in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+                            foreach ($vk in @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })) {
+                                $jf = & $jAdd 'Registry' "$($product.PSChildName)" $vk.PSChildName $vk.PSPath
+                                if ($jf.Verdict -eq 'OLD') {
+                                    try { Remove-Item -Path $vk.PSPath -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - key removed' }
+                                    catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
+                                }
+                            }
+                            # Repair CurrentVersion pointing at a removed version; drop empty product keys.
+                            try {
+                                $remaining = @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })
+                                $cvJ = (Get-ItemProperty $product.PSPath -ErrorAction SilentlyContinue).CurrentVersion
+                                if ($remaining.Count -eq 0) {
+                                    $hadVersions = @($jFinds | Where-Object { $_.Source -eq 'Registry' -and $_.Path -like "$($product.PSPath)*" -and $_.Result -like 'OK*' }).Count -gt 0
+                                    if ($hadVersions) {
+                                        Remove-Item -Path $product.PSPath -Recurse -Force -ErrorAction Stop
+                                        $jf2 = & $jAdd 'Registry' "$($product.PSChildName)" '' $product.PSPath
+                                        $jf2.Verdict = 'OLD'; $jf2.Result = 'OK - empty product key removed'
+                                    }
+                                }
+                                elseif ($cvJ -and ($remaining.PSChildName -notcontains $cvJ)) {
+                                    $newest = ($remaining.PSChildName | Sort-Object)[-1]
+                                    Set-ItemProperty -Path $product.PSPath -Name CurrentVersion -Value $newest -ErrorAction Stop
+                                    $jf3 = & $jAdd 'Registry' "$($product.PSChildName)" "CurrentVersion -> $newest" $product.PSPath
+                                    $jf3.Verdict = 'OK'; $jf3.Result = 'OK - CurrentVersion repointed to newest remaining version'
+                                }
+                            } catch {
+                                $jf4 = & $jAdd 'Registry' "$($product.PSChildName)" '' $product.PSPath
+                                $jf4.Verdict = 'OLD'; $jf4.Result = "FAILED (product key cleanup): $($_.Exception.Message)"
+                            }
+                        }
+                    }
+
+                    # 3. Filesystem residue (Program Files Java dirs; in-use folders report FAILED)
+                    foreach ($root in @("$env:ProgramFiles\Java", "${env:ProgramFiles(x86)}\Java")) {
+                        if (-not $root -or -not (Test-Path $root)) { continue }
+                        foreach ($dir in @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue)) {
+                            $verJ = ''
+                            if ($dir.Name -match '(\d+(?:\.\d+)*(?:_\d+)?)') { $verJ = $Matches[1] }
+                            if (-not $verJ) {
+                                $exeJ = Join-Path $dir.FullName 'bin\java.exe'
+                                if (Test-Path $exeJ) { $verJ = "$((Get-Item $exeJ).VersionInfo.FileVersion)" }
+                            }
+                            $jf = & $jAdd 'FileSystem' $dir.Name $verJ $dir.FullName
+                            if ($jf.Verdict -eq 'OLD') {
+                                try { Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - folder removed' }
+                                catch { $jf.Result = "FAILED (likely in use): $($_.Exception.Message)" }
+                            }
+                        }
+                    }
+
+                    # Rollup: one 'Java' row. Only 'Installed' findings count as a working runtime.
+                    $jOld    = @($jFinds | Where-Object { $_.Verdict -eq 'OLD' })
+                    $jOk     = @($jFinds | Where-Object { $_.Verdict -eq 'OK' })
+                    $jUnk    = @($jFinds | Where-Object { $_.Verdict -eq 'UNKNOWN' })
+                    $jFixed  = @($jOld | Where-Object { "$($_.Result)" -like 'OK*' })
+                    $jFailed = @($jOld | Where-Object { "$($_.Result)" -like 'FAILED*' })
+                    $jManual = @($jOld | Where-Object { "$($_.Result)" -like 'MANUAL*' })
+                    $instOk  = @($jFinds | Where-Object { $_.Source -eq 'Installed' -and $_.Verdict -eq 'OK' })
+                    $instAll = @($jFinds | Where-Object { $_.Source -eq 'Installed' })
+                    $jState  = if ($instOk.Count -gt 0) { "CURRENT ($(@($instOk | ForEach-Object { $_.Version } | Sort-Object -Unique) -join ', '))" }
+                               elseif ($instAll.Count -eq 0) { 'NO JAVA INSTALLED' }
+                               else { 'NO CURRENT JAVA' }
+                    $oldTxt = (@($jOld | ForEach-Object { "$($_.Source):$($_.Version)$(if ("$($_.Result)" -like 'FAILED*') { ' [FAILED]' } elseif ("$($_.Result)" -like 'MANUAL*') { ' [MANUAL]' })" } | Sort-Object -Unique) -join '; ')
+                    if ($oldTxt.Length -gt 400) { $oldTxt = $oldTxt.Substring(0, 400) + ' ...' }
+                    $unkTxt = if ($jUnk.Count -gt 0) { "; $($jUnk.Count) UNKNOWN version(s) left for manual review" } else { '' }
+                    if ($jOld.Count -eq 0) {
+                        & $add 'Java' 'none' 'NOCHANGE' "no Java older than 1.8.0_$minUpd found ($($jFinds.Count) finding(s), $($jOk.Count) OK); state: $jState$unkTxt"
+                    } elseif ($jFailed.Count -eq 0 -and $jManual.Count -eq 0) {
+                        & $add 'Java' 'cleanup' 'FIXED' "removed $($jFixed.Count) OLD item(s) [$oldTxt]; state: $jState$unkTxt"
+                    } else {
+                        & $add 'Java' 'cleanup' 'FAIL' "removed $($jFixed.Count), failed $($jFailed.Count), manual $($jManual.Count) of $($jOld.Count) OLD item(s) [$oldTxt]; state: $jState$unkTxt"
+                    }
+                }
+            } catch { & $add 'Java' 'error' 'FAIL' $_.Exception.Message }
         }
 
         # L. Lockscreen - remediate the Windows 11 CACHED quarantine lock screen / desktop
@@ -1913,10 +2312,45 @@ $script:C2cFixBlock = {
         return @{ RemoteName = $env:COMPUTERNAME; Pillars = @($results) }
     }
 
+    $offlineRow = $null
     try {
         # Pass the pillar set as a '|'-delimited string (all-scalar ArgumentList) so it
         # crosses the WinRM boundary intact; the remote block splits it back to an array.
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours, $MdeOrgId, $MdeBlob, $JavaSrc, $PkiCompanions -ErrorAction Stop
+
+        # ---- Offline definition rung (Defender-ScanFix v2.1 LAST rung) --------------
+        # Only when a validated Microsoft-signed mpam-fe.exe is staged admin-side AND the
+        # AntiMalware fixer just failed EVERY online source on this host. Uses THIS still-
+        # open session: copy the installer to the target, run it locally (no network pull
+        # from the target), re-read the signature age, delete the copy. Result appended as
+        # its own row; its own try/catch so a push error can never FAIL the whole host.
+        if ($OfflineDefPath -and (@($fix.Pillars | Where-Object { $_.Name -eq 'AntiMalware' -and $_.Result -eq 'FAIL' -and "$($_.Detail)" -match 'sig update failed via all sources' }).Count -gt 0)) {
+            try {
+                $remotePkg = 'C:\Windows\Temp\mpam-fe.exe'
+                Copy-Item -Path $OfflineDefPath -Destination $remotePkg -ToSession $sess -Force -ErrorAction Stop
+                $offR = Invoke-Command -Session $sess -ArgumentList $remotePkg, $SigMaxAgeHours -ErrorAction Stop -ScriptBlock {
+                    param($Pkg, $MaxAgeHours)
+                    $r = @{ Ok = $false; AgeH = $null; Note = '' }
+                    try {
+                        $p = Start-Process -FilePath $Pkg -Wait -PassThru -ErrorAction Stop
+                        $r.Note = "installer exit $($p.ExitCode)"
+                        Start-Sleep -Seconds 15
+                        $mpO = Get-MpComputerStatus -ErrorAction SilentlyContinue
+                        $luO = $null; if ($mpO) { try { $luO = $mpO.AntivirusSignatureLastUpdated } catch { $luO = $null } }
+                        if ($luO -and ($luO -as [datetime])) {
+                            $r.AgeH = [math]::Round(((Get-Date) - ([datetime]$luO)).TotalHours, 1)
+                            $r.Ok = ($r.AgeH -le $MaxAgeHours)
+                        }
+                    } catch { $r.Note = "installer threw: $($_.Exception.Message)" }
+                    finally { Remove-Item $Pkg -Force -ErrorAction SilentlyContinue }
+                    [pscustomobject]$r
+                }
+                if ($offR.Ok) { $offlineRow = [pscustomobject]@{ Name = 'AntiMalware'; Action = 'offline-package'; Result = 'FIXED'; Detail = "OFFLINE definition package installed - signature age now $($offR.AgeH)h ($($offR.Note)); supersedes the online-source failure above" } }
+                else { $offlineRow = [pscustomobject]@{ Name = 'AntiMalware'; Action = 'offline-package'; Result = 'FAIL'; Detail = "OFFLINE package pushed but signatures still stale ($($offR.Note))" } }
+            } catch {
+                $offlineRow = [pscustomobject]@{ Name = 'AntiMalware'; Action = 'offline-package'; Result = 'FAIL'; Detail = "OFFLINE package push error: $($_.Exception.Message)" }
+            }
+        }
     } catch {
         $r.Status = 'FAILED'; $r.Detail = "Fix: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -1928,6 +2362,7 @@ $script:C2cFixBlock = {
     # local $pillars would alias the typed param and COERCE the result objects to
     # strings (dropping Name/Result/Detail). Keep them distinct.
     $pillarResults = @($fix.Pillars)
+    if ($offlineRow) { $pillarResults = @($pillarResults) + @($offlineRow) }
     $r.Pillars = $pillarResults
     if ($pillarResults.Count -eq 0) { $r.Status = 'NO CHANGE'; $r.Detail = 'no enabled pillars returned a result'; return $r }
 
@@ -1974,6 +2409,11 @@ $script:C2cFixBlock = {
             'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
             'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
             'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
+            'PkiExpired|FIXED'     { 'EXPIRED PRUNED' }
+            'PkiRdp|FIXED'         { 'RDP CERT REBOUND' }
+            'MdeOnboard|FIXED'     { 'MDE ONBOARDED' }
+            'Java|FIXED'           { 'JAVA CLEANED' }
+            'Java|NOCHANGE'        { 'NO OLD JAVA' }
             default                { [string]$res }
         }
     }
@@ -2132,6 +2572,7 @@ $script:C2cPillarByAction = @{
     'fix-encryption'  = 'Encryption'
     'fix-pki'         = 'PkiRoots'
     'fix-lockscreen'  = 'Lockscreen'   # dedicated opt-in cache fix; NOT in C2cFixablePillars (never in run-all)
+    'fix-java'        = 'Java'         # dedicated opt-in Java cleanup; NOT in C2cFixablePillars (never in run-all)
 }
 
 # --- Admin-side cert-bundle reader (fix-pki) ---------------------------------
@@ -2250,6 +2691,42 @@ function Resolve-C2cCertBundleFolder {
     return @{ Folder = ''; Source = '' }
 }
 
+# --- Offline Defender definition package (Defender-ScanFix v2.1 LAST rung) -------
+# The operator stages Microsoft's full offline installer (mpam-fe.exe) in
+# Packages\DefenderDefinitions (shipped EMPTY apart from a README - the folder is the
+# air-gap staging point). Resolved + validated ADMIN-SIDE before any host is dialed:
+# a definition installer going onto fleet hosts must be a Microsoft-signed FULL
+# package - anything else is refused. Pushed ONLY to hosts where every online
+# signature source failed (see the offline rung in $script:C2cFixBlock).
+function Get-C2cDefenderPackageDir { Join-Path $PSScriptRoot '..\Packages\DefenderDefinitions' }
+
+function Test-C2cDefenderPackage {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return 'not found' }
+    $len = (Get-Item -LiteralPath $Path).Length
+    if ($len -lt 50MB) { return "too small ($([math]::Round($len / 1MB, 0)) MB) - not a full definition package" }
+    $sig = Get-AuthenticodeSignature -FilePath $Path
+    if ($sig.Status -ne 'Valid') { return "signature $($sig.Status)" }
+    if ("$($sig.SignerCertificate.Subject)" -notmatch 'O=Microsoft Corporation') { return "signer is not Microsoft: $($sig.SignerCertificate.Subject)" }
+    return 'OK'
+}
+
+# Returns @{ Path; Note }: Path non-empty ONLY for a validated package; Note carries the
+# rejection reason when a candidate exists but fails validation; both empty = folder empty
+# (the normal shipped state - the offline rung silently stays off).
+function Resolve-C2cDefenderPackage {
+    $dir = Get-C2cDefenderPackageDir
+    foreach ($name in @('mpam-fe.exe', 'mpam-feX64.exe')) {
+        $cand = Join-Path $dir $name
+        if (Test-Path -LiteralPath $cand) {
+            $v = Test-C2cDefenderPackage $cand
+            if ($v -eq 'OK') { return @{ Path = $cand; Note = '' } }
+            return @{ Path = ''; Note = "offline definition package rejected ($v): $cand" }
+        }
+    }
+    return @{ Path = ''; Note = '' }
+}
+
 # Serialize a bundle to the compact JSON the PkiRoots worker consumes (thumbprint + b64
 # per store). @()-wrapped so ConvertFrom-Json single-element arrays round-trip safely.
 function Convert-C2cBundleToJson {
@@ -2275,7 +2752,7 @@ function Invoke-C2cFixAction {
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
 
     $isRunAll     = ($ActionId -eq 'run-all')
-    $isLockscreen = ($ActionId -eq 'fix-lockscreen')   # opt-in plain-hostlist utility - NOT import-scoped
+    $isHostlist   = ($ActionId -eq 'fix-lockscreen' -or $ActionId -eq 'fix-java')   # opt-in plain-hostlist utilities - NOT import-scoped
     $verb         = if ($isRunAll) { 'C2C Run-All' } else { "C2C $ActionId" }
 
     # Confirm word - exact 'FIX' (case-sensitive), matching the suite idiom. FIRST gate.
@@ -2297,6 +2774,19 @@ function Invoke-C2cFixAction {
     $sigMaxHours = 24
     if ($baseline.Config.ContainsKey('sigMaxAgeHours')) { $tmph = 0; if ([int]::TryParse([string]$baseline.Config['sigMaxAgeHours'], [ref]$tmph) -and $tmph -gt 0) { $sigMaxHours = $tmph } }
     elseif ($baseline.Config.ContainsKey('sigMaxAgeDays')) { $tmpd = 0; if ([int]::TryParse([string]$baseline.Config['sigMaxAgeDays'], [ref]$tmpd) -and $tmpd -gt 0) { $sigMaxHours = $tmpd * 24 } }
+
+    # Offline Defender definition package (Defender-ScanFix v2.1 LAST rung). The operator
+    # stages Microsoft's mpam-fe.exe in Packages\DefenderDefinitions (shipped empty); it is
+    # resolved + Authenticode-validated HERE, once, before any host is dialed, and pushed
+    # ONLY to hosts where every online signature source fails. Empty folder = rung off.
+    $offlineDefPath = ''
+    $offPkg = Resolve-C2cDefenderPackage
+    if ($offPkg.Note) { & $send @{ type='log'; level='warn'; text="[AntiMalware] $($offPkg.Note) - offline rung disabled this run." } }
+    elseif ($offPkg.Path) {
+        $offlineDefPath = [string]$offPkg.Path
+        $offMb = [math]::Round((Get-Item -LiteralPath $offlineDefPath).Length / 1MB, 0)
+        & $send @{ type='log'; level='info'; text="[AntiMalware] offline definition package staged: $offlineDefPath ($offMb MB, Microsoft-signed) - pushed ONLY to hosts where every online signature source fails." }
+    }
 
     # --- Cert bundle for the PkiRoots fixer -------------------------------------
     # fix-pki: the bundle is REQUIRED - read it ADMIN-SIDE now; abort (dial nothing) if
@@ -2362,7 +2852,7 @@ function Invoke-C2cFixAction {
     # genuinely no CSV to scope against. fix-lockscreen BYPASSES this block (plain-hostlist).
     $importPlan = $null
     $manualMode = $false
-    if (-not $isLockscreen) {
+    if (-not $isHostlist) {
         $fixCsvPath  = [string]$Params['csvPath']
         $fixCsvText  = [string]$Params['csvText']
         $fixCsvPaths = @()
@@ -2465,18 +2955,19 @@ function Invoke-C2cFixAction {
             & $send @{ type='log'; level='warn'; text='Run-all: no host has an endpoint-fixable pillar - nothing to run.' }
             return @{ rows=@($rows); summary=@{ total=0; infoSkipped=@($rows).Count } }
         }
-    } elseif ($isLockscreen) {
-        # --- fix-lockscreen: opt-in plain-hostlist utility (v1.9.0 semantics) --------
-        # NOT a scored pillar and NOT CSV-mapped, so it SKIPS the import intersection
-        # entirely: it dials exactly the hosts the operator typed (token-regex parsed,
-        # deduped case-insensitively, short-named), one 'Lockscreen' pillar each, then
-        # joins the SAME self-guard + fan-out path below as every other action.
+    } elseif ($isHostlist) {
+        # --- fix-lockscreen / fix-java: opt-in plain-hostlist utilities (v1.9.0 semantics) --
+        # NOT scored pillars and NOT CSV-mapped, so they SKIP the import intersection
+        # entirely: dial exactly the hosts the operator typed (token-regex parsed,
+        # deduped case-insensitively, short-named), one utility pillar each, then
+        # join the SAME self-guard + fan-out path below as every other action.
         $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
         if ($targets.Count -eq 0) {
             & $send @{ type='log'; level='warn'; text='No valid host(s) to fix - enter one or more computer names in Target Computers. Nothing was dialed.' }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }
-        foreach ($t in $targets) { [void]$plan.Add(@{ Host=(Get-C2cShortHost $t); Pillars=@('Lockscreen') }) }
+        $utilPillar = [string]$script:C2cPillarByAction[$ActionId]
+        foreach ($t in $targets) { [void]$plan.Add(@{ Host=(Get-C2cShortHost $t); Pillars=@($utilPillar) }) }
     } else {
         # --- Per-pillar fix: ONE pillar. IMPORT MODE dials ONLY the hosts the import flagged
         #     for that pillar (server-re-derived from the CSV), narrowed to the operator's
@@ -2573,6 +3064,7 @@ function Invoke-C2cFixAction {
         [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cAddCertsSrc)
         [void]$ps.AddArgument([int]$sigMaxHours)
+        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($true); [void]$ps.AddArgument([string]$offlineDefPath)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 

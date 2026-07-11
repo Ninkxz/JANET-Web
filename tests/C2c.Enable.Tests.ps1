@@ -290,15 +290,15 @@ Describe 'C2C manifest - C2C Nemesis v1.10.0, per-pillar fix actions (incl. fix-
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.13.0' {
-        $man.version | Should Be '1.13.0'
+    It 'reports tool version 1.15.0' {
+        $man.version | Should Be '1.15.0'
     }
-    It 'exposes 11 actions: scan + import + six per-pillar fixes + fix-lockscreen + run-all + version-check' {
-        @($man.actions).Count | Should Be 11
+    It 'exposes 12 actions: scan + import + six per-pillar fixes + fix-lockscreen + fix-java + run-all + version-check' {
+        @($man.actions).Count | Should Be 12
     }
     It 'has the exact action id set' {
         $ids = @($man.actions | ForEach-Object { $_.id } | Sort-Object)
-        $expect = @('fix-antimalware','fix-encryption','fix-firewall','fix-lockscreen','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
+        $expect = @('fix-antimalware','fix-encryption','fix-firewall','fix-java','fix-lockscreen','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
         ($ids -join ',') | Should Be ($expect -join ',')
     }
     It 'has scan + import + version-check (read-only) and all fix-* + run-all (destructive)' {

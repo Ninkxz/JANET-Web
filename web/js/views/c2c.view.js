@@ -247,6 +247,25 @@
       lockCard.appendChild(lockFoot);
       left.appendChild(lockCard);
 
+      // --- JAVA CLEANUP (opt-in, destructive; admin session required) ---
+      var javaCard = sectionCard('JAVA CLEANUP - REMOVE OUTDATED (opt-in, destructive)');
+      var javaIntro = el('div'); javaIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
+      javaIntro.textContent = 'Removes Oracle/Sun Java OLDER than 8u491 from each Target Computer: installed products (msiexec, Oracle/Sun publisher only), JavaSoft registry residue (stale keys that keep vulnerability scanners flagging a host after Java is gone) and Program Files\\Java folders. OpenJDK / Temurin / Corretto and unparseable (UNKNOWN) versions are NEVER touched. Not a scored pillar; never part of the run-all. Uses the Type-FIX confirm, Max concurrent and offline options in FIX PILLARS above.';
+      javaCard.appendChild(javaIntro);
+      var javaArm = ui.checkbox('Arm the Java cleanup (uninstall + registry + folder removal of OLD Oracle/Sun Java only)', { title: 'Opt-in. OLD = below 1.8.0_491 (legacy 1.x families included). Uninstall via msiexec /x {GUID} /qn /norestart (no forced reboots; 3010 = reboot pending). Registry: old version subkeys under HKLM JavaSoft (native + WOW6432Node) removed, CurrentVersion repaired. Folders: old dirs under Program Files\\Java (in-use folders report FAILED). OpenJDK/Temurin/Corretto and UNKNOWN versions are never removed.' });
+      javaArm.style.margin = '0 0 8px';
+      javaArm._cb.addEventListener('change', function () { updateTargetButtons(); });
+      javaCard.appendChild(javaArm);
+      var javaBtn = ui.button('REMOVE OUTDATED JAVA', { variant: 'gold', title: 'Run the Java cleanup on every host in Target Computers (destructive - uninstalls old Oracle/Sun Java and deletes its residue). A host with nothing old reports NO OLD JAVA.' });
+      javaBtn.style.cssText += ';width:100%;font-weight:700';
+      javaBtn.disabled = true;
+      javaBtn.onclick = function () { doJavaFix(); };
+      javaCard.appendChild(javaBtn);
+      var javaFoot = el('div', 'muted', 'Requires an admin session + the FIX confirm above. JAVA CLEANED / NO OLD JAVA / FAILED stream into the results grid like every other fix.');
+      javaFoot.style.cssText = 'font-size:11px;line-height:1.35;margin-top:6px';
+      javaCard.appendChild(javaFoot);
+      left.appendChild(javaCard);
+
       // --- IMPORT C2C COMPLIANCE CSV (optional convenience; local parse, no admin gate) ---
       var importCard = sectionCard('IMPORT C2C COMPLIANCE CSV (optional)', 'cyan');
       var importIntro = el('div'); importIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
@@ -454,6 +473,7 @@
         fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
         fixWinrmHeal._cb.disabled = on;
         lockArm._cb.disabled = on;
+        javaArm._cb.disabled = on;
         // Check All / Uncheck All must lock with the per-card checkboxes they drive, or a
         // mid-run click silently rewrites the checked set the NEXT run-all would dispatch.
         checkAllBtn.disabled = on; uncheckAllBtn.disabled = on;
@@ -508,6 +528,8 @@
         var locked = isRunning();
         lockBtn.textContent = 'APPLY LOCKSCREEN / WALLPAPER FIX (' + n + ' host' + (n === 1 ? '' : 's') + ')';
         lockBtn.disabled = locked || n === 0 || !lockArm._cb.checked;
+        javaBtn.textContent = 'REMOVE OUTDATED JAVA (' + n + ' host' + (n === 1 ? '' : 's') + ')';
+        javaBtn.disabled = locked || n === 0 || !javaArm._cb.checked;
       }
 
       function summarize() {
@@ -987,6 +1009,41 @@
         log.banner('C2C Lockscreen / Wallpaper Cache Fix on ' + hosts.length + ' target host(s)');
         lockInputs(true);
         run = ctx.run('fix-lockscreen', { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked }, { keyOf: keyByHost, destructive: true });
+        bindFixRun();
+      }
+
+      // ---- Java cleanup (opt-in utility; DESTRUCTIVE; TARGET-driven; admin session +
+      // FIX confirm + arm checkbox). Not a scored pillar - never in run-all. ----
+      async function doJavaFix() {
+        if (isRunning()) return;
+        var hosts = shortUniq(targets.hosts());
+        if (!hosts.length) { alertDialog('No target hosts', NEED_TARGETS); return; }
+        if (!javaArm._cb.checked) { alertDialog('Not armed', 'Tick "Arm the Java cleanup" checkbox first - this utility is opt-in.'); return; }
+        if (!ctx.session.state.credSet) { alertDialog('Admin session required', 'Set ADW credentials (top-right) and start an admin session before running a fix - it changes machines.'); return; }
+        if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
+
+        var pf = [
+          { label: hosts.length + ' target host(s) queued', ok: hosts.length > 0 },
+          { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+          { label: 'Removes ONLY Oracle/Sun Java below 8u491 - OpenJDK/Temurin/Corretto and UNKNOWN versions are never touched', ok: true },
+          { label: 'No forced reboots (msiexec /norestart; 3010 reported as reboot pending)', ok: true }
+        ];
+        if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
+
+        var ok = await ctx.arm({
+          title: 'Arm Java Cleanup - Remove Outdated',
+          banner: 'DESTRUCTIVE - THIS CHANGES LIVE MACHINES',
+          body: 'About to remove <b>Oracle/Sun Java OLDER than 8u491</b> (installed products via msiexec, JavaSoft registry residue, Program Files\\Java folders) from the <b>' + hosts.length + '</b> host(s) in Target Computers.'
+            + '<br><b>Never touched:</b> OpenJDK / Temurin / Corretto, Java 1.8.0_491+, modern JDKs (9/11/17/21) and any UNKNOWN (unparseable) version - those are listed for manual review instead.',
+          preflight: pf, okText: 'Run Java Cleanup', cancelText: 'Cancel'
+        });
+        if (!ok) { log.append({ text: '[' + ts() + '] Java cleanup cancelled at the arming dialog.', level: 'warn' }); return; }
+
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('C2C Java Cleanup on ' + hosts.length + ' target host(s)');
+        lockInputs(true);
+        run = ctx.run('fix-java', { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked }, { keyOf: keyByHost, destructive: true });
         bindFixRun();
       }
 
