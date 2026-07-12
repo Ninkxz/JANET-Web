@@ -271,6 +271,10 @@ function Test-AdToDnInLocalDomain {
     param([string]$Value, [string]$ExpectDomainSuffix)
     if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
     if ($Value -match '/') { return $false }
+    # Reject any control char (NUL..US, incl. CR/LF/TAB): a real DN never carries one, and .NET's
+    # regex '$' ALSO matches just before a trailing newline - so a value like "...DC=MIL`n" would
+    # otherwise slip past the component-boundary anchor below. (audit loop9 P3)
+    if ($Value -match '[\x00-\x1f]') { return $false }
     if (-not $ExpectDomainSuffix) { return $false }
     # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
     # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
@@ -304,7 +308,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.0'
+        version  = '0.2.1'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(

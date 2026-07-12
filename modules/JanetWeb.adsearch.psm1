@@ -23,7 +23,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adsearch'
         name     = 'AD Search'
-        version  = '3.3.5'
+        version  = '3.3.6'
         category = 'Reporting'
         summary  = 'Search Active Directory for users, computers, groups, org boxes, email, managers, bulk computers, base users, and last-PC logon (DC Security-log scan). RSAT-free ADSI; read-only.'
         actions  = @(
@@ -191,6 +191,10 @@ function Test-AdSearchDnInLocalDomain {
     param([string]$Value, [string]$ExpectDomainSuffix)
     if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
     if ($Value -match '/') { return $false }
+    # Reject any control char (NUL..US, incl. CR/LF/TAB): a real DN never carries one, and .NET's
+    # regex '$' ALSO matches just before a trailing newline - so a value like "...DC=MIL`n" would
+    # otherwise slip past the component-boundary anchor below. (audit loop9 P3)
+    if ($Value -match '[\x00-\x1f]') { return $false }
     if (-not $ExpectDomainSuffix) { return $false }
     # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
     # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
@@ -236,6 +240,10 @@ $script:AdSearchEngine = {
         param([string]$Value, [string]$ExpectDomainSuffix)
         if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
         if ($Value -match '/') { return $false }
+        # Reject any control char (NUL..US, incl. CR/LF/TAB): a real DN never carries one, and .NET's
+        # regex '$' ALSO matches just before a trailing newline - so a value like "...DC=MIL`n" would
+        # otherwise slip past the component-boundary anchor below. (audit loop9 P3)
+        if ($Value -match '[\x00-\x1f]') { return $false }
         if (-not $ExpectDomainSuffix) { return $false }
         # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
         # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
