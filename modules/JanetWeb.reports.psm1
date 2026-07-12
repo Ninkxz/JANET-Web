@@ -2094,11 +2094,19 @@ function Export-AcasFindingsCsvText {
     }
     [void]$lines.Add('"Host","PluginID","VulnName","Severity","IAVA","Category","Status","PatchedDate","PatchedBy","Solution"')
     foreach ($f in $Findings) {
-        $hn = (& $guard $f.Hostname) -replace '"','""'
-        $ev = (& $guard $f.VulnName) -replace '"','""'
-        $es = (& $guard $f.Solution) -replace '"','""'
-        $ia = (& $guard $f.IAVA) -replace '"','""'
-        [void]$lines.Add("`"$hn`",`"$($f.PluginID)`",`"$ev`",`"$($f.Severity)`",`"$ia`",`"$($f.Category)`",`"$($f.Status)`",`"$($f.PatchedDate)`",`"$($f.PatchedBy)`",`"$es`"")
+        # audit loop7 P3: run EVERY cell through $guard - PatchedBy is operator-typed (EDIPI)
+        # free text, the rest are scanner-supplied; a leading = + - @ would otherwise evaluate in Excel.
+        $hn = (& $guard $f.Hostname)    -replace '"','""'
+        $pl = (& $guard $f.PluginID)    -replace '"','""'
+        $ev = (& $guard $f.VulnName)    -replace '"','""'
+        $sv = (& $guard $f.Severity)    -replace '"','""'
+        $ia = (& $guard $f.IAVA)        -replace '"','""'
+        $ca = (& $guard $f.Category)    -replace '"','""'
+        $st = (& $guard $f.Status)      -replace '"','""'
+        $pd = (& $guard $f.PatchedDate) -replace '"','""'
+        $pb = (& $guard $f.PatchedBy)   -replace '"','""'
+        $es = (& $guard $f.Solution)    -replace '"','""'
+        [void]$lines.Add("`"$hn`",`"$pl`",`"$ev`",`"$sv`",`"$ia`",`"$ca`",`"$st`",`"$pd`",`"$pb`",`"$es`"")
     }
     return (($lines -join "`r`n") + "`r`n")
 }
@@ -2177,7 +2185,10 @@ function Get-WeeklySafeFileName {
     param([Parameter(Mandatory)]$Week, [string]$Extension = 'csv')
     $range = ($Week.DateRange -replace '[^A-Za-z0-9_\- ]', '').Trim() -replace '\s+','_'
     if (-not $range) { $range = 'unknown' }
-    return "ACAS_Weekly_${range}_$($Week.Enclave).$Extension"
+    # audit loop7 P3: sanitize Enclave too (a hard-coded 'NIPR'/'SIPR' today, but defensive if it
+    # ever becomes data-derived) so no traversal/odd char can reach the Join-Path'd filename.
+    $enc = ([string]$Week.Enclave -replace '[^A-Za-z0-9_\-]', ''); if (-not $enc) { $enc = 'ENC' }
+    return "ACAS_Weekly_${range}_$enc.$Extension"
 }
 
 function Test-JanetUncReachable {
