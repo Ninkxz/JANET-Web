@@ -322,6 +322,11 @@ $script:AdSearchEngine = {
 
     $root = New-AdEntry ''
     $searcher = [ADSISEARCHER]$root
+    # Do NOT auto-follow a directory-returned EXTERNAL referral to another server:
+    # even a local-domain-rooted search could otherwise be redirected to a host the
+    # DN guard never vetted (loop-7 AD-bind hardening capstone). Inert in a single
+    # AD domain (no referrals); closes the residual redirect.
+    $searcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
     $searcher.PageSize = 15000
     # Cap any single wildcard search at 2000 objects so a broad filter cannot dump
     # the whole directory (the handler also rejects all-wildcard user/computer
@@ -473,6 +478,7 @@ $script:AdSearchEngine = {
             if ($managerResults.Count -gt 0) {
                 $managerDN = $managerResults[0].Properties["distinguishedname"][0]
                 $reportSearcher = [ADSISEARCHER]$root
+                $reportSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
                 $reportSearcher.PageSize = 15000
                 Set-AdLoad $reportSearcher $userAttrs
                 $reportSearcher.filter = "(&(objectCategory=person)(objectClass=user)(manager=$(Escape-LdapFilterValue $managerDN)))"
@@ -643,6 +649,7 @@ $script:AdSearchEngine = {
             $domainDN = $rootDSE.defaultNamingContext.ToString()
 
             $ouSearcher = [ADSISEARCHER]$root
+            $ouSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
             $ouSearcher.PageSize = 1000
             Set-AdLoad $ouSearcher @('distinguishedname')
             $ouSearcher.Filter = "(&(objectCategory=organizationalUnit)(name=$(Escape-LdapFilterValue $baseName)*))"
@@ -656,6 +663,7 @@ $script:AdSearchEngine = {
 
             foreach ($baseOUDN in $baseOUs) {
                 $childSearcher = New-Object System.DirectoryServices.DirectorySearcher
+                $childSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
                 $childSearcher.SearchRoot = New-AdEntry "LDAP://$baseOUDN"
                 $childSearcher.PageSize = 1000
                 $childSearcher.SearchScope = "Subtree"
@@ -669,6 +677,7 @@ $script:AdSearchEngine = {
                         [void]$searchedOUs.Add($childOUDN)
 
                         $userSearcher = New-Object System.DirectoryServices.DirectorySearcher
+                        $userSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
                         $userSearcher.SearchRoot = New-AdEntry "LDAP://$childOUDN"
                         $userSearcher.PageSize = 15000
                         $userSearcher.SearchScope = "Subtree"
@@ -839,6 +848,7 @@ $script:AdSearchEngine = {
             }
 
             $dcSearcher = [ADSISEARCHER]$root
+            $dcSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
             $dcSearcher.PageSize = 500
             Set-AdLoad $dcSearcher @('dnshostname')
             $dcSearcher.Filter = "(&(objectCategory=Computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))"
