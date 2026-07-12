@@ -25,11 +25,11 @@ $mod = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1')    -F
 $RemoveProfile = 'Oracle Java - Remove (fix-java)'
 $ScProfile     = 'Oracle Java - Software Center'
 
-Describe 'ACAS 1.11.0 - manifest loads at the bumped version' {
+Describe 'ACAS 1.11.1 - manifest loads at the bumped version' {
     $manifest = & $mod { Get-JanetToolManifest }
-    It 'manifest id is acas and version is 1.11.0' {
+    It 'manifest id is acas and version is 1.11.1' {
         [string]$manifest.id      | Should Be 'acas'
-        [string]$manifest.version | Should Be '1.11.0'
+        [string]$manifest.version | Should Be '1.11.1'
     }
 }
 
@@ -130,13 +130,17 @@ Describe 'ACAS 1.11.0 - self-guard DROPS the dispatcher before fan-out for the r
         $started = @($evts | Where-Object { $_.type -eq 'status' -and $_.text -match "on \d+ host" })
         $started.Count | Should Be 0
     }
-    It 'a NON-forbidding profile (Software Center) does NOT drop self (existing behavior unchanged)' {
+    It 'a NON-forbidding profile (Software Center) now ALSO drops self (1.11.1 broadened self-guard)' {
+        # 1.11.1: Select-AcasNonSelfHosts drops the dispatcher for EVERY destructive
+        # patch wave, not just ForbidSelf/Java-Remove. SC is still not ForbidSelf, but
+        # the box is now dropped from its wave too (real target kept).
         $out = & $mod {
             param($n)
             @(Select-AcasNonSelfHosts -ProfileName $n -Hosts @($env:COMPUTERNAME, 'FAR-HOST-1') -Send { param($e) })
         } $ScProfile
-        @($out) -contains $env:COMPUTERNAME | Should Be $true
-        @($out).Count | Should Be 2
+        @($out) -contains $env:COMPUTERNAME | Should Be $false
+        @($out) -contains 'FAR-HOST-1'      | Should Be $true
+        @($out).Count | Should Be 1
     }
 }
 

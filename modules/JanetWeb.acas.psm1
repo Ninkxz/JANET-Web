@@ -898,7 +898,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.0'
+        version  = '1.11.1'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1152,17 +1152,22 @@ function Get-AcasProfileForbidsSelf {
     return $false
 }
 
-# Drop the dispatcher host from a target list when the resolved profile forbids self
-# (returns the list untouched for every non-forbidding profile). Emits a Self-guard
-# warning naming any dropped host. Called BEFORE job-array build so a forbidden
-# uninstall never becomes a runspace job against this box.
+# Drop the dispatcher host from a target list for EVERY destructive patch wave
+# (the drop is UNCONDITIONAL - all five call sites are App-Update dispatchers whose
+# profiles run remote installs/uninstalls that may reboot; none may ever target this
+# box). Emits a Self-guard warning naming any dropped host; the warning wording keys
+# off the ForbidSelf flag (Java REMOVE says "uninstall Java", others say "patch").
+# Called BEFORE job-array build so a destructive action never becomes a runspace job
+# against this box. Only destructive dispatchers call this - read-only paths
+# (analyze/verify/kb-scan/group-findings/findings-for-host/list-profiles/preflight)
+# stay self-inclusive because they never invoke it.
 function Select-AcasNonSelfHosts {
     param([string]$ProfileName, [object[]]$Hosts, [scriptblock]$Send)
     $hostArr = @($Hosts)
-    if (-not (Get-AcasProfileForbidsSelf $ProfileName)) { return $hostArr }
     $selfHits = @($hostArr | Where-Object { Test-AcasHostIsSelf $_ })
     if ($selfHits.Count -gt 0 -and $Send) {
-        & $Send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from '$ProfileName' wave (never uninstall Java on the JANET host): $($selfHits -join ', ')" }
+        $why = if (Get-AcasProfileForbidsSelf $ProfileName) { 'never uninstall Java on the JANET host' } else { 'never patch the JANET host' }
+        & $Send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from '$ProfileName' wave ($why): $($selfHits -join ', ')" }
     }
     return @($hostArr | Where-Object { -not (Test-AcasHostIsSelf $_) })
 }
@@ -3037,6 +3042,20 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='No valid targets.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
             }
+            # Self-guard: NEVER reboot the dispatcher host - the reboot worker runs
+            # shutdown.exe ON THIS box targeting \\HOST, so a self-target would kill the
+            # JANET HttpListener mid-wave. Drop any target that resolves to us (short/
+            # FQDN/NIC-IP/loopback) and warn; short-circuit if none remain. Mirrors the
+            # reboot-selected self-guard verbatim.
+            $selfHits = @($targets | Where-Object { Test-AcasHostIsSelf $_ })
+            if ($selfHits.Count -gt 0) {
+                & $send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from reboot wave (never reboot self): $($selfHits -join ', ')" }
+                $targets = @($targets | Where-Object { -not (Test-AcasHostIsSelf $_) })
+            }
+            if ($targets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to reboot.' }
+                return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
+            }
             $vulnDisplay = [string]$Params['vulnDisplay']; if (-not $vulnDisplay) { $vulnDisplay = 'Scheduled Reboot' }
             $warn = [string]$Params['warningText']
             if ([string]::IsNullOrWhiteSpace($warn)) { $warn = 'This workstation will reboot in 5 minutes for required security updates. Save your work now.' }
@@ -3185,6 +3204,16 @@ function Invoke-JanetToolAction {
                 foreach ($kb in $kbs) { if (-not $byHost[$h].Contains($kb)) { $byHost[$h].Add($kb) } }
             }
             if ($byHost.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No host|KB pairs to install.' }; return @{ rows=@(); summary=@{ total=0 } } }
+            # Self-guard: NEVER service Windows KB on the dispatcher host - MECM
+            # InstallUpdates may reboot, which would kill the JANET HttpListener mid-wave.
+            # Drop any host key that resolves to us (short/FQDN/NIC-IP/loopback) BEFORE the
+            # per-host job array is built, warn, and short-circuit if none remain.
+            $selfKbHits = @($byHost.Keys | Where-Object { Test-AcasHostIsSelf $_ })
+            if ($selfKbHits.Count -gt 0) {
+                & $send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from KB-install wave (never patch self): $($selfKbHits -join ', ')" }
+                foreach ($sk in $selfKbHits) { $byHost.Remove($sk) }
+            }
+            if ($byHost.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to install.' }; return @{ rows=@(); summary=@{ total=0 } } }
             if ($msuPath -and -not (Test-Path -LiteralPath $msuPath)) { & $send @{ type='log'; level='warn'; text="MSU not found (MECM-only this run): $msuPath" } }
             & $send @{ type='log'; level='info'; text="KB install ($method) on $($byHost.Count) host(s)$(if($msuPath){" with MSU fallback $(Split-Path $msuPath -Leaf)"})$(if($noReboot){' [no-reboot]'})." }
             $jobs = New-Object System.Collections.ArrayList
