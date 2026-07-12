@@ -65,3 +65,8 @@ committed. Ledger rows 1-4, 6, 8 status -> **BLOCKED-DESKTOP-WIP** (defect confi
 awaiting the owner to commit/reconcile the 2.4.x line, then land 2.5.0). Row 5 -> the Desktop tool lacks the
 MDE path (the prepared 2.5.0 adds it as new). These remain OPEN in the ledger - not closed - until the Desktop
 commit is unblocked.
+
+## Loop-5 finding (NEW) - ACAS destructive actions can target the operator/dispatcher box -> CLOSED-BOTH
+| # | Finding (sev) | Web fix | In Desktop? | Status |
+|---|---------------|---------|-------------|--------|
+| 24 | ACAS schedule-reboot/kb-install/App-Update waves lacked a self-guard - could reboot/patch the JANET dispatcher (Web) or the operator's own workstation (Desktop) mid-run (P2) | acas.psm1 1.11.1: schedule-reboot + kb-install `Test-AcasHostIsSelf` drop; `Select-AcasNonSelfHosts` broadened to unconditional | YES - `ACAS Nemesis Tool` had 4 unguarded dispatchers | **CLOSED-BOTH** (Desktop 1.10.14: `Get-NemLocalIdentity`+`Test-NemHostIsSelf` drop in all 4, archived 1.10.13, config+JANET.ps1 repointed) |
