@@ -2910,18 +2910,25 @@ function Invoke-JanetToolAction {
             return @{ rows=@(); summary=@{ total=$targets.Count } }
         }
     }
-    # Self-guard: never REBOOT the JANET dispatcher box mid-fan-out. Drop any target that IS
-    # this machine BEFORE dispatch - a self-reboot would kill the HttpListener mid-dispatch.
+    # Self-guard: never MUTATE the JANET dispatcher box itself mid-fan-out. Drop any target that
+    # IS this machine BEFORE dispatch. This began as a reboot-only guard (a self-reboot kills the
+    # HttpListener mid-dispatch), but EVERY state-changing op can harm self, not just the rebooters:
+    #   Pin / Unpin    -> write/remove the WindowsUpdate TargetReleaseVersion policy
+    #   ForceDiscovery -> re-writes policy + triggers WU; in aggressive mode stops WU services and
+    #                     renames SoftwareDistribution (would disrupt the dispatcher's own WU stack)
+    #   UpgradeDrive   -> pins + triggers WU + may reboot a confirmed-staged host ($rebootWhenStaged)
+    #   InstallCab     -> DISM feature-update install (+ reboot when $reboot)
+    #   SetPageFile    -> writes the WMI page-file policy (+ reboot when $reboot)
+    #   RepairHealth   -> DISM/SFC component-store repair (+ reboot when $reboot)
+    #   AutoFix        -> per-device remediation (+ reboot when $reboot)
+    # So the guard now runs for ALL mutating ops when not in dry-run. The read-only ops on this
+    # path - Ping / CheckUpgrade / Diagnose / FleetStatus / ErrorReport (all map to $null audit) -
+    # legitimately query self and are deliberately NOT dropped; a $dryRun preview changes no state
+    # and likewise keeps self.
     # (Restart tool audit#10; the in-worker DNS guard does NOT catch self - our own name
-    # resolves to us so it passes.) Every op that issues a remote reboot is guarded:
-    #   UpgradeDrive -> reboots a confirmed-staged host when $rebootWhenStaged
-    #   InstallCab   -> reboots after a successful DISM feature-update install when $reboot
-    #   SetPageFile  -> reboots to apply the page-file change when $reboot
-    #   RepairHealth -> reboots when a repair requires it and no user is logged on ($reboot)
-    #   AutoFix      -> reboots when a fix requires it and no user is logged on ($reboot)
-    $rebootIntent = ( ($op -eq 'UpgradeDrive' -and $rebootWhenStaged) -or `
-                      (($op -eq 'InstallCab' -or $op -eq 'SetPageFile' -or $op -eq 'RepairHealth' -or $op -eq 'AutoFix') -and $reboot) )
-    if ($rebootIntent -and -not $dryRun) {
+    # resolves to us so it passes.)
+    $mutatesTarget = ( @('Pin','Unpin','ForceDiscovery','UpgradeDrive','InstallCab','SetPageFile','RepairHealth','AutoFix') -contains $op )
+    if ($mutatesTarget -and -not $dryRun) {
         $keptT = New-Object System.Collections.ArrayList
         $selfT = New-Object System.Collections.ArrayList
         foreach ($t in $targets) { if (Test-WinUpgradeHostIsSelf $t) { [void]$selfT.Add($t) } else { [void]$keptT.Add($t) } }
