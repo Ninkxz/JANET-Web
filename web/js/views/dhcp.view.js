@@ -318,8 +318,12 @@
         var removed = originalValues.filter(function (v) { return workingValues.indexOf(v) < 0; });
         if (added.length === 0 && removed.length === 0) return 'REORDER ONLY (same set, new order)';
         var parts = [];
-        if (added.length) parts.push('ADD: + ' + added.join(', '));
-        if (removed.length) parts.push('REMOVE: - ' + removed.join(', '));
+        // esc() each value: added/removed derive from r.Values returned by the REMOTE
+        // DHCP server (dhcp.view.js load path, unvalidated) and this string is rendered
+        // via ConfirmDialog body -> innerHTML. A free-form option value (015/066/067/012)
+        // could otherwise carry a space-free XSS payload into the privileged console (audit P2).
+        if (added.length) parts.push('ADD: + ' + added.map(esc).join(', '));
+        if (removed.length) parts.push('REMOVE: - ' + removed.map(esc).join(', '));
         return parts.join('<br>');
       }
       async function doApply() {
