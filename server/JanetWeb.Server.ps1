@@ -40,6 +40,11 @@ function Start-JanetWebServer {
         [string]$PackagesRoot = ''
     )
 
+    # Fail fast on a misconfigured launch: a Mandatory [string] still accepts ''. With an
+    # empty token the request gate at ~:371 never matches ($tok -and ... short-circuits), so
+    # EVERY request 403s and the server looks up-but-dead. Throw loudly at start instead.
+    # (loop12 server audit P3 - not a bypass, the gate already fails closed; this is clarity.)
+    if ([string]::IsNullOrEmpty($Token)) { throw 'Start-JanetWebServer: -Token must be a non-empty per-launch secret.' }
     $serverDir    = Join-Path $Root 'server'
     $webDir       = (Resolve-Path (Join-Path $Root 'web')).Path
     $modulesDir   = Join-Path $Root 'modules'
