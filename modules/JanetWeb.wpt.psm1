@@ -5169,6 +5169,8 @@ function Invoke-JanetToolAction {
             $catalog = Get-WptUnsupportedCatalog
             & $send @{ type='status'; text="Scanning $($targets.Count) host(s) for unsupported/SEoL software with $threads thread(s)..." }
             $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
+            $iss.Commands.Add($fn)
             $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
             $pool.Open()
             $jobs = New-Object System.Collections.ArrayList
@@ -5276,6 +5278,8 @@ function Invoke-JanetToolAction {
             $totalUnits = [int](($byHost.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum)
             & $send @{ type='status'; text="Uninstalling $totalUnits unsupported product(s) across $($hostList.Count) host(s) with $threads thread(s)..." }
             $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
+            $iss.Commands.Add($fn)
             $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
             $pool.Open()
             $jobs = New-Object System.Collections.ArrayList
@@ -5637,6 +5641,14 @@ function Invoke-JanetToolAction {
             $caption = [string]$Params['caption']; if ([string]::IsNullOrWhiteSpace($caption)) { $caption = 'System Maintenance' }
             $message = [string]$Params['message']; if ([string]::IsNullOrWhiteSpace($message)) { $message = 'This workstation is undergoing scheduled maintenance. Please do not log in until maintenance is complete.' }
             $hardlock = $false; if ($Params.ContainsKey('hardlock') -and $null -ne $Params['hardlock']) { $hardlock = [bool]$Params['hardlock'] }
+            # HARDLOCK is a real interactive-logon lock, so drop the dispatcher host to avoid
+            # locking an admin out of this box's console mid-dispatch (soft banner-only is safe
+            # on self -> only guard when hardlock). Mirrors the forced-patch self-guard. Audit P2.
+            if ($hardlock) {
+                $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+                $targets = $guarded.Targets
+                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to lock (hardlock).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
+            }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptMaintLockBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $caption, $message, $hardlock) } `
