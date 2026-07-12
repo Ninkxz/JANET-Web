@@ -2403,7 +2403,7 @@ $script:C2cFixBlock = {
                             $r.Ok = ($r.AgeH -le $MaxAgeHours)
                         }
                     } catch { $r.Note = "installer threw: $($_.Exception.Message)" }
-                    finally { Remove-Item $Pkg -Force -ErrorAction SilentlyContinue }
+                    finally { Remove-Item -LiteralPath $Pkg -Force -ErrorAction SilentlyContinue }
                     [pscustomobject]$r
                 }
                 if ($offR.Ok) { $offlineRow = [pscustomobject]@{ Name = 'AntiMalware'; Action = 'offline-package'; Result = 'FIXED'; Detail = "OFFLINE definition package installed - signature age now $($offR.AgeH)h ($($offR.Note)); supersedes the online-source failure above" } }
