@@ -136,7 +136,7 @@ function Invoke-JanetJavaRemediation {
                 if ($remaining.Count -eq 0) {
                     $hadVersions = @($jFinds | Where-Object { $_.Source -eq 'Registry' -and $_.Path -like "$($product.PSPath)*" -and $_.Result -like 'OK*' }).Count -gt 0
                     if ($hadVersions) {
-                        Remove-Item -Path $product.PSPath -Recurse -Force -ErrorAction Stop
+                        Remove-Item -LiteralPath $product.PSPath -Recurse -Force -ErrorAction Stop
                         $jf2 = & $jAdd 'Registry' "$($product.PSChildName)" '' $product.PSPath
                         $jf2.Verdict = 'OLD'; $jf2.Result = 'OK - empty product key removed'
                     }
