@@ -57,7 +57,7 @@ function Get-JanetToolManifest {
                 label       = 'Add to KEV'
                 description = 'Add one or more CVE(s) to the KEV catalog and save them to JanetLocal\KevCatalog.txt (validated, de-duped, sorted). The catalog ships in take-to-work.'
                 kind        = 'stream-table'
-                destructive = $false
+                destructive = $true   # PERSISTS to KevCatalog.txt - a state-changing write must ride the admin-session gate (audit loop7 P3)
                 columns     = @('CVE','Status')
                 inputs      = @(
                     @{ name='cves'; label='CVE(s) to add (one per line, or comma/space separated)'; type='text'; required=$true }

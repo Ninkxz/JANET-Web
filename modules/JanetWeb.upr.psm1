@@ -1516,13 +1516,6 @@ function Build-UprManualHostJobs {
         if ([string]::IsNullOrWhiteSpace($t)) { continue }
         if (-not (Test-UprValidTarget $t)) { $dropped++; continue }
         if (-not $seen.Add($t)) { continue }
-        # Self-guard: NEVER build a job for the JANET dispatcher host - a UPR uninstall on
-        # self would remove EOL software from the box running the server (audit P2). Mirrors
-        # the report path (Build-UprHostJobs). Manual/Targeted-Uninstall is destructive too.
-        if (Test-UprHostIsSelf $t) {
-            if ($Log) { & $Log "Self-guard: dropped the JANET dispatcher host '$t' - never uninstall software from the box hosting this session." 'warn' }
-            continue
-        }
         $jobs += [PSCustomObject]@{ Target=$t; Profiles=@($Profiles); HostObj=[PSCustomObject]@{ NetBIOSName=$t; DNSName=''; IPAddress='' } }
     }
     if ($Log -and $dropped -gt 0) { & $Log "$dropped pasted host token(s) were not valid host names/IPs and were skipped." 'warn' }
