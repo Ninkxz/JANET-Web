@@ -2388,9 +2388,9 @@ $script:C2cFixBlock = {
                         # its SHA256 pinned THEN. Re-hash the copy that actually landed on THIS target and
                         # refuse to execute if it drifted from the pinned value (validate->push tamper).
                         $actual = (Get-FileHash -LiteralPath $Pkg -Algorithm SHA256).Hash
-                        if ($ExpectHash -and ($actual -ne $ExpectHash)) {
-                            $r.Note = "package SHA256 mismatch (validate->push tamper) - NOT executed"
-                            Remove-Item $Pkg -Force -ErrorAction SilentlyContinue
+                        if ((-not $ExpectHash) -or ($actual -ne $ExpectHash)) {
+                            $r.Note = "package SHA256 unverified (no pin) or mismatch (validate->push tamper) - NOT executed"
+                            Remove-Item -LiteralPath $Pkg -Force -ErrorAction SilentlyContinue
                             return [pscustomobject]$r
                         }
                         $p = Start-Process -FilePath $Pkg -Wait -PassThru -ErrorAction Stop

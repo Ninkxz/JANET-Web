@@ -500,10 +500,12 @@ function Get-WptLocalIdentity {
     # an IP literal (audit P3; parity with acas/restart's identity set).
     try {
         foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
-            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
-            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
-                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
-            }
+            try {
+                if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+                foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                    if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+                }
+            } catch {}
         }
     } catch {}
     $script:WptLocalIdentity = $set
