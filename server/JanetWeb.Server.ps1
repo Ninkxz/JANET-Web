@@ -718,16 +718,30 @@ function Start-JanetWebServer {
                     }
                     $toolVer = '1.0.0'; if ($mani -and $mani.version) { $toolVer = [string]$mani.version }
 
-                    # Server-side session gate: a DESTRUCTIVE (state-changing) action
-                    # requires an admin session = responsibility ack (POST /session/start)
-                    # AND a set credential. Read-only actions (scans/queries/adsearch) are
-                    # always allowed, so the AD-search bypass and read-only diagnostics
-                    # still work without an admin session. This backstops the browser gate.
+                    # Server-side session gate (FAIL-CLOSED as of loop 5): a DESTRUCTIVE
+                    # (state-changing) action requires an admin session = responsibility
+                    # ack (POST /session/start) AND a set credential. This backstops the
+                    # browser gate. The default is now DENY: an action is destructive
+                    # UNLESS it POSITIVELY asserts read-only (explicit destructive=$false).
+                    # A manifest action that OMITS the 'destructive' key is treated as
+                    # state-changing and gated, so a future unflagged action can never
+                    # silently run without a session (was: default ALLOW - the latent hole
+                    # this loop closes). Read-only actions (scans/queries/adsearch) still
+                    # run without a session because each is explicitly destructive=$false.
+                    # NOTE: manifest actions are raw hashtables, so key presence is tested
+                    # with IDictionary.Contains - PSObject.Properties does NOT surface
+                    # hashtable keys. The ACAS by-id set governs ONLY actions ABSENT from
+                    # the manifest ($actObj null); a by-id action that also lives in the
+                    # manifest is ruled by its manifest flag (so its explicit destructive
+                    # flag is never weakened by the by-id read-only list).
                     $actObj = $null; if ($mani -and $mani.actions) { $actObj = $mani.actions | Where-Object { $_.id -eq $actId } | Select-Object -First 1 }
-                    # Destructive if the manifest says so, OR if this is an ACAS by-id
-                    # state-changing action (absent from the manifest, so $actObj is null
-                    # and the manifest test alone would default-allow it - audit#1).
-                    $isDestructive = ($actObj -and $actObj.destructive) -or ($toolId -eq 'acas' -and $acasByIdDestructive -contains $actId)
+                    $isDestructive = $true
+                    if ($actObj) {
+                        $hasFlag = if ($actObj -is [System.Collections.IDictionary]) { $actObj.Contains('destructive') } else { [bool]$actObj.PSObject.Properties['destructive'] }
+                        if ($hasFlag -and (-not $actObj.destructive)) { $isDestructive = $false }
+                    } elseif ($toolId -eq 'acas' -and $acasByIdActions -contains $actId) {
+                        $isDestructive = [bool]($acasByIdDestructive -contains $actId)
+                    }
                     if ($isDestructive -and -not ($state.AckGiven -and $null -ne $state.Cred)) {
                         & $writeJson $resp @{ error = 'Admin session required: set ADW credentials and accept responsibility (Start Admin Session) before running actions that change machines.' } 403; continue
                     }
