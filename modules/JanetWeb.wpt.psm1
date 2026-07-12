@@ -560,6 +560,20 @@ function ConvertTo-WptBool {
     return ("$Value" -match '^(?i:true|1|yes|on)$')
 }
 
+# Neutralize spreadsheet formula injection on remote-harvested free text: a CSV
+# cell beginning with = + - @ (or a leading tab/CR) is evaluated as a formula by
+# Excel/Sheets, so a compromised fleet host could set its OS caption / hostname to
+# a payload that runs when the operator opens the snapshot. Prefix such values with
+# a single quote so they render as literal text (same guard as reports.psm1
+# ConvertTo-ReportsCsvCell). Null/empty pass through unchanged; the downstream
+# ConvertTo-Csv still applies the RFC-4180 quoting.
+function Protect-WptCsvCell {
+    param([string]$Value)
+    $s = if ($null -eq $Value) { '' } else { [string]$Value }
+    if ($s -match '^[=+\-@\t\r]') { return "'" + $s }
+    return $s
+}
+
 # Persist the bulk-scan result rows as one snapshot CSV. Best-effort: any failure
 # only WARNS via -Send and never throws, so a save problem cannot fail the scan.
 function Save-WptBulkSnapshot {
@@ -577,15 +591,15 @@ function Save-WptBulkSnapshot {
             if ($null -eq $r) { continue }
             $get = { param($k) if ($r -is [hashtable]) { $r[$k] } else { $r.$k } }
             [void]$objs.Add([pscustomobject]@{
-                Host               = [string](& $get 'Host')
+                Host               = Protect-WptCsvCell ([string](& $get 'Host'))
                 Online             = [bool](& $get 'Online')
-                OS                 = [string](& $get 'OsName')
-                Build              = [string](& $get 'OsBuild')
-                MECMUpdateCount    = [string](& $get 'MECMUpdateCount')
-                WindowsUpdateCount = [string](& $get 'WindowsUpdateCount')
-                AppUpdateCount     = [string](& $get 'AppCount')
-                RebootPending      = [string](& $get 'RebootPending')
-                LastBootTime       = [string](& $get 'LastBootTime')
+                OS                 = Protect-WptCsvCell ([string](& $get 'OsName'))
+                Build              = Protect-WptCsvCell ([string](& $get 'OsBuild'))
+                MECMUpdateCount    = Protect-WptCsvCell ([string](& $get 'MECMUpdateCount'))
+                WindowsUpdateCount = Protect-WptCsvCell ([string](& $get 'WindowsUpdateCount'))
+                AppUpdateCount     = Protect-WptCsvCell ([string](& $get 'AppCount'))
+                RebootPending      = Protect-WptCsvCell ([string](& $get 'RebootPending'))
+                LastBootTime       = Protect-WptCsvCell ([string](& $get 'LastBootTime'))
                 ScanStamp          = $scanStamp
             })
         }
