@@ -288,6 +288,14 @@ $script:AdSearchEngine = {
     if ($SearchParams -is [hashtable] -and $SearchParams.ContainsKey('SearchBase')) {
         $sb = ([string]$SearchParams['SearchBase']).Trim()
         if (-not [string]::IsNullOrWhiteSpace($sb)) {
+            # LDAP://<searchBase> is a BIND path, not a filter: a value like 'evildc/DC=x' or a
+            # full 'LDAP://evil' URL would redirect the search root bind to an attacker-chosen host.
+            # Require a plain distinguished name (starts with a DN RDN, no path chars) - same guard
+            # the AD TO scan ships (JanetWeb.adto.psm1:342). This drops the old LDAP://-prefix
+            # tolerance for a SEARCH BASE, which was the bind-redirect vector (audit P3).
+            if ($sb -notmatch '^[A-Za-z]{1,8}=' -or $sb -match '[/\\]') {
+                return @(@{ _Error = "Rejected SearchBase '$sb': must be a plain distinguished name (e.g. OU=Squadron,DC=area52,DC=mil) with no server prefix or path characters."; _Failure = $true })
+            }
             if ($sb -notmatch '^(?i)LDAP://') { $sb = "LDAP://$sb" }
             try {
                 $searcher.SearchRoot = New-AdEntry $sb
