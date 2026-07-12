@@ -263,6 +263,28 @@ $script:RemoteAdminScriptBlock = {
     try { $sess = New-PSSession @splat }
     catch { $r.Status = 'Session error'; $r.Error = "Session: $($_.Exception.Message)"; return $r }
 
+    # Wrong-box guard (HARD ABORT, before any operator code runs): compare the
+    # answering box's name to the dialed short name. If DNS resolved the target to a
+    # different (or the dispatcher's own) host, the operator's ARBITRARY scriptblock
+    # would otherwise run on the WRONG box. IP-literal targets have no DNS indirection.
+    try {
+        $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+        if ($expectedShort) {
+            $answering = Invoke-Command -Session $sess -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop
+            if (([string]$answering).Trim().ToUpper() -ne $expectedShort.Trim().ToUpper()) {
+                Remove-PSSession $sess -ErrorAction SilentlyContinue
+                $r.Status = 'Skipped'
+                $r.Error = "DNS MISMATCH: dialed '$Computer' but '$(([string]$answering).Trim())' answered - ABORTED, operator block NOT run"
+                return $r
+            }
+        }
+    } catch {
+        Remove-PSSession $sess -ErrorAction SilentlyContinue
+        $r.Status = 'Failed'
+        $r.Error = "wrong-box guard probe failed: $($_.Exception.Message)"
+        return $r
+    }
+
     try {
         # Recreate the operator block INSIDE the worker (scriptblocks don't cross
         # runspace boundaries cleanly; the text does). Already parse-validated up
