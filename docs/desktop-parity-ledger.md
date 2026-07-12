@@ -70,3 +70,8 @@ commit is unblocked.
 | # | Finding (sev) | Web fix | In Desktop? | Status |
 |---|---------------|---------|-------------|--------|
 | 24 | ACAS schedule-reboot/kb-install/App-Update waves lacked a self-guard - could reboot/patch the JANET dispatcher (Web) or the operator's own workstation (Desktop) mid-run (P2) | acas.psm1 1.11.1: schedule-reboot + kb-install `Test-AcasHostIsSelf` drop; `Select-AcasNonSelfHosts` broadened to unconditional | YES - `ACAS Nemesis Tool` had 4 unguarded dispatchers | **CLOSED-BOTH** (Desktop 1.10.14: `Get-NemLocalIdentity`+`Test-NemHostIsSelf` drop in all 4, archived 1.10.13, config+JANET.ps1 repointed) |
+
+## Loop-8 finding (NEW) - message `send` could WinRM-loopback and popup the dispatcher -> Web CLOSED, Desktop BLOCKED
+| # | Finding (sev) | Web fix | In Desktop? | Status |
+|---|---------------|---------|-------------|--------|
+| 25 | `message` send (destructive) had no dispatcher self-guard - a target resolving to this box would pop msg.exe on the JANET console host itself (WinRM loopback); last self-guard-parity gap in the suite (P3) | message.psm1 1.3.4 (`5699bfb6`): `Get-JanetMessageLocalIdentity`+`Test-JanetMessageHostIsSelf` drop self BEFORE fan-out, gated to `send`; ping stays self-inclusive; 7 tests | YES - `RemoteMessageTool_1.3.3.ps1` is the exact twin and shares the gap | **BLOCKED-DESKTOP-WIP** (Desktop tool is one of 19 files the concurrent Live-Usage Snapshot sync is live-rewriting; versioning it would collide - mirror deferred until `X:\J.A.N.E.T` is clean. 3rd consecutive cycle blocked) |
