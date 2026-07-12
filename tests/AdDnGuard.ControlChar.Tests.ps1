@@ -54,3 +54,33 @@ foreach ($c in $cases) {
         }
     }
 }
+
+# -----------------------------------------------------------------------------
+#  Drift guard (loop-10): the DN guard exists as THREE hand-copied bodies -
+#  adsearch module-level + an inline copy in the bare-runspace $script:AdSearchEngine
+#  (the module comment calls this pair "BYTE-IDENTICAL"), plus adto's module-level
+#  copy. The loop-9 control-char reject had to be applied to all three by hand; if a
+#  future edit lands in only one, the guard silently weakens in the others. These
+#  tests fail the moment the copies diverge. (Text/source assertions - no runspace.)
+# -----------------------------------------------------------------------------
+Describe 'DN guard - source-copy drift guard' {
+    $adsearchSrc = [System.IO.File]::ReadAllText((Join-Path $script:Root 'modules\JanetWeb.adsearch.psm1'))
+    $adtoSrc     = [System.IO.File]::ReadAllText((Join-Path $script:Root 'modules\JanetWeb.adto.psm1'))
+    # Normalize each source line to its trimmed content so the 4-space module copy and
+    # the 8-space inline copy compare equal on body, not indentation.
+    $bodies = [regex]::Matches($adsearchSrc, '(?s)function\s+Test-AdSearchDnInLocalDomain\s*\{(.*?)\r?\n[ \t]*\}')
+    $norm = { param($s) (($s -split "\r?\n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) -join "`n" }
+
+    It 'has exactly two Test-AdSearchDnInLocalDomain copies in adsearch (module + inline engine)' {
+        $bodies.Count | Should Be 2
+    }
+    It 'the two adsearch copies are byte-identical (indentation-normalized)' {
+        (& $norm $bodies[0].Groups[1].Value) | Should Be (& $norm $bodies[1].Groups[1].Value)
+    }
+    It 'the control-char reject is present in BOTH adsearch copies' {
+        ([regex]::Matches($adsearchSrc, [regex]::Escape("-match '[\x00-\x1f]'"))).Count | Should Be 2
+    }
+    It 'the control-char reject is present in the adto copy' {
+        ([regex]::Matches($adtoSrc, [regex]::Escape("-match '[\x00-\x1f]'"))).Count | Should Be 1
+    }
+}

@@ -52,7 +52,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'history'
         name     = 'Patch History'
-        version  = '1.0.1'
+        version  = '1.0.2'
         category = 'Reporting'
         summary  = 'Read-only Patch History / Audit Explorer. Makes the audit trail JANET already writes (per-tool monthly detail CSVs, TouchedHosts attribution, and the fleet usage rollup on the central log share - with local-spool fallback when the share is down) queryable in-app: per-host timeline, recent activity across tools, per-operator summary, and a staleness board that flags hosts not touched within a threshold. Touches no hosts and writes nothing.'
         actions  = @(
@@ -383,6 +383,14 @@ function Invoke-JanetToolAction {
         $hostName = ([string]$Params['host']).Trim()
         if ([string]::IsNullOrWhiteSpace($hostName)) {
             & $send @{ type='log'; level='warn'; text='No host entered.' }
+            return @{ rows=@(); summary=@{ total=0; source=$loc.Reason; onShare=$loc.OnShare } }
+        }
+        # Validate the host token (parity with stale-hosts:561): a real host name starts
+        # alphanumeric and is [A-Za-z0-9._-]. Reject anything else so a pasted control char
+        # or path fragment never reaches the matcher. Read-only tool - defense-in-depth /
+        # consistency, not a live exploit. (audit loop9->10 P3)
+        if ($hostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') {
+            & $send @{ type='log'; level='warn'; text="Invalid host name: $hostName" }
             return @{ rows=@(); summary=@{ total=0; source=$loc.Reason; onShare=$loc.OnShare } }
         }
         $months = ConvertTo-HistInt ([string]$Params['months']); if ($months -le 0) { $months = 6 }
