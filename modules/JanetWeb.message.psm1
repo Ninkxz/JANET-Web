@@ -22,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'message'
         name     = 'Remote Message'
-        version  = '1.3.3'
+        version  = '1.3.4'
         category = 'Operations'
         summary  = 'Broadcast a popup to logged-on users across many workstations in parallel (msg.exe over WinRM).'
         actions  = @(
@@ -75,6 +75,58 @@ function ConvertTo-MessageHostList {
         if ($h -and ($h -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') -and $seen.Add($h)) { [void]$out.Add($h) }
     }
     return $out.ToArray()
+}
+
+# -----------------------------------------------------------------------------
+#  Dispatcher self-guard (self-contained - COPIED from JanetWeb.restart.psm1's
+#  Get-JanetLocalIdentity/Test-JanetHostIsSelf; NO cross-import). The SEND action is
+#  destructive=$true: it opens a WinRM session to each target and pops msg.exe on every
+#  interactive session there. A target that resolves to THIS box (WinRM loopback) would
+#  pop a message ON the JANET console host itself, so we drop it from the fan-out BEFORE
+#  any session is opened (parity with restart/acas/wpt/beta). Ping All is read-only and
+#  stays self-inclusive (never calls this).
+# -----------------------------------------------------------------------------
+function Get-JanetMessageLocalIdentity {
+    # Every identity that names THIS dispatcher host: shortname, FQDN, all NIC IPs,
+    # loopback. Case-insensitive HashSet, computed once and cached.
+    if ($script:MessageLocalIdentity) { return $script:MessageLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try {
+        $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+        if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
+    } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # Also add every locally-BOUND unicast IPv4 (mgmt/OOB NICs, lagging DNS): a bound IP
+    # not registered under this box's own name would otherwise be missed by the DNS lookup
+    # above, letting a pasted IP-literal target slip past the self-guard.
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
+    $script:MessageLocalIdentity = $set
+    return $set
+}
+
+# True when a target token names THIS dispatcher host (short / FQDN / NIC IP / loopback).
+# An IPv4 literal is only self if it is one of our own NIC IPs (exact set match) or a
+# 127.x loopback - never via the shortname-alias branch (IPv4-literal-safe).
+function Test-JanetMessageHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-JanetMessageLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }                      # any loopback literal
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }  # shortname alias, hostnames only
+    }
+    return $false
 }
 
 # Per-host worker: ping, then deliver the popup to every interactive session.
@@ -284,6 +336,24 @@ function Invoke-JanetToolAction {
     $targets = ConvertTo-MessageHostList ([string]$Params['targets'])
     if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No valid targets.' }; return @{ rows=@(); summary=@{ total=0 } } }
 
+    # Self-guard (parity with restart/acas/wpt/beta): the SEND action is destructive
+    # (destructive=$true) - it WinRM-connects to each target and pops msg.exe on every
+    # interactive session. A target that resolves to THIS dispatcher would pop a message
+    # on the operator's own console (self-WinRM-loopback), so drop it from the fan-out
+    # BEFORE any session is opened, and short-circuit cleanly if nothing is left. Ping All
+    # is read-only and stays self-inclusive (never dropped).
+    if ($ActionId -eq 'send') {
+        $selfHits = @($targets | Where-Object { Test-JanetMessageHostIsSelf $_ })
+        if ($selfHits.Count -gt 0) {
+            & $send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from the send wave (never message the JANET console host itself): $($selfHits -join ', ')" }
+            $targets = @($targets | Where-Object { -not (Test-JanetMessageHostIsSelf $_) })
+        }
+        if ($targets.Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text='Nothing left after the self-guard - only the dispatcher host was targeted.' }
+            return @{ rows=@(); summary=@{ total=0 } }
+        }
+    }
+
     # Parallel hosts: honor the explicit numeric 'threads' input (restored); else fall
     # back to a per-action default (send 16, ping 32, like the desktop). The 'parallel'
     # checkbox is a master switch - unchecked forces sequential (pool width 1). Cancel
@@ -434,4 +504,4 @@ function Invoke-JanetToolAction {
     return @{ rows = @($rows); summary = @{ total=$jobs.Count; ok=$okCount; skipped=$skipCount; failed=$failCount; sent=$okCount } }
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Test-JanetMessageHostIsSelf
