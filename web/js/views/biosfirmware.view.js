@@ -76,7 +76,7 @@
         guards: [
           function () { return targets.count() ? null : 'Input Required|Enter at least one hostname.'; },
           function () { return targets.count() <= MAX_HOSTS ? null : ('Limit Exceeded|Maximum ' + MAX_HOSTS + ' machines per run; remove ' + (targets.count() - MAX_HOSTS) + ' and retry.'); },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '. Use only letters, digits, dot, hyphen, underscore.') : null; }
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(Janet.util.esc).join(', ') + '. Use only letters, digits, dot, hyphen, underscore.') : null; }
         ],
         onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
         onRun: doRun

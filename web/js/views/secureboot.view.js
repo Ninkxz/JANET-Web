@@ -101,7 +101,7 @@
         title: 'Read-only fleet Secure Boot posture scan (one WinRM probe per host; no firmware write).',
         guards: [
           function () { return targets.hosts().length ? null : 'Input Required|Enter at least one hostname.'; },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '. Use only letters, digits, dot, hyphen, underscore.') : null; }
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(Janet.util.esc).join(', ') + '. Use only letters, digits, dot, hyphen, underscore.') : null; }
         ],
         onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
         onRun: doScan
@@ -174,7 +174,7 @@
         guards: [
           function () { return targets.hosts().length ? null : 'Input Required|Enter at least one hostname.'; },
           function () { return targets.hosts().length <= 50 ? null : ('Limit Exceeded|Maximum 50 machines per run; remove ' + (targets.hosts().length - 50) + ' and retry.'); },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '. Use only letters, digits, dot, hyphen, underscore.') : null; },
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(Janet.util.esc).join(', ') + '. Use only letters, digits, dot, hyphen, underscore.') : null; },
           function () { if (dryCb._cb.checked) return null; var p = pwInput.value || ''; return /[,'"`]/.test(p) ? "Unsupported Password Character|The BIOS password cannot contain a comma, quote, or backtick. Remove it and retry." : null; },
           function () { return ctx.session.state.credSet ? null : 'Admin session required|Set ADW credentials (top-right) and start an admin session before enabling Secure Boot - it changes firmware.'; }
         ],

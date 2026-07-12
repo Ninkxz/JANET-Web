@@ -110,7 +110,7 @@
       function hostGuards(needCred) {
         var g = [
           function () { return targets.hosts().length ? null : 'No Hosts|Add at least one host to the list first.'; },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '.') : null; }
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(esc).join(', ') + '.') : null; }
         ];
         if (needCred) g.push(function () { return ctx.session.state.credSet ? null : 'Admin session required|Set ADW credentials (top-right) and start an admin session first - this registers/removes a SYSTEM scheduled task on the target.'; });
         return g;
