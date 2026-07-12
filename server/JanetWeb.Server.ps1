@@ -31,6 +31,29 @@
 #    POST   /api/job/<jobId>/cancel                   -> cancel a running job
 # =============================================================================
 
+# Resolve a static-asset request URL to a safe file path UNDER the web root, or $null if
+# the request must 404. Extracted from the accept loop (loop13) so the path-traversal
+# defense is unit-testable in isolation. Byte-for-byte what the loop did inline:
+#   - '/' or empty            -> index.html
+#   - leaf name starts with _ -> $null (dev/underscore asset never served, audit#28)
+#   - Resolve-Path canonicalizes; the resolved path MUST start with "<WebDir>\" (trailing
+#     separator so a sibling 'web2' can't prefix-match) AND be an existing leaf file. A
+#     '..' escape, absolute path, UNC, missing file, or directory all fall through to $null.
+function Get-JanetWebAssetPath {
+    param([Parameter(Mandatory)][string]$WebDir, [string]$UrlPath)
+    $rel = if ($UrlPath -eq '/' -or [string]::IsNullOrEmpty($UrlPath)) { 'index.html' } else { $UrlPath.TrimStart('/') }
+    $leaf = [System.IO.Path]::GetFileName($rel)
+    if ($leaf -and $leaf.StartsWith('_')) { return $null }
+    $full = Join-Path $WebDir ($rel -replace '/', '\')
+    $resolved = $null
+    try { $resolved = (Resolve-Path -LiteralPath $full -ErrorAction Stop).Path } catch {}
+    $webGuard = $WebDir.TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar
+    if ($resolved -and $resolved.StartsWith($webGuard, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        return $resolved
+    }
+    return $null
+}
+
 function Start-JanetWebServer {
     param(
         [Parameter(Mandatory)] [string]$Root,
@@ -319,24 +342,13 @@ function Start-JanetWebServer {
                 $verb = $req.HttpMethod
 
                 # ---- static assets (no token; UI code only) ----
+                # Path-traversal defense + dev/underscore-asset 404 live in the extracted,
+                # unit-tested Get-JanetWebAssetPath (loop13). $null -> 404; a real in-root
+                # leaf -> served. (audit#28 underscore rule folded into the helper.)
                 if ($path -notlike '/api/*') {
-                    $rel = if ($path -eq '/' -or [string]::IsNullOrEmpty($path)) { 'index.html' } else { $path.TrimStart('/') }
-                    # audit#28: never serve a dev/underscore-prefixed asset from the
-                    # production web root (e.g. _devtest.html, _stub.view.js) - they are
-                    # dev-only harnesses that bypass the client gate and expose the tool
-                    # catalog. 404 any request whose leaf name starts with '_'.
-                    $leaf = [System.IO.Path]::GetFileName($rel)
-                    if ($leaf -and $leaf.StartsWith('_')) {
-                        & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes('not found')) 404 'text/plain'
-                        continue
-                    }
-                    $full = Join-Path $webDir ($rel -replace '/', '\')
-                    # path-traversal guard: resolved file must stay under web/
-                    $resolved = $null
-                    try { $resolved = (Resolve-Path -LiteralPath $full -ErrorAction Stop).Path } catch {}
-                    $webGuard = $webDir.TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar   # trailing sep so a sibling 'web2' can't pass the prefix check
-                    if ($resolved -and $resolved.StartsWith($webGuard, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolved -PathType Leaf)) {
-                        & $writeBytes $resp ([System.IO.File]::ReadAllBytes($resolved)) 200 (& $contentType ([System.IO.Path]::GetExtension($resolved)))
+                    $asset = Get-JanetWebAssetPath -WebDir $webDir -UrlPath $path
+                    if ($asset) {
+                        & $writeBytes $resp ([System.IO.File]::ReadAllBytes($asset)) 200 (& $contentType ([System.IO.Path]::GetExtension($asset)))
                     } else {
                         & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes('not found')) 404 'text/plain'
                     }
