@@ -163,6 +163,37 @@ function ConvertTo-JanetMachineList {
 }
 
 # -----------------------------------------------------------------------------
+#  Pure bind-redirect guard for a SearchBase / DN (audit P2 + P3).
+#  Returns $true when the value is SAFE to use as an LDAP bind root (accept),
+#  $false when it must be REJECTED. A DN is safe only when it (a) starts with an
+#  RDN attribute (e.g. OU= / DC=), (b) carries no '/' (which would let a value
+#  like 'evilhost/DC=x' or 'LDAP://evil' redirect the bind to an attacker host),
+#  and (c) ends at the local domain's DC= suffix - so a serverless bind cannot be
+#  steered at a foreign domain (e.g. DC=evil,DC=com) whose DsGetDcName would land
+#  the credentialed/identity bind on the attacker's DC (P2). '\' is DELIBERATELY
+#  allowed: RFC 4514 escapes RDN special chars with '\' (e.g. CN=Smith\, John,...),
+#  so it is a legitimate DN character, not a redirect vector (P3 false-positive).
+#  Match is -match/-notmatch (case-insensitive) because DN case varies.
+#
+#  PILOT ASSUMPTION: a single AD domain (the JANET host's own, derived from
+#  $env:USERDNSDOMAIN). A legitimate cross-domain / child-domain target under a
+#  different DC= suffix is REJECTED -> a multi-domain deployment needs a
+#  trusted-domain allowlist. Fail-safe (over-restrictive), documented pilot-pending.
+#
+#  NOTE: the search engine runs inside a BARE child runspace (no module scope), so
+#  this module-level copy is NOT visible there; the engine defines a byte-identical
+#  inline copy of this function (same name/body) and calls it at its SearchBase
+#  site. This copy stays exported so the predicate is unit-testable offline.
+function Test-AdSearchDnInLocalDomain {
+    param([string]$Value, [string]$ExpectDomainSuffix)
+    if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
+    if ($Value -match '/') { return $false }
+    if (-not $ExpectDomainSuffix) { return $false }
+    if ($Value -notmatch ([regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+    return $true
+}
+
+# -----------------------------------------------------------------------------
 #  The search engine, lifted verbatim from Start-AsyncSearch's $scriptBlock
 #  (Tools\ADSearchTool.ps1 lines 1298-1957). Returns an array of result
 #  hashtables. Escape-LdapFilterValue and Parse-OUFromDN are defined inline so
@@ -180,6 +211,19 @@ $script:AdSearchEngine = {
         $r = $r     -replace '\)', '\29'
         $r = $r     -replace "`0", '\00'
         return $r
+    }
+
+    # Bind-redirect guard for the SearchBase (audit P2 + P3). BYTE-IDENTICAL copy of
+    # the module-level Test-AdSearchDnInLocalDomain - inlined because this engine runs
+    # in a bare child runspace where the module function is not visible (same reason
+    # Escape-LdapFilterValue is inlined). Returns $true when SAFE to bind, $false to reject.
+    function Test-AdSearchDnInLocalDomain {
+        param([string]$Value, [string]$ExpectDomainSuffix)
+        if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
+        if ($Value -match '/') { return $false }
+        if (-not $ExpectDomainSuffix) { return $false }
+        if ($Value -notmatch ([regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+        return $true
     }
 
     # Build an AD bind that honors the operator-supplied credential when present.
@@ -289,12 +333,18 @@ $script:AdSearchEngine = {
         $sb = ([string]$SearchParams['SearchBase']).Trim()
         if (-not [string]::IsNullOrWhiteSpace($sb)) {
             # LDAP://<searchBase> is a BIND path, not a filter: a value like 'evildc/DC=x' or a
-            # full 'LDAP://evil' URL would redirect the search root bind to an attacker-chosen host.
-            # Require a plain distinguished name (starts with a DN RDN, no path chars) - same guard
-            # the AD TO scan ships (JanetWeb.adto.psm1:342). This drops the old LDAP://-prefix
-            # tolerance for a SEARCH BASE, which was the bind-redirect vector (audit P3).
-            if ($sb -notmatch '^[A-Za-z]{1,8}=' -or $sb -match '[/\\]') {
-                return @(@{ _Error = "Rejected SearchBase '$sb': must be a plain distinguished name (e.g. OU=Squadron,DC=area52,DC=mil) with no server prefix or path characters."; _Failure = $true })
+            # full 'LDAP://evil' URL would redirect the search root bind to an attacker-chosen host
+            # (P2/P3), and a bare foreign DN like 'DC=evil,DC=com' would bind SERVERLESSLY to the
+            # attacker's domain (ADSI's DsGetDcName resolves evil.com and lands the credentialed/
+            # identity bind on their DC). Require a plain DN that ENDS at THIS host's own domain
+            # suffix (derived from $env:USERDNSDOMAIN, process-level so it resolves in this bare
+            # runspace). '/' is blocked; '\' is ALLOWED (RFC 4514 escapes commas in a CN, e.g.
+            # CN=Smith\, John,...). Same hardened guard the AD TO scan ships (JanetWeb.adto.psm1).
+            $expectDom = ''
+            $__d = [string]$env:USERDNSDOMAIN
+            if ($__d) { $expectDom = (($__d -split '\.' | Where-Object { $_ } | ForEach-Object { "DC=$_" }) -join ',') }
+            if (-not (Test-AdSearchDnInLocalDomain -Value $sb -ExpectDomainSuffix $expectDom)) {
+                return @(@{ _Error = "Rejected SearchBase '$sb': must be a plain distinguished name ending at this host's domain ($(if ($expectDom) { $expectDom } else { '<USERDNSDOMAIN not set>' })), e.g. OU=Squadron,$expectDom - no server prefix, no '/' path chars, and no foreign domain."; _Failure = $true })
             }
             if ($sb -notmatch '^(?i)LDAP://') { $sb = "LDAP://$sb" }
             try {
@@ -1787,4 +1837,4 @@ function Invoke-JanetToolAction {
     return @{ rows = @($rows); summary = $summary }
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Test-AdSearchDnInLocalDomain
