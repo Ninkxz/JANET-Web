@@ -1333,7 +1333,7 @@ function Get-C2cShortHost {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$PkiCompanions, [string]$OfflineDefPath)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$PkiCompanions, [string]$OfflineDefPath, [string]$OfflineDefSha256)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
@@ -2380,10 +2380,19 @@ $script:C2cFixBlock = {
             try {
                 $remotePkg = 'C:\Windows\Temp\mpam-fe.exe'
                 Copy-Item -Path $OfflineDefPath -Destination $remotePkg -ToSession $sess -Force -ErrorAction Stop
-                $offR = Invoke-Command -Session $sess -ArgumentList $remotePkg, $SigMaxAgeHours -ErrorAction Stop -ScriptBlock {
-                    param($Pkg, $MaxAgeHours)
+                $offR = Invoke-Command -Session $sess -ArgumentList $remotePkg, $SigMaxAgeHours, $OfflineDefSha256 -ErrorAction Stop -ScriptBlock {
+                    param($Pkg, $MaxAgeHours, $ExpectHash)
                     $r = @{ Ok = $false; AgeH = $null; Note = '' }
                     try {
+                        # TOCTOU gate: the package was Authenticode/size/identity-validated admin-side and
+                        # its SHA256 pinned THEN. Re-hash the copy that actually landed on THIS target and
+                        # refuse to execute if it drifted from the pinned value (validate->push tamper).
+                        $actual = (Get-FileHash -LiteralPath $Pkg -Algorithm SHA256).Hash
+                        if ($ExpectHash -and ($actual -ne $ExpectHash)) {
+                            $r.Note = "package SHA256 mismatch (validate->push tamper) - NOT executed"
+                            Remove-Item $Pkg -Force -ErrorAction SilentlyContinue
+                            return [pscustomobject]$r
+                        }
                         $p = Start-Process -FilePath $Pkg -Wait -PassThru -ErrorAction Stop
                         $r.Note = "installer exit $($p.ExitCode)"
                         Start-Sleep -Seconds 15
@@ -2778,11 +2787,11 @@ function Resolve-C2cDefenderPackage {
         $cand = Join-Path $dir $name
         if (Test-Path -LiteralPath $cand) {
             $v = Test-C2cDefenderPackage $cand
-            if ($v -eq 'OK') { return @{ Path = $cand; Note = '' } }
-            return @{ Path = ''; Note = "offline definition package rejected ($v): $cand" }
+            if ($v -eq 'OK') { return @{ Path = $cand; Note = ''; Sha256 = (Get-FileHash -LiteralPath $cand -Algorithm SHA256).Hash } }
+            return @{ Path = ''; Note = "offline definition package rejected ($v): $cand"; Sha256 = '' }
         }
     }
-    return @{ Path = ''; Note = '' }
+    return @{ Path = ''; Note = ''; Sha256 = '' }
 }
 
 # Serialize a bundle to the compact JSON the PkiRoots worker consumes (thumbprint + b64
@@ -2838,7 +2847,9 @@ function Invoke-C2cFixAction {
     # resolved + Authenticode-validated HERE, once, before any host is dialed, and pushed
     # ONLY to hosts where every online signature source fails. Empty folder = rung off.
     $offlineDefPath = ''
+    $offlineDefSha256 = ''
     $offPkg = Resolve-C2cDefenderPackage
+    $offlineDefSha256 = [string]$offPkg.Sha256
     if ($offPkg.Note) { & $send @{ type='log'; level='warn'; text="[AntiMalware] $($offPkg.Note) - offline rung disabled this run." } }
     elseif ($offPkg.Path) {
         $offlineDefPath = [string]$offPkg.Path
@@ -3122,7 +3133,7 @@ function Invoke-C2cFixAction {
         [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cAddCertsSrc)
         [void]$ps.AddArgument([int]$sigMaxHours)
-        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($true); [void]$ps.AddArgument([string]$offlineDefPath)
+        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($true); [void]$ps.AddArgument([string]$offlineDefPath); [void]$ps.AddArgument([string]$offlineDefSha256)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
