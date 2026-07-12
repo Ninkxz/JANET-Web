@@ -46,3 +46,22 @@ scripts ORIGINATED in Desktop ("the four field ScanFix ports") and almost certai
 Rows 7, 12 (AD-TO is a net-new Web tool, no Desktop twin), 14 (XSS needs a browser DOM - Desktop has none),
 16 (HTTP admin-session gate - Desktop has no server), 21 (add-kev gate is the Web server gate). None have a
 Desktop code path to fix.
+
+## Loop-3 Desktop-mirror attempt (C2C P2s -> C2CNemesisTool) - BLOCKED by concurrent WIP
+Analyzed `C2CNemesisTool_2.4.1.ps1` against ledger rows 1-6/8. **Desktop has 5 of the 6 defects** (the field
+scripts originated there): row 1 mpam gate (regex was UNANCHORED + no product-id), **row 2 PkiRdp - the tool
+used the WRONG EKU (Client-Auth 1.3.6.1.5.5.7.3.2 instead of Server-Auth ...3.1), no HasPrivateKey, and
+cleared the old listener before binding**, row 3 Java residue removed unconditionally (no Oracle/Sun gate),
+row 4 BitLocker RESUME path had no escrow-first, row 6/8 no SHA256 pin (TOCTOU). Row 5 (MDE blob expiry) was
+NOT present (new). A fixed `C2CNemesisTool_2.5.0.ps1` with all six mirrored from the Web c2c reference was
+prepared and **parked at `X:\J.A.N.E.T\dev\proposed-security-mirror\C2CNemesisTool_2.5.0.ps1`** (parse-clean,
+BOM).
+
+**NOT COMMITTED - collision:** the Desktop repo has uncommitted work NOT authored by this loop - untracked
+`Tools\C2CNemesisTool_2.4.0.ps1` + `_2.4.1.ps1` (a C2C version line in progress; committed config still points
+to 2.3.0) and a 68-line uncommitted `dev\Sync-TakeToWork.ps1` edit. Per the hard rule (never merge over
+concurrent work), the Desktop tree was RESTORED (2.4.1 un-archived, config reverted to 2.3.0) and nothing was
+committed. Ledger rows 1-4, 6, 8 status -> **BLOCKED-DESKTOP-WIP** (defect confirmed present + fix prepared,
+awaiting the owner to commit/reconcile the 2.4.x line, then land 2.5.0). Row 5 -> the Desktop tool lacks the
+MDE path (the prepared 2.5.0 adds it as new). These remain OPEN in the ledger - not closed - until the Desktop
+commit is unblocked.
