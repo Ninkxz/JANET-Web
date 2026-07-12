@@ -18,12 +18,20 @@
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
 # =============================================================================
 
+# Shared, vendor-gated Java remediation engine (ONE copy, also used by c2c). The
+# fix-java pool worker runs in a bare runspace with no module scope, so we inject the
+# SOURCE STRING (Get-JanetJavaVerdict + Invoke-JanetJavaRemediation) and dot-source it
+# there. The security guards - vendor gate '(?i)oracle|sun microsystems' + strict-GUID
+# msiexec '^\{[0-9A-Fa-f-]+\}$' - live in that shared engine and are never forked here.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.javafix.psm1') -Force -ErrorAction SilentlyContinue
+$script:JavaFixSrc = if (Get-Command Get-JanetJavaFixSrc -ErrorAction SilentlyContinue) { Get-JanetJavaFixSrc } else { '' }
+
 function Get-JanetToolManifest {
     @{
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.5.33'
+        version  = '6.6.0'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -275,6 +283,16 @@ function Get-JanetToolManifest {
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='pairs'; label='Host + TAB + AppName pairs (one per line; filled by the scan grid)'; type='textarea'; required=$true },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=12 }
+                )
+            },
+            @{
+                id='fix-java'; label='Fix Java (Oracle/Sun only)'; kind='stream-table'; destructive=$true
+                confirm='Remove all Oracle/Sun Java OLDER than 8u491 (installed products, JavaSoft registry residue, Program Files folders) from the target host(s)? OpenJDK/Temurin/Corretto and unknown versions are NEVER touched, and the JANET dispatcher host is always dropped from the wave. Proceed?'
+                description='Vendor-gated Java cleanup driven by the SHARED engine c2c uses: on each reachable target, remove Oracle/Sun-published Java older than 1.8.0_491 - installed products (msiexec /x on strict-GUID ProductCodes only), JavaSoft registry residue (removed only when a matching Oracle/Sun Uninstall entry exists), and Program Files\Java folders. OpenJDK/Temurin/Corretto and UNKNOWN versions are left untouched. The dispatcher host is self-guarded out of the wave. One rollup row per host.'
+                columns=@('Host','Reachable','Result','Detail')
+                inputs=@(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=12 }
                 )
             },
@@ -4106,6 +4124,48 @@ $script:WptSoftwareUninstallBlock = {
     }
 }
 
+# --- Fix Java (vendor-gated, SHARED engine) -----------------------------------
+# One host per worker. Reachability via Test-WptHostReachable (injected into the
+# pool's InitialSessionState), then a session to the target where the shared source
+# ($JavaFixSrc = Get-JanetJavaFixSrc) is dot-sourced and Invoke-JanetJavaRemediation
+# runs. The vendor gate + strict-GUID guard are inside that shared engine and are
+# NEVER weakened here. Returns { Host; Reachable; Rows; Error }.
+$script:WptFixJavaBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [string]$JavaFixSrc)
+    $r = @{ Host=$Computer; Reachable=$false; Rows=@(); Error='' }
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { $r.Error = 'unreachable (TCP 5985/5986/445)'; return $r }
+    $r.Reachable = $true
+    $soP = @{ OperationTimeout=600000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
+    $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    # DNS-mismatch guard (HARD ABORT): never uninstall Java on a box that isn't the
+    # one we dialed. Name compare (no PTR on AFNET); an IPv4-literal target has no
+    # shortname to compare -> skip. If the probe can't run, proceed.
+    if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+        $targetShort = ($Computer -split '\.')[0]
+        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"; return $r
+        }
+    }
+    try {
+        $rows = Invoke-Command @splat -ArgumentList $JavaFixSrc -ScriptBlock {
+            param([string]$Src)
+            if ($Src) { try { . ([scriptblock]::Create($Src)) } catch {} }
+            if (-not (Get-Command Invoke-JanetJavaRemediation -ErrorAction SilentlyContinue)) {
+                return ,([pscustomobject]@{ Name='Java'; Action='none'; Result='FAIL'; Detail='Java remediation engine unavailable on target - nothing removed (fail-closed)' })
+            }
+            @(Invoke-JanetJavaRemediation -MinUpdate 491)
+        }
+        $r.Rows = @($rows)
+    } catch { $r.Error = "Java remediation failed: $($_.Exception.Message)" }
+    return $r
+}
+
 # --- Software Center App List (CCM_Application, mirrors WPT 6018-6029) ---------
 $script:WptAppListBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
@@ -5345,6 +5405,90 @@ function Invoke-JanetToolAction {
             } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
             & $send @{ type='status'; text="Done. $okCount removed, $failCount failed of $totalUnits." }
             return @{ rows=@($rows); summary=@{ total=$totalUnits; ok=$okCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
+        }
+        'fix-java' {
+            $threads = Get-WptThreadCount $Params 12
+            # Self-guard: DROP the JANET dispatcher host from the wave BEFORE fan-out -
+            # a Java uninstall must NEVER run against this host (mirrors reboot/restart).
+            $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+            $javaTargets = $guarded.Targets
+            if ($javaTargets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to fix (self-guard).' }
+                return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } }
+            }
+            # Fail-closed if the shared vendor-gated engine did not load.
+            if ([string]::IsNullOrWhiteSpace($script:JavaFixSrc)) {
+                & $send @{ type='log'; level='err'; text='Shared Java remediation engine (JanetWeb.javafix) unavailable - aborting (fail-closed).' }
+                return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
+            }
+            & $send @{ type='status'; text="Fixing Java (Oracle/Sun older than 8u491) on $($javaTargets.Count) host(s) with $threads thread(s)..." }
+            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
+            $iss.Commands.Add($fn)
+            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+            $pool.Open()
+            $jobs = New-Object System.Collections.ArrayList
+            foreach ($h in $javaTargets) {
+                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+                [void]$ps.AddScript($script:WptFixJavaBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($script:JavaFixSrc)
+                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
+            }
+            $rows = New-Object System.Collections.ArrayList
+            $done = 0; $okCount = 0; $failCount = 0
+            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
+            try {
+                while ($done -lt $jobs.Count) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS -and $j.Async.IsCompleted) {
+                            $res = $null; $err = $null
+                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $err = "worker error: $($_.Exception.Message)" }
+                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                            if ($err -or $null -eq $res) {
+                                if (-not $err) { $err = 'no result' }
+                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail=$err }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
+                            } elseif ($res.Error) {
+                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
+                            } else {
+                                # The shared engine returns a single rollup 'Java' row per host.
+                                $jrow = @($res.Rows)[0]
+                                $rslt = if ($jrow) { [string]$jrow.Result } else { 'NOCHANGE' }
+                                $det  = if ($jrow) { [string]$jrow.Detail } else { 'no result row' }
+                                $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
+                                if ($isOk) { $okCount++ } else { $failCount++ }
+                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
+                            }
+                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                        }
+                    }
+                    if ($done -lt $jobs.Count) {
+                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
+                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
+                        if ($cancelled -or $timedOut) {
+                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
+                            foreach ($j in $jobs) {
+                                if ($j.PS) {
+                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
+                                    $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
+                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
+                                    $done++
+                                }
+                            }
+                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned (already-dispatched removals may proceed on the host)." }
+                            break
+                        }
+                        Start-Sleep -Milliseconds 120
+                    }
+                }
+            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+            & $send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($javaTargets.Count) host(s)." }
+            return @{ rows=@($rows); summary=@{ total=$javaTargets.Count; ok=$okCount; failed=$failCount; selfSkipped=$guarded.SkippedCount; cancelled=$cancelled; timedOut=$timedOut } }
         }
         'kb-install' {
             $threads = Get-WptThreadCount $Params 16

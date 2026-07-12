@@ -573,39 +573,17 @@ $script:C2cMdeOnboardingBlob = @'
 {"body":"{\"previousOrgIds\":[],\"orgId\":\"99557bcc-8dc2-443b-af2e-08c9162c01bb\",\"geoLocationUrl\":\"https://winatp-gw-usgv.microsoft.com/\",\"datacenter\":\"UsGovVirginia\",\"vortexGeoLocation\":\"FFL4\",\"partnerGeoLocation\":\"FFL5\",\"version\":\"2.03\",\"packageGuid\":\"5ddb3710-4895-44a3-a42e-adb14bd8ce3a\"}","sig":"MiMFsO374dVHT6vhzUCAzwY21Rr4dJZZS90C4EsjHCWpCXCjKlpa7pSfI8b07rp1Xe2D5IJNh5wERf13SDSTa8C45qTOuDsgmS+H/IiKOy0GVZk1wHiq40H0jgaC+SfacldUPaCYtfu5e3kukB/ZtPDpgXt95Jqblyg7QzTPX37nWCKFfdx6RqH9cU2fKw51MRjGCX0680ce3YgiWTAszBUlRsENGJxztjSZmbZQ0thw4I20NPufdL+RBhA8S582d6qvxxNM8ssoNUpeNuhtmaMli10pbaNKVIhViGdY07C0E82BZmMjBuLWt6w/Zv7enM684cAvmchwY/muV7gWfA==","sha256sig":"MiMFsO374dVHT6vhzUCAzwY21Rr4dJZZS90C4EsjHCWpCXCjKlpa7pSfI8b07rp1Xe2D5IJNh5wERf13SDSTa8C45qTOuDsgmS+H/IiKOy0GVZk1wHiq40H0jgaC+SfacldUPaCYtfu5e3kukB/ZtPDpgXt95Jqblyg7QzTPX37nWCKFfdx6RqH9cU2fKw51MRjGCX0680ce3YgiWTAszBUlRsENGJxztjSZmbZQ0thw4I20NPufdL+RBhA8S582d6qvxxNM8ssoNUpeNuhtmaMli10pbaNKVIhViGdY07C0E82BZmMjBuLWt6w/Zv7enM684cAvmchwY/muV7gWfA==","cert":"MIIFuTCCA6GgAwIBAgITMwAAA1KuP8phV63bpgAAAAADUjANBgkqhkiG9w0BAQsFADB+MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSgwJgYDVQQDEx9NaWNyb3NvZnQgU2VjdXJlIFNlcnZlciBDQSAyMDExMB4XDTI1MDEwNzE4MjYzM1oXDTI2MDEwNzE4MjYzM1owOTE3MDUGA1UEAxMuQ2xvdWRDbGllbnRBdXRoZW50aWNhdGlvbi1GRi51c2dvdmNsb3VkYXBwLm5ldDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALIDBWZFbZbGsF/cDf0K4w4mqXXj9LB11sgg7kYkqABowL3N/lwUjfp2PY/jr/1mAzSgSGX5p4cp23mFOHNt7jisRqifVN1Vc1M9ZlA6BnVs9TndKTkEfpEshsr/eM92/hYFdyMUoxkgs6+GybvHId1tm7pgR45ZBOgtE/+IWC2AqIT6xUyKjOJkK3y4MPEnm3x7kKyTbElwPnqElyG3WJOfQtqZbT0D6B/bZUc+ucUIHObHp0XKK3PMMUkUACdu0hoqYTW7xsQ/u8F6xs1lY2QmHl5mM7yilKVcVt+Pl7Na72UA9fX+NAtd6Y8YQGn/NrNBUM0f9cH9EqNcAKhy39kCAwEAAaOCAXMwggFvMA4GA1UdDwEB/wQEAwIFIDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADA5BgNVHREEMjAwgi5DbG91ZENsaWVudEF1dGhlbnRpY2F0aW9uLUZGLnVzZ292Y2xvdWRhcHAubmV0MB0GA1UdDgQWBBRzIMpwRp9unotSJTdGI1PhGOkWzDAfBgNVHSMEGDAWgBQ2VollSctbmy88rEIWUE2RuTPXkTBTBgNVHR8ETDBKMEigRqBEhkJodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNTZWNTZXJDQTIwMTFfMjAxMS0xMC0xOC5jcmwwYAYIKwYBBQUHAQEEVDBSMFAGCCsGAQUFBzAChkRodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRzL01pY1NlY1NlckNBMjAxMV8yMDExLTEwLTE4LmNydDANBgkqhkiG9w0BAQsFAAOCAgEAMFkb2XuiBz+1dgYqNzr7H2WLKmv+44Jcw6xEzLT3qxDb5YyVGOFtE9x5tYwShJflGLok/H7OiHfphVXjTIufJPsr4yRGtdnfkK/ehuingNCLNh9UEHWdpylgpH/snZ203ljlmMkGefHjLJ7iZ+tZ+rip0jeUtdd/qepSuuCU9juRxfSHhVdZLqcoZRIxyTOocE0sv87vswfq1ps+9CGlWZHMYcJAyu4oN0ftu2g29JzWMfYbj06p811lmtP/1IclIt8zlb9NF+S/KV6/6xxTaLHhyC7257QmHqMM+G7PxPffWrEWB2TLwcFNSPfnkvSnd6Q6YJSciDtLMtg530a7kHWx25TVHlBkEEIcOnaDYeDx4qEfVB/071a+9tgLZ4L+yHhAL3v0JQVs68jRnhWawfbA4il1ckospnC3XoVbm4xWwmsYReWzSHxie0QPlIIP728WEJqTGx7yS+FSTMt4tpmaLJg78iurOlKu5PjgYVCOaiKB1D0F2oMEQTCW90BZ0I7Tjtnx0rnELxE13O49o5xf8QvtCc6LjyRYk3gTNHSFkUUNTgirWrvFfKz0vHGiR1sAhOVxay5fdW+DqH1sqfpBUVhsZEQ63IG8zkhMYYl/xUFfLGFnXrjzaOn58+GdPqDUuTR2NwFuGiI4zYPabM97sklmbBAYZIH/JcPOUAA=","chain":["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"]}
 '@
 
-# Java verdict (Java-Cleanup-ScanFix v1.1 port). SOURCE STRING so the same classifier runs
-# in module scope (unit tests) AND inside the remote fix worker (dot-sourced there). OLD /
-# OK / UNKNOWN relative to 1.8.0_<MinUpdate>; UNKNOWN is NEVER auto-removed.
-$script:C2cJavaSrc = @'
-function Get-C2cJavaVerdict {
-    param([string]$Version, [int]$MinUpdate = 491)
-    $s = "$Version".Trim()
-    if (-not $s) { return 'UNKNOWN' }
-    # Old scheme: 1.8.0_281, 1.7.0, 1.2, 1.0.1 (legacy Java Web Start keys land here too)
-    if ($s -match '^1\.(\d+)(?:\.(\d+))?(?:_(\d+))?$') {
-        $maj = [int]$Matches[1]
-        $upd = 0; if ($Matches[3]) { $upd = [int]$Matches[3] }
-        if ($maj -lt 8) { return 'OLD' }
-        if ($maj -eq 8 -and $upd -lt $MinUpdate) { return 'OLD' }
-        return 'OK'
-    }
-    # Dotted scheme: 11.0.2 (modern JDK), 8.0.2810.9 (Oracle DisplayVersion), 2.8.281.9 (auto updater)
-    if ($s -match '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') {
-        $maj = [int]$Matches[1]
-        if ($maj -ge 9) { return 'OK' }
-        if ($maj -eq 8) {
-            $u = [math]::Floor([int]$Matches[3] / 10)
-            if ($u -lt $MinUpdate) { return 'OLD' }
-            return 'OK'
-        }
-        return 'OLD'
-    }
-    # Bare major: 17, 21
-    if ($s -match '^(\d+)$') { if ([int]$Matches[1] -ge 9) { return 'OK' } return 'OLD' }
-    return 'UNKNOWN'
-}
-'@
+# Java remediation engine (Java-Cleanup-ScanFix v1.1) lives in the SHARED module
+# JanetWeb.javafix.psm1 so c2c AND wpt run ONE copy of the vendor-gated (Oracle/Sun-
+# only) removal + strict-GUID msiexec guard - no fork. The pool worker has no module
+# scope, so $script:C2cJavaSrc carries the SOURCE STRING (Get-JanetJavaVerdict +
+# Invoke-JanetJavaRemediation), injected + dot-sourced in the worker. It is also
+# dot-sourced here so the classifier resolves in module scope; Get-C2cJavaVerdict is
+# kept as a thin delegator so the c2c name (existing tests + any caller) still works.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.javafix.psm1') -Force -ErrorAction SilentlyContinue
+$script:C2cJavaSrc = if (Get-Command Get-JanetJavaFixSrc -ErrorAction SilentlyContinue) { Get-JanetJavaFixSrc } else { '' }
 try { . ([scriptblock]::Create($script:C2cJavaSrc)) } catch {}
+function Get-C2cJavaVerdict { param([string]$Version, [int]$MinUpdate = 491) Get-JanetJavaVerdict $Version $MinUpdate }
 
 # Per-pillar TIER + tiered verdict + display tag. Defined as a SOURCE STRING so it can be
 # dot-sourced BOTH in module scope (admin-side use + unit tests) AND inside each pool worker
@@ -2183,135 +2161,15 @@ $script:C2cFixBlock = {
         #    reboot pending). One 'Java' row per host with the rollup.
         if ($Pillars -contains 'Java') {
             try {
+                # Dot-source the SHARED, vendor-gated engine ($JavaSrc = Get-JanetJavaFixSrc)
+                # into this bare worker runspace, then delegate. Behavior is unchanged from the
+                # former inline block: the vendor gate ('(?i)oracle|sun microsystems') and the
+                # strict-GUID msiexec guard ('^\{[0-9A-Fa-f-]+\}$') live in Invoke-JanetJavaRemediation.
                 if ($JavaSrc) { try { . ([scriptblock]::Create($JavaSrc)) } catch {} }
-                $minUpd = 491
-                if (-not (Get-Command Get-C2cJavaVerdict -ErrorAction SilentlyContinue)) {
-                    & $add 'Java' 'none' 'FAIL' 'Java verdict helper unavailable on target - nothing removed (fail-closed)'
+                if (-not (Get-Command Invoke-JanetJavaRemediation -ErrorAction SilentlyContinue)) {
+                    & $add 'Java' 'none' 'FAIL' 'Java remediation engine unavailable on target - nothing removed (fail-closed)'
                 } else {
-                    $jFinds = New-Object System.Collections.ArrayList
-                    $jAdd = { param($src, $name, $ver, $path) $jf = [pscustomobject]@{ Source=$src; Name=[string]$name; Version=[string]$ver; Path=[string]$path; Verdict=(Get-C2cJavaVerdict $ver $minUpd); Result=$null }; [void]$jFinds.Add($jf); $jf }
-
-                    # Vendor gate for JavaSoft residue: capture the family|update token of EVERY
-                    # Oracle/Sun-published Uninstall entry found on THIS host. A JavaSoft version
-                    # subkey is pruned ONLY when its token is in this set - a JavaSoft key with no
-                    # matching Oracle/Sun install (e.g. OpenJDK/Corretto/Temurin residue) is LEFT
-                    # UNTOUCHED (registry version schemes differ, so match on family|update, not raw).
-                    $oracleKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                    $javaKey = {
-                        param([string]$v)
-                        $t = "$v".Trim()
-                        if ($t -match '^1\.(\d+)(?:\.(\d+))?(?:_(\d+))?$') { $u = 0; if ($Matches[3]) { $u = [int]$Matches[3] }; return ("$([int]$Matches[1])|$u") }
-                        if ($t -match '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') { $mj = [int]$Matches[1]; if ($mj -eq 8) { return ('8|' + [string][math]::Floor([int]$Matches[3] / 10)) } else { return ("$mj|0") } }
-                        return $null
-                    }
-
-                    # 1. Installed products (Uninstall keys, Oracle/Sun publisher only)
-                    foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
-                        if (-not (Test-Path $root)) { continue }
-                        foreach ($key in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
-                            $pJ = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
-                            if (-not $pJ) { continue }
-                            if ("$($pJ.DisplayName)" -notmatch '(?i)\bjava\b|\bj2se\b|\bjre\b|\bjdk\b') { continue }
-                            if ("$($pJ.Publisher)" -notmatch '(?i)oracle|sun microsystems') { continue }
-                            $jf = & $jAdd 'Installed' "$($pJ.DisplayName)" "$($pJ.DisplayVersion)" $key.PSPath
-                            $okj = & $javaKey "$($pJ.DisplayVersion)"; if ($okj) { [void]$oracleKeys.Add($okj) }
-                            if ($jf.Verdict -eq 'OLD') {
-                                if ($key.PSChildName -match '^\{[0-9A-Fa-f-]+\}$') {
-                                    try {
-                                        $prc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $($key.PSChildName) /qn /norestart" -Wait -PassThru -ErrorAction Stop
-                                        switch ($prc.ExitCode) {
-                                            0       { $jf.Result = 'OK - uninstalled' }
-                                            3010    { $jf.Result = 'OK - uninstalled, reboot pending' }
-                                            1605    { $jf.Result = 'OK - orphan key (product was not actually installed)' }
-                                            default { $jf.Result = "FAILED: msiexec exit $($prc.ExitCode)" }
-                                        }
-                                    } catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
-                                } else { $jf.Result = 'MANUAL: non-MSI uninstall entry - review manually' }
-                            }
-                        }
-                    }
-
-                    # 2. JavaSoft registry residue (native + WOW6432Node) + CurrentVersion repair
-                    foreach ($root in @('HKLM:\SOFTWARE\JavaSoft', 'HKLM:\SOFTWARE\WOW6432Node\JavaSoft')) {
-                        if (-not (Test-Path $root)) { continue }
-                        foreach ($product in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
-                            foreach ($vk in @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })) {
-                                $jf = & $jAdd 'Registry' "$($product.PSChildName)" $vk.PSChildName $vk.PSPath
-                                if ($jf.Verdict -eq 'OLD') {
-                                    $jsKey = & $javaKey $vk.PSChildName
-                                    if ($jsKey -and $oracleKeys.Contains($jsKey)) {
-                                        try { Remove-Item -LiteralPath $vk.PSPath -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - key removed' }
-                                        catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
-                                    } else {
-                                        $jf.Result = 'SKIP - no Oracle/Sun Uninstall entry for this version on host; JavaSoft key left untouched (may be OpenJDK/Corretto/Temurin residue)'
-                                    }
-                                }
-                            }
-                            # Repair CurrentVersion pointing at a removed version; drop empty product keys.
-                            try {
-                                $remaining = @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })
-                                $cvJ = (Get-ItemProperty $product.PSPath -ErrorAction SilentlyContinue).CurrentVersion
-                                if ($remaining.Count -eq 0) {
-                                    $hadVersions = @($jFinds | Where-Object { $_.Source -eq 'Registry' -and $_.Path -like "$($product.PSPath)*" -and $_.Result -like 'OK*' }).Count -gt 0
-                                    if ($hadVersions) {
-                                        Remove-Item -Path $product.PSPath -Recurse -Force -ErrorAction Stop
-                                        $jf2 = & $jAdd 'Registry' "$($product.PSChildName)" '' $product.PSPath
-                                        $jf2.Verdict = 'OLD'; $jf2.Result = 'OK - empty product key removed'
-                                    }
-                                }
-                                elseif ($cvJ -and ($remaining.PSChildName -notcontains $cvJ)) {
-                                    $newest = ($remaining.PSChildName | Sort-Object)[-1]
-                                    Set-ItemProperty -Path $product.PSPath -Name CurrentVersion -Value $newest -ErrorAction Stop
-                                    $jf3 = & $jAdd 'Registry' "$($product.PSChildName)" "CurrentVersion -> $newest" $product.PSPath
-                                    $jf3.Verdict = 'OK'; $jf3.Result = 'OK - CurrentVersion repointed to newest remaining version'
-                                }
-                            } catch {
-                                $jf4 = & $jAdd 'Registry' "$($product.PSChildName)" '' $product.PSPath
-                                $jf4.Verdict = 'OLD'; $jf4.Result = "FAILED (product key cleanup): $($_.Exception.Message)"
-                            }
-                        }
-                    }
-
-                    # 3. Filesystem residue (Program Files Java dirs; in-use folders report FAILED)
-                    foreach ($root in @("$env:ProgramFiles\Java", "${env:ProgramFiles(x86)}\Java")) {
-                        if (-not $root -or -not (Test-Path $root)) { continue }
-                        foreach ($dir in @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue)) {
-                            $verJ = ''
-                            if ($dir.Name -match '(\d+(?:\.\d+)*(?:_\d+)?)') { $verJ = $Matches[1] }
-                            if (-not $verJ) {
-                                $exeJ = Join-Path $dir.FullName 'bin\java.exe'
-                                if (Test-Path $exeJ) { $verJ = "$((Get-Item $exeJ).VersionInfo.FileVersion)" }
-                            }
-                            $jf = & $jAdd 'FileSystem' $dir.Name $verJ $dir.FullName
-                            if ($jf.Verdict -eq 'OLD') {
-                                try { Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - folder removed' }
-                                catch { $jf.Result = "FAILED (likely in use): $($_.Exception.Message)" }
-                            }
-                        }
-                    }
-
-                    # Rollup: one 'Java' row. Only 'Installed' findings count as a working runtime.
-                    $jOld    = @($jFinds | Where-Object { $_.Verdict -eq 'OLD' })
-                    $jOk     = @($jFinds | Where-Object { $_.Verdict -eq 'OK' })
-                    $jUnk    = @($jFinds | Where-Object { $_.Verdict -eq 'UNKNOWN' })
-                    $jFixed  = @($jOld | Where-Object { "$($_.Result)" -like 'OK*' })
-                    $jFailed = @($jOld | Where-Object { "$($_.Result)" -like 'FAILED*' })
-                    $jManual = @($jOld | Where-Object { "$($_.Result)" -like 'MANUAL*' })
-                    $instOk  = @($jFinds | Where-Object { $_.Source -eq 'Installed' -and $_.Verdict -eq 'OK' })
-                    $instAll = @($jFinds | Where-Object { $_.Source -eq 'Installed' })
-                    $jState  = if ($instOk.Count -gt 0) { "CURRENT ($(@($instOk | ForEach-Object { $_.Version } | Sort-Object -Unique) -join ', '))" }
-                               elseif ($instAll.Count -eq 0) { 'NO JAVA INSTALLED' }
-                               else { 'NO CURRENT JAVA' }
-                    $oldTxt = (@($jOld | ForEach-Object { "$($_.Source):$($_.Version)$(if ("$($_.Result)" -like 'FAILED*') { ' [FAILED]' } elseif ("$($_.Result)" -like 'MANUAL*') { ' [MANUAL]' })" } | Sort-Object -Unique) -join '; ')
-                    if ($oldTxt.Length -gt 400) { $oldTxt = $oldTxt.Substring(0, 400) + ' ...' }
-                    $unkTxt = if ($jUnk.Count -gt 0) { "; $($jUnk.Count) UNKNOWN version(s) left for manual review" } else { '' }
-                    if ($jOld.Count -eq 0) {
-                        & $add 'Java' 'none' 'NOCHANGE' "no Java older than 1.8.0_$minUpd found ($($jFinds.Count) finding(s), $($jOk.Count) OK); state: $jState$unkTxt"
-                    } elseif ($jFailed.Count -eq 0 -and $jManual.Count -eq 0) {
-                        & $add 'Java' 'cleanup' 'FIXED' "removed $($jFixed.Count) OLD item(s) [$oldTxt]; state: $jState$unkTxt"
-                    } else {
-                        & $add 'Java' 'cleanup' 'FAIL' "removed $($jFixed.Count), failed $($jFailed.Count), manual $($jManual.Count) of $($jOld.Count) OLD item(s) [$oldTxt]; state: $jState$unkTxt"
-                    }
+                    foreach ($row in @(Invoke-JanetJavaRemediation -MinUpdate 491)) { & $add $row.Name $row.Action $row.Result $row.Detail }
                 }
             } catch { & $add 'Java' 'error' 'FAIL' $_.Exception.Message }
         }
