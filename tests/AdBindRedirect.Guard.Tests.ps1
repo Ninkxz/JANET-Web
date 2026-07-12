@@ -30,6 +30,8 @@ $Reject = @(
     'evilhost/DC=area52,DC=mil'                           # explicit-server form (has '/')
     'LDAP://evil'                                         # full LDAP URL redirect
     'CN=x,DC=notarea52,DC=mil'                            # look-alike suffix that is NOT the local domain
+    'DC=evil,DC=area52,DC=mil'                            # P3: child-subdomain prepend -> distinct domain evil.area52.mil (extra DC=)
+    'CN=ABDC=AREA52,DC=MIL'                               # P3: suffix as a mid-string substring, not a component boundary
 )
 
 Describe 'AD bind-redirect guard - AD Search pure predicate' {

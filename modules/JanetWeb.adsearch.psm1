@@ -176,9 +176,12 @@ function ConvertTo-JanetMachineList {
 #  Match is -match/-notmatch (case-insensitive) because DN case varies.
 #
 #  PILOT ASSUMPTION: a single AD domain (the JANET host's own, derived from
-#  $env:USERDNSDOMAIN). A legitimate cross-domain / child-domain target under a
-#  different DC= suffix is REJECTED -> a multi-domain deployment needs a
-#  trusted-domain allowlist. Fail-safe (over-restrictive), documented pilot-pending.
+#  $env:USERDNSDOMAIN). A child that is a strict SUBTREE of the local domain (a
+#  deeper DN under the SAME DC= suffix, e.g. OU=x,DC=area52,DC=mil) is ACCEPTED; a
+#  DIFFERENT domain - sibling, parent, or a foreign child like DC=evil,DC=area52,
+#  DC=mil whose own DC-tail differs (real domain evil.area52.mil) - is REJECTED. A
+#  genuine separate child / trusted DOMAIN needs the pilot allowlist. Fail-safe
+#  (over-restrictive), documented pilot-pending.
 #
 #  NOTE: the search engine runs inside a BARE child runspace (no module scope), so
 #  this module-level copy is NOT visible there; the engine defines a byte-identical
@@ -189,7 +192,14 @@ function Test-AdSearchDnInLocalDomain {
     if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
     if ($Value -match '/') { return $false }
     if (-not $ExpectDomainSuffix) { return $false }
-    if ($Value -notmatch ([regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+    # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
+    # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
+    if ($Value -notmatch ('(^|,)' + [regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+    # and the value must carry NO EXTRA DC= component beyond the expected suffix - so a child
+    # subdomain prepend (DC=evil,DC=area52,DC=mil -> the distinct domain evil.area52.mil) is rejected
+    $dcInValue  = ([regex]::Matches($Value, '(?i)(^|,)DC=')).Count
+    $dcInSuffix = ([regex]::Matches($ExpectDomainSuffix, '(?i)(^|,)DC=')).Count
+    if ($dcInValue -ne $dcInSuffix) { return $false }
     return $true
 }
 
@@ -222,7 +232,14 @@ $script:AdSearchEngine = {
         if ($Value -notmatch '^[A-Za-z]{1,8}=') { return $false }
         if ($Value -match '/') { return $false }
         if (-not $ExpectDomainSuffix) { return $false }
-        if ($Value -notmatch ([regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+        # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
+        # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
+        if ($Value -notmatch ('(^|,)' + [regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+        # and the value must carry NO EXTRA DC= component beyond the expected suffix - so a child
+        # subdomain prepend (DC=evil,DC=area52,DC=mil -> the distinct domain evil.area52.mil) is rejected
+        $dcInValue  = ([regex]::Matches($Value, '(?i)(^|,)DC=')).Count
+        $dcInSuffix = ([regex]::Matches($ExpectDomainSuffix, '(?i)(^|,)DC=')).Count
+        if ($dcInValue -ne $dcInSuffix) { return $false }
         return $true
     }
 
