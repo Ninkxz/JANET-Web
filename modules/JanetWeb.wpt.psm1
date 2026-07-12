@@ -495,6 +495,17 @@ function Get-WptLocalIdentity {
         if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
     } catch {}
     try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # Also every locally-BOUND unicast IPv4 (mgmt\OOB NICs, lagging DNS): a bound IP not
+    # registered under this box's own name would otherwise slip the self-guard when pasted as
+    # an IP literal (audit P3; parity with acas/restart's identity set).
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
     $script:WptLocalIdentity = $set
     return $set
 }

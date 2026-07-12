@@ -564,8 +564,9 @@ $script:C2cMdeOrgId = '99557BCC-8DC2-443B-AF2E-08C9162C01BB'
 
 # MDE OnboardingInfo blob (Defender-ScanFix v2.1 port). This is the TENANT-WIDE value the
 # ATP GPO deploys - identical on every machine in the org (captured from a correctly
-# onboarded host 10 Jul 2026; the signing cert inside expires Jan 2027 - re-capture from a
-# good host if Microsoft rotates the payload). The AntiMalware fixer uses it as the LAST
+# onboarded host 10 Jul 2026; the embedded signing cert EXPIRED 2026-01-07 - the payload
+# needs re-capture from a healthy host (pilot-pending) before onboarding heal can take). The
+# AntiMalware fixer uses it as the LAST
 # rung of the onboarding heal ladder (deps -> gpupdate -> blob): written ONLY when the ATP
 # policy key is still empty after gpupdate, as a bridge until the GPO asserts the SAME value.
 $script:C2cMdeOnboardingBlob = @'
@@ -1779,6 +1780,19 @@ $script:C2cFixBlock = {
                             # present + ready; best-effort, the resume below still runs either way).
                             $tpmProtTxt = ''
                             if ($isOsVol) {
+                                # Escrow-first: NEVER resume a TPM-only OS volume. If no RecoveryPassword
+                                # protector exists, add + escrow one via the SAME fail-closed path the enable
+                                # branch uses; if escrow fails, SKIP the resume to avoid a TPM-only lockout.
+                                $hasRpProt = $false
+                                try { $hasRpProt = @($bv.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)RecoveryPassword' }).Count -gt 0 } catch { $hasRpProt = $false }
+                                if (-not $hasRpProt) {
+                                    $efR = & $escrowFirst $mp $bv
+                                    if (-not $efR.Ok) {
+                                        & $add 'Encryption' 'none' 'SKIP' "$mp no escrowed recovery protector - resume skipped to avoid TPM-only lockout ($($efR.Detail))"
+                                        continue
+                                    }
+                                    $tpmProtTxt = "; recovery protector added + escrowed to $([string]$efR.Target)"
+                                }
                                 $hasTpmProt = $false
                                 try { $hasTpmProt = @($bv.KeyProtector | Where-Object { [string]$_.KeyProtectorType -match '(?i)Tpm' }).Count -gt 0 } catch { $hasTpmProt = $false }
                                 if (-not $hasTpmProt) {
@@ -1787,10 +1801,10 @@ $script:C2cFixBlock = {
                                             $tpR = Get-Tpm -ErrorAction Stop
                                             if ([bool]$tpR.TpmPresent -and [bool]$tpR.TpmReady) {
                                                 Add-BitLockerKeyProtector -MountPoint $mp -TpmProtector -ErrorAction Stop | Out-Null
-                                                $tpmProtTxt = '; missing TPM protector added'
-                                            } else { $tpmProtTxt = '; NOTE: no TPM protector and TPM not present/ready - resume may not stick' }
+                                                $tpmProtTxt += '; missing TPM protector added'
+                                            } else { $tpmProtTxt += '; NOTE: no TPM protector and TPM not present/ready - resume may not stick' }
                                         }
-                                    } catch { $tpmProtTxt = "; TPM protector add failed ($($_.Exception.Message))" }
+                                    } catch { $tpmProtTxt += "; TPM protector add failed ($($_.Exception.Message))" }
                                 }
                             }
                             $act = 'Resume-BitLocker'
@@ -1963,6 +1977,18 @@ $script:C2cFixBlock = {
                         $bo = "$MdeBlob" | ConvertFrom-Json; $bb = $bo.body | ConvertFrom-Json
                         $blobUsable = ("$($bb.orgId)".Trim().ToUpper() -eq $MdeOrgId.Trim().ToUpper())
                     } catch { $blobUsable = $false }
+                    # Advisory (non-blocking): the embedded blob is signed; if that leaf cert has
+                    # expired, Sense will reject the local blob and onboarding heal will not take.
+                    # Surface it and continue - re-capture needs a live domain, not done here.
+                    try {
+                        $bCert = "$MdeBlob" | ConvertFrom-Json
+                        if ($bCert.cert) {
+                            $leafC = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(, [Convert]::FromBase64String([string]$bCert.cert))
+                            if ($leafC.NotAfter -lt (Get-Date)) {
+                                & $add 'MdeOnboard' 'advisory' 'IN PROGRESS' "MDE onboarding blob signing cert EXPIRED $($leafC.NotAfter.ToString('yyyy-MM-dd')) - re-capture from a healthy host; onboarding heal will not take until then"
+                            }
+                        }
+                    } catch {}
                     # Gateway reachability (blob geoLocationUrl, else the USGov default) - the WHY
                     # for a fail: nothing local can complete onboarding if 443 is blocked.
                     $gwHost = 'winatp-gw-usgv.microsoft.com'
@@ -2106,7 +2132,7 @@ $script:C2cFixBlock = {
             #     certificate (self-signed / expired / missing). A healthy CA-issued
             #     listener is NEVER touched (silent). Reordered SAFE for auto-run: the
             #     replacement cert (newest valid My-store cert matching this computer with
-            #     the Client Authentication EKU 1.3.6.1.5.5.7.3.2) is located FIRST - with
+            #     the Server Authentication EKU 1.3.6.1.5.5.7.3.1) is located FIRST - with
             #     no candidate the listener is left alone (SKIP), nothing is cleared.
             try {
                 $tsgs = Get-CimInstance -Namespace 'root/cimv2/terminalservices' -ClassName 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'" -ErrorAction Stop
@@ -2124,16 +2150,22 @@ $script:C2cFixBlock = {
                 $rdpState = if (-not $lcert) { 'missing' } elseif ($lcert.NotAfter -lt $nowRd) { 'expired' } elseif ($lcert.Subject -eq $lcert.Issuer) { 'self-signed' } else { 'healthy' }
                 if ($rdpState -ne 'healthy') {
                     $cand = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
-                        $_.DnsNameList -match $env:COMPUTERNAME -and $_.NotAfter -gt $nowRd -and
-                        @($_.EnhancedKeyUsageList | Where-Object { [string]$_.ObjectId -eq '1.3.6.1.5.5.7.3.2' }).Count -gt 0
+                        (@($_.DnsNameList | ForEach-Object { [string]$_.Unicode } | Where-Object { $_ -eq $env:COMPUTERNAME -or (($_ -split '\.')[0] -eq $env:COMPUTERNAME) }).Count -gt 0) -and $_.NotAfter -gt $nowRd -and $_.HasPrivateKey -and
+                        @($_.EnhancedKeyUsageList | Where-Object { [string]$_.ObjectId -eq '1.3.6.1.5.5.7.3.1' }).Count -gt 0
                     } | Sort-Object NotAfter -Descending | Select-Object -First 1
                     if (-not $cand) {
-                        & $add 'PkiRdp' 'none' 'SKIP' "RDP listener cert is $rdpState but no valid CA-issued My-store cert (Client Auth EKU) matches this host - left untouched"
+                        & $add 'PkiRdp' 'none' 'SKIP' "RDP listener cert is $rdpState but no valid CA-issued My-store cert (Server Auth EKU) matches this host - left untouched"
                     } else {
-                        Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name 'SelfSignedCertStore' -Value '' -Force -ErrorAction SilentlyContinue
-                        Set-CimInstance -InputObject $tsgs -Property @{ SSLCertificateSHA1Hash = [string]$cand.Thumbprint } -ErrorAction Stop | Out-Null
-                        & $add 'PkiRdp' 'rebind' 'FIXED' "RDP listener was $rdpState - bound CA-issued cert $($cand.Thumbprint) (expires $($cand.NotAfter.ToShortDateString()))"
+                        # Bind FIRST; only on a successful bind do the destructive clears run. On a bind
+                        # failure the old cert/listener are left intact (FAIL) - no dead-listener window.
+                        try {
+                            Set-CimInstance -InputObject $tsgs -Property @{ SSLCertificateSHA1Hash = [string]$cand.Thumbprint } -ErrorAction Stop | Out-Null
+                            Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name 'SelfSignedCertStore' -Value '' -Force -ErrorAction SilentlyContinue
+                            & $add 'PkiRdp' 'rebind' 'FIXED' "RDP listener was $rdpState - bound CA-issued cert $($cand.Thumbprint) (expires $($cand.NotAfter.ToShortDateString()))"
+                        } catch {
+                            & $add 'PkiRdp' 'rebind' 'FAIL' "RDP listener was $rdpState - bind to CA-issued cert $($cand.Thumbprint) FAILED, old cert/listener left intact: $($_.Exception.Message)"
+                        }
                     }
                 }
             } catch { & $add 'PkiRdp' 'rebind' 'FAIL' ("RDP listener check/repair error: " + $_.Exception.Message) }
@@ -2159,6 +2191,20 @@ $script:C2cFixBlock = {
                     $jFinds = New-Object System.Collections.ArrayList
                     $jAdd = { param($src, $name, $ver, $path) $jf = [pscustomobject]@{ Source=$src; Name=[string]$name; Version=[string]$ver; Path=[string]$path; Verdict=(Get-C2cJavaVerdict $ver $minUpd); Result=$null }; [void]$jFinds.Add($jf); $jf }
 
+                    # Vendor gate for JavaSoft residue: capture the family|update token of EVERY
+                    # Oracle/Sun-published Uninstall entry found on THIS host. A JavaSoft version
+                    # subkey is pruned ONLY when its token is in this set - a JavaSoft key with no
+                    # matching Oracle/Sun install (e.g. OpenJDK/Corretto/Temurin residue) is LEFT
+                    # UNTOUCHED (registry version schemes differ, so match on family|update, not raw).
+                    $oracleKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $javaKey = {
+                        param([string]$v)
+                        $t = "$v".Trim()
+                        if ($t -match '^1\.(\d+)(?:\.(\d+))?(?:_(\d+))?$') { $u = 0; if ($Matches[3]) { $u = [int]$Matches[3] }; return ("$([int]$Matches[1])|$u") }
+                        if ($t -match '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') { $mj = [int]$Matches[1]; if ($mj -eq 8) { return ('8|' + [string][math]::Floor([int]$Matches[3] / 10)) } else { return ("$mj|0") } }
+                        return $null
+                    }
+
                     # 1. Installed products (Uninstall keys, Oracle/Sun publisher only)
                     foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
                         if (-not (Test-Path $root)) { continue }
@@ -2168,6 +2214,7 @@ $script:C2cFixBlock = {
                             if ("$($pJ.DisplayName)" -notmatch '(?i)\bjava\b|\bj2se\b|\bjre\b|\bjdk\b') { continue }
                             if ("$($pJ.Publisher)" -notmatch '(?i)oracle|sun microsystems') { continue }
                             $jf = & $jAdd 'Installed' "$($pJ.DisplayName)" "$($pJ.DisplayVersion)" $key.PSPath
+                            $okj = & $javaKey "$($pJ.DisplayVersion)"; if ($okj) { [void]$oracleKeys.Add($okj) }
                             if ($jf.Verdict -eq 'OLD') {
                                 if ($key.PSChildName -match '^\{[0-9A-Fa-f-]+\}$') {
                                     try {
@@ -2191,8 +2238,13 @@ $script:C2cFixBlock = {
                             foreach ($vk in @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })) {
                                 $jf = & $jAdd 'Registry' "$($product.PSChildName)" $vk.PSChildName $vk.PSPath
                                 if ($jf.Verdict -eq 'OLD') {
-                                    try { Remove-Item -Path $vk.PSPath -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - key removed' }
-                                    catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
+                                    $jsKey = & $javaKey $vk.PSChildName
+                                    if ($jsKey -and $oracleKeys.Contains($jsKey)) {
+                                        try { Remove-Item -LiteralPath $vk.PSPath -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - key removed' }
+                                        catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
+                                    } else {
+                                        $jf.Result = 'SKIP - no Oracle/Sun Uninstall entry for this version on host; JavaSoft key left untouched (may be OpenJDK/Corretto/Temurin residue)'
+                                    }
                                 }
                             }
                             # Repair CurrentVersion pointing at a removed version; drop empty product keys.
@@ -2232,7 +2284,7 @@ $script:C2cFixBlock = {
                             }
                             $jf = & $jAdd 'FileSystem' $dir.Name $verJ $dir.FullName
                             if ($jf.Verdict -eq 'OLD') {
-                                try { Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - folder removed' }
+                                try { Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop; $jf.Result = 'OK - folder removed' }
                                 catch { $jf.Result = "FAILED (likely in use): $($_.Exception.Message)" }
                             }
                         }
@@ -2707,7 +2759,13 @@ function Test-C2cDefenderPackage {
     if ($len -lt 50MB) { return "too small ($([math]::Round($len / 1MB, 0)) MB) - not a full definition package" }
     $sig = Get-AuthenticodeSignature -FilePath $Path
     if ($sig.Status -ne 'Valid') { return "signature $($sig.Status)" }
-    if ("$($sig.SignerCertificate.Subject)" -notmatch 'O=Microsoft Corporation') { return "signer is not Microsoft: $($sig.SignerCertificate.Subject)" }
+    if ("$($sig.SignerCertificate.Subject)" -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') { return "signer is not Microsoft: $($sig.SignerCertificate.Subject)" }
+    # Product identity: a Microsoft-signed EXE is not enough - require the Defender definition
+    # package specifically (mpam OriginalFilename, or the Antimalware/Defender ProductName).
+    $vi = (Get-Item -LiteralPath $Path).VersionInfo
+    if (("$($vi.OriginalFilename)" -notmatch '(?i)mpam') -and ("$($vi.ProductName)" -notmatch '(?i)antimalware|defender')) {
+        return "not a Defender definition package (OriginalFilename='$($vi.OriginalFilename)', ProductName='$($vi.ProductName)')"
+    }
     return 'OK'
 }
 
