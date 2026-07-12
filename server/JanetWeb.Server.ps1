@@ -288,6 +288,12 @@ function Start-JanetWebServer {
     $pendingAccept = $null
     try {
         while ($listener.IsListening) {
+            # Live usage snapshots: every accept-loop pass (each request AND each 2 s
+            # heartbeat tick) offer the logging bridge a chance to flush cumulative
+            # per-tool usage rows (RowType='Snapshot', ~5 min cadence, only when new
+            # activity was tallied). Without this the dashboard sees NOTHING until a
+            # clean server stop - and nothing EVER if the console is killed.
+            try { Write-JanetWebUsageSnapshot -Context $state.LogCtx } catch {}
             # Heartbeat accept: one async accept stays armed; wait in 2 s slices so
             # Ctrl+C is honored promptly and the reaper runs even when no client is
             # polling. Requests are still handled strictly on this one thread.

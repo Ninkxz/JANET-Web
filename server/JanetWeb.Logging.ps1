@@ -264,6 +264,10 @@ function New-JanetWebLogContext {
         # SessionEnd rollup emits one usage row PER TOOL used (desktop parity), not just one
         # aggregate JANET-WEB row. Populated under $Lock by Write-JanetAction.
         PerTool    = ([hashtable]::Synchronized(@{}))
+        # Live-usage snapshot state (Write-JanetWebUsageSnapshot): UsageDirty is set by
+        # Write-JanetAction whenever a tallied row lands; the snapshot writer clears it.
+        UsageDirty     = $false
+        LastSnapshotAt = $now
         Lock       = (New-Object object)
     })
 
@@ -449,6 +453,7 @@ function Write-JanetAction {
             if ($Result -eq 'Failure') { $pt.Failures++ }
             if ($Action -eq 'VulnPatched' -and $Result -ne 'Failure') { $pt.Vulns += [int]$ItemCount }
             $pt.Last = Get-Date
+            $Context.UsageDirty = $true   # something new for the next live-usage snapshot
         } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
 
         $file = ((Get-Date).ToString('yyyy-MM') + '_detail.csv')   # month at write time (rollover-safe)
@@ -511,6 +516,58 @@ function Write-JanetWebRollup {
         # Aggregate JANET-WEB session row (carries the operator's closing notes).
         $durMin = [math]::Round(((Get-Date) - $Context.StartedAt).TotalMinutes, 1)
         & $addRow 'JANET-WEB' $Context.Hosts.Count $Context.Vulns $Context.Failures $durMin $ClosingNotes
+    } catch {}
+}
+
+function Write-JanetWebUsageSnapshot {
+    <#  LIVE usage rows -> Logs\<YYYY-MM>_usage.csv, RowType='Snapshot', CUMULATIVE
+        per-tool counters. WHY: the SessionEnd rollup only lands on a CLEAN server
+        stop (finally block) - a JANET Web server left running for days writes NO
+        usage rows the whole time, and a killed console / reboot loses the rollup
+        outright, so the dashboard never sees the web activity even though the
+        detail CSVs stream live. The dashboard's per-(SessionId,Tool) dedupe keeps
+        the LATEST Snapshot and lets a SessionEnd row supersede the whole series,
+        so re-emitting cumulative counts never double-counts.
+        No-op unless Write-JanetAction tallied something since the last snapshot
+        (UsageDirty) AND MinIntervalSec has elapsed. Call it cheaply and often
+        (the server calls it every accept-loop pass). NEVER THROWS. #>
+    param([Parameter(Mandatory)] $Context, [int]$MinIntervalSec = 300)
+    if (-not $Context) { return }
+    try {
+        if (-not $Context.UsageDirty) { return }
+        if (((Get-Date) - $Context.LastSnapshotAt).TotalSeconds -lt $MinIntervalSec) { return }
+
+        # Snapshot PerTool under the lock (same idiom as the SessionEnd rollup).
+        $snap = @()
+        [System.Threading.Monitor]::Enter($Context.Lock)
+        try {
+            foreach ($e in $Context.PerTool.GetEnumerator()) {
+                $pt = $e.Value
+                $snap += [pscustomobject]@{
+                    Tool   = [string]$e.Key
+                    Hosts  = $pt.Hosts.Count
+                    Vulns  = [int]$pt.Vulns
+                    Fails  = [int]$pt.Failures
+                    DurMin = [math]::Round(($pt.Last - $pt.First).TotalMinutes, 1)
+                }
+            }
+            $Context.UsageDirty = $false
+            $Context.LastSnapshotAt = Get-Date
+        } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
+        if ($snap.Count -eq 0) { return }
+
+        $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        $file = ((Get-Date).ToString('yyyy-MM') + '_usage.csv')
+        $netFile   = Join-Path $Context.NetRoot $file
+        $localFile = Join-Path (Join-Path (Join-Path $Context.JanetLocal '_Rollup') $Context.UserFolder) $file
+        $header = 'Timestamp,SessionId,Operator,ASI,Tool,ToolVersion,RowType,HostsTouched,VulnsPatched,Failures,DurationMin,ClosingNotes'
+        foreach ($s in $snap) {
+            $line = ConvertTo-JanetWebCsvLine @(
+                $ts, $Context.SessionId, $Context.Operator, $Context.Asi,
+                $s.Tool, $Context.Version, 'Snapshot', $s.Hosts, $s.Vulns, $s.Fails, $s.DurMin, ''
+            )
+            Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
+        }
     } catch {}
 }
 
