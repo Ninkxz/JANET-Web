@@ -122,7 +122,12 @@
   // Serialize to CSV text (CRLF rows, trailing CRLF). rows = array of value-arrays,
   // OR array of objects (keys defaults to headers; pass keys to pull other columns).
   function toCsv(headers, rows, keys) {
-    function q(v) { v = v == null ? '' : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+    // Neutralize spreadsheet formula injection (a cell beginning = + - @ tab CR is run as a
+    // formula by Excel/Sheets) BEFORE RFC-4180 quoting. Every toCsv caller exports remote-
+    // harvested rows (BIOS Model, admin names, filenames), so a compromised host could smuggle
+    // =cmd|'/c calc'!A1 here; the ' prefix renders it literal. Parity with reports.psm1 / wpt
+    // Protect-WptCsvCell. (audit loop7 P2)
+    function q(v) { v = v == null ? '' : String(v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
     keys = keys || headers || [];
     var body = (rows || []).map(function (r) {
       return (Array.isArray(r) ? r : keys.map(function (k) { return r[k]; })).map(q).join(',');
