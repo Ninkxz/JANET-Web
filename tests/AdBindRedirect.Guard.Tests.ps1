@@ -24,6 +24,7 @@ $Accept = @(
     'OU=Squadron,DC=area52,DC=mil'                       # lower-case, ends at local domain
     'CN=Doe\, Jane,OU=Users,DC=AREA52,DC=MIL'            # RFC-4514 escaped comma-CN (P3): '\' is legit
     'DC=area52,DC=mil'                                    # the bare domain root itself
+    'CN=Report\,DC=Legacy,OU=x,DC=area52,DC=mil'         # P3-B (loop8): escaped comma+DC= inside CN, real domain is still area52.mil
 )
 $Reject = @(
     'DC=evil,DC=com'                                      # P2: foreign domain -> serverless attacker bind
@@ -32,6 +33,7 @@ $Reject = @(
     'CN=x,DC=notarea52,DC=mil'                            # look-alike suffix that is NOT the local domain
     'DC=evil,DC=area52,DC=mil'                            # P3: child-subdomain prepend -> distinct domain evil.area52.mil (extra DC=)
     'CN=ABDC=AREA52,DC=MIL'                               # P3: suffix as a mid-string substring, not a component boundary
+    'CN=x\,DC=area52,DC=mil'                              # P3-A (loop8): escaped comma -> real domain is parent 'mil', a redirect to an ancestor
 )
 
 Describe 'AD bind-redirect guard - AD Search pure predicate' {
@@ -67,11 +69,11 @@ Describe 'AD bind-redirect guard - AD Nemesis pure predicate' {
     }
 }
 
-Describe 'AD bind-redirect guard - both AD Search copies use identical logic' {
-    # The engine runs in a bare child runspace (no module scope), so it defines an
-    # INLINE copy of Test-AdSearchDnInLocalDomain. Extract every definition from the
-    # source and assert their normalized bodies are byte-identical (defence against
-    # one copy drifting from the other).
+Describe 'AD bind-redirect guard - all three predicate copies use identical logic' {
+    # The predicate ships in THREE places that must never drift: (1) the adsearch
+    # module-level Test-AdSearchDnInLocalDomain, (2) its byte-identical INLINE copy in
+    # the bare-child-runspace engine, and (3) the adto Test-AdToDnInLocalDomain. Extract
+    # every definition and assert their normalized bodies match (defence against drift).
     function Get-FnBodies {
         param([string]$Src, [string]$Name)
         $lines = $Src -split "`r?`n"
@@ -90,13 +92,21 @@ Describe 'AD bind-redirect guard - both AD Search copies use identical logic' {
         return $bodies
     }
 
-    $src    = Get-Content $script:AdSearchPsm1 -Raw
-    $bodies = @(Get-FnBodies -Src $src -Name 'Test-AdSearchDnInLocalDomain')
+    $srcSearch = Get-Content $script:AdSearchPsm1 -Raw
+    $srcTo     = Get-Content $script:AdToPsm1     -Raw
+    $bodies    = @(Get-FnBodies -Src $srcSearch -Name 'Test-AdSearchDnInLocalDomain')
+    $toBodies  = @(Get-FnBodies -Src $srcTo     -Name 'Test-AdToDnInLocalDomain')
 
-    It 'defines the predicate twice (module-level helper + inline engine copy)' {
+    It 'defines the adsearch predicate twice (module-level helper + inline engine copy)' {
         $bodies.Count | Should Be 2
     }
-    It 'the two copies are byte-identical after whitespace normalization' {
+    It 'the two adsearch copies are byte-identical after whitespace normalization' {
         $bodies[0] | Should Be $bodies[1]
+    }
+    It 'defines the adto predicate exactly once' {
+        $toBodies.Count | Should Be 1
+    }
+    It 'the adto copy is byte-identical to the adsearch copy after whitespace normalization' {
+        $toBodies[0] | Should Be $bodies[0]
     }
 }

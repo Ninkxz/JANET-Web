@@ -194,10 +194,15 @@ function Test-AdSearchDnInLocalDomain {
     if (-not $ExpectDomainSuffix) { return $false }
     # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
     # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
-    if ($Value -notmatch ('(^|,)' + [regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+    # RFC-4514: an RDN value escapes special chars (comma, plus, quote, ...) with a backslash,
+    # e.g. CN=Smith\, John. Strip every \<char> escape pair BEFORE the boundary/count checks so an
+    # escaped comma inside a value can't manufacture a fake component boundary (false-accept to an
+    # ancestor domain) or inflate the DC-count (false-reject a legit escaped DN). (audit loop8 P3)
+    $bare = $Value -replace '\\.', ''
+    if ($bare -notmatch ('(^|,)' + [regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
     # and the value must carry NO EXTRA DC= component beyond the expected suffix - so a child
     # subdomain prepend (DC=evil,DC=area52,DC=mil -> the distinct domain evil.area52.mil) is rejected
-    $dcInValue  = ([regex]::Matches($Value, '(?i)(^|,)DC=')).Count
+    $dcInValue  = ([regex]::Matches($bare, '(?i)(^|,)DC=')).Count
     $dcInSuffix = ([regex]::Matches($ExpectDomainSuffix, '(?i)(^|,)DC=')).Count
     if ($dcInValue -ne $dcInSuffix) { return $false }
     return $true
@@ -234,10 +239,15 @@ $script:AdSearchEngine = {
         if (-not $ExpectDomainSuffix) { return $false }
         # the domain suffix must sit at a COMPONENT boundary (string start or right after a comma),
         # not merely as a trailing substring (blocks e.g. CN=ABDC=AREA52,DC=MIL)
-        if ($Value -notmatch ('(^|,)' + [regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
+        # RFC-4514: an RDN value escapes special chars (comma, plus, quote, ...) with a backslash,
+        # e.g. CN=Smith\, John. Strip every \<char> escape pair BEFORE the boundary/count checks so an
+        # escaped comma inside a value can't manufacture a fake component boundary (false-accept to an
+        # ancestor domain) or inflate the DC-count (false-reject a legit escaped DN). (audit loop8 P3)
+        $bare = $Value -replace '\\.', ''
+        if ($bare -notmatch ('(^|,)' + [regex]::Escape($ExpectDomainSuffix) + '$')) { return $false }
         # and the value must carry NO EXTRA DC= component beyond the expected suffix - so a child
         # subdomain prepend (DC=evil,DC=area52,DC=mil -> the distinct domain evil.area52.mil) is rejected
-        $dcInValue  = ([regex]::Matches($Value, '(?i)(^|,)DC=')).Count
+        $dcInValue  = ([regex]::Matches($bare, '(?i)(^|,)DC=')).Count
         $dcInSuffix = ([regex]::Matches($ExpectDomainSuffix, '(?i)(^|,)DC=')).Count
         if ($dcInValue -ne $dcInSuffix) { return $false }
         return $true
