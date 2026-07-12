@@ -20,6 +20,19 @@
 #  verbatim from the original tool's Start-Nem* functions.
 # =============================================================================
 
+# Shared, vendor-gated Java remediation engine (JanetWeb.javafix.psm1) - the SAME
+# ONE copy c2c's fix-java pillar and wpt's fix-java action call, so ACAS Nemesis'
+# Oracle/Sun-Java REMOVE remediation rides the identical hardened logic (vendor gate
+# '(?i)oracle|sun microsystems' + strict-GUID msiexec guard '^\{[0-9A-Fa-f-]+\}$'),
+# no third fork. The AcasUpdateWorker pool runspace has NO module scope, so
+# $script:AcasJavaFixSrc carries the SOURCE STRING (Get-JanetJavaVerdict +
+# Invoke-JanetJavaRemediation); the dispatcher injects it into the worker, which
+# prepends it to the profile Script text rehydrated in-session on the target. It is
+# also dot-sourced here so the engine resolves in module scope for unit tests.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.javafix.psm1') -Force -ErrorAction SilentlyContinue
+$script:AcasJavaFixSrc = if (Get-Command Get-JanetJavaFixSrc -ErrorAction SilentlyContinue) { Get-JanetJavaFixSrc } else { '' }
+try { . ([scriptblock]::Create($script:AcasJavaFixSrc)) } catch {}
+
 # -----------------------------------------------------------------------------
 #  App Update profile registry (lifted from $script:WptAppUpdateProfiles).
 #  Each profile: Desc, Script (update scriptblock), Verify (version probe),
@@ -298,6 +311,35 @@ $script:AcasUpdateProfiles = @{
             $detailStr = if ($javaHome) { "home: $javaHome" } else { 'via Software Center' }
             return @{ Version = $ver; LastUpdated = $modStr; Verified = $verified; Detail = $detailStr }
         }
+    }
+    'Oracle Java - Remove (fix-java)' = @{
+        Desc = 'ALTERNATE to Software Center: REMOVE vulnerable Oracle/Sun Java via the SHARED, vendor-gated fix-java engine (JanetWeb.javafix - the same one copy c2c/wpt use). Uninstalls only Oracle/Sun-published JRE/JDK older than 1.8.0_491 (msiexec /x {GUID}), prunes matching JavaSoft residue, and clears Program Files\Java folders. OpenJDK/Temurin/Corretto are NEVER touched; UNKNOWN versions are left for manual review. Never runs against the dispatcher host (self-guard). Use when Oracle Java SE CPU vulnerabilities are flagged and removal (not patch-install) is the remediation.'
+        # NeedsJavaFix: the AcasUpdateWorker prepends the injected $AcasJavaFixSrc engine
+        # source to this Script text before the in-session rehydration, and fails CLOSED
+        # (no uninstall) if the source was not injected. ForbidSelf: the dispatch drops the
+        # JANET host from the wave BEFORE job build (a Java uninstall on self is forbidden).
+        NeedsJavaFix = $true
+        ForbidSelf   = $true
+        Script = {
+            # The shared engine source is prepended by the worker, so Invoke-JanetJavaRemediation
+            # is defined in THIS rehydrated scriptblock. Fail closed if it is somehow absent.
+            if (-not (Get-Command Invoke-JanetJavaRemediation -ErrorAction SilentlyContinue)) {
+                return 'FAIL: shared Java remediation engine (JanetWeb.javafix) not present on target - fail-closed, no Java removed'
+            }
+            $rows = @(Invoke-JanetJavaRemediation -MinUpdate 491)
+            $r = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+            if (-not $r) { return 'FAIL: Java remediation returned no result row' }
+            $res = "$($r.Result)"; $det = "$($r.Detail)"
+            # Map the engine rollup (FIXED / NOCHANGE / FAIL) to acas' OK/SKIP/FAIL vocabulary.
+            if     ($res -eq 'FIXED')    { return "OK - Oracle/Sun Java removed ($det)" }
+            elseif ($res -eq 'NOCHANGE') { return "SKIP: $det" }
+            elseif ($res -eq 'FAIL')     { return "FAIL: $det" }
+            else                         { return "$res - $det" }
+        }
+        # Verify is assigned below to the SAME probe the Software-Center Java profile uses
+        # (JavaSoft CurrentVersion -> jvm.dll), so PRE/POST show the version drop to
+        # 'not installed' after a successful removal. (Set post-table to avoid duplicating
+        # the block and to guarantee parity without editing the Software-Center profile.)
     }
     'Microsoft Store - Update Apps' = @{
         Desc = 'Trigger a Microsoft Store update scan (EXPERIMENTAL). Covers Windows App (Remote Desktop) and other MS-Store apps.'
@@ -826,6 +868,15 @@ $script:AcasUpdateProfiles = @{
     }
 }
 
+# Java REMOVE (fix-java) profile reuses the SAME version probe as the Software-Center
+# Java profile (JavaSoft CurrentVersion -> jvm.dll), so PRE/POST show the drop to
+# 'not installed' after a successful removal. Assigned here (not inline) to guarantee
+# parity WITHOUT editing the Software-Center profile - a single source of truth for
+# the Java verify block. Fail-soft: only wire it if both entries are present.
+if ($script:AcasUpdateProfiles['Oracle Java - Remove (fix-java)'] -and $script:AcasUpdateProfiles['Oracle Java - Software Center']) {
+    $script:AcasUpdateProfiles['Oracle Java - Remove (fix-java)'].Verify = $script:AcasUpdateProfiles['Oracle Java - Software Center'].Verify
+}
+
 # -----------------------------------------------------------------------------
 #  ACAS CSV column mapping (lifted from Config.acasImport.ACAS_Default).
 # -----------------------------------------------------------------------------
@@ -847,7 +898,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.10.12'
+        version  = '1.11.0'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1088,6 +1139,34 @@ function Test-AcasHostIsSelf {
     return $false
 }
 
+# A profile is self-forbidden when its ForbidSelf flag is set - currently only the
+# Oracle-Java REMOVE (fix-java) profile, whose msiexec /x + registry/folder deletion
+# would strip Java from the JANET dispatcher host itself. The update-dispatch paths
+# call Select-AcasNonSelfHosts to drop the dispatcher from any wave running such a
+# profile BEFORE the job array is built - the same before-fan-out drop the reboot
+# path uses. (Existing non-destructive update profiles carry no flag -> unaffected.)
+function Get-AcasProfileForbidsSelf {
+    param([string]$ProfileName)
+    $prof = $script:AcasUpdateProfiles[$ProfileName]
+    if ($prof -is [hashtable] -and $prof.ContainsKey('ForbidSelf')) { return [bool]$prof['ForbidSelf'] }
+    return $false
+}
+
+# Drop the dispatcher host from a target list when the resolved profile forbids self
+# (returns the list untouched for every non-forbidding profile). Emits a Self-guard
+# warning naming any dropped host. Called BEFORE job-array build so a forbidden
+# uninstall never becomes a runspace job against this box.
+function Select-AcasNonSelfHosts {
+    param([string]$ProfileName, [object[]]$Hosts, [scriptblock]$Send)
+    $hostArr = @($Hosts)
+    if (-not (Get-AcasProfileForbidsSelf $ProfileName)) { return $hostArr }
+    $selfHits = @($hostArr | Where-Object { Test-AcasHostIsSelf $_ })
+    if ($selfHits.Count -gt 0 -and $Send) {
+        & $Send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from '$ProfileName' wave (never uninstall Java on the JANET host): $($selfHits -join ', ')" }
+    }
+    return @($hostArr | Where-Object { -not (Test-AcasHostIsSelf $_) })
+}
+
 # =============================================================================
 #  REMEDIATION MATCHING ENGINE  (the "auto-patch anything you can patch after
 #  import" core - lifted from the original tool's Get-NemProfileMatchTable +
@@ -1126,7 +1205,10 @@ function Get-AcasProfileMatchTable {
         @{ Keywords=@('Windows Defender','Microsoft Defender','Endpoint Protection'); Exclude=@('Symantec','McAfee','Trellix','Trend Micro','Sophos','Kaspersky','CrowdStrike','ESET','Bitdefender','Cortex','SentinelOne'); Profiles=@('Windows Defender - Update Definitions') }
         @{ Keywords=@('Apache Log4j','Log4j');                                         Profiles=@('Apache Log4j - Replace Vulnerable Jars') }
         @{ Keywords=@('Tenable Nessus Agent','Nessus Agent','Tenable Nessus');         Profiles=@('Tenable Nessus Agent - Package Deploy') }
-        @{ Keywords=@('Oracle Java','Oracle JRE','Java SE Multiple Vulnerabilities'); Profiles=@('Oracle Java - Software Center') }
+        # Java findings surface TWO selectable remediations: install-a-patched-Java via
+        # Software Center (Profiles[0], the default) AND remove-vulnerable-Java via the
+        # shared fix-java engine (alternate). Both map to the SAME Oracle-Java plugin set.
+        @{ Keywords=@('Oracle Java','Oracle JRE','Java SE Multiple Vulnerabilities'); Profiles=@('Oracle Java - Software Center','Oracle Java - Remove (fix-java)') }
     )
 }
 
@@ -1547,21 +1629,30 @@ function Get-AcasRemediationGroups {
 #  in the web host). Returns a string: "OK*"/"FAIL*"/"SKIP*".
 # -----------------------------------------------------------------------------
 $script:AcasUpdateWorker = {
-    param($TargetIn, $ProfileIn, $UpdateProfilesTable, $VerifyOnlyIn, $CredIn, $StageSource)
+    param($TargetIn, $ProfileIn, $UpdateProfilesTable, $VerifyOnlyIn, $CredIn, $StageSource, $JavaFixSrcIn)
     $prof = $UpdateProfilesTable[$ProfileIn]
     if (-not $prof) { return "FAIL: Unknown profile '$ProfileIn'." }
 
     # IsPackage profiles need the controller-side Packages\ staging tree, which
     # the web host does not carry. Fail structured rather than half-deploy.
-    $isPkgProfile = $false; $needsStaging = $false
+    # NeedsJavaFix profiles (Oracle-Java REMOVE) ride the SHARED fix-java engine,
+    # whose SOURCE the dispatcher injects as $JavaFixSrcIn (this bare pool runspace
+    # has no module scope) - prepended to the profile Script text below.
+    $isPkgProfile = $false; $needsStaging = $false; $needsJavaFix = $false
     try {
         if ($prof -is [hashtable] -and $prof.ContainsKey('IsPackage')) { $isPkgProfile = [bool]$prof['IsPackage'] }
         elseif ($prof.PSObject -and $prof.PSObject.Properties['IsPackage']) { $isPkgProfile = [bool]$prof.IsPackage }
         if ($prof -is [hashtable] -and $prof.ContainsKey('NeedsStaging')) { $needsStaging = [bool]$prof['NeedsStaging'] }
         elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsStaging']) { $needsStaging = [bool]$prof.NeedsStaging }
+        if ($prof -is [hashtable] -and $prof.ContainsKey('NeedsJavaFix')) { $needsJavaFix = [bool]$prof['NeedsJavaFix'] }
+        elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsJavaFix']) { $needsJavaFix = [bool]$prof.NeedsJavaFix }
     } catch {}
     if ($isPkgProfile -and -not $VerifyOnlyIn) {
         return "FAIL: package-deploy profile not supported in JANET Web host (no controller Packages\ staging tree)."
+    }
+    # Fail CLOSED: a Java REMOVE run with no injected engine source performs NO uninstall.
+    if ($needsJavaFix -and -not $VerifyOnlyIn -and [string]::IsNullOrWhiteSpace([string]$JavaFixSrcIn)) {
+        return "FAIL: shared Java remediation engine (JanetWeb.javafix) source not injected into worker - aborting (fail-closed), no Java removed."
     }
     # NeedsStaging (Log4j) full-run requires a resolved controller-side jar source;
     # the host copies the jars into the session below (no remote double-hop).
@@ -1659,6 +1750,15 @@ $script:AcasUpdateWorker = {
         # the source text and rehydrate with [scriptblock]::Create() remotely.
         $updateText = [string]$prof.Script.ToString()
         $verifyText = if ($prof.Verify) { [string]$prof.Verify.ToString() } else { '' }
+
+        # Java REMOVE (NeedsJavaFix): prepend the injected SHARED fix-java engine source so
+        # the in-session rehydration ([scriptblock]::Create($updateTxt)) defines
+        # Invoke-JanetJavaRemediation / Get-JanetJavaVerdict BEFORE the profile Script calls
+        # them. Same vendor-gated engine c2c/wpt inject into THEIR bare pool workers. Guarded
+        # above so an empty source already returned a fail-closed FAIL (no uninstall).
+        if ($needsJavaFix -and -not [string]::IsNullOrWhiteSpace([string]$JavaFixSrcIn)) {
+            $updateText = [string]$JavaFixSrcIn + "`r`n" + $updateText
+        }
 
         # Log4j (NeedsStaging): copy the controller-side jars INTO this session's
         # per-host temp (Copy-Item -ToSession - no remote second hop to the UNC),
@@ -2642,12 +2742,16 @@ function Invoke-JanetToolAction {
                     $runHosts = @($g.Hosts | Where-Object { $allow.Contains($_) })
                     if ($runHosts.Count -eq 0) { $skipped++; continue }
                 }
+                # Self-guard: for a ForbidSelf profile (Java REMOVE), drop the dispatcher
+                # host BEFORE building jobs - a Java uninstall must never hit the JANET box.
+                $runHosts = @(Select-AcasNonSelfHosts -ProfileName $prof -Hosts $runHosts -Send $send)
+                if ($runHosts.Count -eq 0) { $skipped++; continue }
                 $picked++
                 $jobs = New-Object System.Collections.ArrayList
                 foreach ($h in $runHosts) {
                     $tupleKey = "$prof|$h"
                     if ($seen.Add($tupleKey)) {
-                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $prof, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path); Context=@{ Profile=$prof } })
+                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $prof, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$prof } })
                     }
                 }
                 if ($jobs.Count -gt 0) {
@@ -2753,11 +2857,16 @@ function Invoke-JanetToolAction {
                     & $send @{ type='log'; level='warn'; text="Skipping '$($g.DisplayName)' -> '$chosen' on $($g.HostCount) host(s): needs controller-side staging (package / Log4j jars). Run it from the workstation patching tool or a single manual run." }
                     continue
                 }
+                # Self-guard: for a ForbidSelf profile (Java REMOVE), drop the dispatcher
+                # host before job build. (The default auto-pick is Software Center, so the
+                # destructive removal is never auto-selected here - this is defense in depth.)
+                $acHosts = @(Select-AcasNonSelfHosts -ProfileName $chosen -Hosts $g.Hosts -Send $send)
+                if ($acHosts.Count -eq 0) { continue }
                 $runnableGroups++
-                foreach ($h in $g.Hosts) {
+                foreach ($h in $acHosts) {
                     $tupleKey = "$chosen|$h"
                     if ($seen.Add($tupleKey)) {
-                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $chosen, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path); Context=@{ Profile=$chosen } })
+                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $chosen, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$chosen } })
                     }
                 }
             }
@@ -2798,13 +2907,20 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='No valid targets.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
             }
+            # Self-guard: for a ForbidSelf profile (Java REMOVE), drop the dispatcher host
+            # BEFORE fan-out - a Java uninstall must never run against the JANET box.
+            $targets = @(Select-AcasNonSelfHosts -ProfileName $profileName -Hosts $targets -Send $send)
+            if ($targets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to run.' }
+                return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
+            }
             $mode = if ($verifyOnly) { 'Verify' } else { 'Update' }
             & $send @{ type='status'; text="$mode '$profileName' for [$vulnDisplay] on $($targets.Count) host(s), $threads thread(s)..." }
 
             $profilesTable = $script:AcasUpdateProfiles
             $jobs = New-Object System.Collections.ArrayList
             foreach ($t in $targets) {
-                [void]$jobs.Add(@{ Host=$t; Args=@($t, $profileName, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path); Context=@{ Profile=$profileName; Mode=$mode } })
+                [void]$jobs.Add(@{ Host=$t; Args=@($t, $profileName, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$profileName; Mode=$mode } })
             }
 
             $rowOf = {
@@ -2863,8 +2979,10 @@ function Invoke-JanetToolAction {
                         & $send @{ type='log'; level='warn'; text="Skipping unknown profile '$($jl.Profile)'." }
                         continue
                     }
-                    foreach ($t in $jl.Hosts) {
-                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path); Context=@{ Profile=$jl.Profile } })
+                    # Self-guard: drop the dispatcher host for a ForbidSelf profile (Java REMOVE).
+                    $rhosts = @(Select-AcasNonSelfHosts -ProfileName $jl.Profile -Hosts $jl.Hosts -Send $send)
+                    foreach ($t in $rhosts) {
+                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$jl.Profile } })
                     }
                 }
                 if ($jobs.Count -eq 0) {
@@ -2889,8 +3007,10 @@ function Invoke-JanetToolAction {
                     }
                     & $send @{ type='status'; text="[$g/$($jobLines.Count)] $mode '$($jl.Profile)' on $($jl.Hosts.Count) host(s)..." }
                     $jobs = New-Object System.Collections.ArrayList
-                    foreach ($t in $jl.Hosts) {
-                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path); Context=@{ Profile=$jl.Profile } })
+                    # Self-guard: drop the dispatcher host for a ForbidSelf profile (Java REMOVE).
+                    $rhosts = @(Select-AcasNonSelfHosts -ProfileName $jl.Profile -Hosts $jl.Hosts -Send $send)
+                    foreach ($t in $rhosts) {
+                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$jl.Profile } })
                     }
                     $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasUpdateWorker -Threads $threads -PerHostSeconds $perHostTimeout `
                                -RowOf $rowOf -OkOf $okOf -AuditAction $(if ($verifyOnly) { 'TouchHost' } else { 'VulnPatched' }) -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
