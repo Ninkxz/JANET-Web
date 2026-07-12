@@ -54,6 +54,44 @@ function Get-JanetWebAssetPath {
     return $null
 }
 
+# Sanitize an operator-supplied upload filename (X-Janet-Filename header) to a bare,
+# traversal-free, device-safe leaf name. Extracted from the /upload handler (loop14) so
+# the write-path traversal defense is unit-testable (the twin of Get-JanetWebAssetPath on
+# the read path). Always returns a non-empty name; falls back to 'upload.dat'. Steps:
+# URL-unescape -> pure leaf extraction -> invalid-char scrub -> empty/dot fallback ->
+# reserved-device-name (CON/COM1/...) '_' prefix.
+#   loop14 hardening: the inline handler used `Split-Path -Leaf`, which RESOLVES a bare
+#   '..' against the provider's current directory (returning a cwd-derived name, so the
+#   `-eq '..'` fallback below was silently dead). Switched to a pure regex leaf-strip
+#   (drop everything up to and including the last / or \) - cwd-independent AND, unlike
+#   [IO.Path]::GetFileName, it never throws on invalid path chars like '<' (which .NET
+#   Framework's GetFileName does). So a '..' name deterministically becomes 'upload.dat'.
+#   Not a security fix (both outputs were already traversal-free), a determinism fix.
+function Get-JanetWebSafeUploadName {
+    param([string]$Raw)
+    $fname = 'upload.dat'
+    if ($Raw) { try { $fname = [System.Uri]::UnescapeDataString($Raw) } catch { $fname = [string]$Raw } }
+    $fname = $fname -replace '^.*[\\/]', ''
+    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) { $fname = $fname.Replace($ch, '_') }
+    if ([string]::IsNullOrWhiteSpace($fname) -or $fname -eq '.' -or $fname -eq '..') { $fname = 'upload.dat' }
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($fname)
+    if ($stem -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') { $fname = '_' + $fname }
+    return $fname
+}
+
+# Sanitize an optional X-Janet-Subdir header (lets a caller co-locate related uploads in
+# one folder). Honored ONLY if it is a bare 1-32 char [A-Za-z0-9_-] token that is not a
+# reserved device name; anything else (separators, spaces, traversal, too long, empty) ->
+# a fresh random 8-hex name. Returns @{ Name=<safe>; Shared=<bool> } (Shared=$true when the
+# caller's own name was honored). Extracted for unit testing (loop14).
+function Get-JanetWebSafeUploadSubdir {
+    param([string]$Raw)
+    if ($Raw -and ($Raw -match '\A[A-Za-z0-9_-]{1,32}\z') -and ($Raw -notmatch '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')) {
+        return @{ Name = $Raw; Shared = $true }
+    }
+    return @{ Name = [guid]::NewGuid().ToString('N').Substring(0,8); Shared = $false }
+}
+
 function Start-JanetWebServer {
     param(
         [Parameter(Mandatory)] [string]$Root,
@@ -582,23 +620,12 @@ function Start-JanetWebServer {
                         & $writeJson $resp @{ ok=$false; error="upload too large ($([int]($req.ContentLength64/1MB)) MB exceeds the 1024 MB cap)" } 413
                         continue
                     }
-                    $fname = 'upload.dat'
-                    $fnameRaw = $req.Headers['X-Janet-Filename']
-                    if ($fnameRaw) { try { $fname = [System.Uri]::UnescapeDataString($fnameRaw) } catch { $fname = [string]$fnameRaw } }
-                    $fname = Split-Path -Leaf $fname              # base name only (no traversal)
-                    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) { $fname = $fname.Replace($ch, '_') }
-                    if ([string]::IsNullOrWhiteSpace($fname) -or $fname -eq '.' -or $fname -eq '..') { $fname = 'upload.dat' }
-                    # Windows reserved device names (CON, PRN, COM1...) would target a device, not a file.
-                    $stem = [System.IO.Path]::GetFileNameWithoutExtension($fname)
-                    if ($stem -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') { $fname = '_' + $fname }
-                    # Optional X-Janet-Subdir lets a caller co-locate related files in
-                    # ONE folder (e.g. the Log4j browse uploads api+core jars together so
-                    # an engine that wants a folder of jars works). Sanitized hard to a
-                    # bare name (no separators / traversal); anything else -> fresh GUID.
-                    $subRaw = $req.Headers['X-Janet-Subdir']
-                    $subShared = $false
-                    if ($subRaw -and ($subRaw -match '\A[A-Za-z0-9_-]{1,32}\z') -and ($subRaw -notmatch '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')) { $subName = $subRaw; $subShared = $true }
-                    else { $subName = [guid]::NewGuid().ToString('N').Substring(0,8) }
+                    # Filename + optional co-location subdir are operator-controlled headers;
+                    # sanitize both to traversal-free, device-safe names via the extracted,
+                    # unit-tested helpers (loop14 - write-path twin of Get-JanetWebAssetPath).
+                    $fname = Get-JanetWebSafeUploadName $req.Headers['X-Janet-Filename']
+                    $subInfo = Get-JanetWebSafeUploadSubdir $req.Headers['X-Janet-Subdir']
+                    $subName = $subInfo.Name; $subShared = $subInfo.Shared
                     $sub  = Join-Path $uploadsDir $subName
                     $dest = $null
                     try {
