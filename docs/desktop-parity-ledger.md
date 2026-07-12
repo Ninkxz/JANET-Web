@@ -80,3 +80,8 @@ commit is unblocked.
 | # | Finding (sev) | Web fix | In Desktop? | Status |
 |---|---------------|---------|-------------|--------|
 | 26 | DN guard `Test-Ad{Search,To}DnInLocalDomain` used a `$`-anchored suffix match; .NET `$` also matches before a trailing newline, so `...DC=MIL\n` slipped past (not exploitable - suffix+DC-count pin still forces a local bind - but it is the security boundary from rows 11/17) (P3) | adsearch.psm1 3.3.6 + adto.psm1 0.2.1 (`2e6a4a55b`): reject `[\x00-\x1f]` before the anchor, all 3 byte-identical guard copies; `tests/AdDnGuard.ControlChar.Tests.ps1` (12) | Depends on the Desktop DN-guard existing first - rows 11/17 (adsearch/adto DN-guard) are themselves still CHECK/BLOCKED, so there is no Desktop guard yet to harden | **DEFERRED-INTO rows 11/17** (when the base DN-guard is mirrored to `ADSearchTool.ps1`, include this control-char reject; no standalone Desktop action) |
+
+## Loop-10 finding (NEW) - history host-timeline input-validation parity -> Web CLOSED-WEB-ONLY
+| # | Finding (sev) | Web fix | In Desktop? | Status |
+|---|---------------|---------|-------------|--------|
+| 27 | history `host-timeline` validated the `host` input for non-empty only, while sibling `stale-hosts` gates on `^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`; read-only tool, value only reaches an in-memory short-name compare (non-exploitable) - a defense-in-depth consistency gap (P3) | history.psm1 1.0.2 (`c303351a4`): apply the same regex + warn on the host-timeline input | NO - `history` is a Web-only tool (a read-only Audit Explorer over the JANET audit trail / usage rollup); JANET Desktop has no equivalent | **CLOSED-WEB-ONLY** (Web-only tool, no Desktop twin) |
