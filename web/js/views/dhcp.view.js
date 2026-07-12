@@ -349,7 +349,7 @@
         if (!scopeIds.length) { ctx.confirm({ title: 'No scopes checked', body: 'Check at least one scope for bulk apply.', okText: 'OK', cancelText: null }); return; }
         var ips = (bulkIps.value || '').split(/[,;\s\r\n]+/).filter(Boolean);
         var bad = ips.filter(function (i) { return !isIpv4(i); });
-        if (!ips.length || bad.length) { ctx.confirm({ title: 'Check IPs', body: ips.length ? ('Not valid IPv4: ' + bad.join(', ')) : 'Enter at least one IP.', okText: 'OK', cancelText: null }); return; }
+        if (!ips.length || bad.length) { ctx.confirm({ title: 'Check IPs', body: ips.length ? ('Not valid IPv4: ' + bad.map(esc).join(', ')) : 'Enter at least one IP.', okText: 'OK', cancelText: null }); return; }
         var dry = dryCbBulk._cb.checked, opt = currentOptionId();
         var label = { append: 'APPEND to bottom of', prepend: 'PREPEND to top of', remove: 'REMOVE from' }[mode];
         var ok = await ctx.confirm({
