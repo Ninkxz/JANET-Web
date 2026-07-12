@@ -46,7 +46,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.2.0'
+        version  = '1.3.0'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -309,6 +309,31 @@ function Get-CertDeploySubjectMap {
 # against a fake store. Returns @{ Added; Already; Total; PerStore=@('Root +N/M',...);
 # FailDetail }. Dot-sourced remotely by the worker AND in module scope (below).
 $script:CertDeployAddCertsSrc = @'
+# TRUST-ANCHOR GUARD (P2 fix): a CA-cert test used to gate what may land in a
+# TRUST-ANCHOR store (Root, CA/Intermediate). Parse the X509BasicConstraintsExtension
+# (OID 2.5.29.19) and return $true ONLY when CertificateAuthority is true. FAIL-CLOSED:
+# an ABSENT BasicConstraints extension (or any parse error) is treated as NOT a CA - a
+# legit modern CA cert carries BasicConstraints CA=true; a leaf/end-entity does not. This
+# is a pure function (no store I/O) so it is directly unit-testable. Applied to Root/CA
+# ONLY; the Disallowed (Untrusted) store is a blacklist, not a trust anchor, so a non-CA
+# cert there is legitimate and this guard never touches it.
+function Test-CertDeployIsCa {
+    param($Cert)
+    if (-not $Cert) { return $false }
+    try {
+        foreach ($ext in $Cert.Extensions) {
+            if ([string]$ext.Oid.Value -eq '2.5.29.19') {
+                $bc = $ext -as [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]
+                if (-not $bc) {
+                    $bc = New-Object System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension
+                    $bc.CopyFrom($ext)
+                }
+                return [bool]$bc.CertificateAuthority
+            }
+        }
+    } catch { return $false }
+    return $false   # no BasicConstraints extension -> fail-closed, NOT a CA
+}
 function Add-CertDeployBundleToStores {
     param($Bundle, [scriptblock]$StoreOpener)
     if (-not $StoreOpener) {
@@ -322,9 +347,14 @@ function Add-CertDeployBundleToStores {
     }
     $added = 0; $already = 0; $total = 0; $failDetail = ''
     $verified = 0
+    $rejected = 0; $rejectDetail = ''
     $notVerified = New-Object System.Collections.ArrayList
+    $addedCerts  = New-Object System.Collections.ArrayList   # Subject(CN) + thumbprint of each cert WE added (anchor + Disallowed)
     $perStore = New-Object System.Collections.ArrayList
-    foreach ($sm in @(@{ Prop='Root'; Store='Root' }, @{ Prop='CA'; Store='CA' }, @{ Prop='Disallowed'; Store='Disallowed' })) {
+    # Anchor=$true marks a TRUST-ANCHOR store (Root, CA/Intermediate): only actual CA certs
+    # may land there. Disallowed is the Untrusted blacklist (Anchor=$false) - a non-CA cert
+    # there is legitimate, so the CA guard is NOT applied to it.
+    foreach ($sm in @(@{ Prop='Root'; Store='Root'; Anchor=$true }, @{ Prop='CA'; Store='CA'; Anchor=$true }, @{ Prop='Disallowed'; Store='Disallowed'; Anchor=$false })) {
         $items = @()
         try { $items = @($Bundle.($sm.Prop)) | Where-Object { $_ } } catch { $items = @() }
         if ($items.Count -eq 0) { continue }
@@ -344,9 +374,22 @@ function Add-CertDeployBundleToStores {
                 try {
                     $raw  = [Convert]::FromBase64String([string]$it.b)
                     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$raw)
+                    # TRUST-ANCHOR GUARD: for Root/CA only, refuse a cert that is NOT an actual CA
+                    # (no BasicConstraints CA=true) - an operator-chosen bundle folder must not be able
+                    # to push a leaf/end-entity cert as a fleet-wide trust anchor. Keep adding valid CAs.
+                    if ($sm.Anchor -and -not (Test-CertDeployIsCa $cert)) {
+                        $rejected++
+                        $rsubj = [string]$cert.Subject
+                        $m = [regex]::Match($rsubj, '(?i)CN=([^,]+)'); if ($m.Success) { $rsubj = $m.Groups[1].Value.Trim() }
+                        $rejectDetail += "rejected non-CA cert '$rsubj' ($tp) from $($sm.Store) - not a CA certificate; "
+                        continue
+                    }
                     $st.Add($cert)
                     if ($tp) { [void]$present.Add($tp); [void]$addedTps.Add($tp) }
                     $sAdd++; $added++
+                    $asubj = [string]$cert.Subject
+                    $am = [regex]::Match($asubj, '(?i)CN=([^,]+)'); if ($am.Success) { $asubj = $am.Groups[1].Value.Trim() }
+                    [void]$addedCerts.Add("$asubj [$tp] -> $($sm.Store)")
                 } catch { $failDetail += "add failed in $($sm.Store): $($_.Exception.Message); " }
             }
             [void]$perStore.Add("$($sm.Store) +$sAdd/$($items.Count)")
@@ -370,7 +413,7 @@ function Add-CertDeployBundleToStores {
             foreach ($tp in $addedTps) { [void]$notVerified.Add($tp) }
         } finally { if ($rst) { try { $rst.Close() } catch {} } }
     }
-    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified.ToArray()) }
+    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified.ToArray()); Rejected=$rejected; RejectDetail=$rejectDetail; AddedCerts=@($addedCerts.ToArray()) }
 }
 # Classify an Add-CertDeployBundleToStores result into the raw deploy token: any
 # .Add/open error -> FAIL; else added-but-stripped-on-re-read -> NOT VERIFIED; else
@@ -1004,7 +1047,7 @@ $script:CertDeployDeployBlock = {
         $ar  = Add-CertDeployBundleToStores -Bundle $bundle
         $tok = if (Get-Command Get-CertDeployResultToken -ErrorAction SilentlyContinue) { Get-CertDeployResultToken $ar }
                elseif ([string]$ar.FailDetail) { 'FAIL' } elseif (@($ar.NotVerified).Count -gt 0) { 'NOT VERIFIED' } elseif ([int]$ar.Added -gt 0) { 'INSTALLED' } else { 'ALREADY' }
-        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified) }
+        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified); Rejected=[int]$ar.Rejected; RejectDetail=[string]$ar.RejectDetail; AddedCerts=@($ar.AddedCerts) }
     }
 
     $ir = $null
@@ -1021,6 +1064,12 @@ $script:CertDeployDeployBlock = {
         'NOT VERIFIED' { $r.Status = 'NOT VERIFIED';          $r.Detail = "added $($ir.Added) of $($ir.Total) but $(@($ir.NotVerified).Count) absent on re-read - a reconciler/policy may be stripping in-session" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         default        { $r.Status = 'FAILED';                $r.Detail = "added $($ir.Added) of $($ir.Total); errors: " + ([string]$ir.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
     }
+    # Surface exactly WHICH CAs were trusted (Subject CN + thumbprint) so the operator can
+    # verify the landed anchors, and flag any non-CA cert refused by the trust-anchor guard.
+    $addedCerts = @($ir.AddedCerts)
+    if ($addedCerts.Count -gt 0) { $r.Detail += " | trusted: " + ($addedCerts -join '; ') }
+    $rejN = [int]$ir.Rejected
+    if ($rejN -gt 0) { $r.Detail += " | REJECTED $rejN non-CA (not added to Root/CA): " + ([string]$ir.RejectDetail).TrimEnd('; ') }
     return $r
 }
 

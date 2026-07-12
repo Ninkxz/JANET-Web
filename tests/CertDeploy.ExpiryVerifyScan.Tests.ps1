@@ -24,10 +24,12 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Force -PassThru
 
 # --- helpers ---------------------------------------------------------------
-# Make a throwaway self-signed cert; return @{ B64; Thumbprint; Raw }.
+# Make a throwaway self-signed CA cert (BasicConstraints CA=true); return @{ B64; Thumbprint; Raw }.
+# CA=true so it passes the trust-anchor guard (Add-CertDeployBundleToStores refuses a non-CA
+# cert in Root/CA) - the re-verify tests below exercise STORE persistence, not the guard.
 function New-TestCert {
     param([string]$Subject = 'CN=CertDeploy-Test')
-    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
+    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyUsage CertSign,CRLSign -TextExtension @('2.5.29.19={text}CA=true') -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
     $raw = $c.RawData
     $tp  = [string]$c.Thumbprint
     Remove-Item ("Cert:\CurrentUser\My\{0}" -f $tp) -Force -ErrorAction SilentlyContinue
@@ -176,8 +178,8 @@ Describe 'CertDeploy scan-cert-management - manifest action + reconciler verdict
     $man  = & $cm { Get-JanetToolManifest }
     $scan = @($man.actions | Where-Object { $_.id -eq 'scan-cert-management' })[0]
 
-    It 'manifest version is bumped to 1.2.0' {
-        $man.version | Should Be '1.2.0'
+    It 'manifest version is bumped to 1.3.0' {
+        $man.version | Should Be '1.3.0'
     }
     It '(d) exposes the scan-cert-management action (read-only, correct label + kind)' {
         $scan | Should Not BeNullOrEmpty

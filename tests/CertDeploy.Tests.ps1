@@ -25,10 +25,12 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Force -PassThru
 
 # --- helpers ---------------------------------------------------------------
-# Make a throwaway self-signed cert; return @{ B64; Thumbprint; Raw }.
+# Make a throwaway self-signed CA cert (BasicConstraints CA=true); return @{ B64; Thumbprint; Raw }.
+# CA=true so it passes the trust-anchor guard (Add-CertDeployBundleToStores refuses a non-CA
+# cert in Root/CA) - these tests exercise the additive/re-verify STORE mechanics, not the guard.
 function New-TestCert {
     param([string]$Subject = 'CN=CertDeploy-Test')
-    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
+    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyUsage CertSign,CRLSign -TextExtension @('2.5.29.19={text}CA=true') -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
     $raw = $c.RawData
     $tp  = [string]$c.Thumbprint
     Remove-Item ("Cert:\CurrentUser\My\{0}" -f $tp) -Force -ErrorAction SilentlyContinue
