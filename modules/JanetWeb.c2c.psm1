@@ -52,7 +52,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.15.0'
+        version  = '1.15.1'
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
         actions  = @(
@@ -2285,11 +2285,15 @@ $script:C2cFixBlock = {
     $r.Pillars = $pillarResults
     if ($pillarResults.Count -eq 0) { $r.Status = 'NO CHANGE'; $r.Detail = 'no enabled pillars returned a result'; return $r }
 
-    # STARTED (BitLocker encryption kicked off) rolls up like FIXED for the host verdict.
-    # NOT VERIFIED (PkiRoots: added but absent on re-read) is its own bucket - louder than
-    # a plain FIXED/NO CHANGE, but not a hard FAIL (the add DID succeed, a reconciler
-    # stripped it). A real FAIL still wins; a mix of FAIL + NOT VERIFIED -> PARTIAL.
-    $fixed  = @($pillarResults | Where-Object { $_.Result -eq 'FIXED' -or $_.Result -eq 'STARTED' }).Count
+    # STARTED (BitLocker encryption kicked off) and KICKED (Patches: MECM SUM/eval cycle
+    # triggered) both roll up like FIXED for the host verdict - each is a success token, not
+    # a no-op. (loop18 P2: KICKED was omitted here, so a lone successful fix-patches reported
+    # host Status 'NO CHANGE' / audited Skipped-0 while the per-pillar tally at ~:3012 already
+    # counted it FIXED - the two now agree.) NOT VERIFIED (PkiRoots: added but absent on
+    # re-read) is its own bucket - louder than a plain FIXED/NO CHANGE, but not a hard FAIL
+    # (the add DID succeed, a reconciler stripped it). A real FAIL still wins; FAIL+NOT
+    # VERIFIED -> PARTIAL.
+    $fixed  = @($pillarResults | Where-Object { $_.Result -eq 'FIXED' -or $_.Result -eq 'STARTED' -or $_.Result -eq 'KICKED' }).Count
     $failed = @($pillarResults | Where-Object { $_.Result -eq 'FAIL'   }).Count
     $notVer = @($pillarResults | Where-Object { $_.Result -eq 'NOT VERIFIED' }).Count
     $skip   = @($pillarResults | Where-Object { $_.Result -eq 'SKIP'   }).Count
