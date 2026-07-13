@@ -5697,7 +5697,7 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='err'; text='Shared spec-exec engine (JanetWeb.specfix) unavailable - aborting (fail-closed).' }
                 return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
             }
-            & $send @{ type='status'; text="Enabling Spectre/BHI mitigation (FeatureSettingsOverride=0 / Mask=3) on $($specTargets.Count) host(s) with $threads thread(s)..." }
+            & $send @{ type='status'; text="Enabling Spectre/BHI mitigation (OR the BHI bit 0x800000 into FeatureSettingsOverride, Mask=3) on $($specTargets.Count) host(s) with $threads thread(s)..." }
             $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
             $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
             $iss.Commands.Add($fn)

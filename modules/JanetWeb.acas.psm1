@@ -1446,7 +1446,13 @@ function Get-AcasVulnGroups {
 
     $classifyPlugin = {
         param([string]$PluginName)
-        $unpatchPatterns = @('Oracle Database','Speculative Execution','Intel BHI','Spectre','Meltdown','ZombieLoad')
+        # 'Speculative Execution','Intel BHI','Spectre' were CARVED OUT here (loop33): they are
+        # now handled by the 'Spectre/BHI Mitigation - Enable (CVE-2022-0001)' profile (the BHI
+        # bit 0x800000 clears Tenable 302873), so they must fall through to Patchable + get a Run
+        # button - the Unpatchable check runs FIRST, so leaving them here made the shipped profile
+        # unreachable on the auto-patch path. Parity with Desktop ACAS 1.10.15. Meltdown / ZombieLoad
+        # / Oracle Database stay Unpatchable (no profile covers them - avoids a dead Run button).
+        $unpatchPatterns = @('Oracle Database','Meltdown','ZombieLoad')
         foreach ($pat in $unpatchPatterns) {
             if ($PluginName.IndexOf($pat, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 return @{ Category='Unpatchable'; ProfileOverride=$null }
