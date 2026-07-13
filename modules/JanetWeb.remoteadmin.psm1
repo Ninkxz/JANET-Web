@@ -39,7 +39,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'remoteadmin'
         name     = 'Remote Admin'
-        version  = '1.0.0'
+        version  = '1.0.1'
         category = 'Operations'
         summary  = 'Two operator hands-on-keyboard capabilities. Open C$: launch \\<computer>\C$ in Explorer on your own session by computer name (strict name validation, audited; needs no admin session). Run Script: fan an operator-authored PowerShell block to one or many hosts over WinRM - arbitrary remote code, so it is destructive and rides the admin-session gate, mirrors the WPT Custom Command SHA256 forensic audit, and self-guards the JANET dispatcher host out of every run.'
         actions  = @(
@@ -107,10 +107,14 @@ function Get-RemoteAdminShortHash {
 # host / IPv4 tokens, drop UNC/URL/junk, de-dup. Same guard the sysadmin tool uses.
 function Get-RemoteAdminTargets {
     param([string]$Raw)
+    # Case-insensitive, ORDER-PRESERVING dedup: `Select-Object -Unique` is case-SENSITIVE,
+    # so 'host1' and 'HOST1' would both survive and the operator's arbitrary block would run
+    # TWICE on the same physical host (double side effects on a run-arbitrary-script tool). A
+    # HashSet(OrdinalIgnoreCase) keeps only the first occurrence and preserves order. (loop23 P3)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     return @(([string]$Raw) -split '[\r\n,;\t ]+' |
         ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -and (Test-RemoteAdminComputerName -Name $_) } |
-        Select-Object -Unique)
+        Where-Object { $_ -and (Test-RemoteAdminComputerName -Name $_) -and $seen.Add($_) })
 }
 
 # Cap remote output to $Max chars (server-side) so one chatty host can't flood the

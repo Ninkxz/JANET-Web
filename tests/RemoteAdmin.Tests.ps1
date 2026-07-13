@@ -98,6 +98,12 @@ Describe 'Get-RemoteAdminTargets' {
         ($t -contains 'bad|name') | Should Be $false
         $t.Count | Should Be 3
     }
+    It 'de-dups CASE-INSENSITIVELY, order preserved, so an arbitrary block never runs twice on one host (loop23 P3)' {
+        $t = @(Get-RemoteAdminTargets -Raw "host1`nHOST1`nHost1, WS-9")
+        $t.Count | Should Be 2
+        $t[0]    | Should Be 'host1'   # first occurrence kept; case-variants collapsed
+        $t[1]    | Should Be 'WS-9'    # order preserved (not alphabetized)
+    }
 }
 
 Describe 'Get-RemoteAdminTruncatedOutput' {
