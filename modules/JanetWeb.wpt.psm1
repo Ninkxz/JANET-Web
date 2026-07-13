@@ -26,12 +26,21 @@
 Import-Module (Join-Path $PSScriptRoot 'JanetWeb.javafix.psm1') -Force -ErrorAction SilentlyContinue
 $script:JavaFixSrc = if (Get-Command Get-JanetJavaFixSrc -ErrorAction SilentlyContinue) { Get-JanetJavaFixSrc } else { '' }
 
+# Shared speculative-execution / side-channel mitigation engine (ONE copy, also used
+# by the ACAS Nemesis tool). The spec-exec scan/enable pool workers run in bare
+# runspaces with no module scope, so we inject the SOURCE STRING (Get-JanetSpecExecState
+# + Invoke-JanetSpecExecRemediation) and dot-source it there, exactly as the fix-java
+# engine is injected above. The KB4073119 registry values / security logic live in that
+# shared engine and are never forked here.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.specfix.psm1') -Force -ErrorAction SilentlyContinue
+$script:SpecFixSrc = if (Get-Command Get-JanetSpecFixSrc -ErrorAction SilentlyContinue) { Get-JanetSpecFixSrc } else { '' }
+
 function Get-JanetToolManifest {
     @{
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.6.1'
+        version  = '6.6.2'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -290,6 +299,25 @@ function Get-JanetToolManifest {
                 id='fix-java'; label='Fix Java (Oracle/Sun only)'; kind='stream-table'; destructive=$true
                 confirm='Remove all Oracle/Sun Java OLDER than 8u491 (installed products, JavaSoft registry residue, Program Files folders) from the target host(s)? OpenJDK/Temurin/Corretto and unknown versions are NEVER touched, and the JANET dispatcher host is always dropped from the wave. Proceed?'
                 description='Vendor-gated Java cleanup driven by the SHARED engine c2c uses: on each reachable target, remove Oracle/Sun-published Java older than 1.8.0_491 - installed products (msiexec /x on strict-GUID ProductCodes only), JavaSoft registry residue (removed only when a matching Oracle/Sun Uninstall entry exists), and Program Files\Java folders. OpenJDK/Temurin/Corretto and UNKNOWN versions are left untouched. The dispatcher host is self-guarded out of the wave. One rollup row per host.'
+                columns=@('Host','Reachable','Result','Detail')
+                inputs=@(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=12 }
+                )
+            },
+            @{
+                id='spec-exec-scan'; label='Spectre/BHI Mitigation Check'; kind='stream-table'; destructive=$false
+                description='Read-only: per host, read the speculative-execution / side-channel mitigation state that Windows gates behind the KB4073119 Memory Management override values (FeatureSettingsOverride / FeatureSettingsOverrideMask). Reports the CPU, a Verdict (ENABLED / DISABLED / PARTIAL / DEFAULT) and a short recommendation. Covers Intel BHI (CVE-2022-0001) and the Spectre/Meltdown family gated behind the same switch. Nothing is written; the dispatcher host is included.'
+                columns=@('Host','CPU','Verdict','FeatureSettingsOverride','Mask','Recommendation','Error')
+                inputs=@(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=12 }
+                )
+            },
+            @{
+                id='spec-exec-enable'; label='Enable Spectre/BHI Mitigation'; kind='stream-table'; destructive=$true
+                confirm='Enable the speculative-execution (Spectre/Meltdown/BHI) mitigations on the target(s)? Writes FeatureSettingsOverride=0 / Mask=3; a REBOOT is required to apply. The dispatcher host is skipped. Proceed?'
+                description='Enable the speculative-execution / side-channel mitigations via the SHARED engine the ACAS Nemesis tool uses: on each reachable target, write the KB4073119 Memory Management values FeatureSettingsOverride=0 / FeatureSettingsOverrideMask=3 (idempotent - already-enabled hosts report NOCHANGE). A REBOOT is required to apply. On Intel CPUs the BHI hardware mitigation additionally needs OEM microcode (Intel SA-00598), which a registry write cannot supply and the tool never fakes. The dispatcher host is self-guarded out of the wave. One rollup row per host.'
                 columns=@('Host','Reachable','Result','Detail')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -4166,6 +4194,84 @@ $script:WptFixJavaBlock = {
     return $r
 }
 
+# --- Spectre/BHI mitigation CHECK (read-only, SHARED engine) -------------------
+# One host per worker. Reachability via Test-WptHostReachable (injected into the
+# pool ISS), then a session to the target where the shared spec-exec source
+# ($SpecFixSrc = Get-JanetSpecFixSrc) is dot-sourced and Get-JanetSpecExecState runs.
+# Read-only: no registry write. Returns { Host; Reachable; Cpu; Verdict; Fso; Mask; Error }.
+$script:WptSpecExecScanBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [string]$SpecFixSrc)
+    $r = @{ Host=$Computer; Reachable=$false; Cpu=''; Verdict=''; Fso=''; Mask=''; Error='' }
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { $r.Error = 'unreachable (TCP 5985/5986/445)'; return $r }
+    $r.Reachable = $true
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
+    $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    try {
+        $st = Invoke-Command @splat -ArgumentList $SpecFixSrc -ScriptBlock {
+            param([string]$Src)
+            if ($Src) { try { . ([scriptblock]::Create($Src)) } catch {} }
+            if (-not (Get-Command Get-JanetSpecExecState -ErrorAction SilentlyContinue)) {
+                return [pscustomobject]@{ Cpu=''; Fso=$null; Mask=$null; Verdict='ERROR' }
+            }
+            Get-JanetSpecExecState
+        }
+        if ($st) {
+            $r.Cpu     = [string]$st.Cpu
+            $r.Verdict = [string]$st.Verdict
+            $r.Fso     = if ($null -ne $st.Fso)  { [string]$st.Fso }  else { '(unset)' }
+            $r.Mask    = if ($null -ne $st.Mask) { [string]$st.Mask } else { '(unset)' }
+        } else { $r.Error = 'no state returned' }
+    } catch { $r.Error = "spec-exec state read failed: $($_.Exception.Message)" }
+    return $r
+}
+
+# --- Spectre/BHI mitigation ENABLE (destructive, SHARED engine) ----------------
+# One host per worker. Reachability, DNS-mismatch HARD ABORT (never write registry
+# on a box that isn't the one we dialed), then a session where the shared source is
+# dot-sourced and Invoke-JanetSpecExecRemediation writes FeatureSettingsOverride=0 /
+# Mask=3 (KB4073119). The registry values / security logic are inside that shared
+# engine and are NEVER changed here. Returns { Host; Reachable; Rows; Error }.
+$script:WptSpecExecEnableBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [string]$SpecFixSrc)
+    $r = @{ Host=$Computer; Reachable=$false; Rows=@(); Error='' }
+    $reach = Test-WptHostReachable $Computer
+    if (-not $reach.Reachable) { $r.Error = 'unreachable (TCP 5985/5986/445)'; return $r }
+    $r.Reachable = $true
+    $soP = @{ OperationTimeout=600000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+    if ($reach.UseSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $opt = New-PSSessionOption @soP
+    $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($reach.UseSsl) { $splat['UseSSL']=$true }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    # DNS-mismatch guard (HARD ABORT): never write the mitigation registry on a box
+    # that isn't the one we dialed. Name compare (no PTR on AFNET); an IPv4-literal
+    # target has no shortname to compare -> skip. If the probe can't run, proceed.
+    if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+        $targetShort = ($Computer -split '\.')[0]
+        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"; return $r
+        }
+    }
+    try {
+        $rows = Invoke-Command @splat -ArgumentList $SpecFixSrc -ScriptBlock {
+            param([string]$Src)
+            if ($Src) { try { . ([scriptblock]::Create($Src)) } catch {} }
+            if (-not (Get-Command Invoke-JanetSpecExecRemediation -ErrorAction SilentlyContinue)) {
+                return ,([pscustomobject]@{ Name='SpecExec'; Action='none'; Result='FAIL'; Detail='spec-exec remediation engine unavailable on target - nothing changed (fail-closed)' })
+            }
+            @(Invoke-JanetSpecExecRemediation)
+        }
+        $r.Rows = @($rows)
+    } catch { $r.Error = "spec-exec remediation failed: $($_.Exception.Message)" }
+    return $r
+}
+
 # --- Software Center App List (CCM_Application, mirrors WPT 6018-6029) ---------
 $script:WptAppListBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
@@ -5497,6 +5603,167 @@ function Invoke-JanetToolAction {
             } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
             & $send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($javaTargets.Count) host(s)." }
             return @{ rows=@($rows); summary=@{ total=$javaTargets.Count; ok=$okCount; failed=$failCount; selfSkipped=$guarded.SkippedCount; cancelled=$cancelled; timedOut=$timedOut } }
+        }
+        'spec-exec-scan' {
+            # Read-only Spectre/BHI mitigation state, one job per host over the pool.
+            # Self-INCLUSIVE (a read-only scan never writes, so the dispatcher is fine to
+            # include, like the other WPT scans). Fail-closed if the shared engine is absent.
+            $threads = Get-WptThreadCount $Params 12
+            if ([string]::IsNullOrWhiteSpace($script:SpecFixSrc)) {
+                & $send @{ type='log'; level='err'; text='Shared spec-exec engine (JanetWeb.specfix) unavailable - aborting (fail-closed).' }
+                return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
+            }
+            & $send @{ type='status'; text="Checking Spectre/BHI mitigation state on $($targets.Count) host(s) with $threads thread(s)..." }
+            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
+            $iss.Commands.Add($fn)
+            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+            $pool.Open()
+            $jobs = New-Object System.Collections.ArrayList
+            foreach ($h in $targets) {
+                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+                [void]$ps.AddScript($script:WptSpecExecScanBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($script:SpecFixSrc)
+                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
+            }
+            $rows = New-Object System.Collections.ArrayList
+            $done = 0; $okCount = 0; $failCount = 0; $needCount = 0
+            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
+            try {
+                while ($done -lt $jobs.Count) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS -and $j.Async.IsCompleted) {
+                            $res = $null; $err = $null
+                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $err = "worker error: $($_.Exception.Message)" }
+                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                            if ($err -or $null -eq $res) {
+                                if (-not $err) { $err = 'no result' }
+                                $row = @{ _rk=$j.Host; Host=$j.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=$err }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
+                            } elseif ($res.Error) {
+                                $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=[string]$res.Error }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
+                            } else {
+                                $verdict = [string]$res.Verdict
+                                $rec = if ($verdict -eq 'ENABLED') { 'ENABLED -> ok' } else { "$verdict -> enable" }
+                                if ($verdict -ne 'ENABLED') { $needCount++ }
+                                $okCount++
+                                $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=$verdict; FeatureSettingsOverride=[string]$res.Fso; Mask=[string]$res.Mask; Recommendation=$rec; Error='' }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Success'; itemCount=0; detail="Verdict=$verdict; $rec" }
+                            }
+                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                        }
+                    }
+                    if ($done -lt $jobs.Count) {
+                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
+                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
+                        if ($cancelled -or $timedOut) {
+                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
+                            foreach ($j in $jobs) {
+                                if ($j.PS) {
+                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
+                                    $row = @{ _rk=$j.Host; Host=$j.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error="abandoned: $reason" }
+                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
+                                    $done++
+                                }
+                            }
+                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned." }
+                            break
+                        }
+                        Start-Sleep -Milliseconds 120
+                    }
+                }
+            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+            & $send @{ type='status'; text="Done. $okCount scanned ($needCount need enabling), $failCount failed of $($targets.Count) host(s)." }
+            return @{ rows=@($rows); summary=@{ total=$targets.Count; ok=$okCount; needEnable=$needCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
+        }
+        'spec-exec-enable' {
+            $threads = Get-WptThreadCount $Params 12
+            # Self-guard: DROP the JANET dispatcher host from the wave BEFORE fan-out -
+            # a mitigation registry write + reboot-required must NEVER target this host
+            # (mirrors reboot / reboot-schedule / fix-java).
+            $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+            $specTargets = $guarded.Targets
+            if ($specTargets.Count -eq 0) {
+                & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to enable (self-guard).' }
+                return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } }
+            }
+            # Fail-closed if the shared engine did not load.
+            if ([string]::IsNullOrWhiteSpace($script:SpecFixSrc)) {
+                & $send @{ type='log'; level='err'; text='Shared spec-exec engine (JanetWeb.specfix) unavailable - aborting (fail-closed).' }
+                return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
+            }
+            & $send @{ type='status'; text="Enabling Spectre/BHI mitigation (FeatureSettingsOverride=0 / Mask=3) on $($specTargets.Count) host(s) with $threads thread(s)..." }
+            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
+            $iss.Commands.Add($fn)
+            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+            $pool.Open()
+            $jobs = New-Object System.Collections.ArrayList
+            foreach ($h in $specTargets) {
+                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+                [void]$ps.AddScript($script:WptSpecExecEnableBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($script:SpecFixSrc)
+                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
+            }
+            $rows = New-Object System.Collections.ArrayList
+            $done = 0; $okCount = 0; $failCount = 0
+            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
+            try {
+                while ($done -lt $jobs.Count) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS -and $j.Async.IsCompleted) {
+                            $res = $null; $err = $null
+                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $err = "worker error: $($_.Exception.Message)" }
+                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                            if ($err -or $null -eq $res) {
+                                if (-not $err) { $err = 'no result' }
+                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail=$err }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
+                            } elseif ($res.Error) {
+                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
+                            } else {
+                                # The shared engine returns a single rollup 'SpecExec' row per host.
+                                $srow = @($res.Rows)[0]
+                                $rslt = if ($srow) { [string]$srow.Result } else { 'FAIL' }
+                                $det  = if ($srow) { [string]$srow.Detail } else { 'no result row' }
+                                $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
+                                if ($isOk) { $okCount++ } else { $failCount++ }
+                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
+                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
+                            }
+                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                        }
+                    }
+                    if ($done -lt $jobs.Count) {
+                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
+                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
+                        if ($cancelled -or $timedOut) {
+                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
+                            foreach ($j in $jobs) {
+                                if ($j.PS) {
+                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
+                                    $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
+                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
+                                    $done++
+                                }
+                            }
+                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned." }
+                            break
+                        }
+                        Start-Sleep -Milliseconds 120
+                    }
+                }
+            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+            & $send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($specTargets.Count) host(s). Reboot required to apply." }
+            return @{ rows=@($rows); summary=@{ total=$specTargets.Count; ok=$okCount; failed=$failCount; selfSkipped=$guarded.SkippedCount; cancelled=$cancelled; timedOut=$timedOut } }
         }
         'kb-install' {
             $threads = Get-WptThreadCount $Params 16

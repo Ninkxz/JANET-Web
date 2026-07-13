@@ -27,9 +27,9 @@ $ScProfile     = 'Oracle Java - Software Center'
 
 Describe 'ACAS 1.11.1 - manifest loads at the bumped version' {
     $manifest = & $mod { Get-JanetToolManifest }
-    It 'manifest id is acas and version is 1.11.2' {
+    It 'manifest id is acas and version is 1.11.3' {
         [string]$manifest.id      | Should Be 'acas'
-        [string]$manifest.version | Should Be '1.11.2'
+        [string]$manifest.version | Should Be '1.11.3'
     }
 }
 

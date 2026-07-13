@@ -33,6 +33,17 @@ Import-Module (Join-Path $PSScriptRoot 'JanetWeb.javafix.psm1') -Force -ErrorAct
 $script:AcasJavaFixSrc = if (Get-Command Get-JanetJavaFixSrc -ErrorAction SilentlyContinue) { Get-JanetJavaFixSrc } else { '' }
 try { . ([scriptblock]::Create($script:AcasJavaFixSrc)) } catch {}
 
+# Shared speculative-execution / side-channel mitigation engine (JanetWeb.specfix.psm1)
+# - the SAME ONE copy wpt's spec-exec check/enable actions call, so ACAS Nemesis'
+# Spectre/BHI (CVE-2022-0001) ENABLE remediation rides the identical KB4073119 logic,
+# no fork. $script:AcasSpecFixSrc carries the SOURCE STRING (Get-JanetSpecExecState +
+# Invoke-JanetSpecExecRemediation); the dispatcher injects it into the worker exactly
+# like $AcasJavaFixSrc, which prepends it to the profile Script rehydrated on-target.
+# Also dot-sourced here so the engine resolves in module scope for unit tests.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.specfix.psm1') -Force -ErrorAction SilentlyContinue
+$script:AcasSpecFixSrc = if (Get-Command Get-JanetSpecFixSrc -ErrorAction SilentlyContinue) { Get-JanetSpecFixSrc } else { '' }
+try { . ([scriptblock]::Create($script:AcasSpecFixSrc)) } catch {}
+
 # -----------------------------------------------------------------------------
 #  App Update profile registry (lifted from $script:WptAppUpdateProfiles).
 #  Each profile: Desc, Script (update scriptblock), Verify (version probe),
@@ -340,6 +351,49 @@ $script:AcasUpdateProfiles = @{
         # (JavaSoft CurrentVersion -> jvm.dll), so PRE/POST show the version drop to
         # 'not installed' after a successful removal. (Set post-table to avoid duplicating
         # the block and to guarantee parity without editing the Software-Center profile.)
+    }
+    'Spectre/BHI Mitigation - Enable (CVE-2022-0001)' = @{
+        Desc = 'ENABLE the speculative-execution / side-channel mitigations via the SHARED spec-exec engine (JanetWeb.specfix - the same one copy wpt uses). Writes the KB4073119 Memory Management values FeatureSettingsOverride=0 / FeatureSettingsOverrideMask=3, which force the Spectre/Meltdown/BHI mitigations ON (idempotent - already-enabled hosts report SKIP/NOCHANGE). A REBOOT is required to apply. On Intel CPUs the BHI hardware mitigation additionally needs OEM microcode (Intel SA-00598) - an OEM prereq this tool cannot supply and never fakes; the registry enable alone is not sufficient without it. Never runs against the dispatcher host (self-guard). Use when Intel BHI / CVE-2022-0001 / branch-target-injection / spec-exec findings are flagged.'
+        # NeedsSpecFix: the AcasUpdateWorker prepends the injected $AcasSpecFixSrc engine
+        # source to this Script text before the in-session rehydration, and fails CLOSED
+        # (no write) if the source was not injected. ForbidSelf: the dispatch drops the
+        # JANET host from the wave BEFORE job build (the reboot-required write on self is forbidden).
+        NeedsSpecFix = $true
+        ForbidSelf   = $true
+        Script = {
+            # The shared engine source is prepended by the worker, so Invoke-JanetSpecExecRemediation
+            # is defined in THIS rehydrated scriptblock. Fail closed if it is somehow absent.
+            if (-not (Get-Command Invoke-JanetSpecExecRemediation -ErrorAction SilentlyContinue)) {
+                return 'FAIL: shared spec-exec remediation engine (JanetWeb.specfix) not present on target - fail-closed, nothing changed'
+            }
+            $rows = @(Invoke-JanetSpecExecRemediation)
+            $r = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+            if (-not $r) { return 'FAIL: spec-exec remediation returned no result row' }
+            $res = "$($r.Result)"; $det = "$($r.Detail)"
+            # Map the engine rollup (FIXED / NOCHANGE / FAIL) to acas' OK/SKIP/FAIL vocabulary.
+            if     ($res -eq 'FIXED')    { return "OK - mitigations enabled, REBOOT REQUIRED ($det)" }
+            elseif ($res -eq 'NOCHANGE') { return "SKIP: $det" }
+            elseif ($res -eq 'FAIL')     { return "FAIL: $det" }
+            else                         { return "$res - $det" }
+        }
+        # Read-only Verify: a self-contained probe of the two KB4073119 Memory Management
+        # override values (NOT the engine's write path - just a state read, so it needs no
+        # injected source). PRE/POST show the DEFAULT/DISABLED -> ENABLED transition.
+        Verify = {
+            $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+            $cpu = ''
+            try { $cpu = [string]((Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).Name) } catch {}
+            $fso = $null; $mask = $null
+            try { $fso  = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverride     -ErrorAction Stop).FeatureSettingsOverride }     catch {}
+            try { $mask = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverrideMask -ErrorAction Stop).FeatureSettingsOverrideMask } catch {}
+            if ($null -eq $fso -or $null -eq $mask) { $verdict = 'DEFAULT' }
+            elseif ((([int]$fso -band 3) -eq 0) -and (([int]$mask -band 3) -eq 3)) { $verdict = 'ENABLED' }
+            elseif (([int]$fso -band 3) -ne 0) { $verdict = 'DISABLED' }
+            else { $verdict = 'PARTIAL' }
+            $fsoTxt = if ($null -ne $fso) { [string]$fso } else { '(unset)' }
+            $maskTxt = if ($null -ne $mask) { [string]$mask } else { '(unset)' }
+            return @{ Version = $verdict; LastUpdated = 'n/a'; Verified = ($verdict -eq 'ENABLED'); Detail = "FeatureSettingsOverride=$fsoTxt Mask=$maskTxt$(if ($cpu) { "; $cpu" } else { '' })" }
+        }
     }
     'Microsoft Store - Update Apps' = @{
         Desc = 'Trigger a Microsoft Store update scan (EXPERIMENTAL). Covers Windows App (Remote Desktop) and other MS-Store apps.'
@@ -898,7 +952,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.2'
+        version  = '1.11.3'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1214,6 +1268,11 @@ function Get-AcasProfileMatchTable {
         # Software Center (Profiles[0], the default) AND remove-vulnerable-Java via the
         # shared fix-java engine (alternate). Both map to the SAME Oracle-Java plugin set.
         @{ Keywords=@('Oracle Java','Oracle JRE','Java SE Multiple Vulnerabilities'); Profiles=@('Oracle Java - Software Center','Oracle Java - Remove (fix-java)') }
+        # Intel BHI / Spectre-BHB / speculative-execution branch-target-injection findings
+        # map to the SHARED spec-exec ENABLE engine (writes KB4073119 FeatureSettingsOverride
+        # =0 / Mask=3; reboot required; Intel microcode SA-00598 is an OEM prereq the tool
+        # cannot supply). 'Speculative Execution' sits ABOVE nothing generic here on purpose.
+        @{ Keywords=@('CVE-2022-0001','Branch History Injection','Branch Target Injection','Speculative Execution','Spectre','BHI'); Profiles=@('Spectre/BHI Mitigation - Enable (CVE-2022-0001)') }
     )
 }
 
@@ -1634,7 +1693,7 @@ function Get-AcasRemediationGroups {
 #  in the web host). Returns a string: "OK*"/"FAIL*"/"SKIP*".
 # -----------------------------------------------------------------------------
 $script:AcasUpdateWorker = {
-    param($TargetIn, $ProfileIn, $UpdateProfilesTable, $VerifyOnlyIn, $CredIn, $StageSource, $JavaFixSrcIn)
+    param($TargetIn, $ProfileIn, $UpdateProfilesTable, $VerifyOnlyIn, $CredIn, $StageSource, $JavaFixSrcIn, $SpecFixSrcIn)
     $prof = $UpdateProfilesTable[$ProfileIn]
     if (-not $prof) { return "FAIL: Unknown profile '$ProfileIn'." }
 
@@ -1643,7 +1702,7 @@ $script:AcasUpdateWorker = {
     # NeedsJavaFix profiles (Oracle-Java REMOVE) ride the SHARED fix-java engine,
     # whose SOURCE the dispatcher injects as $JavaFixSrcIn (this bare pool runspace
     # has no module scope) - prepended to the profile Script text below.
-    $isPkgProfile = $false; $needsStaging = $false; $needsJavaFix = $false
+    $isPkgProfile = $false; $needsStaging = $false; $needsJavaFix = $false; $needsSpecFix = $false
     try {
         if ($prof -is [hashtable] -and $prof.ContainsKey('IsPackage')) { $isPkgProfile = [bool]$prof['IsPackage'] }
         elseif ($prof.PSObject -and $prof.PSObject.Properties['IsPackage']) { $isPkgProfile = [bool]$prof.IsPackage }
@@ -1651,6 +1710,8 @@ $script:AcasUpdateWorker = {
         elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsStaging']) { $needsStaging = [bool]$prof.NeedsStaging }
         if ($prof -is [hashtable] -and $prof.ContainsKey('NeedsJavaFix')) { $needsJavaFix = [bool]$prof['NeedsJavaFix'] }
         elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsJavaFix']) { $needsJavaFix = [bool]$prof.NeedsJavaFix }
+        if ($prof -is [hashtable] -and $prof.ContainsKey('NeedsSpecFix')) { $needsSpecFix = [bool]$prof['NeedsSpecFix'] }
+        elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsSpecFix']) { $needsSpecFix = [bool]$prof.NeedsSpecFix }
     } catch {}
     if ($isPkgProfile -and -not $VerifyOnlyIn) {
         return "FAIL: package-deploy profile not supported in JANET Web host (no controller Packages\ staging tree)."
@@ -1658,6 +1719,10 @@ $script:AcasUpdateWorker = {
     # Fail CLOSED: a Java REMOVE run with no injected engine source performs NO uninstall.
     if ($needsJavaFix -and -not $VerifyOnlyIn -and [string]::IsNullOrWhiteSpace([string]$JavaFixSrcIn)) {
         return "FAIL: shared Java remediation engine (JanetWeb.javafix) source not injected into worker - aborting (fail-closed), no Java removed."
+    }
+    # Fail CLOSED: a spec-exec ENABLE run with no injected engine source performs NO write.
+    if ($needsSpecFix -and -not $VerifyOnlyIn -and [string]::IsNullOrWhiteSpace([string]$SpecFixSrcIn)) {
+        return "FAIL: shared spec-exec remediation engine (JanetWeb.specfix) source not injected into worker - aborting (fail-closed), nothing changed."
     }
     # NeedsStaging (Log4j) full-run requires a resolved controller-side jar source;
     # the host copies the jars into the session below (no remote double-hop).
@@ -1763,6 +1828,15 @@ $script:AcasUpdateWorker = {
         # above so an empty source already returned a fail-closed FAIL (no uninstall).
         if ($needsJavaFix -and -not [string]::IsNullOrWhiteSpace([string]$JavaFixSrcIn)) {
             $updateText = [string]$JavaFixSrcIn + "`r`n" + $updateText
+        }
+
+        # Spectre/BHI ENABLE (NeedsSpecFix): prepend the injected SHARED spec-exec engine
+        # source so the in-session rehydration defines Invoke-JanetSpecExecRemediation /
+        # Get-JanetSpecExecState BEFORE the profile Script calls them. Same engine wpt
+        # injects into ITS pool workers. Guarded above so an empty source already returned
+        # a fail-closed FAIL (no registry write).
+        if ($needsSpecFix -and -not [string]::IsNullOrWhiteSpace([string]$SpecFixSrcIn)) {
+            $updateText = [string]$SpecFixSrcIn + "`r`n" + $updateText
         }
 
         # Log4j (NeedsStaging): copy the controller-side jars INTO this session's
@@ -2756,7 +2830,7 @@ function Invoke-JanetToolAction {
                 foreach ($h in $runHosts) {
                     $tupleKey = "$prof|$h"
                     if ($seen.Add($tupleKey)) {
-                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $prof, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$prof } })
+                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $prof, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc, $script:AcasSpecFixSrc); Context=@{ Profile=$prof } })
                     }
                 }
                 if ($jobs.Count -gt 0) {
@@ -2871,7 +2945,7 @@ function Invoke-JanetToolAction {
                 foreach ($h in $acHosts) {
                     $tupleKey = "$chosen|$h"
                     if ($seen.Add($tupleKey)) {
-                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $chosen, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$chosen } })
+                        [void]$jobs.Add(@{ Host=$h; Args=@($h, $chosen, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc, $script:AcasSpecFixSrc); Context=@{ Profile=$chosen } })
                     }
                 }
             }
@@ -2925,7 +2999,7 @@ function Invoke-JanetToolAction {
             $profilesTable = $script:AcasUpdateProfiles
             $jobs = New-Object System.Collections.ArrayList
             foreach ($t in $targets) {
-                [void]$jobs.Add(@{ Host=$t; Args=@($t, $profileName, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$profileName; Mode=$mode } })
+                [void]$jobs.Add(@{ Host=$t; Args=@($t, $profileName, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc, $script:AcasSpecFixSrc); Context=@{ Profile=$profileName; Mode=$mode } })
             }
 
             $rowOf = {
@@ -2987,7 +3061,7 @@ function Invoke-JanetToolAction {
                     # Self-guard: drop the dispatcher host for a ForbidSelf profile (Java REMOVE).
                     $rhosts = @(Select-AcasNonSelfHosts -ProfileName $jl.Profile -Hosts $jl.Hosts -Send $send)
                     foreach ($t in $rhosts) {
-                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$jl.Profile } })
+                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc, $script:AcasSpecFixSrc); Context=@{ Profile=$jl.Profile } })
                     }
                 }
                 if ($jobs.Count -eq 0) {
@@ -3015,7 +3089,7 @@ function Invoke-JanetToolAction {
                     # Self-guard: drop the dispatcher host for a ForbidSelf profile (Java REMOVE).
                     $rhosts = @(Select-AcasNonSelfHosts -ProfileName $jl.Profile -Hosts $jl.Hosts -Send $send)
                     foreach ($t in $rhosts) {
-                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc); Context=@{ Profile=$jl.Profile } })
+                        [void]$jobs.Add(@{ Host=$t; Args=@($t, $jl.Profile, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc, $script:AcasSpecFixSrc); Context=@{ Profile=$jl.Profile } })
                     }
                     $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasUpdateWorker -Threads $threads -PerHostSeconds $perHostTimeout `
                                -RowOf $rowOf -OkOf $okOf -AuditAction $(if ($verifyOnly) { 'TouchHost' } else { 'VulnPatched' }) -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
