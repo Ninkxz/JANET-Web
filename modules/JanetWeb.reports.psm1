@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.18'
+        version  = '2.14.19'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -1492,11 +1492,32 @@ function Compare-AcasScans {
         $comparisonLookup[$key] = $f
     }
 
-    # REMEDIATED: in baseline but NOT in comparison (patched/fixed)
+    # loop39 (ledger row 36): cross-domain short-name COLLISIONS across BOTH scans. The
+    # fold above collapses any non-IP name to its short NetBIOS label, so two DISTINCT
+    # FQDNs (web01.us.af.mil + web01.eu.af.mil) both become WEB01. A baseline-only key on
+    # such a short name LOOKS remediated, but the comparison's WEB01 may be a DIFFERENT
+    # physical box (the other domain), so we cannot confirm the baseline host was actually
+    # patched. Those keys are classified AMBIGUOUS (a new bucket alongside REMEDIATED /
+    # STILL OPEN / NEW), never a silent false-close. Reuses the PROVEN loop24 helper
+    # Get-ReportsHostKeyCollisions (the same one campaign-verify uses); the fold itself is
+    # UNCHANGED - only a genuine >=2-distinct-FQDN collision demotes a would-be REMEDIATED.
+    # DEFERRED follow-up: thread the scan's IP through New-AcasFinding / Parse-AcasFile to
+    # positively disambiguate the two WEB01s (the parser discards the IP once a name string
+    # exists). Until that schema change lands, AMBIGUOUS-and-surface (never silent-close) is
+    # the correct interim behavior.
+    $allHostnames = New-Object System.Collections.ArrayList
+    foreach ($f in $script:BaselineFindings)   { [void]$allHostnames.Add([string]$f.Hostname) }
+    foreach ($f in $script:ComparisonFindings) { [void]$allHostnames.Add([string]$f.Hostname) }
+    $collisions = Get-ReportsHostKeyCollisions -Hostnames @($allHostnames.ToArray())
+
+    # REMEDIATED: in baseline but NOT in comparison (patched/fixed) - UNLESS the short host
+    # key is a cross-domain collision, in which case the closure is AMBIGUOUS (see above).
     foreach ($key in $baselineKeys) {
         if (-not $comparisonKeys.Contains($key)) {
             $f = $baselineLookup[$key]
-            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta='REMEDIATED'; Solution=$f.Solution })
+            $hk = Get-ReportsAuditHostKey $f.Hostname
+            $delta = if ($collisions.Contains($hk)) { 'AMBIGUOUS' } else { 'REMEDIATED' }
+            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta=$delta; Solution=$f.Solution })
         }
     }
     # STILL OPEN: in BOTH baseline AND comparison (not fixed)
@@ -2250,15 +2271,20 @@ function Build-CoraSummary {
         if ($f.Status -eq 'Patched') { continue }
         if ($f.Category -eq 'NOT OUR PATCH') { continue }
         $considered++
-        $hosts[$f.Hostname] = $true
+        # loop39 (ledger row 37): count unique hosts by the SAME normalized key the compare /
+        # closure paths use (Get-ReportsAuditHostKey), so one physical box exported as WEB01 in
+        # one file and web01.us.af.mil in another counts ONCE, not twice. The map value keeps a
+        # representative display name per key (the raw hostname); only the KEY drives the count.
+        $hk = Get-ReportsAuditHostKey $f.Hostname
+        $hosts[$hk] = $f.Hostname
         $sev = $f.Severity
         if (-not $sevCount.ContainsKey($sev)) { $sevCount[$sev] = 0; $sevHosts[$sev] = @{} }
         $sevCount[$sev]++
-        $sevHosts[$sev][$f.Hostname] = $true
+        $sevHosts[$sev][$hk] = $f.Hostname
         $cat = if ([string]::IsNullOrWhiteSpace($f.Category)) { 'Other' } else { $f.Category }
         if (-not $catData.ContainsKey($cat)) { $catData[$cat] = @{ Count = 0; Hosts = @{} } }
         $catData[$cat].Count++
-        $catData[$cat].Hosts[$f.Hostname] = $true
+        $catData[$cat].Hosts[$hk] = $f.Hostname
         $pluginIdKey = ($f.PluginID -as [string])
         if ([string]::IsNullOrWhiteSpace($pluginIdKey)) { continue }
         $thisRank = switch ($f.Severity) { 'Critical'{4} 'High'{3} 'Medium'{2} 'Low'{1} 'Info'{0} default{0} }
@@ -2275,7 +2301,7 @@ function Build-CoraSummary {
             }
         }
         $g = $byPlugin[$pluginIdKey]
-        [void]$g.Hosts.Add($f.Hostname)
+        [void]$g.Hosts.Add($hk)
         $g.FindingCount++
         if ($thisRank -gt $g.SeverityRank) { $g.SeverityRank = $thisRank; $g.Severity = $f.Severity }
     }
@@ -5539,12 +5565,13 @@ function Invoke-JanetToolAction {
             $results = Compare-AcasScans
             $script:ComparisonResults = $results
 
-            $remediated = 0; $stillOpen = 0; $newCount = 0
+            $remediated = 0; $stillOpen = 0; $newCount = 0; $ambiguous = 0
             foreach ($r in $results) {
                 switch ($r.Delta) {
                     'REMEDIATED' { $remediated++ }
                     'STILL OPEN' { $stillOpen++ }
                     'NEW'        { $newCount++ }
+                    'AMBIGUOUS'  { $ambiguous++ }
                 }
             }
 
@@ -5568,9 +5595,12 @@ function Invoke-JanetToolAction {
             }
             & $send @{ type='progress'; done=$results.Count; total=$results.Count }
             $filterNote = if ($rows.Count -ne $results.Count) { " ($($rows.Count) of $($results.Count) shown after filters)" } else { '' }
-            & $send @{ type='audit'; action='TouchHost'; target="Scan compare ($($script:BaselineFindings.Count) baseline vs $($script:ComparisonFindings.Count) comparison)"; result='Success'; itemCount=$results.Count; detail="$remediated remediated, $stillOpen still open, $newCount new" }
-            & $send @{ type='status'; text="Comparison complete: $remediated remediated, $stillOpen still open, $newCount new.$filterNote" }
-            return @{ rows=@($rows); summary=@{ total=$rows.Count; remediated=$remediated; stillOpen=$stillOpen; newFindings=$newCount; deltaTotal=$results.Count } }
+            # loop39 (ledger row 36): AMBIGUOUS = a would-be REMEDIATED key whose short host
+            # name is shared by >=2 distinct FQDNs across the two scans - NOT auto-closed.
+            $ambNote = if ($ambiguous -gt 0) { " ($ambiguous ambiguous - short name shared by distinct hosts; re-scan by FQDN)" } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Scan compare ($($script:BaselineFindings.Count) baseline vs $($script:ComparisonFindings.Count) comparison)"; result='Success'; itemCount=$results.Count; detail="$remediated remediated, $stillOpen still open, $newCount new, $ambiguous ambiguous" }
+            & $send @{ type='status'; text="Comparison complete: $remediated remediated, $stillOpen still open, $newCount new.$ambNote$filterNote" }
+            return @{ rows=@($rows); summary=@{ total=$rows.Count; remediated=$remediated; stillOpen=$stillOpen; newFindings=$newCount; ambiguous=$ambiguous; deltaTotal=$results.Count } }
         }
 
         # -------------------------------------------------------------------
@@ -5707,11 +5737,30 @@ function Invoke-JanetToolAction {
             # the compare keys that produced these results.
             $remLookup = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($r in $remediated) { [void]$remLookup.Add("$(Get-ReportsAuditHostKey $r.Hostname)|$($r.PluginID)") }
+            # loop39 (ledger row 36): this is the ONLY site that writes finding.Status='Patched',
+            # and it builds its OWN keys - so it needs its OWN cross-domain collision guard (the
+            # compare's demotion alone does not protect a stale/reused ComparisonResults set). A
+            # finding whose short host key is shared by >=2 DISTINCT FQDNs in the loaded/compared
+            # set is SKIPPED (left open, surfaced) rather than flipped to Patched - we cannot
+            # confirm WHICH physical box a WEB01 remediation belongs to. Reuses the proven loop24
+            # helper; the fold is unchanged. DEFERRED follow-up: thread the scan IP through
+            # New-AcasFinding / Parse-AcasFile to disambiguate the two WEB01s (the parser discards
+            # the IP once a name exists); until then AMBIGUOUS-skip, never a silent false-close.
+            $applyHostnames = New-Object System.Collections.ArrayList
+            foreach ($finding in $script:AcasFindings) { [void]$applyHostnames.Add([string]$finding.Hostname) }
+            foreach ($r in $remediated)                { [void]$applyHostnames.Add([string]$r.Hostname) }
+            $applyCollisions = Get-ReportsHostKeyCollisions -Hostnames @($applyHostnames.ToArray())
             $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm')
-            $matchCount = 0
+            $matchCount = 0; $skippedAmbiguous = 0
             foreach ($finding in $script:AcasFindings) {
-                $key = "$(Get-ReportsAuditHostKey $finding.Hostname)|$($finding.PluginID)"
+                $hk  = Get-ReportsAuditHostKey $finding.Hostname
+                $key = "$hk|$($finding.PluginID)"
                 if ($remLookup.Contains($key) -and $finding.Status -ne 'Patched') {
+                    if ($applyCollisions.Contains($hk)) {
+                        # Collided short name - do NOT flip to Patched; leave the vuln open and surfaced.
+                        $skippedAmbiguous++
+                        continue
+                    }
                     $finding.Status      = 'Patched'
                     $finding.PatchedDate = $stamp
                     $finding.PatchedBy   = 'Scan Comparison'
@@ -5722,14 +5771,16 @@ function Invoke-JanetToolAction {
             $add = { param($metric,$value) $r=@{ Metric=$metric; Value=$value }; [void]$rows.Add($r); & $send (@{ type='row' } + $r) }
             & $add 'Remediated in comparison' $remediated.Count
             & $add 'Marked Patched now' $matchCount
-            & $add 'Already Patched / no match' ($remediated.Count - $matchCount)
+            & $add 'Skipped (ambiguous host key)' $skippedAmbiguous
+            & $add 'Already Patched / no match' ($remediated.Count - $matchCount - $skippedAmbiguous)
             # Success only when at least one loaded finding was actually flipped to
             # Patched; if nothing matched (or all were already Patched) no work was
             # done -> Skipped with itemCount=0.
             $applyResult = if ($matchCount -gt 0) { 'Success' } else { 'Skipped' }
-            & $send @{ type='audit'; action='TouchHost'; target="Apply remediated ($($remediated.Count) keys)"; result=$applyResult; itemCount=$matchCount; detail="$matchCount finding(s) marked Patched (PatchedBy=Scan Comparison) of $($remediated.Count) remediated" }
-            & $send @{ type='status'; text="$matchCount finding(s) marked Patched ($($remediated.Count) remediated in comparison)." }
-            return @{ rows=@($rows); summary=@{ total=$matchCount; remediated=$remediated.Count; marked=$matchCount } }
+            $skipNote = if ($skippedAmbiguous -gt 0) { " ($skippedAmbiguous skipped as ambiguous - short name shared by distinct hosts; re-scan by FQDN)" } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Apply remediated ($($remediated.Count) keys)"; result=$applyResult; itemCount=$matchCount; detail="$matchCount finding(s) marked Patched (PatchedBy=Scan Comparison) of $($remediated.Count) remediated, $skippedAmbiguous skipped as ambiguous" }
+            & $send @{ type='status'; text="$matchCount finding(s) marked Patched ($($remediated.Count) remediated in comparison).$skipNote" }
+            return @{ rows=@($rows); summary=@{ total=$matchCount; remediated=$remediated.Count; marked=$matchCount; skippedAmbiguous=$skippedAmbiguous } }
         }
 
         # -------------------------------------------------------------------
