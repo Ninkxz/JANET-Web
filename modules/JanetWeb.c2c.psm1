@@ -165,7 +165,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-pki'
                 label       = 'Fix PKI Trust Roots'
-                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. Two PKI-Fix-ScanFix v1.9 companions then run on each host: (a) EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Client Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. Two PKI-Fix-ScanFix v1.9 companions are OPT-IN via their own boxes (both default OFF; the core additive bundle install above always runs): (a) prunePki - EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) fixRdp - a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Client Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Each companion runs only when its box is ticked. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the PKI Trust Roots pillar on the import-flagged host(s) you checked? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
@@ -174,6 +174,8 @@ function Get-JanetToolManifest {
                     @{ name='targets';          label='Checked host(s) - a subset of the PKI Trust Roots hosts the import flagged'; type='hostlist'; required=$true },
                     @{ name='csvPath';          label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='certBundleFolder'; label='DoD trust bundle folder (server-readable path, e.g. a UNC path with root\*.cer, Intermediate\*.cer, Untrusted\*.cer)'; type='text'; required=$true },
+                    @{ name='prunePki';         label='Prune expired retired DoD intermediates (CA store; the 4 legacy-keeps never touched)'; type='bool'; required=$false; default=$false },
+                    @{ name='fixRdp';           label='Repair broken RDP listener (self-signed/expired/missing -> rebind CA-issued; healthy untouched)'; type='bool'; required=$false; default=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
@@ -224,7 +226,7 @@ function Get-JanetToolManifest {
                     @{ name='plan';             label='Run-all plan (JSON: [{host,pillars:[...]}] - the operator''s per-pillar host selections)'; type='textarea'; required=$true },
                     @{ name='csvPath';          label='C2C Compliance CSV (the plan is re-derived from this import and the client plan intersected against it)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted FIXED volumes (OS + data; only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
-                    @{ name='certBundleFolder'; label='DoD trust bundle folder (optional; needed only if a host plans PkiRoots)'; type='text'; required=$false },
+                    @{ name='certBundleFolder'; label='DoD trust bundle folder (optional; needed only if a host plans PkiRoots. The two PkiRoots companions - prunePki / fixRdp - are opt-in via the PkiRoots card boxes and default OFF)'; type='text'; required=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
@@ -1311,7 +1313,7 @@ function Get-C2cShortHost {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$PkiCompanions, [string]$OfflineDefPath, [string]$OfflineDefSha256)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$OfflineDefPath, [string]$OfflineDefSha256)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
@@ -1382,7 +1384,7 @@ $script:C2cFixBlock = {
     $fixSb = {
         # Pillars cross as a '|'-delimited string (never an array) so no ArgumentList
         # flattening/serialization ambiguity over the WinRM boundary.
-        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$PkiCompanions)
+        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$DoPrune, [bool]$DoRdp)
         if ($SigMaxAgeHours -le 0) { $SigMaxAgeHours = 24 }
         $Pillars = @(($PillarCsv -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
@@ -2079,9 +2081,10 @@ $script:C2cFixBlock = {
             #     are EXCLUDED - fix-pki intentionally pushes those despite expiry (guard
             #     copy of $script:C2cLegacyIntermediates; keep the two lists in sync).
             #     Emits a row only when something matched; a clean CA store is silent.
-            #     $PkiCompanions gates both companions: only the REAL dispatcher passes it,
-            #     so direct fix-block callers (unit tests) never touch live machine state.
-            if ($PkiCompanions) {
+            #     $DoPrune gates this companion INDEPENDENTLY (opt-in box on the PkiRoots card;
+            #     default OFF). Direct fix-block callers (unit tests) pass $false and so never
+            #     touch live machine state. The core additive bundle install above ALWAYS runs.
+            if ($DoPrune) {
             try {
                 $allowSubject = '^CN=DOD (EMAIL|ID|SW|DERILITY) CA-\d+, OU=PKI, OU=DoD'
                 $legacyKeep = @(
@@ -2105,6 +2108,7 @@ $script:C2cFixBlock = {
                     else { & $add 'PkiExpired' 'prune' 'FIXED' ("removed $delOk expired retired DoD intermediate(s) from the CA store (allowlisted DOD EMAIL/ID/SW/DERILITY subjects only; the four legacy-keep intermediates untouched)") }
                 }
             } catch { & $add 'PkiExpired' 'prune' 'FAIL' ("expired-intermediate prune error: " + $_.Exception.Message) }
+            }
 
             # Pc. PkiRdp (PKI-Fix-ScanFix v1.9 port) - repair a BROKEN RDP-tcp listener
             #     certificate (self-signed / expired / missing). A healthy CA-issued
@@ -2112,6 +2116,9 @@ $script:C2cFixBlock = {
             #     replacement cert (newest valid My-store cert matching this computer with
             #     the Server Authentication EKU 1.3.6.1.5.5.7.3.1) is located FIRST - with
             #     no candidate the listener is left alone (SKIP), nothing is cleared.
+            #     $DoRdp gates this companion INDEPENDENTLY (opt-in box on the PkiRoots card;
+            #     default OFF). A healthy CA-issued listener is never touched even when armed.
+            if ($DoRdp) {
             try {
                 $tsgs = Get-CimInstance -Namespace 'root/cimv2/terminalservices' -ClassName 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'" -ErrorAction Stop
                 $rdpHash = (([string]$tsgs.SSLCertificateSHA1Hash) -replace '[^0-9A-Fa-f]', '').ToUpper()
@@ -2226,7 +2233,7 @@ $script:C2cFixBlock = {
     try {
         # Pass the pillar set as a '|'-delimited string (all-scalar ArgumentList) so it
         # crosses the WinRM boundary intact; the remote block splits it back to an array.
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours, $MdeOrgId, $MdeBlob, $JavaSrc, $PkiCompanions -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours, $MdeOrgId, $MdeBlob, $JavaSrc, $DoPrune, $DoRdp -ErrorAction Stop
 
         # ---- Offline definition rung (Defender-ScanFix v2.1 LAST rung) --------------
         # Only when a validated Microsoft-signed mpam-fe.exe is staged admin-side AND the
@@ -2694,6 +2701,13 @@ function Invoke-C2cFixAction {
     $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
     $doEnable       = Get-C2cBool $Params['enableEncryption'] $false
     $winrmHeal      = Get-C2cBool $Params['winrmHeal'] $false
+    # PkiRoots companions (opt-in, destructive extras; both default OFF). Gate the two
+    # PKI-Fix-ScanFix v1.9 companions INDEPENDENTLY: prunePki -> expired retired-intermediate
+    # prune (block a), fixRdp -> broken RDP-listener rebind (block b). The core additive DoD
+    # trust-bundle install ALWAYS runs; only these destructive extras are box-gated. Shared
+    # param contract with the certdeploy tool so the two stay consistent.
+    $doPrune        = Get-C2cBool $Params['prunePki'] $false
+    $doRdp          = Get-C2cBool $Params['fixRdp'] $false
 
     # Baseline (fresh) for the Tanium service name used by the Monitoring fixer.
     $baseline = Get-C2cBaseline
@@ -2995,7 +3009,7 @@ function Invoke-C2cFixAction {
         [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cAddCertsSrc)
         [void]$ps.AddArgument([int]$sigMaxHours)
-        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($true); [void]$ps.AddArgument([string]$offlineDefPath); [void]$ps.AddArgument([string]$offlineDefSha256)
+        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($doPrune); [void]$ps.AddArgument($doRdp); [void]$ps.AddArgument([string]$offlineDefPath); [void]$ps.AddArgument([string]$offlineDefSha256)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 

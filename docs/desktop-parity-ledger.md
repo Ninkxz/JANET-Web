@@ -90,7 +90,7 @@ commit is unblocked.
 | # | Finding (sev) | Web fix | In Desktop? | Status |
 |---|---------------|---------|-------------|--------|
 | 28 | RunBar host guard interpolated the invalid-hostname list `bad` into a confirm-dialog string body without `esc()`; `confirmdialog.js:57` assigns a string body via innerHTML -> a HOST_RE-failing token (operator-typed OR an imported ACAS/scan hostname CSV cell) like `<img src=x onerror=...>` fires on the run click. 7 occurrences / 1 root cause / 4 views (P2) | 4 non-colliding sites fixed `7bdc8dad4` via `bad.map(esc)` (mirrors dhcp.view.js:352): beta.view.js:113, biosfirmware.view.js:79, secureboot.view.js:104+177; node --check clean, suite 822 | NO - browser-DOM innerHTML sink; JANET Desktop has no web UI/DOM (same as row 14 dhcp XSS) | **CLOSED-WEB-ONLY** (no Desktop DOM) |
-| 29 | Same XSS pattern, 3 more occurrences in certdeploy.view.js:131/142/154 | Prepared (`bad.slice(0,5).map(esc)`, local esc at :70) but NOT applied - certdeploy.view.js is part of a concurrent uncommitted WIP; touching it would sweep in that session's edits | NO - browser-DOM sink, Web-only | **DEFERRED-CONCURRENT-WIP** (land when the WIP commits, or hand to the owner - Web-only, no Desktop action) |
+| 29 | Same XSS pattern, 3 more occurrences in certdeploy.view.js RunBar guards | FIXED (loop25): all 3 invalid-hostname guards now `bad.slice(0,5).map(esc).join(', ')` - landed with the PKI-boxes feature once the operator directed the certdeploy WIP be committed | NO - browser-DOM sink, Web-only | **CLOSED-WEB-ONLY** (no Desktop DOM) |
 
 ## Loop-12 finding (NEW) - server layer audited GREEN; one P3 fail-fast hardening -> Web-only
 | # | Finding (sev) | Web fix | In Desktop? | Status |

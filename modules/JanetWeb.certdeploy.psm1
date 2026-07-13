@@ -46,7 +46,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.3.0'
+        version  = '1.4.0'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -67,7 +67,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'deploy'
                 label       = 'Deploy Trust Certs'
-                description = 'DESTRUCTIVE (certificate store) - requires a live admin session and the exact confirm word DEPLOY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (blank folder = the shipped Packages\DoD-Certs); abort and dial nothing if it is missing/empty. Per host: TCP reachability, a DNS wrong-box HARD abort, and the dispatcher self-guard (the JANET host is never targeted), then ONE WinRM round-trip that ADDITIVELY installs each store group - each LocalMachine store is opened ReadWrite and ONLY certs whose thumbprint is not already present are added; nothing is EVER removed. Result ROOTS INSTALLED (added N of M across Root/CA/Disallowed) / ROOTS ALREADY PRESENT / FAILED / OFFLINE. Per-host watchdog + operator cancel bridge.'
+                description = 'DESTRUCTIVE (certificate store) - requires a live admin session and the exact confirm word DEPLOY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (blank folder = the shipped Packages\DoD-Certs); abort and dial nothing if it is missing/empty. Per host: TCP reachability, a DNS wrong-box HARD abort, and the dispatcher self-guard (the JANET host is never targeted), then ONE WinRM round-trip that ADDITIVELY installs each store group - each LocalMachine store is opened ReadWrite and ONLY certs whose thumbprint is not already present are added; nothing is EVER removed. Result ROOTS INSTALLED (added N of M across Root/CA/Disallowed) / ROOTS ALREADY PRESENT / FAILED / OFFLINE. Per-host watchdog + operator cancel bridge. TWO INDEPENDENT OPT-IN companions (default OFF - the deploy stays purely additive unless ticked) run the PKI-Fix-ScanFix v1.9 fixes on each host in the SAME WinRM round-trip, after the install, each armable on its own: prunePki prunes EXPIRED retired DOD EMAIL/ID/SW/DERILITY intermediates from the CA store ONLY (the four legacy-keep intermediates this tool intentionally pushes are never touched, nor is any other expired cert); fixRdp rebinds a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) to the newest valid CA-issued My-store cert for the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched), a healthy CA-issued listener is never touched. Companion outcomes ride in the row Detail; they never change the row Status.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Deploy the DoD/LTMA trust-root bundle to the target host(s)? This ADDITIVELY installs the DoD roots into LocalMachine Root/CA/Disallowed (never removes anything). Proceed?'
@@ -77,6 +77,8 @@ function Get-JanetToolManifest {
                     @{ name='certBundleFolder'; label='DoD/LTMA trust bundle folder (blank = shipped Packages\DoD-Certs)'; type='text'; required=$false },
                     @{ name='confirm'; label='Type DEPLOY to confirm'; type='text'; required=$true },
                     @{ name='includeExpired'; label='Include EXPIRED certs (dead trust anchors - default OFF)'; type='bool'; required=$false; default=$false },
+                    @{ name='prunePki'; label='Prune expired retired DoD intermediates (CA store; the 4 legacy-keeps never touched)'; type='bool'; required=$false; default=$false },
+                    @{ name='fixRdp'; label='Repair broken RDP listener (self-signed/expired/missing -> rebind CA-issued; healthy untouched)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false }
                 )
@@ -433,6 +435,99 @@ function Get-CertDeployResultToken {
 # Define the additive installer + classifier in MODULE scope too (admin-side use +
 # direct unit testing). The deploy worker dot-sources the same source string remotely.
 try { . ([scriptblock]::Create($script:CertDeployAddCertsSrc)) } catch {}
+
+# --- PKI-Fix-ScanFix v1.9 companions (OPT-IN deploy extra) ----------------------
+# PORT of the C2C fix-pki Pb/Pc companion blocks (JanetWeb.c2c.psm1) so the Cert
+# Deploy tab can run the SAME remediation the C2C Fix PKI path runs - gated on the
+# deploy action's prunePki/fixRdp inputs (both default OFF: deploy stays purely additive).
+# Runs ON the target host AFTER the additive install, in the same WinRM round-trip.
+# Returns an array of note strings ("PkiExpired FIXED: ...", "PkiRdp SKIP: ...");
+# an EMPTY array means both companions found nothing to do (no prunable expired
+# retired intermediates AND a healthy/absent-with-no-candidate RDP listener).
+$script:CertDeployCompanionsSrc = @'
+function Invoke-CertDeployCompanions {
+    param([bool]$DoPrune = $true, [bool]$DoRdp = $true)
+    $notes = New-Object System.Collections.ArrayList
+    # (a) PkiExpired - prune EXPIRED retired DoD intermediates. SAFETY MODEL: expired
+    #     does NOT mean deletable (roots, timestamping and machine-identity certs are
+    #     often expired-but-required), so deletion is gated on an ALLOWLIST: subject
+    #     must match the retired DoD intermediate pattern AND the store is CA ONLY
+    #     (never My/Root/TrustedPublisher/Disallowed). The four LegacyIntermediates
+    #     thumbprints are EXCLUDED - deploy intentionally pushes those despite expiry
+    #     (guard copy of $script:CertDeployLegacyIntermediates; keep the lists in sync).
+    if ($DoPrune) {
+    try {
+        $allowSubject = '^CN=DOD (EMAIL|ID|SW|DERILITY) CA-\d+, OU=PKI, OU=DoD'
+        $legacyKeep = @(
+            '53FDE0F40638BD1A68A68D1E91089009B33BAE5E'  # DOD EMAIL CA-59
+            '1907FC2B223EE0301B45745BDB59AAD90FE7C5D7'  # DOD ID CA-59
+            '5DFFDAB658915FA6B0DB4E0BCF70D5BB1B8425FC'  # DOD SW CA-60
+            '5F555AB8A87DD146314171621245CF720BF53B8A'  # DOD SW CA-61
+        )
+        $nowPk = Get-Date
+        $prunable = @(Get-ChildItem 'Cert:\LocalMachine\CA' -ErrorAction SilentlyContinue | Where-Object {
+            $_.NotAfter -lt $nowPk -and $_.Subject -match $allowSubject -and
+            ($legacyKeep -notcontains ((([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]', '').ToUpper()))
+        })
+        if ($prunable.Count -gt 0) {
+            $delOk = 0; $delFail = ''
+            foreach ($pc in $prunable) {
+                try { Remove-Item -Path $pc.PSPath -Force -ErrorAction Stop; $delOk++ }
+                catch { $delFail += "$($pc.Thumbprint): $($_.Exception.Message); " }
+            }
+            if ($delFail) { [void]$notes.Add("PkiExpired FAIL: removed $delOk of $($prunable.Count) expired retired DoD intermediate(s) from the CA store; errors: " + $delFail.TrimEnd('; ')) }
+            else { [void]$notes.Add("PkiExpired FIXED: removed $delOk expired retired DoD intermediate(s) from the CA store (allowlisted DOD EMAIL/ID/SW/DERILITY subjects only; the four legacy-keep intermediates untouched)") }
+        }
+    } catch { [void]$notes.Add("PkiExpired FAIL: expired-intermediate prune error: " + $_.Exception.Message) }
+    }
+    # (b) PkiRdp - repair a BROKEN RDP-tcp listener certificate (self-signed / expired /
+    #     missing). A healthy CA-issued listener is NEVER touched (silent). Reordered
+    #     SAFE for auto-run: the replacement cert (newest valid My-store cert matching
+    #     this computer with the Server Authentication EKU 1.3.6.1.5.5.7.3.1) is located
+    #     FIRST - with no candidate the listener is left alone (SKIP), nothing cleared.
+    if ($DoRdp) {
+    try {
+        $tsgs = Get-CimInstance -Namespace 'root/cimv2/terminalservices' -ClassName 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'" -ErrorAction Stop
+        $rdpHash = (([string]$tsgs.SSLCertificateSHA1Hash) -replace '[^0-9A-Fa-f]', '').ToUpper()
+        $nowRd = Get-Date
+        $lcert = $null
+        if ($rdpHash -and $rdpHash -ne ('0' * 40)) {
+            foreach ($stN in @('My', 'Remote Desktop')) {
+                $lcert = Get-ChildItem "Cert:\LocalMachine\$stN" -ErrorAction SilentlyContinue |
+                         Where-Object { ((([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]', '').ToUpper()) -eq $rdpHash } |
+                         Select-Object -First 1
+                if ($lcert) { break }
+            }
+        }
+        $rdpState = if (-not $lcert) { 'missing' } elseif ($lcert.NotAfter -lt $nowRd) { 'expired' } elseif ($lcert.Subject -eq $lcert.Issuer) { 'self-signed' } else { 'healthy' }
+        if ($rdpState -ne 'healthy') {
+            $cand = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
+                (@($_.DnsNameList | ForEach-Object { [string]$_.Unicode } | Where-Object { $_ -eq $env:COMPUTERNAME -or (($_ -split '\.')[0] -eq $env:COMPUTERNAME) }).Count -gt 0) -and $_.NotAfter -gt $nowRd -and $_.HasPrivateKey -and
+                @($_.EnhancedKeyUsageList | Where-Object { [string]$_.ObjectId -eq '1.3.6.1.5.5.7.3.1' }).Count -gt 0
+            } | Sort-Object NotAfter -Descending | Select-Object -First 1
+            if (-not $cand) {
+                [void]$notes.Add("PkiRdp SKIP: RDP listener cert is $rdpState but no valid CA-issued My-store cert (Server Auth EKU) matches this host - left untouched")
+            } else {
+                # Bind FIRST; only on a successful bind do the destructive clears run. On a bind
+                # failure the old cert/listener are left intact (FAIL) - no dead-listener window.
+                try {
+                    Set-CimInstance -InputObject $tsgs -Property @{ SSLCertificateSHA1Hash = [string]$cand.Thumbprint } -ErrorAction Stop | Out-Null
+                    Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name 'SelfSignedCertStore' -Value '' -Force -ErrorAction SilentlyContinue
+                    [void]$notes.Add("PkiRdp FIXED: RDP listener was $rdpState - bound CA-issued cert $($cand.Thumbprint) (expires $($cand.NotAfter.ToShortDateString()))")
+                } catch {
+                    [void]$notes.Add("PkiRdp FAIL: RDP listener was $rdpState - bind to CA-issued cert $($cand.Thumbprint) FAILED, old cert/listener left intact: $($_.Exception.Message)")
+                }
+            }
+        }
+    } catch { [void]$notes.Add("PkiRdp FAIL: RDP listener check/repair error: " + $_.Exception.Message) }
+    }
+    return @($notes.ToArray())
+}
+'@
+# NOT dot-sourced in module scope: Invoke-CertDeployCompanions touches live machine
+# state (cert stores + the RDP listener) with no read-only path, so it must exist
+# ONLY on the remote target. Unit tests inspect the source string instead.
 
 # --- READ-ONLY store reader (CHECK worker + unit test) -------------------------
 # For each store group, open the LocalMachine store READ-ONLY and, given the bundle
@@ -985,7 +1080,8 @@ function Invoke-CertDeployCheckAction {
 #  guard + wrong-box HARD abort + per-host watchdog + operator cancel.
 # =============================================================================
 $script:CertDeployDeployBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$BundleJson, [string]$AddCertsSrc)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc)
+    $RunCompanions = ($DoPrune -or $DoRdp)
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Missing=''; Detail=''; Added=0; Total=0 }
 
@@ -1038,20 +1134,32 @@ $script:CertDeployDeployBlock = {
     # ADDITIVE install: deliver base64 certs grouped by store as JSON; the remote side
     # dot-sources Add-CertDeployBundleToStores and adds only-missing (NEVER removes).
     $installSb = {
-        param([string]$BundleJson, [string]$AddCertsSrc)
+        param([string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc)
+        $RunCompanions = ($DoPrune -or $DoRdp)
         $bundle = $null
         if ($BundleJson) { try { $bundle = $BundleJson | ConvertFrom-Json } catch { $bundle = $null } }
         if ($AddCertsSrc) { try { . ([scriptblock]::Create($AddCertsSrc)) } catch {} }
-        if (-not $bundle) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='no cert bundle delivered to the worker' } }
-        if (-not (Get-Command Add-CertDeployBundleToStores -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='cert-store installer helper unavailable on target' } }
+        if (-not $bundle) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='no cert bundle delivered to the worker'; Companions=@() } }
+        if (-not (Get-Command Add-CertDeployBundleToStores -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='cert-store installer helper unavailable on target'; Companions=@() } }
         $ar  = Add-CertDeployBundleToStores -Bundle $bundle
         $tok = if (Get-Command Get-CertDeployResultToken -ErrorAction SilentlyContinue) { Get-CertDeployResultToken $ar }
                elseif ([string]$ar.FailDetail) { 'FAIL' } elseif (@($ar.NotVerified).Count -gt 0) { 'NOT VERIFIED' } elseif ([int]$ar.Added -gt 0) { 'INSTALLED' } else { 'ALREADY' }
-        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified); Rejected=[int]$ar.Rejected; RejectDetail=[string]$ar.RejectDetail; AddedCerts=@($ar.AddedCerts) }
+        # OPT-IN v1.9 companions (prune expired retired intermediates + RDP listener repair),
+        # AFTER the install in the same round-trip. They run even on ALREADY - a host with
+        # every root present can still hold prunable expired certs or a broken RDP listener.
+        $comp = @()
+        if ($RunCompanions -and $CompanionsSrc) {
+            try {
+                . ([scriptblock]::Create($CompanionsSrc))
+                if (Get-Command Invoke-CertDeployCompanions -ErrorAction SilentlyContinue) { $comp = @(Invoke-CertDeployCompanions -DoPrune $DoPrune -DoRdp $DoRdp) }
+                else { $comp = @('companions FAIL: helper unavailable on target') }
+            } catch { $comp = @('companions FAIL: ' + $_.Exception.Message) }
+        }
+        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified); Rejected=[int]$ar.Rejected; RejectDetail=[string]$ar.RejectDetail; AddedCerts=@($ar.AddedCerts); Companions=@($comp) }
     }
 
     $ir = $null
-    try { $ir = Invoke-Command -Session $sess -ScriptBlock $installSb -ArgumentList $BundleJson, $AddCertsSrc -ErrorAction Stop }
+    try { $ir = Invoke-Command -Session $sess -ScriptBlock $installSb -ArgumentList $BundleJson, $AddCertsSrc, $DoPrune, $DoRdp, $CompanionsSrc -ErrorAction Stop }
     catch { $r.Status = 'FAILED'; $r.Detail = "Deploy: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
     finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
 
@@ -1070,6 +1178,13 @@ $script:CertDeployDeployBlock = {
     if ($addedCerts.Count -gt 0) { $r.Detail += " | trusted: " + ($addedCerts -join '; ') }
     $rejN = [int]$ir.Rejected
     if ($rejN -gt 0) { $r.Detail += " | REJECTED $rejN non-CA (not added to Root/CA): " + ([string]$ir.RejectDetail).TrimEnd('; ') }
+    # Companion outcomes ride in Detail only - the row Status stays the install token.
+    if ($RunCompanions) {
+        $compNotes = @()
+        try { $compNotes = @($ir.Companions) | Where-Object { $_ } } catch { $compNotes = @() }
+        if ($compNotes.Count -gt 0) { $r.Detail += ' | ' + ($compNotes -join '; ') }
+        else { $r.Detail += ' | companions ran: nothing to fix (no prunable expired intermediates; RDP listener healthy)' }
+    }
     return $r
 }
 
@@ -1133,6 +1248,18 @@ function Invoke-CertDeployDeployAction {
         return @{ rows=@(); summary=@{ total=0; rejected=$true; expiredCount=$expiredCount; expiredExcluded=$expiredCount } }
     }
 
+    # OPT-IN v1.9 companions (default OFF - deploy stays purely additive unless ticked). Two
+    # INDEPENDENT toggles (prunePki / fixRdp). BACK-COMPAT: an old client that sends only the
+    # retired single runCompanions truthy (and NEITHER new param) arms BOTH.
+    $legacy  = Get-CertDeployBool $Params['runCompanions'] $false
+    $doPrune = if ($Params.ContainsKey('prunePki') -or $Params.ContainsKey('fixRdp')) { Get-CertDeployBool $Params['prunePki'] $false } else { $legacy }
+    $doRdp   = if ($Params.ContainsKey('prunePki') -or $Params.ContainsKey('fixRdp')) { Get-CertDeployBool $Params['fixRdp'] $false } else { $legacy }
+    $runCompanions = ($doPrune -or $doRdp)
+    if ($runCompanions) {
+        $on = @(); if ($doPrune) { $on += 'expired retired-DoD-intermediate prune (CA store only; the four legacy-keep intermediates never touched)' }; if ($doRdp) { $on += 'broken-RDP-listener rebind (healthy CA-issued listeners never touched)' }
+        & $send @{ type='log'; level='warn'; text="[COMPANIONS] v1.9 fix companions ENABLED: after the install each host also gets the $($on -join ' and ')." }
+    }
+
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
     if ($targets.Count -eq 0) {
         & $send @{ type='log'; level='warn'; text='No valid targets.' }
@@ -1177,7 +1304,7 @@ function Invoke-CertDeployDeployAction {
     foreach ($h in $dial) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:CertDeployDeployBlock)
-        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($script:CertDeployAddCertsSrc)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($script:CertDeployAddCertsSrc); [void]$ps.AddArgument($doPrune); [void]$ps.AddArgument($doRdp); [void]$ps.AddArgument($script:CertDeployCompanionsSrc)
         [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 

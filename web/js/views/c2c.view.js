@@ -137,6 +137,8 @@
       var pillarCards = {};              // pillar key -> { hosts, via, cb, fixBtn, enableCb?, bundleInput? } for the per-pillar fix cards
       var encEnableChecked = false;      // persists the ENABLE-BitLocker opt-in across card rebuilds
       var pkiBundleValue = '';           // persists the PKI cert bundle folder across card rebuilds
+      var pkiPruneChecked = false;       // persists the "prune expired retired DoD intermediates" opt-in (default OFF)
+      var pkiRdpChecked = false;         // persists the "repair broken RDP listener" opt-in (default OFF)
       var importTiles = null;            // hero StatCards (built in the import card below)
 
       // =================== layout ===================
@@ -886,6 +888,34 @@
           pr.appendChild(bi);
           box.appendChild(pr);
           entry.bundleInput = bi;
+
+          // Two OPT-IN companions (both default UNCHECKED). The core additive bundle install
+          // always runs; these destructive extras run ONLY when ticked. Shared contract with
+          // the certdeploy tool: prunePki / fixRdp.
+          var pruneCb = ui.checkbox('Prune expired retired DoD intermediates', { title: 'Opt-in (default OFF). Prunes EXPIRED retired DoD intermediates from the CA store ONLY when the subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND it is not one of the four legacy-keep intermediates this tool intentionally pushes. Roots, machine identity and timestamping certs are never touched.' });
+          pruneCb._cb.checked = pkiPruneChecked;
+          pruneCb._cb.onchange = function () { pkiPruneChecked = pruneCb._cb.checked; };
+          pruneCb.style.margin = '6px 0 0';
+          box.appendChild(pruneCb);
+          entry.pruneCb = pruneCb;
+
+          var rdpCb = ui.checkbox('Repair broken RDP listener', { title: 'Opt-in (default OFF). Rebinds a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) to the newest valid CA-issued My-store cert matching the host. The replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP); a healthy CA-issued listener is never touched.' });
+          rdpCb._cb.checked = pkiRdpChecked;
+          rdpCb._cb.onchange = function () { pkiRdpChecked = rdpCb._cb.checked; };
+          rdpCb.style.margin = '4px 0 0';
+          box.appendChild(rdpCb);
+          entry.rdpCb = rdpCb;
+
+          // Prominent one-click: install the DoD trust roots on the flagged hosts in one obvious
+          // click (same path + guards as the card's Fix button - type-FIX confirm, admin gate,
+          // self-guard - honouring the current bundle folder + the two boxes above).
+          var oneClick = ui.button('FIX PKI TRUST ROOTS', { variant: 'gold', title: 'One-click: install the DoD trust roots on the flagged hosts (destructive). Uses the bundle folder above (blank = shipped DoD default) and the two opt-in boxes. Same guards as the Fix button: type FIX to confirm, admin session, self-guard.' });
+          oneClick.style.cssText += ';margin-top:8px;width:100%';
+          oneClick.onclick = function () { doPillarFix('PkiRoots'); };
+          box.appendChild(oneClick);
+          var hint = el('div'); hint.style.cssText = 'font-size:10.5px;color:var(--text-dim);margin-top:4px';
+          hint.textContent = 'One-click: install the DoD trust roots on the flagged hosts.';
+          box.appendChild(hint);
         }
 
         // row 2: the Fix button (dials the pillar's FULL import-flagged host set)
@@ -943,6 +973,8 @@
         if (confirmInput.value !== 'FIX') { alertDialog('Type FIX to Confirm', 'Type FIX (exactly, uppercase) in the Confirm box to arm the destructive fix.'); return; }
         var bundleFolder = (c && c.bundleInput) ? String(c.bundleInput.value || '').trim() : '';
         var enableEnc = key === 'Encryption' && c && c.enableCb && c.enableCb._cb.checked;
+        var pkiPrune = key === 'PkiRoots' && c && c.pruneCb && c.pruneCb._cb.checked;
+        var pkiRdp = key === 'PkiRoots' && c && c.rdpCb && c.rdpCb._cb.checked;
         var scopeTxt = manual ? 'Target Computer(s)' : 'import-flagged host(s) for ' + PILLAR_TAB[key];
 
         var pf = [
@@ -952,6 +984,8 @@
         ];
         if (key === 'Encryption') pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Resume-only (ENABLE not ticked)', ok: true });
         if (key === 'PkiRoots') pf.push({ label: 'Cert bundle: ' + (bundleFolder || 'shipped DoD default (Packages\\DoD-Certs)'), ok: true });
+        if (key === 'PkiRoots') pf.push({ label: 'Prune expired retired DoD intermediates: ' + (pkiPrune ? 'YES (opt-in ticked)' : 'no (default off)'), ok: true });
+        if (key === 'PkiRoots') pf.push({ label: 'Repair broken RDP listener: ' + (pkiRdp ? 'YES (opt-in ticked)' : 'no (default off)'), ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
         var ok = await ctx.arm({
@@ -972,7 +1006,7 @@
         var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked };
         if (!manual) params.csvPath = importCsvPath;   // omit csvPath -> engine runs MANUAL mode
         if (key === 'Encryption') params.enableEncryption = enableEnc;
-        if (key === 'PkiRoots') params.certBundleFolder = bundleFolder;
+        if (key === 'PkiRoots') { params.certBundleFolder = bundleFolder; params.prunePki = pkiPrune; params.fixRdp = pkiRdp; }
         run = ctx.run(meta.action, params, { keyOf: keyByHost, destructive: true });
         bindFixRun();
       }
@@ -1069,6 +1103,8 @@
         var enableEnc = !!(encTab && encTab.enableCb && encTab.enableCb._cb.checked && pillarsUsed.Encryption);
         var bundleFolder = (pkiTab && pkiTab.bundleInput) ? String(pkiTab.bundleInput.value || '').trim() : String(pkiBundleValue || '').trim();
         var pkiChecked = !!pillarsUsed.PkiRoots;
+        var pkiPrune = !!(pkiChecked && ((pkiTab && pkiTab.pruneCb) ? pkiTab.pruneCb._cb.checked : pkiPruneChecked));
+        var pkiRdp = !!(pkiChecked && ((pkiTab && pkiTab.rdpCb) ? pkiTab.rdpCb._cb.checked : pkiRdpChecked));
 
         var pf = [
           { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
@@ -1077,6 +1113,7 @@
         ];
         if (pillarsUsed.Encryption) pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
         if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs)', ok: true });
+        if (pkiChecked) pf.push({ label: 'PKI companions: prune expired intermediates ' + (pkiPrune ? 'ON' : 'off') + ', repair RDP listener ' + (pkiRdp ? 'ON' : 'off') + ' (opt-in, default off)', ok: true });
         if (manual) pf.push({ label: 'MANUAL mode - no C2C import: dials exactly the Target Computers you checked pillars for', ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
@@ -1102,6 +1139,8 @@
           plan: JSON.stringify(plan),
           enableEncryption: enableEnc,
           certBundleFolder: bundleFolder,
+          prunePki: pkiPrune,
+          fixRdp: pkiRdp,
           winrmHeal: fixWinrmHeal._cb.checked,
           confirm: confirmInput.value,
           threads: threadsFix(),

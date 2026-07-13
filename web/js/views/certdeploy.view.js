@@ -15,6 +15,14 @@
                                         installs the DoD roots and never removes.
                                         Expired certs are skipped by default; an
                                         "Include expired certs" checkbox opts in.
+                                        Two independent opt-in checkboxes
+                                        (default off) each arm a PKI-Fix-ScanFix
+                                        v1.9 companion after the install:
+                                        prunePki (expired-retired-intermediate
+                                        prune) and fixRdp (broken-RDP-listener
+                                        rebind). A prominent "FIX PKI TRUST ROOTS"
+                                        button is a one-click shortcut to the
+                                        same gated DEPLOY path.
    SCAN CERT MANAGEMENT (action 'scan-cert-management') - read-only, no admin
                                         gate, no confirm; reports whether
                                         InstallRoot / GPO manages trust roots
@@ -105,6 +113,10 @@
       optCard.appendChild(offlineCb);
       var includeExpiredCb = ui.checkbox('Include expired certs (dead anchors - normally skipped)', { title: 'Also push certificates whose NotAfter has already passed. Off by default - expired certs are dead trust anchors and are excluded from the bundle read + push unless ticked.' });
       optCard.appendChild(includeExpiredCb);
+      var pruneCb = ui.checkbox('Prune expired retired DoD intermediates (CA store; 4 legacy-keeps untouched)', { title: 'After the additive install, also prune EXPIRED retired DOD EMAIL/ID/SW/DERILITY intermediates from the CA store only (the four legacy-keep intermediates this tool intentionally pushes are never touched, nor is any other expired cert). Off by default: unticked, Deploy removes nothing. Independent of the RDP repair.' });
+      optCard.appendChild(pruneCb);
+      var rdpCb = ui.checkbox('Repair broken RDP listener (rebind CA-issued; healthy untouched)', { title: 'After the additive install, also rebind a broken (self-signed/expired/missing) RDP-tcp listener to the newest valid CA-issued My-store cert for the host - the replacement is located first (no candidate = left untouched), a healthy CA-issued listener is never touched. Off by default. Independent of the intermediate prune.' });
+      optCard.appendChild(rdpCb);
       var threadsRow = el('div'); threadsRow.style.cssText = 'display:flex;align-items:center;gap:10px';
       threadsRow.appendChild(ui.label('Max concurrent:'));
       var threadsIn = ui.number({ value: 16, min: 1, max: 32, title: 'Parallel hosts (Check 1-32; Deploy caps at 16).' }); threadsIn.style.width = '80px';
@@ -121,7 +133,7 @@
         title: 'Read-only: report which hosts are missing which DoD roots (changes nothing).',
         guards: [
           function () { return targets.hosts().length ? null : 'No Hosts|Add at least one host to the list first.'; },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '.') : null; }
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(esc).join(', ') + '.') : null; }
         ],
         onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
         onRun: doCheck,
@@ -132,7 +144,7 @@
         title: 'Destructive: additively install the DoD roots into LocalMachine Root/CA/Disallowed (never removes). Needs an admin session.',
         guards: [
           function () { return targets.hosts().length ? null : 'No Hosts|Add at least one host to the list first.'; },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '.') : null; },
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(esc).join(', ') + '.') : null; },
           function () { return ctx.session.state.credSet ? null : 'Admin session required|Set ADW credentials (top-right) and start an admin session before deploying certificates - it writes to the LocalMachine stores.'; }
         ],
         onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
@@ -144,13 +156,22 @@
         title: 'Read-only: reports whether InstallRoot policy and/or a GPO manages trust certs on each host (a manual push may be reconciled away). No admin session, no confirm.',
         guards: [
           function () { return targets.hosts().length ? null : 'No Hosts|Add at least one host to the list first.'; },
-          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).join(', ') + '.') : null; }
+          function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(esc).join(', ') + '.') : null; }
         ],
         onGuardFail: function (m) { var p = m.split('|'); ctx.confirm({ title: p[0], body: p[1] || p[0], okText: 'OK', cancelText: null }); },
         onRun: doScanMgmt,
         onCancel: function () { if (scanRun) { scanRun.cancel(); actlog.append({ text: '[' + ts() + '] CANCEL requested.', level: 'warn' }); } }
       });
       var checkWrap = el('div'); checkWrap.appendChild(checkRunbar.el); actCard.appendChild(checkWrap);
+      // PROMINENT one-click shortcut: fire the SAME DEPLOY path (runbar guards -> admin-gate ->
+      // type-DEPLOY arm dialog -> self-guard). It just clicks the DEPLOY cta, bypassing NO gate.
+      var fixPkiWrap = el('div'); fixPkiWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin:2px 0 4px';
+      var fixPkiBtn = ui.button('FIX PKI TRUST ROOTS (deploy DoD bundle)', { variant: 'gold', title: 'One-click shortcut to the core trust-root deploy: pushes the DoD/LTMA trust roots to the targeted hosts. Runs the SAME Deploy path - admin session required, type-DEPLOY arm dialog, self-guard - nothing is bypassed.' });
+      fixPkiBtn.style.cssText += ';width:100%;font-size:15px;font-weight:700;padding:12px 16px;letter-spacing:0.5px';
+      fixPkiBtn.onclick = function () { if (isRunning()) return; deployRunbar.cta.click(); };
+      var fixPkiHint = el('div', 'muted', 'One-click: push the DoD trust roots to the target hosts.'); fixPkiHint.style.fontSize = '11px';
+      fixPkiWrap.appendChild(fixPkiBtn); fixPkiWrap.appendChild(fixPkiHint);
+      actCard.appendChild(fixPkiWrap);
       var deployWrap = el('div'); deployWrap.appendChild(deployRunbar.el); actCard.appendChild(deployWrap);
       var scanWrap = el('div'); scanWrap.appendChild(scanRunbar.el); actCard.appendChild(scanWrap);
       left.appendChild(actCard);
@@ -243,7 +264,7 @@
       function threads() { var n = parseInt(threadsIn.value, 10); if (isNaN(n) || n < 1) n = 16; if (n > 32) n = 32; return n; }
       function lockInputs(on) {
         offlineCb._cb.disabled = on; threadsIn.disabled = on; clearBtn.disabled = on;
-        bundleInput.disabled = on; importBtn.disabled = on; includeExpiredCb._cb.disabled = on;
+        bundleInput.disabled = on; importBtn.disabled = on; includeExpiredCb._cb.disabled = on; pruneCb._cb.disabled = on; rdpCb._cb.disabled = on;
       }
       clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); stats.reset(); expiredBadge.textContent = ''; setStatus('Ready'); };
       exportBtn.onclick = function () {
@@ -323,21 +344,36 @@
         var hosts = targets.hosts();
         var folderTxt = String(bundleInput.value || '').trim() || 'the shipped Packages\\DoD-Certs bundle';
         var includeExpired = !!includeExpiredCb._cb.checked;
+        var prunePki = !!pruneCb._cb.checked;
+        var fixRdp = !!rdpCb._cb.checked;
+        var runCompanions = prunePki || fixRdp;
         var expiredTxt = includeExpired
           ? 'Expired certs in the bundle are <b>INCLUDED</b> - dead trust anchors WILL be pushed (each flagged EXPIRED - dead trust anchor).'
           : 'Expired certs in the bundle are <b>skipped by default</b> - not pushed.';
+        var companionsTxt;
+        if (runCompanions) {
+          var parts = [];
+          if (prunePki) parts.push('the expired retired-DoD-intermediate <b>prune</b> (CA store only; the four legacy-keep intermediates never touched) - this CAN REMOVE certs');
+          if (fixRdp) parts.push('the broken-RDP-listener <b>rebind</b> (healthy listeners never touched)');
+          companionsTxt = 'v1.9 fix companions are <b>ENABLED</b> - after the install each host also gets ' + parts.join(' and ') + '.';
+        } else {
+          companionsTxt = 'v1.9 fix companions are <b>off</b> - the deploy is purely additive.';
+        }
         var ok = await ctx.arm({
           title: 'Arm DEPLOY TRUST CERTS',
           banner: 'DESTRUCTIVE - THIS WRITES TO THE LOCALMACHINE CERT STORES',
           body: 'About to <b>additively install</b> the DoD/LTMA trust roots from <b>' + esc(folderTxt) + '</b> into the <b>LocalMachine Root / CA / Disallowed</b> stores on <b>' + hosts.length + ' host(s)</b> over WinRM.'
             + '<br>It adds only the roots that are <b>not already present</b> and <b>never removes</b> anything - a host that already has every root is reported ROOTS ALREADY PRESENT and left untouched.'
             + '<br>' + expiredTxt
+            + '<br>' + companionsTxt
             + '<br>The JANET dispatcher host is self-guarded out of the run.',
           preflight: [
             { label: hosts.length + ' host(s) targeted', ok: true },
             { label: 'Bundle: ' + folderTxt, ok: true },
-            { label: 'Additive install - never removes a certificate', ok: true },
-            { label: includeExpired ? 'Expired certs: INCLUDED (dead anchors will be pushed)' : 'Expired certs: excluded (skipped by default)', ok: true }
+            { label: runCompanions ? 'Install is additive, BUT companions armed below may remove/rebind certs' : 'Additive install - never removes a certificate', ok: true },
+            { label: includeExpired ? 'Expired certs: INCLUDED (dead anchors will be pushed)' : 'Expired certs: excluded (skipped by default)', ok: true },
+            { label: prunePki ? 'Prune expired retired DoD intermediates: ENABLED (CA store; 4 legacy-keeps untouched)' : 'Prune expired retired DoD intermediates: off', ok: true },
+            { label: fixRdp ? 'Repair broken RDP listener: ENABLED (rebind CA-issued; healthy untouched)' : 'Repair broken RDP listener: off', ok: true }
           ],
           confirmWord: 'DEPLOY', okText: 'Deploy Trust Certs', cancelText: 'Cancel'
         });
@@ -352,6 +388,8 @@
           confirm: 'DEPLOY',
           attemptOffline: !!offlineCb._cb.checked,
           includeExpired: includeExpired,
+          prunePki: prunePki,
+          fixRdp: fixRdp,
           threads: threads()
         }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: true });
         bindRun('Deploy', 'installed/present');
