@@ -898,7 +898,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.1'
+        version  = '1.11.2'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -2128,7 +2128,7 @@ $script:AcasUpdateRowOf = {
     @{
         Host             = $hostName
         Profile          = $ctx.Profile
-        Result           = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
+        Result           = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'UNCONFIRMED*') { 'UNCONFIRMED' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
         'Version Before' = $(if ($pre)  { $pre }  else { 'n/a' })
         'Version After'  = $(if ($post) { $post } else { 'n/a' })
         Timestamp        = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -2934,7 +2934,7 @@ function Invoke-JanetToolAction {
                 $post = Get-AcasMarker $res 'POST'
                 @{
                     Host             = $hostName
-                    Result           = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
+                    Result           = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'UNCONFIRMED*') { 'UNCONFIRMED' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
                     'Version Before' = $(if ($pre)  { $pre }  else { 'n/a' })
                     'Version After'  = $(if ($post) { $post } else { 'n/a' })
                     Mode             = $ctx.Mode
@@ -3278,10 +3278,14 @@ function Invoke-JanetToolAction {
             $g = $groups | Where-Object { $_.Key -eq $key } | Select-Object -First 1
             if (-not $g) { & $send @{ type='log'; level='warn'; text="Group not found: $key" }; return @{ rows=@(); summary=@{ total=0 } } }
             $targets = @($g.Hosts)
-            if ($Params['hosts']) {
+            if ($Params['hosts'] -and @($Params['hosts']).Count -gt 0) {
                 $allow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
                 foreach ($hf in @($Params['hosts'])) { $sh = Get-AcasShortHost ([string]$hf); if ($sh) { [void]$allow.Add($sh) } }
-                if ($allow.Count -gt 0) { $targets = @($g.Hosts | Where-Object { $allow.Contains($_) }) }
+                # loop19 P2: a non-empty filter whose tokens all canonicalize to empty means
+                # "none", NOT "all" - apply the intersection UNCONDITIONALLY (parity with the
+                # correct patch-selected sibling at ~:2744) so an empty result falls through to
+                # the No-targets return below and never reboots the whole group.
+                $targets = @($g.Hosts | Where-Object { $allow.Contains($_) })
             }
             # Defense-in-depth: re-run the target whitelist on the by-id/CSV path (the
             # group Hosts were validated at parse, but never trust the derived list) and
