@@ -78,6 +78,42 @@ Describe 'Reboot-schedule self-guard drops the dispatcher host before dispatch (
     }
 }
 
+# -----------------------------------------------------------------------------
+#  loop20: self-guard coverage extended to the three OTHER reboot-capable actions
+#  (bulk-patch FORCED, kb-install reboot-ENABLED, registry-key-apply reboot-after).
+#  Each now runs targets through Remove-WptSelfTargets BEFORE fan-out, exactly like
+#  reboot/reboot-schedule above. A self-only target must drop to total=0 /
+#  selfSkipped=1 with a Self-guard warn. Only the reboot-capable sub-mode is guarded
+#  (non-invasive patch / noreboot KB / no-reboot-after apply are untouched).
+# -----------------------------------------------------------------------------
+Describe 'bulk-patch FORCED self-guard drops the dispatcher before dispatch (loop20 P1)' {
+    $out = Invoke-WptAction -ActionId 'bulk-patch' -Params @{ targets = '127.0.0.1'; mode = 'forced' }
+    It 'self-only forced patch -> total=0, selfSkipped=1, Self-guard warn' {
+        [int]$out.Result.summary.total       | Should Be 0
+        [int]$out.Result.summary.selfSkipped | Should Be 1
+        ($out.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'warn' -and $_.text -match 'Self-guard' }) | Should Not BeNullOrEmpty
+    }
+}
+
+Describe 'kb-install reboot-ENABLED self-guard drops the dispatcher (loop20 P2)' {
+    $out = Invoke-WptAction -ActionId 'kb-install' -Params @{ targets = '127.0.0.1'; kbs = 'KB5001234'; noreboot = $false }
+    It 'self-only reboot-enabled KB install -> total=0, selfSkipped=1, Self-guard warn' {
+        [int]$out.Result.summary.total       | Should Be 0
+        [int]$out.Result.summary.selfSkipped | Should Be 1
+        ($out.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'warn' -and $_.text -match 'Self-guard' }) | Should Not BeNullOrEmpty
+    }
+}
+
+Describe 'registry-key-apply reboot-after self-guard drops the dispatcher (loop20 P2)' {
+    $key = & $m { @((Get-WptRegKeyCatalog).Keys)[0] }
+    $out = Invoke-WptAction -ActionId 'registry-key-apply' -Params @{ targets = '127.0.0.1'; cvekey = $key; rebootafter = $true }
+    It 'self-only reboot-after STIG apply -> total=0, selfSkipped=1, Self-guard warn' {
+        [int]$out.Result.summary.total       | Should Be 0
+        [int]$out.Result.summary.selfSkipped | Should Be 1
+        ($out.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'warn' -and $_.text -match 'Self-guard' }) | Should Not BeNullOrEmpty
+    }
+}
+
 Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)' {
 
     It 'IPv4-literal target: DNS-mismatch probe is skipped entirely and the reboot path proceeds' {

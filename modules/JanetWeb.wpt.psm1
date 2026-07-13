@@ -31,7 +31,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.6.0'
+        version  = '6.6.1'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -4989,6 +4989,14 @@ function Invoke-JanetToolAction {
             # (reboot-if-needed, customer-affecting - for quarantined hosts).
             $patchMode = ([string]$Params['mode']).ToLower(); if ($patchMode -ne 'forced') { $patchMode = 'noninvasive' }
             & $send @{ type='log'; level=$(if ($patchMode -eq 'forced') { 'warn' } else { 'info' }); text="Patch posture: $(if ($patchMode -eq 'forced') { 'FORCED (reboot-if-needed - customer-affecting)' } else { 'non-invasive (reboots suppressed)' })." }
+            # Self-guard (loop20 P1): FORCED mode sets IsRebootIfNeeded on app installs, so the
+            # target CCM client can reboot the box mid-dispatch. Drop the JANET dispatcher host
+            # BEFORE fan-out (mirrors reboot / reboot-schedule / fix-java); non-invasive never reboots.
+            if ($patchMode -eq 'forced') {
+                $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+                $targets = $guarded.Targets
+                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to patch (forced self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
+            }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptPatchBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $patchMode) } `
@@ -5496,6 +5504,14 @@ function Invoke-JanetToolAction {
             if ($kbList.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Enter one or more KB numbers to install.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $msuPath = ([string]$Params['msu']).Trim()
             $noReboot = $true; if ($Params.ContainsKey('noreboot') -and $null -ne $Params['noreboot']) { $noReboot = [bool]$Params['noreboot'] }
+            # Self-guard (loop20 P2): with auto-reboot ENABLED the MSU/wusa fallback runs without
+            # /norestart and can reboot the box. Drop the JANET dispatcher host BEFORE fan-out when
+            # reboots are not suppressed (mirrors reboot / reboot-schedule / fix-java).
+            if (-not $noReboot) {
+                $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+                $targets = $guarded.Targets
+                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to install (reboot-enabled self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
+            }
             & $send @{ type='status'; text="Installing $($kbList.Count) KB(s) on $($targets.Count) host(s)$(if($msuPath){' (MSU fallback armed)'} )..." }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptKbInstallBlock -AuditAction 'VulnPatched' `
@@ -5837,6 +5853,14 @@ function Invoke-JanetToolAction {
             $entry = $catalog[$key]; $regPath = $entry.RegPath; $defs = $entry.Defs
             $cveLabel = [string]$entry.DisplayName
             $rebootAfter = $false; if ($Params.ContainsKey('rebootafter') -and $null -ne $Params['rebootafter']) { $rebootAfter = [bool]$Params['rebootafter'] }
+            # Self-guard (loop20 P2): with reboot-after checked, a successful apply arms a ~1h
+            # shutdown /r /f on the host - drop the JANET dispatcher host BEFORE fan-out so it is
+            # never scheduled to reboot itself (mirrors reboot / reboot-schedule / fix-java).
+            if ($rebootAfter) {
+                $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+                $targets = $guarded.Targets
+                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to apply (reboot-after self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
+            }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptRegApplyBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $regPath, $defs, $rebootAfter, $cveLabel) } `

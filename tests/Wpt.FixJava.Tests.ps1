@@ -35,8 +35,8 @@ Describe 'WPT 6.6.0 - fix-java manifest action (destructive, self-guarded utilit
 
     $manifest = & $m { Get-JanetToolManifest }
 
-    It 'manifest version is bumped to 6.6.0' {
-        [string]$manifest.version | Should Be '6.6.0'
+    It 'manifest version is bumped to 6.6.1' {
+        [string]$manifest.version | Should Be '6.6.1'
     }
     It 'fix-java is exposed as a destructive action with a confirm + targets input' {
         $a = @($manifest.actions | Where-Object { $_.id -eq 'fix-java' })[0]
