@@ -245,30 +245,33 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
         $r.Leaked    | Should Be $false
     }
 
-    It '(h) TPM not ready => SKIP, no policy write, no protector, escrow + Enable never called' {
+    It '(h) TPM not ready => SKIP enable; FVE GPO policy IS healed (v7.11 parity); no protector, escrow + Enable never called' {
         $r = Invoke-C2cEnable -DoEnable $true -Scenario 'tpmnotready'
         $r.EncResult      | Should Be 'SKIP'
         $r.EncDetail      | Should Match 'TPM not ready'
-        $r.PolicyAsserted | Should Be $false
+        # v7.11 full parity: policy asserted once up front, BEFORE the TPM gate SKIPs the enable.
+        $r.PolicyAsserted | Should Be $true
         $r.AddCalled      | Should Be $false
         $r.EnableCalled   | Should Be $false
     }
 
-    It '(h) not domain-joined => SKIP, no policy write, no protector, escrow + Enable never called' {
+    It '(h) not domain-joined => SKIP enable; FVE GPO policy IS healed (v7.11 parity); no protector, escrow + Enable never called' {
         $r = Invoke-C2cEnable -DoEnable $true -Scenario 'notdomain'
         $r.EncResult      | Should Be 'SKIP'
         $r.EncDetail      | Should Match 'not domain-joined'
-        $r.PolicyAsserted | Should Be $false
+        $r.PolicyAsserted | Should Be $true
         $r.AddCalled      | Should Be $false
         $r.EnableCalled   | Should Be $false
     }
 
-    It 'REGRESSION: enableEncryption OFF + FullyDecrypted => today''s SKIP routing text (nothing changed)' {
+    It 'enableEncryption OFF + FullyDecrypted => SKIP routing text (enable NOT attempted) but FVE GPO policy IS healed (v7.11 parity)' {
         $r = Invoke-C2cEnable -DoEnable $false -Scenario 'happy'
         $r.EncResult      | Should Be 'SKIP'
         $r.EncDetail      | Should Match 'route to MECM/desk-side'
         $r.EncDetail      | Should Match 'TPM\+recovery-key escrow policy'
-        $r.PolicyAsserted | Should Be $false
+        # The GPO heal is non-destructive and runs whenever the Encryption pillar runs; only the
+        # destructive ENABLE stays gated behind enableEncryption. No protector added, no Enable called.
+        $r.PolicyAsserted | Should Be $true
         $r.AddCalled      | Should Be $false
         $r.EnableCalled   | Should Be $false
     }

@@ -1536,7 +1536,8 @@ $script:C2cFixBlock = {
 
                         # FVE policy asserted at most ONCE per host (memoized in $fve). Policy is what
                         # enforces recovery-key escrow + XtsAes256 - never encrypt without it. A write
-                        # failure marks $fve.Ok=$false and the calling volume FAILs (enable NOT attempted).
+                        # failure marks $fve.Ok=$false and the ENABLE path FAILs (enable NOT attempted);
+                        # heal/resume/already-on paths proceed regardless (they run no Enable-BitLocker).
                         $fve = @{ Done = $false; Ok = $false; Err = ''; Txt = '' }
                         $assertFve = {
                             if ($fve.Done) { return }
@@ -1642,6 +1643,13 @@ $script:C2cFixBlock = {
                             return @{ Ok = $true; KpId = $newKpId; Target = $escrowTarget; Detail = '' }
                         }
 
+                        # v7.11 GPO full parity: assert the FVE policy ONCE up front, before ANY
+                        # BitLocker cmdlet on ANY path - so an already-encrypted / suspended box still
+                        # gets its GPO values healed (matches the reference Set-FvePolicy-at-top). The
+                        # enable branch still re-checks $fve.Ok to fail closed; heal/resume never gate on it.
+                        & $assertFve
+                        $fveNote = if ($fve.Ok) { $fve.Txt } else { "FVE policy assert FAILED: $($fve.Err)" }
+
                         foreach ($bv in $ordered) {
                             $mp  = ([string]$bv.MountPoint).TrimEnd('\'); if (-not $mp) { $mp = $sys }
                             $psv = [string]$bv.ProtectionStatus; $vsv = [string]$bv.VolumeStatus
@@ -1649,7 +1657,7 @@ $script:C2cFixBlock = {
                             $pctv = ''; try { $pctv = [string]$bv.EncryptionPercentage } catch {}
 
                             if ($psv -eq 'On') {
-                                & $add 'Encryption' 'none' 'NOCHANGE' "$mp protection already On; $vsv"
+                                & $add 'Encryption' 'none' 'NOCHANGE' "$mp protection already On; $vsv; $fveNote"
                                 if ($isOsVol) { $osEncOrPlanned = $true }
                                 continue
                             }
@@ -1792,7 +1800,7 @@ $script:C2cFixBlock = {
                             catch { $act = 'manage-bde -protectors -enable'; & manage-bde -protectors -enable $mp 2>&1 | Out-Null }
                             Start-Sleep -Milliseconds 500
                             $bl2 = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
-                            if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "$mp protection resumed -> On; $($bl2.VolumeStatus)$tpmProtTxt"; if ($isOsVol) { $osEncOrPlanned = $true } }
+                            if ([string]$bl2.ProtectionStatus -eq 'On') { & $add 'Encryption' $act 'FIXED' "$mp protection resumed -> On; $($bl2.VolumeStatus)$tpmProtTxt; $fveNote"; if ($isOsVol) { $osEncOrPlanned = $true } }
                             elseif ($vsv -match '(?i)FullyEncrypted')     { & $add 'Encryption' $act 'FAIL' "$mp resume attempted but protection still $($bl2.ProtectionStatus)" }
                             else { & $add 'Encryption' $act 'SKIP' "$mp protection $($bl2.ProtectionStatus); volume $($bl2.VolumeStatus) - not a resumable state; route to MECM/desk-side" }
                         }
