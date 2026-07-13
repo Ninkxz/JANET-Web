@@ -28,7 +28,7 @@ cannot exist in Desktop (no web server / browser UI / Web-only tool) · **CLOSED
 | 15 | winupgrade self-guard scoped to reboot only (P2) | winupgrade.psm1 | Desktop Windows-upgrade tool reboot guard | **CHECK** |
 | 16 | Fail-closed admin-session gate (P2, design) | server/JanetWeb.Server.ps1 | Web-only (no HTTP server in Desktop) | **CLOSED-WEB-ONLY** (Web-only server) |
 | 17 | DN-guard local-domain suffix + boundary + RFC-4514 escape (P2/P3) | adsearch.psm1 | Desktop AD-search bind guard | **CHECK** |
-| 18 | CSV formula-injection: client toCsv + wpt snapshot (P2) | shell.js, wpt.psm1 | Desktop CSV exporters | **CHECK** |
+| 18 | CSV formula-injection: client toCsv + wpt snapshot (P2) | shell.js `toCsv` + `Protect-WptCsvCell` + `ConvertTo-ReportsCsvCell` (Web fully covered) | YES - Desktop ReportsTool bypassed its own `Protect-CsvFormula` in 3 exporters; ADSearchTool + WPT had NO neutralizer (raw AD attrs + scan/registry Publisher/DisplayName -> analyst spreadsheet) | **CLOSED-BOTH** (loop37 `f261ff99`: ReportsTool 2.14.8 wired the helper into Export-OtherVulnCsv/Dirty30/RemediationCsv; ADSearchTool 3.3.4 + WPT 6.5.29 added the helper + threaded every free-text/external cell; neutralize-before-quote; numeric/date left) |
 | 19 | wpt bulk pools missing Test-WptHostReachable injection (P2) | wpt.psm1 | Desktop patch tool pool dispatch | **CHECK** |
 | 20 | wpt maintenance-lock missing self-guard (P3) | wpt.psm1 | Desktop maintenance-lock (if present) | **CHECK** |
 | 21 | kev add-kev write ungated -> destructive=$true (P3) | kev.psm1 | Web-only (server gate + Web-only tool) | **CLOSED-WEB-ONLY** (Web-only gate) |
