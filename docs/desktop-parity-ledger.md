@@ -11,14 +11,14 @@ cannot exist in Desktop (no web server / browser UI / Web-only tool) · **CLOSED
 
 | # | Finding (sev) | Web fix (file) | In Desktop? | Status |
 |---|---------------|----------------|-------------|--------|
-| 1 | mpam offline Defender gate: Authenticode+MS-signer+product-id+50MB (P2) | c2c.psm1 | field script `fix-defender` ported from Desktop | **CHECK** |
-| 2 | PkiRdp Server-Auth EKU + HasPrivateKey + bind-before-clear (P2) | c2c.psm1 | Desktop `fix-pki`/RDP-cert | **CHECK** |
-| 3 | Java vendor gate (Oracle/Sun-only) + strict-GUID msiexec (P2) | c2c.psm1 fix-java | Desktop `fix-java` (origin script) | **CHECK** (also Phase-2 Cycle 1/2) |
-| 4 | BitLocker resume escrow-first, key never leaked (P2) | c2c.psm1 | Desktop `fix-bitlocker` | **CHECK** |
-| 5 | MDE onboarding blob expiry advisory (P2) | c2c.psm1 | Desktop Defender onboarding | **CHECK** |
-| 6 | Offline Defender SHA256 validate->push pin (P3->design) | c2c.psm1 | Desktop offline-Defender push | **CHECK** |
+| 1 | mpam offline Defender gate: Authenticode+MS-signer+product-id+50MB (P2) | c2c.psm1 | Desktop had sig/signer/size but NO product-identity check | **CLOSED-BOTH** (C2CNemesisTool 2.4.4 `472daff4`, loop28: `Test-C2cDefenderPackage` now also requires OriginalFilename~mpam OR ProductName~antimalware\|defender) |
+| 2 | PkiRdp Server-Auth EKU + HasPrivateKey + bind-before-clear (P2) | c2c.psm1 | YES - Desktop 2.4.3 used the WRONG EKU (Client-Auth ...3.2), no HasPrivateKey, cleared before bind (spot-verified) | **CLOSED-BOTH** (2.4.4 `472daff4`, loop28: Server-Auth EKU ...3.1 + HasPrivateKey + bind-FIRST; clears run only on a successful bind) |
+| 3 | Java vendor gate (Oracle/Sun-only) + strict-GUID msiexec (P2) | c2c.psm1 fix-java | YES - loop-28 sweep verified `C2CNemesisTool_2.4.3` Java block (:3216-3239) is IDENTICAL to Web: `Publisher -match '(?i)oracle|sun microsystems'` gate + `msiexec /x` only on `^\{[0-9A-Fa-f-]+\}$` strict-GUID; non-GUID entries marked MANUAL (never auto-run) | **CLOSED-BOTH** (already correct in Desktop - no change needed; verified loop28) |
+| 4 | BitLocker resume escrow-first, key never leaked (P2) | c2c.psm1 | YES - Desktop Enable path was hardened but the RESUME path could resume into TPM-only unescrowed | **CLOSED-BOTH** (2.4.4 `472daff4`, loop28: resume now escrows via `$escrowFirst` BEFORE Resume-BitLocker, SKIPs if escrow fails; recovery password never emitted) |
+| 5 | MDE onboarding blob expiry advisory (P2) | c2c.psm1 | YES - Desktop MdeOnboard path existed but had NO blob-cert expiry check | **CLOSED-BOTH** (2.4.4 `472daff4`, loop28: parses the blob cert, emits an IN PROGRESS advisory when NotAfter is past) |
+| 6 | Offline Defender SHA256 validate->push pin (P3->design) | c2c.psm1 | YES - Desktop ran mpam-fe.exe unverified after copy (TOCTOU), no SHA256 | **CLOSED-BOTH** (2.4.4 `472daff4`, loop28: SHA-256 pin computed admin-side, threaded to the worker, re-hashed on target before exec; fail-closed on missing/mismatch) |
 | 7 | adto FIX/IAO buttons dead - isRunning() (P3) | adto.view.js | AD-TO is a Web-only tool (no Desktop twin) | **CLOSED-WEB-ONLY** (Web-only tool) |
-| 8 | SHA256 pin fail-closed on empty + -LiteralPath x2 (P3) | c2c.psm1 | Desktop offline-Defender push | **CHECK** |
+| 8 | SHA256 pin fail-closed on empty + -LiteralPath x2 (P3) | c2c.psm1 | YES - same offline-Defender push as row 6 (fails open, -Path globbing) | **CLOSED-BOTH** (2.4.4 `472daff4`, loop28: `-not $ExpectHash` -> NOT executed [fail-closed on empty]; Copy-Item/Remove-Item switched to -LiteralPath) |
 | 9 | Self-guard case-sensitivity: `return ,$set` HashSet (P2) | 11 identity helpers | Desktop self-guard helpers (if present) | **CHECK** |
 | 10 | Per-NIC try/catch in identity enumeration (P3) | 11 identity helpers | Desktop NIC-enumeration self-guard | **CHECK** |
 | 11 | adsearch SearchBase LDAP bind-redirect (P1) | adsearch.psm1 | Desktop AD-search tool `SearchBase` bind | **CHECK** |
