@@ -307,7 +307,7 @@ function Get-JanetToolManifest {
             },
             @{
                 id='spec-exec-scan'; label='Spectre/BHI Mitigation Check'; kind='stream-table'; destructive=$false
-                description='Read-only: per host, read the speculative-execution / side-channel mitigation state that Windows gates behind the KB4073119 Memory Management override values (FeatureSettingsOverride / FeatureSettingsOverrideMask). Reports the CPU, a Verdict (ENABLED / DISABLED / PARTIAL / DEFAULT) and a short recommendation. Covers Intel BHI (CVE-2022-0001) and the Spectre/Meltdown family gated behind the same switch. Nothing is written; the dispatcher host is included.'
+                description='Read-only: per host, read the Intel BHI (CVE-2022-0001) mitigation state that Tenable plugin 302873 audits - whether FeatureSettingsOverride carries the BHI bit 0x800000 and FeatureSettingsOverrideMask=3. Reports the CPU, a Verdict (COMPLIANT / DRIFT / VULNERABLE) and a short recommendation. Nothing is written; the dispatcher host is included.'
                 columns=@('Host','CPU','Verdict','FeatureSettingsOverride','Mask','Recommendation','Error')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -316,8 +316,8 @@ function Get-JanetToolManifest {
             },
             @{
                 id='spec-exec-enable'; label='Enable Spectre/BHI Mitigation'; kind='stream-table'; destructive=$true
-                confirm='Enable the speculative-execution (Spectre/Meltdown/BHI) mitigations on the target(s)? Writes FeatureSettingsOverride=0 / Mask=3; a REBOOT is required to apply. The dispatcher host is skipped. Proceed?'
-                description='Enable the speculative-execution / side-channel mitigations via the SHARED engine the ACAS Nemesis tool uses: on each reachable target, write the KB4073119 Memory Management values FeatureSettingsOverride=0 / FeatureSettingsOverrideMask=3 (idempotent - already-enabled hosts report NOCHANGE). A REBOOT is required to apply. On Intel CPUs the BHI hardware mitigation additionally needs OEM microcode (Intel SA-00598), which a registry write cannot supply and the tool never fakes. The dispatcher host is self-guarded out of the wave. One rollup row per host.'
+                confirm='Enable the Intel BHI (CVE-2022-0001) mitigation on the target(s)? OR-s the BHI bit 0x800000 into FeatureSettingsOverride (existing Spectre/Meltdown bits preserved) and sets Mask=3; a REBOOT is required to apply. The dispatcher host is skipped. Proceed?'
+                description='Enable the Intel BHI (CVE-2022-0001) mitigation via the SHARED engine the ACAS Nemesis tool uses: on each reachable target, OR the BHI bit 0x800000 into FeatureSettingsOverride - PRESERVING the host''s existing Spectre/Meltdown posture bits (0x48 / 0x2048) rather than a flat overwrite - and set FeatureSettingsOverrideMask=3. This is the write that actually clears Tenable plugin 302873 (a flat 0/8264 overwrite does not, and strips the BHI bit off already-compliant hosts). Idempotent - already-compliant hosts report NOCHANGE; the write is read back and only reported FIXED on a compliant readback. A REBOOT is required to apply. The dispatcher host is self-guarded out of the wave. One rollup row per host.'
                 columns=@('Host','Reachable','Result','Detail')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
@@ -4233,9 +4233,10 @@ $script:WptSpecExecScanBlock = {
 # --- Spectre/BHI mitigation ENABLE (destructive, SHARED engine) ----------------
 # One host per worker. Reachability, DNS-mismatch HARD ABORT (never write registry
 # on a box that isn't the one we dialed), then a session where the shared source is
-# dot-sourced and Invoke-JanetSpecExecRemediation writes FeatureSettingsOverride=0 /
-# Mask=3 (KB4073119). The registry values / security logic are inside that shared
-# engine and are NEVER changed here. Returns { Host; Reachable; Rows; Error }.
+# dot-sourced and Invoke-JanetSpecExecRemediation ORs the BHI bit 0x800000 into
+# FeatureSettingsOverride (preserving existing bits) with Mask=3. The registry values /
+# security logic are inside that shared engine and are NEVER changed here. Returns
+# { Host; Reachable; Rows; Error }.
 $script:WptSpecExecEnableBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$SpecFixSrc)
     $r = @{ Host=$Computer; Reachable=$false; Rows=@(); Error='' }
@@ -5646,8 +5647,8 @@ function Invoke-JanetToolAction {
                                 & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
                             } else {
                                 $verdict = [string]$res.Verdict
-                                $rec = if ($verdict -eq 'ENABLED') { 'ENABLED -> ok' } else { "$verdict -> enable" }
-                                if ($verdict -ne 'ENABLED') { $needCount++ }
+                                $rec = if ($verdict -eq 'COMPLIANT') { 'COMPLIANT -> ok' } else { "$verdict -> enable" }
+                                if ($verdict -ne 'COMPLIANT') { $needCount++ }
                                 $okCount++
                                 $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=$verdict; FeatureSettingsOverride=[string]$res.Fso; Mask=[string]$res.Mask; Recommendation=$rec; Error='' }
                                 [void]$rows.Add($row); & $send (@{ type='row' } + $row)

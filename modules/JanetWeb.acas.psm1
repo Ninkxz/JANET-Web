@@ -353,7 +353,7 @@ $script:AcasUpdateProfiles = @{
         # the block and to guarantee parity without editing the Software-Center profile.)
     }
     'Spectre/BHI Mitigation - Enable (CVE-2022-0001)' = @{
-        Desc = 'ENABLE the speculative-execution / side-channel mitigations via the SHARED spec-exec engine (JanetWeb.specfix - the same one copy wpt uses). Writes the KB4073119 Memory Management values FeatureSettingsOverride=0 / FeatureSettingsOverrideMask=3, which force the Spectre/Meltdown/BHI mitigations ON (idempotent - already-enabled hosts report SKIP/NOCHANGE). A REBOOT is required to apply. On Intel CPUs the BHI hardware mitigation additionally needs OEM microcode (Intel SA-00598) - an OEM prereq this tool cannot supply and never fakes; the registry enable alone is not sufficient without it. Never runs against the dispatcher host (self-guard). Use when Intel BHI / CVE-2022-0001 / branch-target-injection / spec-exec findings are flagged.'
+        Desc = 'ENABLE the Intel BHI (CVE-2022-0001) mitigation via the SHARED spec-exec engine (JanetWeb.specfix - the same one copy wpt uses). ORs the BHI bit 0x800000 into FeatureSettingsOverride - PRESERVING the host''s existing Spectre/Meltdown posture bits (0x48 / 0x2048), never a flat overwrite - and sets FeatureSettingsOverrideMask=3. This is the write that actually clears Tenable plugin 302873; a flat 0/8264 overwrite does not, and strips the BHI bit off already-compliant hosts. Idempotent - already-compliant hosts report SKIP/NOCHANGE; the write is read back and only reported OK on a compliant readback. A REBOOT is required for the kernel to apply. Never runs against the dispatcher host (self-guard). Use when Intel BHI / CVE-2022-0001 / branch-target-injection findings are flagged.'
         # NeedsSpecFix: the AcasUpdateWorker prepends the injected $AcasSpecFixSrc engine
         # source to this Script text before the in-session rehydration, and fails CLOSED
         # (no write) if the source was not injected. ForbidSelf: the dispatch drops the
@@ -376,23 +376,26 @@ $script:AcasUpdateProfiles = @{
             elseif ($res -eq 'FAIL')     { return "FAIL: $det" }
             else                         { return "$res - $det" }
         }
-        # Read-only Verify: a self-contained probe of the two KB4073119 Memory Management
-        # override values (NOT the engine's write path - just a state read, so it needs no
-        # injected source). PRE/POST show the DEFAULT/DISABLED -> ENABLED transition.
+        # Read-only Verify: a self-contained probe of whether FeatureSettingsOverride carries
+        # the BHI bit 0x800000 with Mask=3 (what Tenable plugin 302873 audits) - NOT the
+        # engine's write path, just a state read, so it needs no injected source. PRE/POST
+        # show the VULNERABLE/DRIFT -> COMPLIANT transition. Mirrors Get-JanetSpecExecState.
         Verify = {
             $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+            $bhi = 0x00800000
             $cpu = ''
             try { $cpu = [string]((Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).Name) } catch {}
             $fso = $null; $mask = $null
             try { $fso  = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverride     -ErrorAction Stop).FeatureSettingsOverride }     catch {}
             try { $mask = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverrideMask -ErrorAction Stop).FeatureSettingsOverrideMask } catch {}
-            if ($null -eq $fso -or $null -eq $mask) { $verdict = 'DEFAULT' }
-            elseif ((([int]$fso -band 3) -eq 0) -and (([int]$mask -band 3) -eq 3)) { $verdict = 'ENABLED' }
-            elseif (([int]$fso -band 3) -ne 0) { $verdict = 'DISABLED' }
-            else { $verdict = 'PARTIAL' }
+            $hasBit = ($null -ne $fso)  -and (((([int]$fso) -band $bhi) -eq $bhi))
+            $maskOk = ($null -ne $mask) -and (([int]$mask) -eq 3)
+            if     ($hasBit -and $maskOk) { $verdict = 'COMPLIANT' }
+            elseif ($null -eq $fso)       { $verdict = 'VULNERABLE' }
+            else                          { $verdict = 'DRIFT' }
             $fsoTxt = if ($null -ne $fso) { [string]$fso } else { '(unset)' }
             $maskTxt = if ($null -ne $mask) { [string]$mask } else { '(unset)' }
-            return @{ Version = $verdict; LastUpdated = 'n/a'; Verified = ($verdict -eq 'ENABLED'); Detail = "FeatureSettingsOverride=$fsoTxt Mask=$maskTxt$(if ($cpu) { "; $cpu" } else { '' })" }
+            return @{ Version = $verdict; LastUpdated = 'n/a'; Verified = ($verdict -eq 'COMPLIANT'); Detail = "FeatureSettingsOverride=$fsoTxt Mask=$maskTxt$(if ($cpu) { "; $cpu" } else { '' })" }
         }
     }
     'Microsoft Store - Update Apps' = @{
@@ -1269,9 +1272,9 @@ function Get-AcasProfileMatchTable {
         # shared fix-java engine (alternate). Both map to the SAME Oracle-Java plugin set.
         @{ Keywords=@('Oracle Java','Oracle JRE','Java SE Multiple Vulnerabilities'); Profiles=@('Oracle Java - Software Center','Oracle Java - Remove (fix-java)') }
         # Intel BHI / Spectre-BHB / speculative-execution branch-target-injection findings
-        # map to the SHARED spec-exec ENABLE engine (writes KB4073119 FeatureSettingsOverride
-        # =0 / Mask=3; reboot required; Intel microcode SA-00598 is an OEM prereq the tool
-        # cannot supply). 'Speculative Execution' sits ABOVE nothing generic here on purpose.
+        # map to the SHARED spec-exec ENABLE engine (ORs the BHI bit 0x800000 into
+        # FeatureSettingsOverride, preserving existing bits, Mask=3 - clears Tenable 302873;
+        # reboot required). 'Speculative Execution' sits ABOVE nothing generic here on purpose.
         @{ Keywords=@('CVE-2022-0001','Branch History Injection','Branch Target Injection','Speculative Execution','Spectre','BHI'); Profiles=@('Spectre/BHI Mitigation - Enable (CVE-2022-0001)') }
     )
 }
