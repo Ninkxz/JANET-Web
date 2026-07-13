@@ -44,12 +44,16 @@ function Get-JanetSpecExecState {
     $fso = $null; $mask = $null
     try { $fso  = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverride     -ErrorAction Stop).FeatureSettingsOverride }     catch {}
     try { $mask = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverrideMask -ErrorAction Stop).FeatureSettingsOverrideMask } catch {}
-    $hasBit = ($null -ne $fso)  -and (((([int]$fso)  -band $bhi) -eq $bhi))
-    $maskOk = ($null -ne $mask) -and (([int]$mask) -eq 3)
+    # Guard the [int] cast: an exotic REG_SZ / out-of-range value must NOT throw. A
+    # non-numeric value is treated as absent (VULNERABLE) - fail-closed, never COMPLIANT.
+    $fsoInt = $null;  if ($null -ne $fso)  { try { $fsoInt = [int]$fso }  catch { $fsoInt = $null } }
+    $maskInt = $null; if ($null -ne $mask) { try { $maskInt = [int]$mask } catch { $maskInt = $null } }
+    $hasBit = ($null -ne $fsoInt)  -and ((($fsoInt -band $bhi) -eq $bhi))
+    $maskOk = ($null -ne $maskInt) -and ($maskInt -eq 3)
     if ($hasBit -and $maskOk) {
         $verdict = 'COMPLIANT'
-    } elseif ($null -eq $fso) {
-        $verdict = 'VULNERABLE'   # value absent - BHI mitigation bit never set
+    } elseif ($null -eq $fsoInt) {
+        $verdict = 'VULNERABLE'   # value absent or non-numeric - BHI mitigation bit never set
     } else {
         $verdict = 'DRIFT'        # value present but BHI bit missing or Mask != 3
     }
@@ -70,7 +74,7 @@ function Invoke-JanetSpecExecRemediation {
     if ($before.Verdict -eq 'COMPLIANT') {
         return ,([pscustomobject]@{ Name='SpecExec'; Action='none'; Result='NOCHANGE'; Detail="BHI mitigation already set (FeatureSettingsOverride=0x$('{0:X}' -f [int]$before.Fso), Mask=$($before.Mask)) - no change." })
     }
-    $curFso = 0; if ($null -ne $before.Fso) { $curFso = [int]$before.Fso }
+    $curFso = 0; if ($null -ne $before.Fso) { try { $curFso = [int]$before.Fso } catch { $curFso = 0 } }
     $newFso = $curFso -bor $bhi
     try {
         if (-not (Test-Path $mm)) { New-Item -Path $mm -Force -ErrorAction Stop | Out-Null }

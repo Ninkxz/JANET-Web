@@ -32,8 +32,8 @@ Describe 'winupgrade manifest exposes the read-only os-audit action' {
             ($act.columns -contains $c) | Should Be $true
         }
     }
-    It 'the winupgrade manifest is version-bumped to 0.5.0 (or newer)' {
-        [version]$mani.version -ge [version]'0.5.0' | Should Be $true
+    It 'the winupgrade manifest is version-bumped to 0.5.1 (or newer)' {
+        [version]$mani.version -ge [version]'0.5.1' | Should Be $true
     }
 }
 

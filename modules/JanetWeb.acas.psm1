@@ -388,10 +388,14 @@ $script:AcasUpdateProfiles = @{
             $fso = $null; $mask = $null
             try { $fso  = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverride     -ErrorAction Stop).FeatureSettingsOverride }     catch {}
             try { $mask = (Get-ItemProperty -Path $mm -Name FeatureSettingsOverrideMask -ErrorAction Stop).FeatureSettingsOverrideMask } catch {}
-            $hasBit = ($null -ne $fso)  -and (((([int]$fso) -band $bhi) -eq $bhi))
-            $maskOk = ($null -ne $mask) -and (([int]$mask) -eq 3)
+            # Guard the [int] cast: an exotic REG_SZ / out-of-range value must NOT throw. A
+            # non-numeric value is treated as absent (VULNERABLE) - fail-closed, never COMPLIANT.
+            $fsoInt = $null;  if ($null -ne $fso)  { try { $fsoInt = [int]$fso }  catch { $fsoInt = $null } }
+            $maskInt = $null; if ($null -ne $mask) { try { $maskInt = [int]$mask } catch { $maskInt = $null } }
+            $hasBit = ($null -ne $fsoInt)  -and ((($fsoInt -band $bhi) -eq $bhi))
+            $maskOk = ($null -ne $maskInt) -and ($maskInt -eq 3)
             if     ($hasBit -and $maskOk) { $verdict = 'COMPLIANT' }
-            elseif ($null -eq $fso)       { $verdict = 'VULNERABLE' }
+            elseif ($null -eq $fsoInt)    { $verdict = 'VULNERABLE' }
             else                          { $verdict = 'DRIFT' }
             $fsoTxt = if ($null -ne $fso) { [string]$fso } else { '(unset)' }
             $maskTxt = if ($null -ne $mask) { [string]$mask } else { '(unset)' }

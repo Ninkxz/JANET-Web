@@ -31,6 +31,15 @@
 #  sfc /scannow), auto-fix (per-device analyse-then-fix, ported from $sbAutoFix) and
 #  error-report (read-only per-error row scan reusing the diagnose signature logic).
 #
+#  v0.5.1: install-updates audit hardening (Loop-33). The WUA driver now stamps a
+#  per-run Nonce + Host=$env:COMPUTERNAME into EVERY result.json object; the worker
+#  generates a fresh nonce, bakes it into the driver (#__NONCE__# placeholder), and
+#  REJECTS any polled result.json whose nonce != this run's (kills the WMI/DCOM
+#  stale-read race - keeps polling) or whose Host short-name != the dialed target
+#  (-> explicit 'WrongBox' row, Ok=$false). result.json is deleted up front on BOTH
+#  transports, and the JANET_WUA SYSTEM task + driver.ps1/result.json are removed
+#  after harvest (best-effort; a cleanup failure never flips a real result).
+#
 #  Contract:
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -49,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.0'
+        version  = '0.5.1'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -810,10 +819,36 @@ function Get-WinUpgradeWuaResultRow {
     #   When no numeric ResultCode is present the driver's Status string is used verbatim
     #   (NoUpdates / Error / Timeout). A $null result (no result.json before the poll
     #   deadline) -> Status='Timeout'. Got=$false only for a $null/blank result (the
-    #   transport produced nothing) so the cascade keeps trying the next transport.
-    param($Result)
+    #   transport produced nothing) OR a NONCE MISMATCH (a stale/prior-run result.json)
+    #   so the cascade/poll keeps trying instead of trusting the wrong file. A confirmed
+    #   HOST mismatch (result.json Host short-name != the dialed target) -> an explicit
+    #   'WrongBox' row (Ok=$false, Got=$true) - never a success. ExpectNonce/TargetShort/
+    #   TargetIsIp are optional; when ExpectNonce is blank the nonce gate is skipped
+    #   (back-compat), and the host gate is skipped for IP-literal targets.
+    param($Result, [string]$ExpectNonce = '', [string]$TargetShort = '', [bool]$TargetIsIp = $false)
     $out = [ordered]@{ Status='Timeout'; KBs=''; Reboot=$false; Error=''; Ok=$false; Got=$false }
     if ($null -eq $Result) { $out.Error = 'no result.json before the poll deadline'; return $out }
+    # NONCE gate: a result.json whose Nonce != this run's is a stale/prior file -> reject
+    # (Got=$false so the caller keeps polling; NEVER surfaces as this run's success).
+    if ($ExpectNonce) {
+        $rNonce = ''
+        try { if ($Result.PSObject.Properties['Nonce']) { $rNonce = [string]$Result.Nonce } } catch {}
+        if ($rNonce -ne $ExpectNonce) { $out.Error = 'result.json nonce mismatch (stale/prior run) - ignored'; return $out }
+    }
+    # HOST gate: the driver stamps Host=$env:COMPUTERNAME; if it does not match the dialed
+    # short name we patched/queried the WRONG box (stale DNS / reused IP). Skip for IP targets.
+    if (-not $TargetIsIp -and $TargetShort) {
+        $rHost = ''
+        try { if ($Result.PSObject.Properties['Host']) { $rHost = [string]$Result.Host } } catch {}
+        if ($rHost) {
+            $rHostShort = ($rHost -split '\.')[0]
+            if ($rHostShort -ine $TargetShort) {
+                $out.Got = $true; $out.Status = 'WrongBox'; $out.Ok = $false
+                $out.Error = "result.json Host '$rHost' != dialed target '$TargetShort' (WRONG BOX - stale DNS / reused IP)"
+                return $out
+            }
+        }
+    }
     $out.Got = $true
     $rc = $null
     try { if ($Result.PSObject.Properties['ResultCode']) { $rc = $Result.ResultCode } } catch {}
@@ -841,6 +876,9 @@ function Get-WinUpgradeWuaResultRow {
 # Download, Install, and writes C:\ProgramData\JANET\WUA\result.json with Status
 # (ResultCode 2=Installed, 3=InstalledWithErrors, else InstallFailed) / Installed /
 # Reboot / KBs. '#__INCLUDEMU__#' is string-replaced with $true/$false before send.
+# '#__NONCE__#' is string-replaced with a fresh per-run token so the worker can prove
+# a polled result.json belongs to THIS run (not a stale prior run's file); every
+# result object also stamps Host=$env:COMPUTERNAME so the worker can catch a wrong box.
 # Single-quoted here-string so $-tokens are preserved literally for the target.
 $script:WinUpgradeWuaDriver = @'
 $ErrorActionPreference = "Stop"
@@ -848,6 +886,8 @@ $base = Join-Path $env:ProgramData "JANET\WUA"
 $log  = Join-Path $base "result.json"
 # #__INCLUDEMU__# is replaced with $true/$false before this is sent.
 $IncludeMU = #__INCLUDEMU__#
+# #__NONCE__# is replaced with this run's fresh nonce token before send.
+$Nonce = "#__NONCE__#"
 try {
     $session = New-Object -ComObject Microsoft.Update.Session
     $muGuid = "7971f918-a847-4430-9279-4a52d1efe18d"
@@ -884,7 +924,7 @@ try {
         }
     }
     if ($agg.Count -eq 0) {
-        [pscustomobject]@{ Status="NoUpdates"; Installed=0; Reboot=$false; KBs=@(); Services=$svcUsed; SvcErrors=$svcErr; Time=(Get-Date).ToString("o") } |
+        [pscustomobject]@{ Status="NoUpdates"; Installed=0; Reboot=$false; KBs=@(); Services=$svcUsed; SvcErrors=$svcErr; Nonce=$Nonce; Host=$env:COMPUTERNAME; Time=(Get-Date).ToString("o") } |
             ConvertTo-Json | Set-Content -Path $log -Encoding UTF8
         return
     }
@@ -905,10 +945,12 @@ try {
         KBs        = ($kbs | Select-Object -Unique)
         Services   = $svcUsed
         SvcErrors  = $svcErr
+        Nonce      = $Nonce
+        Host       = $env:COMPUTERNAME
         Time       = (Get-Date).ToString("o")
     } | ConvertTo-Json | Set-Content -Path $log -Encoding UTF8
 } catch {
-    [pscustomobject]@{ Status="Error"; Message=$_.Exception.Message; Time=(Get-Date).ToString("o") } |
+    [pscustomobject]@{ Status="Error"; Message=$_.Exception.Message; Nonce=$Nonce; Host=$env:COMPUTERNAME; Time=(Get-Date).ToString("o") } |
         ConvertTo-Json | Set-Content -Path $log -Encoding UTF8
 }
 '@
@@ -2999,13 +3041,23 @@ $script:WinUpgradeWorker = {
                 }
                 $timeoutSec = [int]$TimeoutMin * 60
                 if ($timeoutSec -lt 300) { $timeoutSec = 300 }
-                # Bake the Include-Microsoft-Update toggle into the driver text (#__INCLUDEMU__# -> $true/$false).
-                $driver = ([string]$WuaDriver).Replace('#__INCLUDEMU__#', $(if ($IncludeMU) { '$true' } else { '$false' }))
+                # Fresh per-run nonce so a polled result.json can be PROVEN to belong to THIS run
+                # (kills the WMI/DCOM stale-read race - a prior run's result.json carries a different
+                # nonce and is rejected). GUID randomness is fine here (runtime tool, not a workflow).
+                $runNonce = [guid]::NewGuid().ToString('N')
+                # Target identity for the wrong-box guard: the dialed short name, and whether the
+                # target is a bare IP literal (skip the host-name match for IP-literal targets).
+                $targetIpParsed = $null
+                $targetIsIp     = [System.Net.IPAddress]::TryParse([string]$Computer, [ref]$targetIpParsed)
+                $targetShort    = ([string]$Computer -split '\.')[0]
+                # Bake the Include-Microsoft-Update toggle + the nonce into the driver text
+                # (#__INCLUDEMU__# -> $true/$false, #__NONCE__# -> this run's nonce).
+                $driver = ([string]$WuaDriver).Replace('#__INCLUDEMU__#', $(if ($IncludeMU) { '$true' } else { '$false' })).Replace('#__NONCE__#', $runNonce)
 
                 # In-session runner: register+start the SYSTEM task, poll result.json, return json.
                 # Ported VERBATIM from HTTPS_Installer.ps1 lines 235-253.
                 $remoteTaskRunner = {
-                    param($DriverText, $TimeoutSec)
+                    param($DriverText, $TimeoutSec, $RunNonce)
                     $base = Join-Path $env:ProgramData "JANET\WUA"
                     New-Item -ItemType Directory -Force -Path $base | Out-Null
                     $log = Join-Path $base "result.json"
@@ -3016,22 +3068,53 @@ $script:WinUpgradeWorker = {
                     $set  = New-ScheduledTaskSettingsSet -StartWhenAvailable
                     Register-ScheduledTask -TaskName "JANET_WUA" -Action $act -Principal $prin -Settings $set -Force | Out-Null
                     Start-ScheduledTask -TaskName "JANET_WUA"
+                    # Poll for a result.json that carries THIS run's nonce (a stale/prior file with a
+                    # different nonce is ignored -> keep polling until it is overwritten or we time out).
                     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+                    $out = $null
                     while ((Get-Date) -lt $deadline) {
-                        if (Test-Path $log) { Start-Sleep 2; break }
+                        if (Test-Path $log) {
+                            Start-Sleep 2
+                            $txt = $null; try { $txt = Get-Content $log -Raw } catch {}
+                            if ($txt) {
+                                $ok = $false; try { if (($txt | ConvertFrom-Json).Nonce -eq $RunNonce) { $ok = $true } } catch {}
+                                if ($ok) { $out = $txt; break }
+                            }
+                        }
                         Start-Sleep 6
                     }
-                    if (Test-Path $log) { Get-Content $log -Raw } else { '{"Status":"Timeout"}' }
+                    if (-not $out) { $out = '{"Status":"Timeout","Nonce":"' + $RunNonce + '"}' }
+                    # Best-effort cleanup: never leave a persistent SYSTEM task or the driver/result
+                    # residue on the target. A cleanup failure must NOT change the harvested result.
+                    try { Unregister-ScheduledTask -TaskName "JANET_WUA" -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Item (Join-Path $base "driver.ps1") -Force -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Item $log -Force -ErrorAction SilentlyContinue } catch {}
+                    $out
                 }
 
                 # Inline mirror of Get-WinUpgradeWuaResultRow (tested authority) - a bare pool
                 # runspace cannot call the module fn. ResultCode 2=Installed,3=InstalledWithErrors,
                 # else InstallFailed; Got=$false means the transport produced nothing (keep casc.).
                 $shapeRow = {
-                    param($json)
+                    param($json, $ExpectNonce, $TargetShort, $TargetIsIp)
                     $res = $null; try { $res = $json | ConvertFrom-Json } catch {}
                     $o = [ordered]@{ Status='Timeout'; KBs=''; Reboot=$false; Error=''; Ok=$false; Got=$false }
                     if ($null -eq $res) { return $o }
+                    # NONCE gate: reject a stale/prior result.json (different nonce) -> Got=$false so
+                    # the poll/cascade keeps going; a wrong file can NEVER become this run's success.
+                    if ($ExpectNonce) {
+                        $rNonce = ''; try { if ($res.PSObject.Properties['Nonce']) { $rNonce = [string]$res.Nonce } } catch {}
+                        if ($rNonce -ne $ExpectNonce) { $o.Error = 'nonce mismatch (stale/prior run)'; return $o }
+                    }
+                    # HOST gate: driver stamps Host=$env:COMPUTERNAME; a mismatch = wrong box.
+                    if (-not $TargetIsIp -and $TargetShort) {
+                        $rHost = ''; try { if ($res.PSObject.Properties['Host']) { $rHost = [string]$res.Host } } catch {}
+                        if ($rHost -and (($rHost -split '\.')[0] -ine $TargetShort)) {
+                            $o.Got = $true; $o.Status = 'WrongBox'; $o.Ok = $false
+                            $o.Error = "result.json Host '$rHost' != dialed target '$TargetShort' (WRONG BOX - stale DNS / reused IP)"
+                            return $o
+                        }
+                    }
                     $o.Got = $true
                     $rc = $null; try { if ($res.PSObject.Properties['ResultCode']) { $rc = $res.ResultCode } } catch {}
                     if ($null -ne $rc -and "$rc" -ne '') {
@@ -3059,11 +3142,11 @@ $script:WinUpgradeWorker = {
                     try {
                         $idleMs = [int][Math]::Min(2147483, ($timeoutSec + 900)) * 1000
                         $so = New-PSSessionOption -OpenTimeout 25000 -OperationTimeout 0 -IdleTimeout $idleMs -CancelTimeout 5000 -SkipCACheck:$att.UseSSL -SkipCNCheck:$att.UseSSL
-                        $ic = @{ ComputerName=$Computer; ScriptBlock=$remoteTaskRunner; ArgumentList=@($driver,$timeoutSec); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop'; Port=$att.Port }
+                        $ic = @{ ComputerName=$Computer; ScriptBlock=$remoteTaskRunner; ArgumentList=@($driver,$timeoutSec,$runNonce); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop'; Port=$att.Port }
                         if ($credSet) { $ic.Credential = $Cred }
                         if ($att.UseSSL) { $ic['UseSSL'] = $true }
                         $json = Invoke-Command @ic
-                        $shaped = & $shapeRow $json
+                        $shaped = & $shapeRow $json $runNonce $targetShort $targetIsIp
                         if ($shaped.Got) {
                             $r.Transport = $att.Transport; $r.Status = $shaped.Status; $r.KBs = $shaped.KBs
                             $r.Reboot = $shaped.Reboot; $r.Error = $shaped.Error; $r.Ok = $shaped.Ok
@@ -3100,29 +3183,56 @@ Start-ScheduledTask -TaskName 'JANET_WUA'
                         if ($credSet) { $cim = New-CimSession -ComputerName $Computer -Credential $Cred -SessionOption $cso -ErrorAction Stop }
                         else          { $cim = New-CimSession -ComputerName $Computer -SessionOption $cso -ErrorAction Stop }
                         $inv = Invoke-CimMethod -CimSession $cim -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd } -ErrorAction Stop
-                        Remove-CimSession $cim -ErrorAction SilentlyContinue
                         if ($inv.ReturnValue -ne 0) {
+                            Remove-CimSession $cim -ErrorAction SilentlyContinue
                             [void]$trail.Add("WMI/DCOM: Win32_Process.Create rc=$($inv.ReturnValue)")
                         } else {
-                            $unc = "\\$Computer\C`$\ProgramData\JANET\WUA\result.json"
+                            $unc    = "\\$Computer\C`$\ProgramData\JANET\WUA\result.json"
+                            $uncDrv = "\\$Computer\C`$\ProgramData\JANET\WUA\driver.ps1"
                             $useDrive = $credSet
                             if ($useDrive) { New-PSDrive -Name JWUA -PSProvider FileSystem -Root "\\$Computer\C`$" -Credential $Cred -ErrorAction SilentlyContinue | Out-Null }
-                            $deadline = (Get-Date).AddSeconds($timeoutSec); $polled = $null
+                            # Poll for a result.json that carries THIS run's nonce. A stale/prior-run
+                            # file (wrong nonce) is IGNORED so we keep polling; the async Win32_Process
+                            # start can no longer be mis-read as this run's success. WrongBox stops early.
+                            $deadline = (Get-Date).AddSeconds($timeoutSec); $shaped = $null
                             while ((Get-Date) -lt $deadline) {
                                 if (& $isCancelled) { break }
-                                if (Test-Path $unc) { try { $polled = Get-Content $unc -Raw } catch {}; if ($polled) { break } }
+                                if (Test-Path $unc) {
+                                    $polled = $null; try { $polled = Get-Content $unc -Raw } catch {}
+                                    if ($polled) {
+                                        $cand = & $shapeRow $polled $runNonce $targetShort $targetIsIp
+                                        if ($cand.Got) { $shaped = $cand; break }   # matching nonce (real status or WrongBox)
+                                    }
+                                }
                                 Start-Sleep 8
                             }
-                            if ($useDrive) { Remove-PSDrive -Name JWUA -ErrorAction SilentlyContinue }
-                            $shaped = & $shapeRow $polled
+                            if ($null -eq $shaped) { $shaped = & $shapeRow $null $runNonce $targetShort $targetIsIp }
                             if ($shaped.Got) {
                                 $r.Transport = 'WMI/DCOM'; $r.Status = $shaped.Status; $r.KBs = $shaped.KBs
                                 $r.Reboot = $shaped.Reboot; $r.Error = $shaped.Error; $r.Ok = $shaped.Ok
                                 $r.Detail = "WMI/DCOM: $($shaped.Status)" + $(if ($shaped.KBs) { " [$($shaped.KBs)]" } else { '' }) + $(if ($shaped.Reboot) { ' (reboot pending)' } else { '' }) + $(if ($shaped.Error) { " - $($shaped.Error)" } else { '' })
                                 $succeeded = $true
                             } else {
-                                [void]$trail.Add('WMI/DCOM: task launched but no result.json before timeout')
+                                [void]$trail.Add('WMI/DCOM: task launched but no matching result.json before timeout')
                             }
+                            # Best-effort cleanup (never leave a persistent SYSTEM task / driver residue):
+                            # fire a follow-up bootstrap to Unregister the task + delete the files, and
+                            # also remove them over the admin share. A cleanup failure must NOT flip a
+                            # real Installed result to a failure.
+                            try {
+                                $cleanup = @"
+try { Unregister-ScheduledTask -TaskName 'JANET_WUA' -Confirm:`$false -ErrorAction SilentlyContinue } catch {}
+`$b = Join-Path `$env:ProgramData 'JANET\WUA'
+Remove-Item (Join-Path `$b 'driver.ps1')   -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path `$b 'result.json')  -Force -ErrorAction SilentlyContinue
+"@
+                                $encC = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanup))
+                                Invoke-CimMethod -CimSession $cim -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encC" } -ErrorAction SilentlyContinue | Out-Null
+                            } catch {}
+                            try { if (Test-Path $unc)    { Remove-Item $unc    -Force -ErrorAction SilentlyContinue } } catch {}
+                            try { if (Test-Path $uncDrv) { Remove-Item $uncDrv -Force -ErrorAction SilentlyContinue } } catch {}
+                            if ($useDrive) { Remove-PSDrive -Name JWUA -ErrorAction SilentlyContinue }
+                            Remove-CimSession $cim -ErrorAction SilentlyContinue
                         }
                     } catch {
                         [void]$trail.Add("WMI/DCOM: $($_.Exception.Message)")

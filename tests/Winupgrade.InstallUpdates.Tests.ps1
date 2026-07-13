@@ -131,6 +131,35 @@ Describe 'Get-WinUpgradeWuaResultRow - result.json -> row (ResultCode->Status ma
         [bool]$row.Got | Should Be $false
         [bool]$row.Ok  | Should Be $false
     }
+
+    It 'nonce MISMATCH -> rejected: Got=false, NOT Ok (a stale Installed never surfaces)' {
+        $rt = ([pscustomobject]@{ Status='Installed'; ResultCode=2; Reboot=$true; KBs=@('KB1'); Nonce='OLD'; Host='WS-A' }) | ConvertTo-Json | ConvertFrom-Json
+        $row = & $m { param($x) Get-WinUpgradeWuaResultRow -Result $x -ExpectNonce 'NEW' -TargetShort 'WS-A' } $rt
+        [bool]$row.Got | Should Be $false
+        [bool]$row.Ok  | Should Be $false
+        $row.Status    | Should Not Be 'Installed'
+    }
+
+    It 'matching nonce + matching Host -> the mapped Installed row (Got, Ok)' {
+        $rt = ([pscustomobject]@{ Status='Installed'; ResultCode=2; Reboot=$true; KBs=@('KB1'); Nonce='NEW'; Host='WS-A.contoso.com' }) | ConvertTo-Json | ConvertFrom-Json
+        $row = & $m { param($x) Get-WinUpgradeWuaResultRow -Result $x -ExpectNonce 'NEW' -TargetShort 'WS-A' } $rt
+        $row.Status    | Should Be 'Installed'
+        [bool]$row.Ok  | Should Be $true
+    }
+
+    It 'matching nonce but WRONG Host -> WrongBox, NOT Ok' {
+        $rt = ([pscustomobject]@{ Status='Installed'; ResultCode=2; Nonce='NEW'; Host='WS-OTHER' }) | ConvertTo-Json | ConvertFrom-Json
+        $row = & $m { param($x) Get-WinUpgradeWuaResultRow -Result $x -ExpectNonce 'NEW' -TargetShort 'WS-A' } $rt
+        $row.Status    | Should Be 'WrongBox'
+        [bool]$row.Ok  | Should Be $false
+    }
+
+    It 'IP-literal target -> host gate skipped (no false WrongBox on an IP dial)' {
+        $rt = ([pscustomobject]@{ Status='NoUpdates'; Nonce='NEW'; Host='WS-REALNAME' }) | ConvertTo-Json | ConvertFrom-Json
+        $row = & $m { param($x) Get-WinUpgradeWuaResultRow -Result $x -ExpectNonce 'NEW' -TargetShort '10' -TargetIsIp $true } $rt
+        $row.Status    | Should Be 'NoUpdates'
+        [bool]$row.Ok  | Should Be $true
+    }
 }
 
 Describe 'install-updates worker end to end (shimmed transport/poll - no real WinRM/WMI/task)' {
@@ -139,18 +168,39 @@ Describe 'install-updates worker end to end (shimmed transport/poll - no real Wi
     # result.json TEXT (what the in-session task runner returns). AttemptOffline is
     # forced $true so the worker proceeds past the fake-host reachability probe into
     # the transport cascade; the first (HTTPS 5986) attempt is served the canned json.
+    #  The shim mirrors the REAL SYSTEM driver: the driver stamps its OWN nonce (the one
+    #  the worker baked in via #__NONCE__#, handed to the runner as ArgumentList[2]) and
+    #  Host=$env:COMPUTERNAME into result.json. So by default the shim stamps Nonce =
+    #  ArgumentList[2] (matches this run) and Host = the dialed ComputerName (correct box).
+    #  NonceOverride / HostOverride simulate a stale-nonce (wrong-run) or wrong-box read.
     function Invoke-InstallWorker {
-        param([string]$Computer, [string]$ResultJson, [bool]$DryRun = $false)
+        param([string]$Computer, [string]$ResultJson, [bool]$DryRun = $false,
+              [bool]$AllowHttp = $true, [bool]$AllowWmi = $true,
+              $NonceOverride = $null, $HostOverride = $null, [bool]$Stamp = $true)
         return & $m {
-            param($Computer, $ResultJson, $DryRun)
-            Set-Variable -Name __json  -Scope script -Value $ResultJson
-            Set-Variable -Name __calls -Scope script -Value (New-Object System.Collections.ArrayList)
+            param($Computer, $ResultJson, $DryRun, $AllowHttp, $AllowWmi, $NonceOverride, $HostOverride, $Stamp)
+            Set-Variable -Name __json    -Scope script -Value $ResultJson
+            Set-Variable -Name __calls   -Scope script -Value (New-Object System.Collections.ArrayList)
+            Set-Variable -Name __stamp   -Scope script -Value $Stamp
+            Set-Variable -Name __nonceOv -Scope script -Value $NonceOverride
+            Set-Variable -Name __hostOv  -Scope script -Value $HostOverride
             function script:Invoke-Command {
                 param($ComputerName,$ScriptBlock,$ArgumentList,$Authentication,$SessionOption,$ErrorAction,$Credential,$Session,$Port,$UseSSL)
                 $t = [string]$ScriptBlock
                 if ($t -match 'Register-ScheduledTask' -or $t -match 'result\.json') {
                     [void]$script:__calls.Add('RUN')
-                    return $script:__json
+                    $json = $script:__json
+                    if ($script:__stamp) {
+                        $n = if ($null -ne $script:__nonceOv) { $script:__nonceOv } else { $ArgumentList[2] }
+                        $h = if ($null -ne $script:__hostOv)  { $script:__hostOv }  else { $ComputerName }
+                        try {
+                            $obj = $json | ConvertFrom-Json
+                            $obj | Add-Member -NotePropertyName Nonce -NotePropertyValue $n -Force
+                            $obj | Add-Member -NotePropertyName Host  -NotePropertyValue $h -Force
+                            $json = $obj | ConvertTo-Json
+                        } catch {}
+                    }
+                    return $json
                 }
                 return $null
             }
@@ -163,15 +213,15 @@ Describe 'install-updates worker end to end (shimmed transport/poll - no real Wi
                     4,64,'2.0','y',$false,
                     300,$null,26100,$false,$false,
                     $false,$false,$false,$false,$false,
-                    $true,$true,$true,45,'DRIVER-TEXT-#__INCLUDEMU__#'
+                    $true,$AllowHttp,$AllowWmi,45,'DRV|MU=#__INCLUDEMU__#|N=#__NONCE__#'
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 return @{ Row = $row; Calls = @($script:__calls) }
             } finally {
                 Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue
-                Remove-Variable -Name __json,__calls -Scope script -ErrorAction SilentlyContinue
+                Remove-Variable -Name __json,__calls,__stamp,__nonceOv,__hostOv -Scope script -ErrorAction SilentlyContinue
             }
-        } $Computer $ResultJson $DryRun
+        } $Computer $ResultJson $DryRun $AllowHttp $AllowWmi $NonceOverride $HostOverride $Stamp
     }
 
     It 'a NoUpdates result.json -> Status NoUpdates over the HTTPS transport, no reboot' {
@@ -196,6 +246,33 @@ Describe 'install-updates worker end to end (shimmed transport/poll - no real Wi
         $out = Invoke-InstallWorker -Computer 'WS-FAIL' -ResultJson '{"Status":"InstallFailed","ResultCode":4,"Reboot":false,"KBs":[]}'
         $out.Row.Status   | Should Be 'InstallFailed'
         [bool]$out.Row.Ok | Should Be $false
+    }
+
+    It 'matching nonce + matching Host -> the mapped Installed row (happy path proven)' {
+        $out = Invoke-InstallWorker -Computer 'WS-OK' -ResultJson '{"Status":"Installed","ResultCode":2,"Reboot":false,"KBs":["KB5054156"]}'
+        ($out.Calls -contains 'RUN') | Should Be $true
+        $out.Row.Status   | Should Be 'Installed'
+        [bool]$out.Row.Ok | Should Be $true
+    }
+
+    It 'a WRONG-nonce result.json is REJECTED - never surfaces as Installed (stale/prior run)' {
+        # The driver ran (RUN recorded) but stamped a stale nonce -> the worker must reject it
+        # and keep polling; with no other transport it ends NOT Ok and NOT a success status.
+        $out = Invoke-InstallWorker -Computer 'WS-STALE' `
+                 -ResultJson '{"Status":"Installed","ResultCode":2,"Reboot":true,"KBs":["KB9999999"]}' `
+                 -NonceOverride 'deadbeefdeadbeefdeadbeefdeadbeef' -AllowHttp $false -AllowWmi $false
+        ($out.Calls -contains 'RUN')   | Should Be $true
+        [bool]$out.Row.Ok              | Should Be $false
+        @('Installed','InstalledWithErrors','NoUpdates') -contains $out.Row.Status | Should Be $false
+    }
+
+    It 'a Host-mismatch result.json -> WrongBox row, NOT Ok (wrong box, stale DNS / reused IP)' {
+        $out = Invoke-InstallWorker -Computer 'WS-INTENDED' `
+                 -ResultJson '{"Status":"Installed","ResultCode":2,"Reboot":false,"KBs":["KB5054156"]}' `
+                 -HostOverride 'WS-OTHERBOX'
+        $out.Row.Status   | Should Be 'WrongBox'
+        [bool]$out.Row.Ok | Should Be $false
+        $out.Row.Error    | Should Match 'WRONG BOX'
     }
 
     It 'Dry-run -> DRY-RUN row and NO SYSTEM task ever registered (no RUN call)' {

@@ -14,6 +14,14 @@
 #  and the function returns EARLY - no runspace pool is opened and NO host is
 #  ever contacted. shutdown.exe / DISM are never reached.
 #
+#  DESKTOP PARITY (Loop-33 FIX 3): the desktop WindowsUpgradeTool_0.5.1.ps1
+#  Test-HostIsSelf was ported to the SAME identity set as Web's
+#  Get-WinUpgradeLocalIdentity (COMPUTERNAME, DNS hostname + FQDN, all DNS-resolved
+#  IPs, AND every bound unicast IPv4, plus loopback), closing the "paste the tool
+#  host's own bound NIC IP as an install target" bypass. The desktop has no Pester;
+#  Test-HostIsSelf was smoke-tested read-only (own COMPUTERNAME / loopback / bound
+#  NIC IP -> $true; a foreign name / foreign IP -> $false), fail-closed-on-throw kept.
+#
 #  Run:  Invoke-Pester -Path .\tests\Winupgrade.SelfGuard.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
