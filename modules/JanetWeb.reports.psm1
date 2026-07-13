@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.17'
+        version  = '2.14.18'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -1574,6 +1574,31 @@ function Get-ReportsAuditHostKey {
     $v = ([string]$Value).Trim()
     if ($v -match '^\d{1,3}(\.\d{1,3}){3}$') { return $v }
     return ((($v -split '\.')[0]).ToUpper())
+}
+
+# Detect cross-domain short-name COLLISIONS (ledger row 36): two physically-distinct FQDNs
+# that fold to the SAME Get-ReportsAuditHostKey short key (e.g. web01.us.af.mil +
+# web01.eu.af.mil -> WEB01). The short fold is INTENDED for short-vs-FQDN of ONE host
+# (web01 <-> web01.dom), but two DISTINCT FQDNs sharing a short name are DIFFERENT boxes, so
+# a closure/compare verdict under that shared key is ambiguous. Given the hostnames seen in a
+# scan, returns a case-insensitive HashSet of the short keys backed by >=2 DISTINCT dot-bearing
+# FQDNs. A bare short name (no dot) or a short + single FQDN is NOT a collision (that is the
+# intended fold); an IP key never collides (kept whole). (loop24)
+function Get-ReportsHostKeyCollisions {
+    param([string[]]$Hostnames)
+    $byKey = @{}
+    foreach ($h in $Hostnames) {
+        $hn = ([string]$h).Trim()
+        if (-not $hn) { continue }
+        if ($hn -notmatch '\.') { continue }                       # bare short name - not an FQDN
+        if ($hn -match '^\d{1,3}(\.\d{1,3}){3}$') { continue }      # IP literal - never collides
+        $key = Get-ReportsAuditHostKey $hn
+        if (-not $byKey.ContainsKey($key)) { $byKey[$key] = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase) }
+        [void]$byKey[$key].Add($hn)
+    }
+    $collisions = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($k in $byKey.Keys) { if ($byKey[$k].Count -ge 2) { [void]$collisions.Add($k) } }
+    return ,$collisions
 }
 
 # Scan Logs\<Tool>\<userFolder>\ TouchedHosts_<m>*.csv + <m>_detail*.csv across $Months
@@ -5324,18 +5349,31 @@ function Invoke-JanetToolAction {
             # here was NOT SCANNED this pass - its keys must NOT be scored as remediated (a
             # host offline during the scan window, or a scoped export, would else FALSE-CLOSE).
             $hostsPresent = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $freshHostnames = New-Object System.Collections.ArrayList
             $detail = @{}
             foreach ($f in $script:AcasFindings) {
                 $hk = Get-ReportsAuditHostKey $f.Hostname
                 $k = "$hk|$($f.PluginID)"
                 [void]$hostsPresent.Add($hk)
+                [void]$freshHostnames.Add([string]$f.Hostname)
                 $isFlagged = ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH')
                 if ($isFlagged) { [void]$attestedNow.Add($k) } else { [void]$openNow.Add($k) }
                 if (-not $detail.ContainsKey($k)) { $detail[$k] = $f }
             }
             $campKeys = @($cam.findingKeys)
+            # loop24 (ledger row 36): short keys backed by >=2 DISTINCT FQDNs in the fresh scan
+            # are cross-domain collisions (web01.us + web01.eu -> WEB01). A "remediated" verdict on
+            # such a key is untrustworthy (which physical host was fixed?), so the classify loop
+            # below marks them AMBIGUOUS (never remediated, never auto-close). Warn if any campaign
+            # key rides a collided short name.
+            $collisions   = Get-ReportsHostKeyCollisions -Hostnames @($freshHostnames.ToArray())
+            $campHostKeys = @($campKeys | ForEach-Object { (($_ -split '\|', 2)[0]) })
+            $activeCollisions = @($collisions | Where-Object { $campHostKeys -contains $_ })
+            if ($activeCollisions.Count -gt 0) {
+                & $send @{ type='log'; level='warn'; text="Ambiguous host key(s) - a short name is shared by multiple DISTINCT hosts in this scan (re-scan by FQDN to resolve): $($activeCollisions -join ', '). Their campaign findings are scored AMBIGUOUS, not remediated." }
+            }
             $rows = New-Object System.Collections.ArrayList
-            $remediated = 0; $stillOpen = 0; $attested = 0; $notScanned = 0; $idx = 0
+            $remediated = 0; $stillOpen = 0; $attested = 0; $notScanned = 0; $ambiguous = 0; $idx = 0
             foreach ($k in $campKeys) {
                 $idx++
                 $ks = [string]$k
@@ -5355,9 +5393,17 @@ function Invoke-JanetToolAction {
                     # visible NOT-SCANNED row so the operator re-scans that host.
                     $notScanned++
                     $state = 'NOT-SCANNED'
+                } elseif ($collisions.Contains($parts[0])) {
+                    # loop24 (ledger row 36): this short key is backed by >=2 distinct FQDNs in the
+                    # fresh scan (cross-domain collision). A host with this short name IS present, so
+                    # the key looks remediated - but we cannot confirm WHICH physical host was fixed.
+                    # Never score it remediated and never let it close the campaign; surface an
+                    # AMBIGUOUS row so the operator re-scans by FQDN / resolves it.
+                    $ambiguous++
+                    $state = 'AMBIGUOUS'
                 } else {
                     $remediated++
-                    continue   # absent AND the host WAS scanned = scan-confirmed remediated (no row)
+                    continue   # absent AND the host WAS scanned (unambiguously) = scan-confirmed remediated
                 }
                 $row = @{
                     _rk=$ks
@@ -5375,13 +5421,14 @@ function Invoke-JanetToolAction {
             # Closed % = SCAN-CONFIRMED remediation only (manual attestations excluded).
             $closedPct = if ($totalKeys -gt 0) { [math]::Round(($remediated / $totalKeys) * 100, 1) } else { 0 }
             # verified-closed requires EVERY key SCAN-CONFIRMED remediated - no still-open, no
-            # merely-attested, AND no NOT-SCANNED key (loop21 P1: an unscanned host is unconfirmed,
-            # never a closure). A campaign with only manual flags or unscanned hosts stays in-progress.
-            $allClosed = ($stillOpen -eq 0 -and $attested -eq 0 -and $notScanned -eq 0 -and $totalKeys -gt 0)
+            # merely-attested, no NOT-SCANNED key (loop21 P1: an unscanned host is unconfirmed), and
+            # no AMBIGUOUS key (loop24: a cross-domain short-name collision can't confirm which host
+            # was fixed). A campaign with any of those stays in-progress, never a false closure.
+            $allClosed = ($stillOpen -eq 0 -and $attested -eq 0 -and $notScanned -eq 0 -and $ambiguous -eq 0 -and $totalKeys -gt 0)
             $newStatus = if ($allClosed) { 'verified-closed' } elseif ($remediated -gt 0 -or $attested -gt 0) { 'in-progress' } else { 'open' }
 
             # Persist the verdict back onto the campaign object.
-            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; notScanned=$notScanned; total=$totalKeys; closedPct=$closedPct }
+            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; notScanned=$notScanned; ambiguous=$ambiguous; total=$totalKeys; closedPct=$closedPct }
             if ($cam.PSObject.Properties['verify']) { $cam.verify = $verify } else { $cam | Add-Member -NotePropertyName verify -NotePropertyValue $verify -Force }
             if ($cam.PSObject.Properties['status']) { $cam.status = $newStatus } else { $cam | Add-Member -NotePropertyName status -NotePropertyValue $newStatus -Force }
             $save = Save-ReportsCampaign -Campaign $cam
@@ -5389,9 +5436,10 @@ function Invoke-JanetToolAction {
 
             $attNote = if ($attested -gt 0) { " ($attested manually attested, NOT scan-confirmed)" } else { '' }
             $nsNote  = if ($notScanned -gt 0) { " ($notScanned NOT scanned this pass - re-scan those hosts to confirm)" } else { '' }
-            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated scan-confirmed, $stillOpen still-open, $attested attested, $notScanned not-scanned of $totalKeys ($closedPct% closed); status=$newStatus" }
-            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated scan-confirmed remediated, $stillOpen still-open of $totalKeys - $closedPct% closed$attNote$nsNote. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
-            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; notScanned=$notScanned; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
+            $ambNote = if ($ambiguous -gt 0) { " ($ambiguous AMBIGUOUS - short name shared by distinct hosts; re-scan by FQDN)" } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated scan-confirmed, $stillOpen still-open, $attested attested, $notScanned not-scanned, $ambiguous ambiguous of $totalKeys ($closedPct% closed); status=$newStatus" }
+            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated scan-confirmed remediated, $stillOpen still-open of $totalKeys - $closedPct% closed$attNote$nsNote$ambNote. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
+            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; notScanned=$notScanned; ambiguous=$ambiguous; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
         }
 
         # -------------------------------------------------------------------
