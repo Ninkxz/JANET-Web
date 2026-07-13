@@ -32,7 +32,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.1'
+        version  = '1.2.2'
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE/Store. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -1523,6 +1523,52 @@ function Build-UprManualHostJobs {
 }
 
 # -----------------------------------------------------------------------------
+#  Dispatcher self-guard (loop22, ledger row 13). UPR's uninstall actions
+#  (report-uninstall / manual-uninstall) PERMANENTLY remove software from each
+#  target over WinRM. The DNS-mismatch hard-abort stops acting on the WRONG remote
+#  host, but if the operator explicitly lists the JANET dispatcher (correct DNS) the
+#  uninstall proceeds ON THE BOX THIS LISTENER RUNS ON - it could strip software the
+#  dispatcher needs. Drop self from the uninstall wave BEFORE fan-out (parity with
+#  wpt/acas/c2c/message). Scan actions (report-scan/manual-scan) are read-only and
+#  stay self-inclusive. Self-contained (no cross-import); IPv4-literal-safe.
+# -----------------------------------------------------------------------------
+function Get-UprLocalIdentity {
+    if ($script:UprLocalIdentity) { return ,$script:UprLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try { $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName; if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) } } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            try {
+                if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+                foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                    if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+                }
+            } catch {}
+        }
+    } catch {}
+    $script:UprLocalIdentity = $set; return ,$set
+}
+
+# True when a target token names THIS dispatcher host (short / FQDN / NIC IP / loopback).
+# An IPv4 literal is self ONLY via exact NIC-IP set membership or a 127.x loopback -
+# never via the shortname-alias branch (which is gated behind a non-IP TryParse).
+function Test-UprHostIsSelf {
+    param([string]$Target)
+    $c = ([string]$Target).Trim()
+    if (-not $c) { return $false }
+    if ($c -in @('localhost','127.0.0.1','::1','.')) { return $true }
+    if ($c -match '^127\.') { return $true }
+    $self = Get-UprLocalIdentity
+    if ($self.Contains($c)) { return $true }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($c, [ref]$ip)) { if ($self.Contains(($c -split '\.')[0])) { return $true } }
+    return $false
+}
+
+# -----------------------------------------------------------------------------
 #  Invoke-JanetToolAction - dispatcher
 # -----------------------------------------------------------------------------
 function Invoke-JanetToolAction {
@@ -1620,6 +1666,18 @@ function Invoke-JanetToolAction {
             $manualJobs = @($manualJobs | Where-Object { $selectHosts.Contains($_.Target) })
         }
         if ($manualJobs.Count -eq 0) { & $log 'No valid machines to scan after parsing the host list.' 'warn'; return @{ rows=@(); summary=@{ total=0 } } }
+
+        # Self-guard (loop22, ledger row 13): an uninstall wave must never strip software
+        # from the JANET dispatcher host. Drop self BEFORE fan-out; the read-only scan stays
+        # self-inclusive (never dropped).
+        if ($doUninstall) {
+            $selfJobs = @($manualJobs | Where-Object { Test-UprHostIsSelf $_.Target })
+            if ($selfJobs.Count -gt 0) {
+                & $log ("Self-guard: dropped the JANET dispatcher host from the uninstall wave (" + (($selfJobs | ForEach-Object { $_.Target }) -join ', ') + ") - UPR never uninstalls from the box it runs on.") 'warn'
+                $manualJobs = @($manualJobs | Where-Object { -not (Test-UprHostIsSelf $_.Target) })
+            }
+            if ($manualJobs.Count -eq 0) { & $log 'Only the dispatcher host was targeted - nothing to uninstall (self-guard).' 'warn'; return @{ rows=@(); summary=@{ total=0 } } }
+        }
 
         $modeWord = if ($doUninstall) { 'uninstall' } else { 'scan' }
         & $log ("Targeted " + $modeWord + ": " + $manualJobs.Count + " host(s), " + $manualProfiles.Count + " software rule(s).") 'info'
@@ -1841,6 +1899,16 @@ function Invoke-JanetToolAction {
         & $log "No actionable hosts after applying the host-class filter ('$hostClass'). OS findings and update-class findings are excluded." 'warn'
         return @{ rows=@(); summary=@{ total=0 } }
     }
+    # Self-guard (loop22, ledger row 13): drop the JANET dispatcher host from the uninstall
+    # wave BEFORE fan-out (report-scan is read-only and stays self-inclusive).
+    if ($doUninstall) {
+        $selfJobs = @($hostJobs | Where-Object { Test-UprHostIsSelf $_.Target })
+        if ($selfJobs.Count -gt 0) {
+            & $log ("Self-guard: dropped the JANET dispatcher host from the uninstall wave (" + (($selfJobs | ForEach-Object { $_.Target }) -join ', ') + ") - UPR never uninstalls from the box it runs on.") 'warn'
+            $hostJobs = @($hostJobs | Where-Object { -not (Test-UprHostIsSelf $_.Target) })
+        }
+        if ($hostJobs.Count -eq 0) { & $log 'Only the dispatcher host was targeted - nothing to uninstall (self-guard).' 'warn'; return @{ rows=@(); summary=@{ total=0 } } }
+    }
     & $log "Built $($hostJobs.Count) unique host target(s) across actionable findings." 'info'
     if ($doUninstall) {
         & $log "Uninstall mode: dryRun=$dryRun. Only proven-EOL (Uninstall) candidates are removed; Review/Tanium are skipped." $(if ($dryRun) { 'info' } else { 'warn' })
@@ -1862,4 +1930,4 @@ function Invoke-JanetToolAction {
         -EmitHostAudit (-not $doUninstall) -RemoveSet $removeSet
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Test-UprHostIsSelf
