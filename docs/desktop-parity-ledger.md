@@ -96,3 +96,8 @@ commit is unblocked.
 | # | Finding (sev) | Web fix | In Desktop? | Status |
 |---|---------------|---------|-------------|--------|
 | 30 | Server token gate is fail-closed, but a Mandatory `[string]$Token=''` makes every request 403 silently (server up-but-dead) rather than failing at launch (P3, operability/latent-trap - NOT a bypass; spot-verified the gate cannot be tricked open) | Server.ps1 (`d4e08e26d`): `throw` at server start if `[string]::IsNullOrEmpty($Token)`, before any listener setup | NO - JANET Desktop has no HTTP server / listener / token (same as row 16, the fail-closed admin gate) | **CLOSED-WEB-ONLY** (no HTTP server in Desktop) |
+
+## Loop-18 finding (NEW) - c2c Patches fix success under-reported in the host rollup -> Web CLOSED, Desktop deferred
+| # | Finding (sev) | Web fix | In Desktop? | Status |
+|---|---------------|---------|-------------|--------|
+| 31 | c2c per-host status rollup counted only FIXED/STARTED as a fix, omitting the Patches success token KICKED, so a lone successful fix-patches reported host Status 'NO CHANGE' + audited Skipped/0 while the sibling per-pillar tally counted it fixed - result-honesty bug on a quarantine pillar's success path (P2, safe direction - never a false success) | c2c.psm1 1.15.1 (`54f3432`): add KICKED to the :2292 fixed-class filter, aligning it with :3012 | MAYBE - the Desktop `C2CNemesisTool` (parked mirror 2.5.0, itself BLOCKED-DESKTOP-WIP) may share the same MECM-trigger rollup; needs a check once Desktop is unblocked | **CLOSED-WEB / DESKTOP-DEFERRED** (operator chose status-quo on the Desktop mirror; check the C2CNemesisTool rollup when `X:\J.A.N.E.T` is clean) |
