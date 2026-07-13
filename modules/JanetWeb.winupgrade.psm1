@@ -49,7 +49,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.4.0'
+        version  = '0.5.0'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -79,6 +79,38 @@ function Get-JanetToolManifest {
                     @{ name='version'; label='Target version'; type='select'; required=$false; default='24H2'; options=@('24H2','25H2'); help='Feature-update target the board rolls up against - 24H2 (build 26100+) or 25H2 (build 26200+). Default 24H2. The Win24H2Status column reads "Already <version>+" for the chosen target.' },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
+                )
+            },
+            @{
+                id          = 'os-audit'
+                label       = 'OS Version Audit'
+                description  = 'Read-only OS Version audit rule (changes NOTHING; self-inclusive - it is a scan). Per host it reads CurrentBuild / UBR / DisplayVersion (ReleaseId backstop) / EditionID / ProductName from HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion over the tool''s SSL-first WinRM, then computes THREE pass/fail checks with NO partial state: Gen11 = Windows 11 (CurrentBuild >= 22000); Rel24H2 = release 24H2 or newer (CurrentBuild >= 26100; 25H2=26200 and newer PASS); EntEdition = EditionID EXACTLY ''Enterprise'' (Pro / Education / Home / Enterprise multi-session / IoT all FAIL). Verdict = PASS only if ALL THREE pass, else FAIL with the failing-check list. Mirrors the C2C audit-tier pass/fail idiom.'
+                kind         = 'stream-table'
+                destructive  = $false
+                columns      = @('Host','Online','Generation','ReleaseId','Edition','Gen11','Rel24H2','EntEdition','Verdict','Failed','Error')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
+                )
+            },
+            @{
+                id          = 'install-updates'
+                label       = 'Install Windows Updates (SYSTEM task)'
+                description  = 'PILOT-PENDING (needs a live domain / WSUS ring to truly validate - never fakes a success row). Install ALL available Windows Updates on each target by registering a JANET_WUA scheduled task that runs a Windows Update Agent (Microsoft.Update.Session) driver as NT AUTHORITY\SYSTEM - the only context in which WUA reliably Download()/Install()s (a remote/network logon token blocks it). The driver searches WSUS (ssDefault) and - when Include Microsoft Update is on - also Windows Update + the Microsoft Update catalog (catches Defender / security-platform KBs WSUS/SCCM miss), AcceptEula, Download, Install, then writes C:\ProgramData\JANET\WUA\result.json which the tool polls. Transport cascade per host, stopping on first success: (1) WinRM HTTPS 5986, (2) WinRM HTTP 5985 (if allowed), (3) WMI/DCOM 135 (if allowed, via Win32_Process.Create + result.json over \\host\C$). SELF-GUARDED: the JANET dispatcher host is dropped BEFORE fan-out (this INSTALLS and some updates force a REBOOT - it must never hit the JANET console).'
+                kind         = 'stream-table'
+                destructive  = $true
+                confirm      = 'Install ALL available Windows Updates on the target(s) via a SYSTEM scheduled task (WSUS + optionally Microsoft Update)? This INSTALLS updates and some will force a REBOOT. The dispatcher host is skipped. Proceed?'
+                columns      = @('Host','Online','Transport','Method','Status','KBs','Reboot','Error')
+                inputs       = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='includeMU'; label='Also search Windows Update + Microsoft Update (Defender / security-platform KBs)'; type='bool'; required=$false; default=$true; help='On: the driver also queries Windows Update and the Microsoft Update catalog (GUID 7971f918-a847-4430-9279-4a52d1efe18d), catching Defender / security-platform updates WSUS/SCCM does not carry. Off: WSUS/SCCM source only.' },
+                    @{ name='allowHttp'; label='Allow WinRM HTTP (5985) fallback'; type='bool'; required=$false; default=$true; help='If WinRM HTTPS (5986) does not connect, fall back to plain WinRM HTTP on 5985.' },
+                    @{ name='allowWmi'; label='Allow WMI/DCOM (135) fallback'; type='bool'; required=$false; default=$true; help='If neither WinRM transport connects, bootstrap the SYSTEM task over WMI/DCOM (Win32_Process.Create) and poll result.json via the \\host\C$ admin share.' },
+                    @{ name='timeoutMin'; label='Per-host timeout (minutes)'; type='int'; required=$false; default=45; help='How long to poll result.json for the SYSTEM task to finish before giving up on a host. Default 45.' },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='dryRun'; label='Dry-run (no changes - reports what WOULD happen)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=8 }
                 )
             },
             @{
@@ -736,6 +768,151 @@ function Get-WinUpgradeErrorRowSet {
     return ,($rows.ToArray())
 }
 
+# =============================================================================
+#  v0.5.0 DECISION HELPERS (os-audit / install-updates)
+#
+#  Same dual-tested pattern as the diagnose helpers: PURE, script-scope, unit-tested
+#  authorities. The worker ops that use them run in bare pool runspaces and CANNOT call
+#  a module function, so they MIRROR this logic INLINE. Keep the two in sync.
+# =============================================================================
+
+function Get-WinUpgradeOsAuditVerdict {
+    # PURE: the OS Version audit rule - THREE pass/fail checks with NO partial state.
+    #   Gen11      = (CurrentBuild -ge 22000)   # Windows 11 generation
+    #   Rel24H2    = (CurrentBuild -ge 26100)   # release 24H2 (26100) or newer (25H2=26200, ...)
+    #   EntEdition = ($EditionID -eq 'Enterprise')  # EXACT; Pro/Education/Home/Enterprise
+    #               multi-session (ServerRdsh/EnterpriseS)/IoT (IoTEnterprise) all FAIL
+    # Verdict = 'PASS' iff all three true, else 'FAIL'. Failed = comma list of failing
+    # check names. Mirrored INLINE by the OsAudit worker branch (keep in sync).
+    param([int]$CurrentBuild = 0, [string]$EditionID = '')
+    $gen11   = ($CurrentBuild -ge 22000)
+    $rel24h2 = ($CurrentBuild -ge 26100)
+    $entEd   = ($EditionID -eq 'Enterprise')
+    $failed = New-Object System.Collections.ArrayList
+    if (-not $gen11)   { [void]$failed.Add('Gen11') }
+    if (-not $rel24h2) { [void]$failed.Add('Rel24H2') }
+    if (-not $entEd)   { [void]$failed.Add('EntEdition') }
+    return [ordered]@{
+        Gen11      = $(if ($gen11)   { 'PASS' } else { 'FAIL' })
+        Rel24H2    = $(if ($rel24h2) { 'PASS' } else { 'FAIL' })
+        EntEdition = $(if ($entEd)   { 'PASS' } else { 'FAIL' })
+        Verdict    = $(if ($failed.Count -eq 0) { 'PASS' } else { 'FAIL' })
+        Failed     = ($failed.ToArray() -join ', ')
+    }
+}
+
+function Get-WinUpgradeWuaResultRow {
+    # PURE: turn a parsed WUA result.json object (as the SYSTEM driver writes it, then
+    # ConvertFrom-Json'd from the poll) into the install-updates row fields. This is the
+    # WORKER-side interpretation of the driver's contract and the tested source of truth
+    # for the ResultCode->Status mapping; the InstallUpdates worker MIRRORS it inline.
+    #   ResultCode 2 -> Installed, 3 -> InstalledWithErrors, else InstallFailed.
+    #   When no numeric ResultCode is present the driver's Status string is used verbatim
+    #   (NoUpdates / Error / Timeout). A $null result (no result.json before the poll
+    #   deadline) -> Status='Timeout'. Got=$false only for a $null/blank result (the
+    #   transport produced nothing) so the cascade keeps trying the next transport.
+    param($Result)
+    $out = [ordered]@{ Status='Timeout'; KBs=''; Reboot=$false; Error=''; Ok=$false; Got=$false }
+    if ($null -eq $Result) { $out.Error = 'no result.json before the poll deadline'; return $out }
+    $out.Got = $true
+    $rc = $null
+    try { if ($Result.PSObject.Properties['ResultCode']) { $rc = $Result.ResultCode } } catch {}
+    if ($null -ne $rc -and "$rc" -ne '') {
+        $rcInt = 0; [void][int]::TryParse("$rc", [ref]$rcInt)
+        $out.Status = $(if ($rcInt -eq 2) { 'Installed' } elseif ($rcInt -eq 3) { 'InstalledWithErrors' } else { 'InstallFailed' })
+        if ($out.Status -eq 'InstallFailed') { $out.Error = "install ResultCode=$rcInt" }
+    } else {
+        $out.Status = [string]$Result.Status
+    }
+    try { $out.Reboot = [bool]$Result.Reboot } catch { $out.Reboot = $false }
+    $kbs = @()
+    try { if ($null -ne $Result.KBs) { $kbs = @($Result.KBs) } } catch {}
+    $out.KBs = ($kbs | Where-Object { $_ } | Select-Object -Unique) -join ','
+    if ($out.Status -eq 'Error')   { try { if ($Result.Message) { $out.Error = [string]$Result.Message } } catch {} }
+    if ($out.Status -eq 'Timeout' -and -not $out.Error) { $out.Error = 'SYSTEM task did not report a result in time' }
+    $out.Ok = (@('Installed','InstalledWithErrors','NoUpdates') -contains $out.Status)
+    return $out
+}
+
+# The WUA driver that runs ON the target as NT AUTHORITY\SYSTEM. PORTED VERBATIM from
+# References\HTTPS_Installer.ps1 $Global:WuaDriver (lines 47-128): a SYSTEM-context
+# Microsoft.Update.Session that searches ssDefault (WSUS) and - when IncludeMU - also
+# ssWindowsUpdate + the Microsoft Update catalog (GUID 7971f918-...), AcceptEula,
+# Download, Install, and writes C:\ProgramData\JANET\WUA\result.json with Status
+# (ResultCode 2=Installed, 3=InstalledWithErrors, else InstallFailed) / Installed /
+# Reboot / KBs. '#__INCLUDEMU__#' is string-replaced with $true/$false before send.
+# Single-quoted here-string so $-tokens are preserved literally for the target.
+$script:WinUpgradeWuaDriver = @'
+$ErrorActionPreference = "Stop"
+$base = Join-Path $env:ProgramData "JANET\WUA"
+$log  = Join-Path $base "result.json"
+# #__INCLUDEMU__# is replaced with $true/$false before this is sent.
+$IncludeMU = #__INCLUDEMU__#
+try {
+    $session = New-Object -ComObject Microsoft.Update.Session
+    $muGuid = "7971f918-a847-4430-9279-4a52d1efe18d"
+    $selections = @( ,@(0, $null) )
+    if ($IncludeMU) {
+        try {
+            $sm = New-Object -ComObject Microsoft.Update.ServiceManager
+            $sm.AddService2($muGuid, 7, "") | Out-Null
+        } catch {}
+        $selections += ,@(2, $null)
+        $selections += ,@(3, $muGuid)
+    }
+    $criteria = "IsInstalled=0 and IsHidden=0 and Type='Software'"
+    $agg      = New-Object -ComObject Microsoft.Update.UpdateColl
+    $seen     = @{}
+    $svcUsed  = @()
+    $svcErr   = @()
+    foreach ($sel in $selections) {
+        try {
+            $searcher = $session.CreateUpdateSearcher()
+            $searcher.ServerSelection = $sel[0]
+            if ($sel[1]) { $searcher.ServiceID = $sel[1] }
+            $r = $searcher.Search($criteria)
+            foreach ($u in $r.Updates) {
+                $id = $u.Identity.UpdateID
+                if (-not $seen.ContainsKey($id)) {
+                    $seen[$id] = $true
+                    $agg.Add($u) | Out-Null
+                }
+            }
+            if ($r.Updates.Count -gt 0) { $svcUsed += "sel$($sel[0])=$($r.Updates.Count)" }
+        } catch {
+            $svcErr += "sel$($sel[0]): $($_.Exception.Message)"
+        }
+    }
+    if ($agg.Count -eq 0) {
+        [pscustomobject]@{ Status="NoUpdates"; Installed=0; Reboot=$false; KBs=@(); Services=$svcUsed; SvcErrors=$svcErr; Time=(Get-Date).ToString("o") } |
+            ConvertTo-Json | Set-Content -Path $log -Encoding UTF8
+        return
+    }
+    $kbs = @()
+    foreach ($u in $agg) {
+        try { if (-not $u.EulaAccepted) { $u.AcceptEula() } } catch {}
+        foreach ($k in $u.KBArticleIDs) { $kbs += "KB$k" }
+    }
+    $dl = $session.CreateUpdateDownloader(); $dl.Updates = $agg; $dl.Download() | Out-Null
+    $inst = $session.CreateUpdateInstaller(); $inst.Updates = $agg
+    $res = $inst.Install()
+    # ResultCode: 2=Succeeded 3=SucceededWithErrors 4=Failed 5=Aborted
+    [pscustomobject]@{
+        Status     = if ($res.ResultCode -eq 2) { "Installed" } elseif ($res.ResultCode -eq 3) { "InstalledWithErrors" } else { "InstallFailed" }
+        Installed  = $agg.Count
+        ResultCode = $res.ResultCode
+        Reboot     = [bool]$res.RebootRequired
+        KBs        = ($kbs | Select-Object -Unique)
+        Services   = $svcUsed
+        SvcErrors  = $svcErr
+        Time       = (Get-Date).ToString("o")
+    } | ConvertTo-Json | Set-Content -Path $log -Encoding UTF8
+} catch {
+    [pscustomobject]@{ Status="Error"; Message=$_.Exception.Message; Time=(Get-Date).ToString("o") } |
+        ConvertTo-Json | Set-Content -Path $log -Encoding UTF8
+}
+'@
+
 # Per-host worker. Runs in an isolated runspace -- NO outer-scope vars are
 # visible; everything comes via .AddArgument(). Returns one [ordered] result
 # (Host/Ping/Status/Detail/Ok); the harvest loop turns it into a streamed row.
@@ -808,7 +985,14 @@ $script:WinUpgradeWorker = {
         [bool]$DriverSafe = $false,  # AutoFix: skip driver removal when the device is currently connected
         [bool]$FixPause = $false,    # AutoFix: clear EXPIRED pause values (active pauses respected)
         [bool]$FixRepair = $false,   # AutoFix: DISM/SFC repair only where setup logs show corruption
-        [bool]$ClearStaging = $false # AutoFix: delete a stale rolled-back $WINDOWS.~BT to reclaim disk
+        [bool]$ClearStaging = $false,# AutoFix: delete a stale rolled-back $WINDOWS.~BT to reclaim disk
+        # --- v0.5.0 appended params (kept at the END so existing positional args are unshifted;
+        #     the pre-v0.5.0 Drive test drives the worker with only 28 args, so these all DEFAULT) ---
+        [bool]$IncludeMU = $true,    # InstallUpdates: driver also searches Windows/Microsoft Update
+        [bool]$AllowHttp = $true,    # InstallUpdates: allow WinRM HTTP 5985 fallback
+        [bool]$AllowWmi = $true,     # InstallUpdates: allow WMI/DCOM 135 fallback
+        [int]$TimeoutMin = 45,       # InstallUpdates: per-host result.json poll timeout (minutes)
+        $WuaDriver = ''              # InstallUpdates: the SYSTEM WUA driver text (#__INCLUDEMU__# unreplaced)
     )
 
     $r = [ordered]@{ Host = $Computer; Ping = ''; Status = ''; Detail = ''; Ok = $false; Report = '' }
@@ -2743,6 +2927,214 @@ $script:WinUpgradeWorker = {
                 $r.Detail = if ($noneOnly) { [string]$mapped[0].Evidence } else { "$($mapped.Count) error row(s): $blockN block, $warnN warn" }
                 $r.Ok = $true
             }
+
+            'OsAudit' {
+                # Read-only OS Version audit rule (self-inclusive scan). Reads the CurrentVersion
+                # registry values ON the target over the tool's SSL-first Invoke-Command, then
+                # computes the three pass/fail checks. The verdict logic MIRRORS the PURE, tested
+                # Get-WinUpgradeOsAuditVerdict (keep in sync); a bare pool runspace cannot call it.
+                & $pushStep 'Reading' 'Reading OS version + edition (read-only)...'
+                $sb = {
+                    $cv = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+                    $p  = Get-ItemProperty -Path $cv -ErrorAction Stop
+                    $cbInt = 0; [void][int]::TryParse([string]$p.CurrentBuild, [ref]$cbInt)
+                    $ubrInt = 0; try { [void][int]::TryParse([string]$p.UBR, [ref]$ubrInt) } catch {}
+                    [pscustomobject]@{
+                        CurrentBuild   = $cbInt
+                        UBR            = $ubrInt
+                        DisplayVersion = [string]$p.DisplayVersion
+                        ReleaseId      = [string]$p.ReleaseId
+                        EditionID      = [string]$p.EditionID
+                        ProductName    = [string]$p.ProductName
+                    }
+                }
+                $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
+                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                if ($credSet) { $ic.Credential = $Cred }
+                if ($useSsl) { $ic['UseSSL'] = $true }
+                $info = Invoke-Command @ic
+                $build = 0; try { $build = [int]$info.CurrentBuild } catch { $build = 0 }
+                $edition = [string]$info.EditionID
+                # ---- inline mirror of Get-WinUpgradeOsAuditVerdict (tested source of truth) ----
+                $gen11   = ($build -ge 22000)
+                $rel24h2 = ($build -ge 26100)
+                $entEd   = ($edition -eq 'Enterprise')
+                $failed = New-Object System.Collections.ArrayList
+                if (-not $gen11)   { [void]$failed.Add('Gen11') }
+                if (-not $rel24h2) { [void]$failed.Add('Rel24H2') }
+                if (-not $entEd)   { [void]$failed.Add('EntEdition') }
+                $verdict = $(if ($failed.Count -eq 0) { 'PASS' } else { 'FAIL' })
+                # ---- end mirror ----
+                $rel = if ($info.DisplayVersion) { [string]$info.DisplayVersion } elseif ($info.ReleaseId) { [string]$info.ReleaseId } else { '' }
+                $r.Online     = $true
+                $r.Generation = $(if ($gen11) { 'Windows 11' } else { 'Windows 10' })
+                $r.ReleaseId  = $rel
+                $r.Edition    = $edition
+                $r.Gen11      = $(if ($gen11)   { 'PASS' } else { 'FAIL' })
+                $r.Rel24H2    = $(if ($rel24h2) { 'PASS' } else { 'FAIL' })
+                $r.EntEdition = $(if ($entEd)   { 'PASS' } else { 'FAIL' })
+                $r.Verdict    = $verdict
+                $r.Failed     = ($failed.ToArray() -join ', ')
+                $r.Error      = ''
+                # Status/Detail so the generic Operations grid renders it (parity with diagnose).
+                $r.Status = $verdict
+                $r.Detail = "Build $build $rel / $($r.Generation) / Edition $edition | Gen11=$($r.Gen11) Rel24H2=$($r.Rel24H2) EntEdition=$($r.EntEdition)" + $(if ($verdict -eq 'FAIL') { " | Failed: $($r.Failed)" } else { '' })
+                $r.Ok = $true
+            }
+
+            'InstallUpdates' {
+                # PILOT-PENDING: installs ALL available Windows Updates by registering a JANET_WUA
+                # SYSTEM scheduled task running the ported WUA driver, polling result.json. Transport
+                # cascade, first success wins: WinRM HTTPS 5986 -> WinRM HTTP 5985 (if AllowHttp) ->
+                # WMI/DCOM 135 (if AllowWmi). Self-guard already dropped self BEFORE fan-out. Never
+                # fakes a success row - a row is Ok only when the driver reported NoUpdates/Installed/
+                # InstalledWithErrors. NEEDS A LIVE DOMAIN/WSUS to truly validate; shimmed in tests.
+                $r.Online = $online; $r.Transport = ''; $r.Method = 'SchedTask(SYSTEM)'
+                $r.KBs = ''; $r.Reboot = $false; $r.Error = ''
+                if ($DryRun) {
+                    $muNote = if ($IncludeMU) { 'WSUS + Windows/Microsoft Update' } else { 'WSUS/SCCM source only' }
+                    $r.Status = 'DRY-RUN'; $r.Ok = $true
+                    $r.Detail = "Would register the JANET_WUA SYSTEM task to install all available updates ($muNote), polling result.json up to ${TimeoutMin} min ($authNote). Changes nothing."
+                    break
+                }
+                $timeoutSec = [int]$TimeoutMin * 60
+                if ($timeoutSec -lt 300) { $timeoutSec = 300 }
+                # Bake the Include-Microsoft-Update toggle into the driver text (#__INCLUDEMU__# -> $true/$false).
+                $driver = ([string]$WuaDriver).Replace('#__INCLUDEMU__#', $(if ($IncludeMU) { '$true' } else { '$false' }))
+
+                # In-session runner: register+start the SYSTEM task, poll result.json, return json.
+                # Ported VERBATIM from HTTPS_Installer.ps1 lines 235-253.
+                $remoteTaskRunner = {
+                    param($DriverText, $TimeoutSec)
+                    $base = Join-Path $env:ProgramData "JANET\WUA"
+                    New-Item -ItemType Directory -Force -Path $base | Out-Null
+                    $log = Join-Path $base "result.json"
+                    Remove-Item $log -ErrorAction SilentlyContinue
+                    Set-Content -Path (Join-Path $base "driver.ps1") -Value $DriverText -Encoding UTF8
+                    $act  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$base\driver.ps1`""
+                    $prin = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+                    $set  = New-ScheduledTaskSettingsSet -StartWhenAvailable
+                    Register-ScheduledTask -TaskName "JANET_WUA" -Action $act -Principal $prin -Settings $set -Force | Out-Null
+                    Start-ScheduledTask -TaskName "JANET_WUA"
+                    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+                    while ((Get-Date) -lt $deadline) {
+                        if (Test-Path $log) { Start-Sleep 2; break }
+                        Start-Sleep 6
+                    }
+                    if (Test-Path $log) { Get-Content $log -Raw } else { '{"Status":"Timeout"}' }
+                }
+
+                # Inline mirror of Get-WinUpgradeWuaResultRow (tested authority) - a bare pool
+                # runspace cannot call the module fn. ResultCode 2=Installed,3=InstalledWithErrors,
+                # else InstallFailed; Got=$false means the transport produced nothing (keep casc.).
+                $shapeRow = {
+                    param($json)
+                    $res = $null; try { $res = $json | ConvertFrom-Json } catch {}
+                    $o = [ordered]@{ Status='Timeout'; KBs=''; Reboot=$false; Error=''; Ok=$false; Got=$false }
+                    if ($null -eq $res) { return $o }
+                    $o.Got = $true
+                    $rc = $null; try { if ($res.PSObject.Properties['ResultCode']) { $rc = $res.ResultCode } } catch {}
+                    if ($null -ne $rc -and "$rc" -ne '') {
+                        $rcInt = 0; [void][int]::TryParse("$rc", [ref]$rcInt)
+                        $o.Status = $(if ($rcInt -eq 2) { 'Installed' } elseif ($rcInt -eq 3) { 'InstalledWithErrors' } else { 'InstallFailed' })
+                        if ($o.Status -eq 'InstallFailed') { $o.Error = "install ResultCode=$rcInt" }
+                    } else { $o.Status = [string]$res.Status }
+                    try { $o.Reboot = [bool]$res.Reboot } catch { $o.Reboot = $false }
+                    $kk = @(); try { if ($null -ne $res.KBs) { $kk = @($res.KBs) } } catch {}
+                    $o.KBs = ($kk | Where-Object { $_ } | Select-Object -Unique) -join ','
+                    if ($o.Status -eq 'Error') { try { if ($res.Message) { $o.Error = [string]$res.Message } } catch {} }
+                    $o.Ok = (@('Installed','InstalledWithErrors','NoUpdates') -contains $o.Status)
+                    return $o
+                }
+
+                $trail = New-Object System.Collections.ArrayList
+                $succeeded = $false
+                # --- WinRM transport attempts (HTTPS 5986 first, then HTTP 5985 if allowed) ---
+                $attempts = New-Object System.Collections.ArrayList
+                [void]$attempts.Add(@{ Label='WinRM HTTPS 5986'; Transport='HTTPS'; UseSSL=$true;  Port=5986 })
+                if ($AllowHttp) { [void]$attempts.Add(@{ Label='WinRM HTTP 5985'; Transport='HTTP'; UseSSL=$false; Port=5985 }) }
+                foreach ($att in $attempts) {
+                    if (& $isCancelled) { $r.Status='Cancelled'; $r.Detail='cancelled by operator'; $r.Ok=$false; break }
+                    & $pushStep 'Working' "Registering JANET_WUA SYSTEM task via $($att.Label)..."
+                    try {
+                        $idleMs = [int][Math]::Min(2147483, ($timeoutSec + 900)) * 1000
+                        $so = New-PSSessionOption -OpenTimeout 25000 -OperationTimeout 0 -IdleTimeout $idleMs -CancelTimeout 5000 -SkipCACheck:$att.UseSSL -SkipCNCheck:$att.UseSSL
+                        $ic = @{ ComputerName=$Computer; ScriptBlock=$remoteTaskRunner; ArgumentList=@($driver,$timeoutSec); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop'; Port=$att.Port }
+                        if ($credSet) { $ic.Credential = $Cred }
+                        if ($att.UseSSL) { $ic['UseSSL'] = $true }
+                        $json = Invoke-Command @ic
+                        $shaped = & $shapeRow $json
+                        if ($shaped.Got) {
+                            $r.Transport = $att.Transport; $r.Status = $shaped.Status; $r.KBs = $shaped.KBs
+                            $r.Reboot = $shaped.Reboot; $r.Error = $shaped.Error; $r.Ok = $shaped.Ok
+                            $r.Detail = "$($att.Label): $($shaped.Status)" + $(if ($shaped.KBs) { " [$($shaped.KBs)]" } else { '' }) + $(if ($shaped.Reboot) { ' (reboot pending)' } else { '' }) + $(if ($shaped.Error) { " - $($shaped.Error)" } else { '' })
+                            $succeeded = $true; break
+                        } else {
+                            [void]$trail.Add("$($att.Label): no result.json (task may still be running)")
+                        }
+                    } catch {
+                        [void]$trail.Add("$($att.Label): $($_.Exception.Message)")
+                    }
+                }
+
+                # --- WMI/DCOM fallback: Win32_Process.Create a bootstrap that writes the driver +
+                #     registers the SYSTEM task, then poll result.json via \\host\C$ (ported from
+                #     HTTPS_Installer.ps1 lines 368-413). Only when WinRM did not succeed. ---
+                if (-not $succeeded -and $AllowWmi -and -not (& $isCancelled)) {
+                    & $pushStep 'Working' 'WinRM failed; bootstrapping SYSTEM task over WMI/DCOM...'
+                    try {
+                        $driver64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($driver))
+                        $bootstrap = @"
+`$base = Join-Path `$env:ProgramData 'JANET\WUA'
+New-Item -ItemType Directory -Force -Path `$base | Out-Null
+Remove-Item (Join-Path `$base 'result.json') -ErrorAction SilentlyContinue
+Set-Content -Path (Join-Path `$base 'driver.ps1') -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$driver64'))) -Encoding UTF8
+`$act  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + `$base + '\driver.ps1"')
+`$prin = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'JANET_WUA' -Action `$act -Principal `$prin -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Force | Out-Null
+Start-ScheduledTask -TaskName 'JANET_WUA'
+"@
+                        $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+                        $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
+                        $cso = New-CimSessionOption -Protocol Dcom
+                        if ($credSet) { $cim = New-CimSession -ComputerName $Computer -Credential $Cred -SessionOption $cso -ErrorAction Stop }
+                        else          { $cim = New-CimSession -ComputerName $Computer -SessionOption $cso -ErrorAction Stop }
+                        $inv = Invoke-CimMethod -CimSession $cim -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd } -ErrorAction Stop
+                        Remove-CimSession $cim -ErrorAction SilentlyContinue
+                        if ($inv.ReturnValue -ne 0) {
+                            [void]$trail.Add("WMI/DCOM: Win32_Process.Create rc=$($inv.ReturnValue)")
+                        } else {
+                            $unc = "\\$Computer\C`$\ProgramData\JANET\WUA\result.json"
+                            $useDrive = $credSet
+                            if ($useDrive) { New-PSDrive -Name JWUA -PSProvider FileSystem -Root "\\$Computer\C`$" -Credential $Cred -ErrorAction SilentlyContinue | Out-Null }
+                            $deadline = (Get-Date).AddSeconds($timeoutSec); $polled = $null
+                            while ((Get-Date) -lt $deadline) {
+                                if (& $isCancelled) { break }
+                                if (Test-Path $unc) { try { $polled = Get-Content $unc -Raw } catch {}; if ($polled) { break } }
+                                Start-Sleep 8
+                            }
+                            if ($useDrive) { Remove-PSDrive -Name JWUA -ErrorAction SilentlyContinue }
+                            $shaped = & $shapeRow $polled
+                            if ($shaped.Got) {
+                                $r.Transport = 'WMI/DCOM'; $r.Status = $shaped.Status; $r.KBs = $shaped.KBs
+                                $r.Reboot = $shaped.Reboot; $r.Error = $shaped.Error; $r.Ok = $shaped.Ok
+                                $r.Detail = "WMI/DCOM: $($shaped.Status)" + $(if ($shaped.KBs) { " [$($shaped.KBs)]" } else { '' }) + $(if ($shaped.Reboot) { ' (reboot pending)' } else { '' }) + $(if ($shaped.Error) { " - $($shaped.Error)" } else { '' })
+                                $succeeded = $true
+                            } else {
+                                [void]$trail.Add('WMI/DCOM: task launched but no result.json before timeout')
+                            }
+                        }
+                    } catch {
+                        [void]$trail.Add("WMI/DCOM: $($_.Exception.Message)")
+                    }
+                }
+
+                if (-not $succeeded -and [string]$r.Status -ne 'Cancelled') {
+                    $r.Transport = 'none'; $r.Status = 'Unreachable'; $r.Ok = $false
+                    $r.Error = ($trail.ToArray() -join ' ; ')
+                    $r.Detail = "All transports failed: $($r.Error)"
+                }
+            }
         }
     }
     catch {
@@ -2770,6 +3162,8 @@ function Invoke-JanetToolAction {
     $op = switch ($ActionId) {
         'diagnose'       { 'Diagnose' }
         'fleet-status'   { 'FleetStatus' }
+        'os-audit'       { 'OsAudit' }
+        'install-updates'{ 'InstallUpdates' }
         'pin'            { 'Pin' }
         'unpin'          { 'Unpin' }
         'forcediscovery' { 'ForceDiscovery' }
@@ -2807,6 +3201,10 @@ function Invoke-JanetToolAction {
         'RepairHealth'   { 'VulnPatched' }
         'AutoFix'        { 'VulnPatched' }
         'ErrorReport'    { $null }
+        # InstallUpdates = installs Windows Updates via the SYSTEM task -> remediation -> 'VulnPatched'.
+        # OsAudit = read-only OS version audit scan -> $null (no audit row, like Diagnose/Ping).
+        'InstallUpdates' { 'VulnPatched' }
+        'OsAudit'        { $null }
         default          { $null }
     }
 
@@ -2849,6 +3247,16 @@ function Invoke-JanetToolAction {
     if ($Params['countdownSeconds']) { $cs2 = 0; if ([int]::TryParse([string]$Params['countdownSeconds'], [ref]$cs2)) { $countdownSeconds = $cs2 } }
     if ($countdownSeconds -lt 30)    { $countdownSeconds = 30 }
     if ($countdownSeconds -gt 86400) { $countdownSeconds = 86400 }
+    # install-updates options: includeMU / allowHttp / allowWmi default ON (manifest defaults);
+    # timeoutMin default 45, clamped 5-720. The WUA driver text is threaded to the worker.
+    $includeMU      = ConvertTo-JanetBool $Params['includeMU'] $true
+    $allowHttp      = ConvertTo-JanetBool $Params['allowHttp'] $true
+    $allowWmi       = ConvertTo-JanetBool $Params['allowWmi'] $true
+    $timeoutMin     = 45
+    if ($Params['timeoutMin']) { $tm = 0; if ([int]::TryParse([string]$Params['timeoutMin'], [ref]$tm)) { $timeoutMin = $tm } }
+    if ($timeoutMin -lt 5)   { $timeoutMin = 5 }
+    if ($timeoutMin -gt 720) { $timeoutMin = 720 }
+    $wuaDriver      = $script:WinUpgradeWuaDriver
     # Shared pin policy-write block threaded to the worker (reused by Pin + UpgradeDrive).
     $pinBlock       = $script:WinUpgradePinBlock
     # Diagnose constants + SCCM cycle GUIDs (defined once at module scope, copied EXACTLY
@@ -2904,6 +3312,10 @@ function Invoke-JanetToolAction {
     if ($op -eq 'RepairHealth')   { $defThreads = 4;  $maxJobSeconds = 3600 }
     if ($op -eq 'AutoFix')        { $defThreads = 8;  $maxJobSeconds = if ($fixRepair) { 3600 } else { 900 } }
     if ($op -eq 'ErrorReport')    { $defThreads = 16; $maxJobSeconds = 300 }
+    # OsAudit: light read-only registry read -> wide fan-out. InstallUpdates: the SYSTEM task
+    # can run for many minutes, so the watchdog must exceed the per-host poll timeout.
+    if ($op -eq 'OsAudit')        { $defThreads = 16; $maxJobSeconds = 120 }
+    if ($op -eq 'InstallUpdates') { $defThreads = 8;  $maxJobSeconds = ($timeoutMin * 60) + 300 }
     if ($op -eq 'Pin' -or $op -eq 'UpgradeDrive') {
         if ([string]::IsNullOrWhiteSpace($product) -or [string]::IsNullOrWhiteSpace($version)) {
             & $send @{ type='log'; level='warn'; text='Product and Version are both required to drive/pin a target release.' }
@@ -2927,7 +3339,9 @@ function Invoke-JanetToolAction {
     # and likewise keeps self.
     # (Restart tool audit#10; the in-worker DNS guard does NOT catch self - our own name
     # resolves to us so it passes.)
-    $mutatesTarget = ( @('Pin','Unpin','ForceDiscovery','UpgradeDrive','InstallCab','SetPageFile','RepairHealth','AutoFix') -contains $op )
+    # InstallUpdates INSTALLS updates + some force a REBOOT -> it MUST self-guard (never hit the
+    # JANET console). OsAudit is a read-only scan -> deliberately NOT dropped (self is auditable).
+    $mutatesTarget = ( @('Pin','Unpin','ForceDiscovery','UpgradeDrive','InstallCab','SetPageFile','RepairHealth','AutoFix','InstallUpdates') -contains $op )
     if ($mutatesTarget -and -not $dryRun) {
         $keptT = New-Object System.Collections.ArrayList
         $selfT = New-Object System.Collections.ArrayList
@@ -2968,7 +3382,9 @@ function Invoke-JanetToolAction {
     # order as the appended worker param() tail (a mismatch silently corrupts every arg).
     # v0.4.0 args ($minBuild + the auto-fix toggles) appended at the END in the SAME order as the
     # worker param() tail (a mismatch silently corrupts every argument).
-    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging) }
+    # v0.5.0 args ($includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver) appended at the END
+    # in the SAME order as the worker param() tail (a mismatch silently corrupts every argument).
+    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging, $includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver) }
     $rowOf       = {
         param($res)
         if ($op -eq 'FleetStatus') {
@@ -3029,6 +3445,47 @@ function Invoke-JanetToolAction {
                 Status         = $status
                 TargetVersion  = $version
                 Detail         = [string]$res.Detail
+            }
+        }
+        if ($op -eq 'OsAudit') {
+            # OS Version audit row (the manifest's 11 columns) + Status/Detail for the generic
+            # grid. Timeout / cancel / worker-error results arrive as a bare {Host;Ping;Status;
+            # Detail} -> surface Online=false + Error=<detail> and blank check columns.
+            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
+            $status = [string]$res.Status
+            $isErr  = ($status -eq 'FAILED' -or $status -eq 'Cancelled' -or $status -eq 'Skipped')
+            return @{
+                Host       = $res.Host
+                Online     = [bool](& $get 'Online' $false)
+                Generation = [string](& $get 'Generation' '')
+                ReleaseId  = [string](& $get 'ReleaseId' '')
+                Edition    = [string](& $get 'Edition' '')
+                Gen11      = [string](& $get 'Gen11' '')
+                Rel24H2    = [string](& $get 'Rel24H2' '')
+                EntEdition = [string](& $get 'EntEdition' '')
+                Verdict    = [string](& $get 'Verdict' '')
+                Failed     = [string](& $get 'Failed' '')
+                Error      = if ($isErr) { [string]$res.Detail } else { [string](& $get 'Error' '') }
+                Status     = $status
+                Detail     = [string]$res.Detail
+            }
+        }
+        if ($op -eq 'InstallUpdates') {
+            # install-updates row (Host/Online/Transport/Method/Status/KBs/Reboot/Error) +
+            # Detail for the generic grid. Timeout/cancel/worker-error -> Error=<detail>.
+            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
+            $status = [string]$res.Status
+            $isErr  = ($status -eq 'FAILED' -or $status -eq 'Cancelled')
+            return @{
+                Host      = $res.Host
+                Online    = [bool](& $get 'Online' $false)
+                Transport = [string](& $get 'Transport' '')
+                Method    = [string](& $get 'Method' '')
+                Status    = $status
+                KBs       = [string](& $get 'KBs' '')
+                Reboot    = [bool](& $get 'Reboot' $false)
+                Error     = if ($isErr) { [string]$res.Detail } else { [string](& $get 'Error' '') }
+                Detail    = [string]$res.Detail
             }
         }
         if ($op -eq 'RepairHealth') {

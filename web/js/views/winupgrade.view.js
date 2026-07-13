@@ -142,6 +142,33 @@
           + 'DRY-RUN / FAILED / OFFLINE / Cancelled. Optionally reboots afterwards if required and no user is logged on. '
           + 'Destructive - an admin session is required unless Dry-run.';
       }
+    },
+    'os-audit': {
+      action: 'os-audit',
+      radio: 'OS Version Audit (read-only PASS/FAIL - Win11 / 24H2+ / Enterprise)',
+      guide: function () {
+        return 'OS VERSION AUDIT runs a READ-ONLY pass/fail check on each PC and changes NOTHING (it is a scan; self is included). '
+          + 'It reads CurrentBuild / DisplayVersion / EditionID from the target and computes THREE checks with NO partial state:\n\n'
+          + '  - Gen11      = Windows 11 generation (CurrentBuild >= 22000).\n'
+          + '  - Rel24H2    = release 24H2 or newer (CurrentBuild >= 26100; 25H2 = 26200 and newer also PASS).\n'
+          + '  - EntEdition = EditionID is EXACTLY "Enterprise" (Pro / Education / Home / Enterprise multi-session / IoT all FAIL).\n\n'
+          + 'Verdict = PASS only when ALL THREE pass, otherwise FAIL with the failing-check list. Read-only: no admin session or '
+          + 'Dry-run needed. Mirrors the C2C audit-tier pass/fail idiom.';
+      }
+    },
+    'install-updates': {
+      action: 'install-updates',
+      radio: 'Install Windows Updates (SYSTEM task - WSUS + optional Microsoft Update)',
+      guide: function () {
+        return 'INSTALL WINDOWS UPDATES installs ALL available updates on each target by registering a JANET_WUA scheduled task that '
+          + 'runs a Windows Update Agent driver as NT AUTHORITY\\SYSTEM (the only context in which WUA reliably Download()/Install()s - '
+          + 'a remote logon token blocks it), then polls C:\\ProgramData\\JANET\\WUA\\result.json.\n\n'
+          + 'It searches WSUS and - when "Also search Windows/Microsoft Update" is ticked - also Windows Update + the Microsoft Update '
+          + 'catalog (catching Defender / security-platform KBs WSUS/SCCM miss). Transport cascade per host, first success wins: WinRM '
+          + 'HTTPS 5986 -> WinRM HTTP 5985 -> WMI/DCOM 135.\n\nPILOT-PENDING: needs a live domain / WSUS ring to truly validate. This '
+          + 'INSTALLS updates and some FORCE A REBOOT - the JANET dispatcher host is always dropped from the run. Admin session required '
+          + 'unless Dry-run.';
+      }
     }
   };
 
@@ -181,7 +208,12 @@
       case 'REPAIRED':
       case 'FIXED':
       case 'DRIVEN':
+      // os-audit verdict PASS + install-updates success statuses.
+      case 'PASS':
+      case 'Installed':
       case 'Online': return 'st-ok';
+      // install-updates: no updates were pending (a quiet good outcome).
+      case 'NoUpdates': return 'cell-dim';
       // dim: nothing needed doing (still a "good" outcome, just quieter than a fix).
       case 'NO CHANGES':
       case 'ALREADY ON TARGET': return 'cell-dim';
@@ -203,7 +235,11 @@
       case 'Queued': return 'cell-dim';
       case 'FAILED':
       case 'OFFLINE':
-      case 'Offline': return 'st-bad';
+      case 'Offline':
+      // os-audit verdict FAIL + install-updates hard failures.
+      case 'FAIL':
+      case 'InstallFailed':
+      case 'Unreachable': return 'st-bad';
       // amber: needs operator attention but not a hard failure.
       // DRY-RUN = preview only; NEEDS POLICY = target-version policy missing;
       // BLOCKED = a deferral/pause is holding the build back; HW INCOMPAT = CPU/TPM fails + no bypass;
@@ -219,6 +255,8 @@
       case 'NEEDS REBOOT':
       case 'STAGED':
       case 'PARTIAL':
+      // install-updates: installed but WUA reported per-update errors (needs a look).
+      case 'InstalledWithErrors':
       case 'Skipped':
       case 'Cancelled': return 'st-warn';
       default: return '';
@@ -293,7 +331,7 @@
       // --- Operation ---
       var opCard = sectionCard('OPERATION');
       var opRadios = {};
-      ['diagnose', 'pin', 'unpin', 'forcediscovery', 'installcab', 'setpagefile', 'error-report', 'auto-fix', 'repair-health'].forEach(function (k) {
+      ['diagnose', 'os-audit', 'pin', 'unpin', 'forcediscovery', 'installcab', 'install-updates', 'setpagefile', 'error-report', 'auto-fix', 'repair-health'].forEach(function (k) {
         var rowWrap = el('label'); rowWrap.style.cssText = 'display:flex;align-items:flex-start;gap:8px;margin:4px 0;cursor:pointer';
         var rb = el('input'); rb.type = 'radio'; rb.name = 'winupg-op'; rb.value = k; rb.style.marginTop = '3px';
         rb.checked = (k === 'pin');
@@ -429,6 +467,22 @@
           opCard._afPause = afPause; opCard._afRepair = afRepair; opCard._afStaging = afStaging; opCard._afSccm = afSccm; opCard._afReboot = afReboot;
         }
 
+        // Install Windows Updates inputs (includeMU / allowHttp / allowWmi / timeout) sit under its radio.
+        if (k === 'install-updates') {
+          var iuWrap = el('div'); iuWrap.style.cssText = 'margin:2px 0 4px 24px;display:flex;flex-direction:column;gap:6px';
+          var iuCaption = el('div', 'muted', 'PILOT-PENDING: needs a live domain / WSUS ring. Installs updates as SYSTEM; some force a reboot.'); iuCaption.style.cssText = 'font-size:11px;color:var(--warn)';
+          iuWrap.appendChild(iuCaption);
+          var iuMu = ui.checkbox('Also search Windows Update + Microsoft Update (Defender / security-platform KBs)', { checked: true, title: 'On: the driver also queries Windows Update and the Microsoft Update catalog, catching KBs WSUS/SCCM does not carry. Off: WSUS/SCCM source only.' });
+          var iuHttp = ui.checkbox('Allow WinRM HTTP (5985) fallback', { checked: true, title: 'Fall back to plain WinRM HTTP on 5985 if HTTPS (5986) does not connect.' });
+          var iuWmi = ui.checkbox('Allow WMI/DCOM (135) fallback', { checked: true, title: 'Bootstrap the SYSTEM task over WMI/DCOM and poll result.json via \\\\host\\C$ if neither WinRM transport connects.' });
+          [iuMu, iuHttp, iuWmi].forEach(function (cb) { iuWrap.appendChild(cb); });
+          var iuTo = ui.number({ value: 45, min: 5, max: 720, title: 'How long to poll result.json for the SYSTEM task to finish before giving up on a host (minutes).' });
+          iuTo.style.width = '90px';
+          iuWrap.appendChild(ui.field('Per-host timeout (min)', iuTo));
+          opCard.appendChild(iuWrap);
+          opCard._iuMu = iuMu; opCard._iuHttp = iuHttp; opCard._iuWmi = iuWmi; opCard._iuTo = iuTo; opCard._iuWrap = iuWrap;
+        }
+
         // Repair Health inputs (reboot) sit under the Repair Health radio.
         if (k === 'repair-health') {
           var rhWrap = el('div'); rhWrap.style.cssText = 'margin:2px 0 4px 24px;display:flex;flex-direction:column;gap:6px';
@@ -516,7 +570,7 @@
           },
           function () {
             if (!OPS[currentOp]) return null;            // ping isn't routed through RUN
-            if (currentOp === 'diagnose' || currentOp === 'error-report') return null;   // read-only scans - no admin session (like ping / checkupgrade)
+            if (currentOp === 'diagnose' || currentOp === 'error-report' || currentOp === 'os-audit') return null;   // read-only scans - no admin session (like ping / checkupgrade)
             // destructive ops (pin/unpin/installcab/setpagefile/forcediscovery/auto-fix/repair-health)
             // require an admin session EVEN for Dry-run: the server gates on the manifest's
             // destructive flag (it never trusts a client-sent dryRun), so exempting Dry-run
@@ -566,9 +620,9 @@
         rowClass: function (r) {
           if (r.Severity != null) { var sv = String(r.Severity); if (sv === 'BLOCK') return 'row-bad'; if (sv === 'WARN') return 'row-warn'; return ''; }
           var s = String(r.Status);
-          if (s === 'DONE' || s === 'RESET' || s === 'READY' || s === 'ON 24H2' || s === 'Online' || s === 'CLEAN' || s === 'REPAIRED' || s === 'FIXED') return 'row-ok';
-          if (s === 'FAILED' || s === 'Offline' || s === 'OFFLINE') return 'row-bad';
-          if (s === 'DRY-RUN' || s === 'NEEDS POLICY' || s === 'BLOCKED' || s === 'HW INCOMPAT' || s === 'MEMORY' || s === 'ERRORS' || s === 'NEEDS REBOOT' || s === 'PARTIAL' || s === 'Skipped' || s === 'Cancelled') return 'row-warn';
+          if (s === 'DONE' || s === 'RESET' || s === 'READY' || s === 'ON 24H2' || s === 'Online' || s === 'CLEAN' || s === 'REPAIRED' || s === 'FIXED' || s === 'PASS' || s === 'Installed') return 'row-ok';
+          if (s === 'FAILED' || s === 'Offline' || s === 'OFFLINE' || s === 'FAIL' || s === 'InstallFailed' || s === 'Unreachable') return 'row-bad';
+          if (s === 'DRY-RUN' || s === 'NEEDS POLICY' || s === 'BLOCKED' || s === 'HW INCOMPAT' || s === 'MEMORY' || s === 'ERRORS' || s === 'NEEDS REBOOT' || s === 'PARTIAL' || s === 'InstalledWithErrors' || s === 'Skipped' || s === 'Cancelled') return 'row-warn';
           return '';
         }
       });
@@ -641,6 +695,10 @@
         opCard._afWrap.style.opacity = isAf ? '1' : '0.45';
         opCard._rhReboot._cb.disabled = !isRh;
         opCard._rhWrap.style.opacity = isRh ? '1' : '0.45';
+        var isIu = currentOp === 'install-updates';
+        [opCard._iuMu, opCard._iuHttp, opCard._iuWmi].forEach(function (cb) { cb._cb.disabled = !isIu; });
+        opCard._iuTo.disabled = !isIu;
+        opCard._iuWrap.style.opacity = isIu ? '1' : '0.45';
       }
       function refreshGuide() {
         if (currentOp === 'pin') guideBox.value = OPS.pin.guide((opCard._prodInput.value || '').trim(), (opCard._verInput.value || '').trim());
@@ -712,6 +770,8 @@
         opCard._afVersion.disabled = on || currentOp !== 'auto-fix';
         [opCard._afPolicy, opCard._afBypass, opCard._afDrivers, opCard._afDriverSafe, opCard._afPause, opCard._afRepair, opCard._afStaging, opCard._afSccm, opCard._afReboot].forEach(function (cb) { cb._cb.disabled = on || currentOp !== 'auto-fix'; });
         opCard._rhReboot._cb.disabled = on || currentOp !== 'repair-health';
+        [opCard._iuMu, opCard._iuHttp, opCard._iuWmi].forEach(function (cb) { cb._cb.disabled = on || currentOp !== 'install-updates'; });
+        opCard._iuTo.disabled = on || currentOp !== 'install-updates';
         dryCb._cb.disabled = on; offlineCb._cb.disabled = on; threadsInput.disabled = on;
         pingBtn.disabled = on; checkBtn.disabled = on; clearBtn.disabled = on;
       }
@@ -782,7 +842,7 @@
         var opMeta = OPS[currentOp];
         if (!opMeta) return;
         var hosts = targets.hosts();
-        var dry = dryCb._cb.checked && currentOp !== 'diagnose' && currentOp !== 'error-report';   // read-only ops: no Dry-run
+        var dry = dryCb._cb.checked && currentOp !== 'diagnose' && currentOp !== 'error-report' && currentOp !== 'os-audit';   // read-only ops: no Dry-run
         // reboot is per-operation: Install CAB / Set Page File / Auto-Fix / Repair Health each carry their own reboot toggle.
         var reboot = (currentOp === 'installcab') ? opCard._rebootCb._cb.checked
                    : (currentOp === 'setpagefile') ? opCard._pfReboot._cb.checked
@@ -790,13 +850,15 @@
                    : (currentOp === 'repair-health') ? opCard._rhReboot._cb.checked
                    : false;
         var aggressive = (currentOp === 'forcediscovery') && opCard._fdAggressive._cb.checked;
-        var readonly = (currentOp === 'diagnose' || currentOp === 'error-report');
+        var readonly = (currentOp === 'diagnose' || currentOp === 'error-report' || currentOp === 'os-audit');
         var cabPath = effectiveCabPath();
         var pfMb = parseInt(opCard._pfSize.value, 10) || 16384;
 
         // Build the desktop-style op label + Yes/No confirm.
         var opLabel;
         if (currentOp === 'diagnose') opLabel = 'DIAGNOSTIC SCAN (read-only)';
+        else if (currentOp === 'os-audit') opLabel = 'OS VERSION AUDIT (read-only PASS/FAIL)';
+        else if (currentOp === 'install-updates') opLabel = 'INSTALL WINDOWS UPDATES (SYSTEM task)' + (opCard._iuMu._cb.checked ? ' +MU' : '');
         else if (currentOp === 'pin') opLabel = 'PIN to ' + (opCard._prodInput.value || '').trim() + ' ' + (opCard._verInput.value || '').trim()
           + (opCard._runWuCb._cb.checked ? ' + RUN WU' : '')
           + (opCard._sccmRefreshCb._cb.checked ? ' + SCCM REFRESH' : '')
@@ -820,9 +882,12 @@
           ? 'WARNING: a target may REBOOT if required and no user is logged on.'
           : 'WARNING: targets will REBOOT ~10 seconds after a successful install.';
         var aggressiveMsg = 'WARNING: Aggressive mode STOPS the Windows Update services, renames SoftwareDistribution + catroot2, and re-registers the WU DLLs before re-scanning.';
+        var warnInstallUpdates = (currentOp === 'install-updates' && !dry);
+        var installUpdatesMsg = 'WARNING: this INSTALLS all available Windows Updates via a SYSTEM task and some updates will FORCE A REBOOT. The JANET dispatcher host is always skipped. (Pilot-pending: validate on a small ring first.)';
         var extraWarn = '';
         if (warnReboot) extraWarn = '<br><br><span style="color:var(--bad);font-weight:700">' + rebootMsg + '</span>';
         else if (warnAggressive) extraWarn = '<br><br><span style="color:var(--bad);font-weight:700">' + aggressiveMsg + '</span>';
+        else if (warnInstallUpdates) extraWarn = '<br><br><span style="color:var(--bad);font-weight:700">' + installUpdatesMsg + '</span>';
 
         var confirmBody = 'Operation: <b>' + escHtml(opLabel) + '</b><br>'
           + 'Targets: <b>' + hosts.length + '</b><br>'
@@ -866,6 +931,12 @@
           params.aggressive = aggressive;
         }
         if (currentOp === 'error-report') { params.version = opCard._erVersion.value; }
+        if (currentOp === 'install-updates') {
+          params.includeMU = opCard._iuMu._cb.checked;
+          params.allowHttp = opCard._iuHttp._cb.checked;
+          params.allowWmi = opCard._iuWmi._cb.checked;
+          params.timeoutMin = parseInt(opCard._iuTo.value, 10) || 45;
+        }
         if (currentOp === 'auto-fix') {
           params.version = opCard._afVersion.value;
           params.fixPolicy = opCard._afPolicy._cb.checked;
