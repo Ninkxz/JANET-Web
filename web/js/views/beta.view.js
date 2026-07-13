@@ -51,12 +51,63 @@
     return '';
   }
 
+  // Beta Lab is gated behind a passphrase (page-session unlock - entered once per load).
+  // The plaintext is NOT stored: we compare a SHA-256 hex digest via crypto.subtle
+  // (http://127.0.0.1 is a secure context, so subtle crypto is available).
+  var betaUnlocked = false;
+  var BETA_HASH = '329518b7c0a44b2e0f4d486fd8d84f7671f285bf6f06ce223703ec1157a8b235';
+  function sha256Hex(str) {
+    var enc = new TextEncoder().encode(String(str));
+    return crypto.subtle.digest('SHA-256', enc).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    });
+  }
+
   JanetViews.register('beta', {
     mount: function (host, ctx) {
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
       var run = null, unsub = null;
       function ts() { return ctx.util.clockStr(); }
       var esc = (ctx.util && ctx.util.esc) ? ctx.util.esc : function (s) { return String(s == null ? '' : s); };
+
+      // ---- Beta password gate (per page-session) ----------------------------
+      // Until the passphrase is entered, render only a lock screen; the real Beta
+      // UI below never builds. On success we flip the session flag, clear the host,
+      // and re-mount (which now falls through the gate to build the tool).
+      var self = this;
+      if (!betaUnlocked) {
+        var gate = el('div');
+        gate.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;min-height:0;padding:24px;box-sizing:border-box';
+        var gcard = el('div');
+        gcard.style.cssText = 'max-width:420px;width:100%;padding:28px;border-radius:12px;background:rgba(20,20,28,0.55);border:1px solid rgba(180,150,255,0.28);display:flex;flex-direction:column;gap:14px;text-align:center';
+        var gh = el('div', null, 'Beta Lab — Locked'); gh.style.cssText = 'font-size:18px;font-weight:700;color:#c9b6ff';
+        var gsub = el('div', 'muted', 'This feature is gated. Enter the beta password to continue.'); gsub.style.fontSize = '12px';
+        var gin = el('input'); gin.type = 'password'; gin.placeholder = 'Beta password'; gin.setAttribute('autocomplete', 'off');
+        gin.style.cssText = 'padding:10px 12px;border-radius:8px;border:1px solid rgba(180,150,255,0.35);background:rgba(0,0,0,0.35);color:#eee;font-size:14px;width:100%;box-sizing:border-box';
+        var gbtn = el('button', null, 'Unlock'); gbtn.type = 'button';
+        gbtn.style.cssText = 'padding:10px 14px;border-radius:8px;border:none;background:linear-gradient(90deg,#7a5cff,#b48aff);color:#0b0b12;font-weight:700;cursor:pointer;font-size:14px';
+        var gmsg = el('div', null, ''); gmsg.style.cssText = 'font-size:12px;min-height:16px';
+        function gTry() {
+          var pw = String(gin.value || ''); if (!pw) { return; }
+          gbtn.disabled = true; gmsg.style.color = '#c9b6ff'; gmsg.textContent = 'Checking…';
+          sha256Hex(pw).then(function (h) {
+            if (h === BETA_HASH) {
+              betaUnlocked = true;
+              try { while (host.firstChild) host.removeChild(host.firstChild); } catch (e) {}
+              self.mount(host, ctx);
+            } else {
+              gbtn.disabled = false; gin.value = ''; gmsg.style.color = '#ff8a8a'; gmsg.textContent = 'Incorrect password.'; try { gin.focus(); } catch (e) {}
+            }
+          }).catch(function () { gbtn.disabled = false; gmsg.style.color = '#ff8a8a'; gmsg.textContent = 'Crypto unavailable (open via http://127.0.0.1).'; });
+        }
+        gbtn.onclick = gTry;
+        gin.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); gTry(); } });
+        gcard.appendChild(gh); gcard.appendChild(gsub); gcard.appendChild(gin); gcard.appendChild(gbtn); gcard.appendChild(gmsg);
+        gate.appendChild(gcard); host.appendChild(gate);
+        this._root = gate;
+        setTimeout(function () { try { gin.focus(); } catch (e) {} }, 0);
+        return;
+      }
 
       var actlog = C.ActivityLog({ title: 'ACTIVITY LOG', defaultName: 'Beta_C2CQuarantineKiller_ActivityLog' });
 
