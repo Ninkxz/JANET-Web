@@ -23,7 +23,7 @@ cannot exist in Desktop (no web server / browser UI / Web-only tool) · **CLOSED
 | 10 | Per-NIC try/catch in identity enumeration (P3) | 11 identity helpers | Desktop NIC-enumeration self-guard | **CHECK** |
 | 11 | adsearch SearchBase LDAP bind-redirect (P1) | adsearch.psm1 | Desktop AD-search tool `SearchBase` bind | **CHECK** |
 | 12 | adto fix/validate credentialed dn bind-redirect (P1) | adto.psm1 | AD-TO Web-only tool | **CLOSED-WEB-ONLY** (Web-only tool) |
-| 13 | upr manual-uninstall missing self-guard (P1) | upr.psm1 | Desktop UPR uninstall (Web upr has no self-guard yet - port deferred) | **CHECK** |
+| 13 | upr manual-uninstall (+report-uninstall) missing dispatcher self-guard - could uninstall software from the JANET box itself (P2; the merge reverted a broken port) | upr.psm1 1.2.2 (`fbbdd94`, loop22): `Get-UprLocalIdentity`+`Test-UprHostIsSelf`, drop self before BOTH uninstall fan-outs; scans stay self-inclusive; `tests/Upr.SelfGuard.Tests.ps1` (4) | LIKELY - Desktop `UnsupportedProductRemediator_1.1.4` does the same remote uninstall; check its self-guard when Desktop is unblocked | **CLOSED-WEB / DESKTOP-DEFERRED** (was CHECK/port-deferred; Web now closed - operator status-quo on the Desktop mirror) |
 | 14 | dhcp diffText() stored XSS (P2) | dhcp.view.js | Desktop has no browser UI (no innerHTML sink) | **CLOSED-WEB-ONLY** (no web UI) |
 | 15 | winupgrade self-guard scoped to reboot only (P2) | winupgrade.psm1 | Desktop Windows-upgrade tool reboot guard | **CHECK** |
 | 16 | Fail-closed admin-session gate (P2, design) | server/JanetWeb.Server.ps1 | Web-only (no HTTP server in Desktop) | **CLOSED-WEB-ONLY** (Web-only server) |
