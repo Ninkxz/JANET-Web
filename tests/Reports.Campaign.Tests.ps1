@@ -57,28 +57,50 @@ Describe 'Remediation campaign store (campaign-create / campaign-list)' {
         )
         $cr = Invoke-JanetToolAction -ActionId 'campaign-create' -Params @{ name=($uniqName + '-VER') } -Emit $noop
         $id = $cr.summary.id
-        # Fresh scan: hA|1 remediated (gone), hB|2 still open.
-        $script:AcasFindings = @([pscustomobject]@{ Hostname='hB'; PluginID='2'; VulnName='Apache'; Severity='High'; CVE=''; Category='Apache'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' })
+        # V1 - partial: hA is present+scanned (unrelated finding) so hA|1 is genuinely
+        # remediated; hB present with plugin 2 still open. -> 1 remediated / 1 still-open.
+        # (loop21 P1: a remediation now REQUIRES the host to appear in the fresh scan.)
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='hA'; PluginID='99'; VulnName='Other';  Severity='Low';  CVE=''; Category='Other';  Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' }
+            [pscustomobject]@{ Hostname='hB'; PluginID='2';  VulnName='Apache'; Severity='High'; CVE=''; Category='Apache'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' }
+        )
         $v1 = Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId=$id } -Emit $noop
-        # Fresh scan: both gone -> fully closed.
-        $script:AcasFindings = @([pscustomobject]@{ Hostname='hZ'; PluginID='9'; VulnName='Other'; Severity='Low'; CVE=''; Category='Other'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' })
+        # V2 - full: BOTH hosts present+scanned, plugins 1/2 gone -> genuinely fully closed.
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='hA'; PluginID='99'; VulnName='Other'; Severity='Low'; CVE=''; Category='Other'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' }
+            [pscustomobject]@{ Hostname='hB'; PluginID='98'; VulnName='Other'; Severity='Low'; CVE=''; Category='Other'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' }
+        )
         $v2 = Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId=$id } -Emit $noop
-        $json = Get-ReportsCampaignById -Id $id
+        $json2 = Get-ReportsCampaignById -Id $id     # verified-closed persisted here
+        # V3 (loop21 P1) - hB ABSENT from the fresh scan (not scanned): hA|1 remediated,
+        # hB|2 must be NOT-SCANNED (never a false closure) -> status re-opens to in-progress.
+        $script:AcasFindings = @([pscustomobject]@{ Hostname='hA'; PluginID='99'; VulnName='Other'; Severity='Low'; CVE=''; Category='Other'; Status='Open'; Solution=''; InKEV=$false; KevCves=''; IAVA='' })
+        $v3 = Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId=$id } -Emit $noop
+        $json3 = Get-ReportsCampaignById -Id $id      # in-progress persisted here
         $file = Join-Path (Get-ReportsCampaignDir) ("$id.json")
-        [pscustomobject]@{ V1=$v1.summary; V2=$v2.summary; Json=$json; File=$file }
+        [pscustomobject]@{ V1=$v1.summary; V2=$v2.summary; V3=$v3.summary; Json2=$json2; Json3=$json3; File=$file }
     } $script:Uniq
 
     It 'partial verify: 1 remediated / 1 still-open = 50% closed, in-progress' {
         [int]$verify.V1.remediated | Should Be 1
         [int]$verify.V1.stillOpen  | Should Be 1
+        [int]$verify.V1.notScanned | Should Be 0
         $verify.V1.status          | Should Be 'in-progress'
     }
-    It 'full verify: all remediated = 100% closed, verified-closed, persisted' {
+    It 'full verify: all remediated (hosts present in scan) = 100% closed, verified-closed, persisted' {
         [int]$verify.V2.remediated | Should Be 2
         [int]$verify.V2.stillOpen  | Should Be 0
+        [int]$verify.V2.notScanned | Should Be 0
         $verify.V2.status          | Should Be 'verified-closed'
-        $verify.Json.status        | Should Be 'verified-closed'
-        [int]$verify.Json.verify.remediated | Should Be 2
+        $verify.Json2.status       | Should Be 'verified-closed'
+        [int]$verify.Json2.verify.remediated | Should Be 2
+    }
+    It 'loop21 P1: a campaign host ABSENT from the fresh scan is NOT-SCANNED, never a false closure' {
+        [int]$verify.V3.remediated | Should Be 1
+        [int]$verify.V3.notScanned | Should Be 1
+        [int]$verify.V3.stillOpen  | Should Be 0
+        $verify.V3.status          | Should Be 'in-progress'   # NOT verified-closed - the fix
+        $verify.Json3.status       | Should Be 'in-progress'
     }
     It 'campaign-verify returns notFound for an unknown id' {
         $nf = & $script:Mod { $script:AcasFindings=@([pscustomobject]@{Hostname='x';PluginID='1';Status='Open';Severity='Low';VulnName='';CVE='';Category='Other';Solution='';InKEV=$false;KevCves='';IAVA=''}); (Invoke-JanetToolAction -ActionId 'campaign-verify' -Params @{ campaignId='no-such-id' } -Emit { param($e) }).summary }

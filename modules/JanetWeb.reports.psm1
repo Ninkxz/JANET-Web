@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.16'
+        version  = '2.14.17'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -5320,16 +5320,22 @@ function Invoke-JanetToolAction {
             # stops a campaign whose keys were all hand-flagged from auto-closing.
             $openNow     = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $attestedNow = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            # loop21 P1: host KEYS actually present in the fresh scan. A campaign host missing
+            # here was NOT SCANNED this pass - its keys must NOT be scored as remediated (a
+            # host offline during the scan window, or a scoped export, would else FALSE-CLOSE).
+            $hostsPresent = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $detail = @{}
             foreach ($f in $script:AcasFindings) {
-                $k = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
+                $hk = Get-ReportsAuditHostKey $f.Hostname
+                $k = "$hk|$($f.PluginID)"
+                [void]$hostsPresent.Add($hk)
                 $isFlagged = ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH')
                 if ($isFlagged) { [void]$attestedNow.Add($k) } else { [void]$openNow.Add($k) }
                 if (-not $detail.ContainsKey($k)) { $detail[$k] = $f }
             }
             $campKeys = @($cam.findingKeys)
             $rows = New-Object System.Collections.ArrayList
-            $remediated = 0; $stillOpen = 0; $attested = 0; $idx = 0
+            $remediated = 0; $stillOpen = 0; $attested = 0; $notScanned = 0; $idx = 0
             foreach ($k in $campKeys) {
                 $idx++
                 $ks = [string]$k
@@ -5342,9 +5348,16 @@ function Invoke-JanetToolAction {
                     # Present but hand-flagged: attested, NOT scan-confirmed closed.
                     $attested++
                     $state = 'MANUAL-ATTESTED'
+                } elseif (-not $hostsPresent.Contains($parts[0])) {
+                    # loop21 P1: the host is ABSENT from the fresh scan (offline during the scan
+                    # window, or a scoped export) - we CANNOT confirm the vuln is gone. Never
+                    # score it remediated and never let it auto-close the campaign; surface a
+                    # visible NOT-SCANNED row so the operator re-scans that host.
+                    $notScanned++
+                    $state = 'NOT-SCANNED'
                 } else {
                     $remediated++
-                    continue   # physically absent = scan-confirmed remediated (no row)
+                    continue   # absent AND the host WAS scanned = scan-confirmed remediated (no row)
                 }
                 $row = @{
                     _rk=$ks
@@ -5361,22 +5374,24 @@ function Invoke-JanetToolAction {
             $totalKeys = @($campKeys).Count
             # Closed % = SCAN-CONFIRMED remediation only (manual attestations excluded).
             $closedPct = if ($totalKeys -gt 0) { [math]::Round(($remediated / $totalKeys) * 100, 1) } else { 0 }
-            # verified-closed requires EVERY key physically absent - no still-open AND no
-            # merely-attested key. A campaign with only manual flags stays in-progress.
-            $allClosed = ($stillOpen -eq 0 -and $attested -eq 0 -and $totalKeys -gt 0)
+            # verified-closed requires EVERY key SCAN-CONFIRMED remediated - no still-open, no
+            # merely-attested, AND no NOT-SCANNED key (loop21 P1: an unscanned host is unconfirmed,
+            # never a closure). A campaign with only manual flags or unscanned hosts stays in-progress.
+            $allClosed = ($stillOpen -eq 0 -and $attested -eq 0 -and $notScanned -eq 0 -and $totalKeys -gt 0)
             $newStatus = if ($allClosed) { 'verified-closed' } elseif ($remediated -gt 0 -or $attested -gt 0) { 'in-progress' } else { 'open' }
 
             # Persist the verdict back onto the campaign object.
-            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; total=$totalKeys; closedPct=$closedPct }
+            $verify = @{ verifiedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); verifiedBy=(Get-ReportsCleanUser); remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; notScanned=$notScanned; total=$totalKeys; closedPct=$closedPct }
             if ($cam.PSObject.Properties['verify']) { $cam.verify = $verify } else { $cam | Add-Member -NotePropertyName verify -NotePropertyValue $verify -Force }
             if ($cam.PSObject.Properties['status']) { $cam.status = $newStatus } else { $cam | Add-Member -NotePropertyName status -NotePropertyValue $newStatus -Force }
             $save = Save-ReportsCampaign -Campaign $cam
             if (-not $save.Written) { & $send @{ type='log'; level='warn'; text="Verify computed but the campaign file could not be updated: $($save.Error)" } }
 
             $attNote = if ($attested -gt 0) { " ($attested manually attested, NOT scan-confirmed)" } else { '' }
-            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated scan-confirmed, $stillOpen still-open, $attested attested of $totalKeys ($closedPct% closed); status=$newStatus" }
-            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated scan-confirmed remediated, $stillOpen still-open of $totalKeys - $closedPct% closed$attNote. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
-            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
+            $nsNote  = if ($notScanned -gt 0) { " ($notScanned NOT scanned this pass - re-scan those hosts to confirm)" } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Verify campaign '$($cam.name)'"; result='Success'; itemCount=$totalKeys; detail="$remediated scan-confirmed, $stillOpen still-open, $attested attested, $notScanned not-scanned of $totalKeys ($closedPct% closed); status=$newStatus" }
+            & $send @{ type='status'; text="Campaign '$($cam.name)': $remediated scan-confirmed remediated, $stillOpen still-open of $totalKeys - $closedPct% closed$attNote$nsNote. Status: $newStatus$(if ($allClosed) { ' 🎉' } else { '' })." }
+            return @{ rows=@($rows); summary=@{ total=$stillOpen; remediated=$remediated; scanConfirmed=$remediated; attested=$attested; stillOpen=$stillOpen; notScanned=$notScanned; totalKeys=$totalKeys; closedPct=$closedPct; status=$newStatus; name=[string]$cam.name } }
         }
 
         # -------------------------------------------------------------------
