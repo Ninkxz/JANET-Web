@@ -36,6 +36,125 @@ Describe 'Get-ReportsHostKeyCollisions - cross-domain short-name detection (loop
     }
 }
 
+Describe 'Get-ReportsHostKeyCollisions - IP-qualified signal for BARE short names (loop40 P1)' {
+    It 'flags two BARE short names on DIFFERENT IPs (the short-name-only AFNET norm)' {
+        $c = & $script:Mod { param($hn,$ip) Get-ReportsHostKeyCollisions -Hostnames $hn -IPs $ip } @('WEB01','WEB01') @('10.0.0.1','10.0.0.2')
+        $c.Contains('WEB01') | Should Be $true
+    }
+    It 'does NOT flag a short name + its own FQDN sharing the SAME IP (one box, two forms - fixes F2 over-fire)' {
+        $c = & $script:Mod { param($hn,$ip) Get-ReportsHostKeyCollisions -Hostnames $hn -IPs $ip } @('WEB01','web01.us.af.mil') @('10.0.0.1','10.0.0.1')
+        $c.Contains('WEB01') | Should Be $false
+    }
+    It 'does NOT flag two BARE short names when NO IP is present (IP-less residual - undisambiguable, unchanged from loop39)' {
+        $c = & $script:Mod { param($hn) Get-ReportsHostKeyCollisions -Hostnames $hn } @('WEB01','WEB01')
+        @($c).Count | Should Be 0
+    }
+    It 'does NOT flag two BARE short names sharing ONE IP (same box re-listed)' {
+        $c = & $script:Mod { param($hn,$ip) Get-ReportsHostKeyCollisions -Hostnames $hn -IPs $ip } @('WEB01','WEB01') @('10.0.0.9','10.0.0.9')
+        @($c).Count | Should Be 0
+    }
+    It 'ignores blank / non-IPv4 IP cells (no false collision from junk in the IP column)' {
+        $c = & $script:Mod { param($hn,$ip) Get-ReportsHostKeyCollisions -Hostnames $hn -IPs $ip } @('WEB01','WEB01') @('','n/a')
+        @($c).Count | Should Be 0
+    }
+}
+
+Describe 'New-AcasFinding / Parse-AcasFile - carries the scan IP discriminator (loop40 P1)' {
+    It 'New-AcasFinding stamps the IP field from -IP' {
+        $f = & $script:Mod { New-AcasFinding -Hostname 'WEB01' -PluginID '5' -VulnName 'x' -Severity 'High' -CVE '' -Category 'Other' -Solution '' -KevSet $null -IavmMap $null -IP '10.0.0.5' }
+        $f.IP | Should Be '10.0.0.5'
+    }
+    It 'defaults IP to empty when -IP is omitted' {
+        $f = & $script:Mod { New-AcasFinding -Hostname 'WEB01' -PluginID '5' -VulnName 'x' -Severity 'High' -CVE '' -Category 'Other' -Solution '' -KevSet $null -IavmMap $null }
+        [string]$f.IP | Should Be ''
+    }
+    It 'Parse-AcasFile carries the IP from a CSV row that has an IP Address column' {
+        $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('SELFTEST-ACASIP-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.csv')
+        Set-Content -LiteralPath $csv -Value "DNS Name,IP Address,Plugin,Name,Severity`r`nWEB01,10.0.0.7,900001,Chrome flaw,Critical" -Encoding ASCII
+        try {
+            $ip = & $script:Mod { param($p) $fs = @(Parse-AcasFile -FilePath $p); if ($fs.Count -gt 0) { [string]$fs[0].IP } else { '<none>' } } $csv
+            $ip | Should Be '10.0.0.7'
+        } finally {
+            if (Test-Path -LiteralPath $csv) { [System.IO.File]::Delete($csv) }
+        }
+    }
+}
+
+Describe 'Compare-AcasScans / acas-run-compare - two BARE WEB01 on DIFFERENT IPs -> AMBIGUOUS, never false-closed (loop40 P1 core)' {
+    # The regression loop39 missed: a BARE short-name-only export (no FQDN, no dot) of two
+    # DISTINCT boxes sharing WEB01. Baseline WEB01 (10.0.0.1) has plugin 5 open; the comparison
+    # only re-scanned the OTHER WEB01 (10.0.0.2). Under the raw fold WEB01|5 is baseline-only and
+    # would be REMEDIATED (false close). The IP signal now demotes it to AMBIGUOUS.
+    $cmp = & $script:Mod {
+        $noop = { param($e) }
+        $script:BaselineFindings = @(
+            [pscustomobject]@{ Hostname='WEB01'; IP='10.0.0.1'; PluginID='5'; VulnName='Chrome'; Severity='Critical'; CVE='CVE-1'; Category='Chrome'; Solution='x' }
+        )
+        $script:ComparisonFindings = @(
+            [pscustomobject]@{ Hostname='WEB01'; IP='10.0.0.2'; PluginID='7'; VulnName='Other'; Severity='Low'; CVE=''; Category='Other'; Solution='' }
+        )
+        Invoke-JanetToolAction -ActionId 'acas-run-compare' -Params @{} -Emit $noop
+    }
+
+    It 'scores the bare-name collision AMBIGUOUS via distinct IPs' {
+        [int]$cmp.summary.ambiguous | Should Be 1
+    }
+    It 'does NOT false-close it as REMEDIATED' {
+        [int]$cmp.summary.remediated | Should Be 0
+        @($cmp.rows | Where-Object { $_.Delta -eq 'REMEDIATED' }).Count | Should Be 0
+    }
+    It 'surfaces the collided key as an AMBIGUOUS row' {
+        @($cmp.rows | Where-Object { $_.Delta -eq 'AMBIGUOUS' -and [string]$_.PluginID -eq '5' }).Count | Should Be 1
+    }
+}
+
+Describe 'acas-apply-remediated - two BARE WEB01 on DIFFERENT IPs are NOT flipped Patched (loop40 P1 mutation guard)' {
+    $ap = & $script:Mod {
+        $noop = { param($e) }
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='WEB01'; IP='10.0.0.1'; PluginID='5'; VulnName='Chrome'; Severity='Critical'; CVE='CVE-1'; Category='Chrome'; Status='Open'; Solution='x'; PatchedBy=''; PatchedDate='' }
+            [pscustomobject]@{ Hostname='WEB01'; IP='10.0.0.2'; PluginID='9'; VulnName='Other';  Severity='Low';      CVE='';      Category='Other';  Status='Open'; Solution='';  PatchedBy=''; PatchedDate='' }
+        )
+        $script:ComparisonResults = @(
+            [pscustomobject]@{ Hostname='WEB01'; IP='10.0.0.1'; PluginID='5'; VulnName='Chrome'; Severity='Critical'; CVE='CVE-1'; Category='Chrome'; Delta='REMEDIATED'; Solution='x' }
+        )
+        $res = Invoke-JanetToolAction -ActionId 'acas-apply-remediated' -Params @{} -Emit $noop
+        [pscustomobject]@{ Summary=$res.summary; Status=($script:AcasFindings | Where-Object { $_.PluginID -eq '5' } | Select-Object -First 1).Status }
+    }
+
+    It 'leaves the collided finding Open (never patches the wrong box)' {
+        $ap.Status | Should Be 'Open'
+    }
+    It 'marks zero and reports the skip as ambiguous' {
+        [int]$ap.Summary.marked           | Should Be 0
+        [int]$ap.Summary.skippedAmbiguous | Should Be 1
+    }
+}
+
+Describe 'acas-apply-remediated - anti-over-guard: WEB01 + its own FQDN on the SAME IP still flips (loop40 F2)' {
+    # One physical box exported two ways (short + FQDN) sharing ONE IP - NOT a collision.
+    $ap = & $script:Mod {
+        $noop = { param($e) }
+        $script:AcasFindings = @(
+            [pscustomobject]@{ Hostname='WEB01';           IP='10.0.0.1'; PluginID='5'; VulnName='Chrome'; Severity='Critical'; CVE='CVE-1'; Category='Chrome'; Status='Open'; Solution='x'; PatchedBy=''; PatchedDate='' }
+            [pscustomobject]@{ Hostname='web01.us.af.mil'; IP='10.0.0.1'; PluginID='6'; VulnName='Apache'; Severity='High';     CVE='';      Category='Apache'; Status='Open'; Solution='';  PatchedBy=''; PatchedDate='' }
+        )
+        $script:ComparisonResults = @(
+            [pscustomobject]@{ Hostname='WEB01'; IP='10.0.0.1'; PluginID='5'; VulnName='Chrome'; Severity='Critical'; CVE='CVE-1'; Category='Chrome'; Delta='REMEDIATED'; Solution='x' }
+        )
+        $res = Invoke-JanetToolAction -ActionId 'acas-apply-remediated' -Params @{} -Emit $noop
+        [pscustomobject]@{ Summary=$res.summary; Status=($script:AcasFindings | Where-Object { $_.PluginID -eq '5' } | Select-Object -First 1).Status }
+    }
+
+    It 'flips the single-box finding to Patched (no over-guard)' {
+        $ap.Status | Should Be 'Patched'
+    }
+    It 'marks one and skips none' {
+        [int]$ap.Summary.marked           | Should Be 1
+        [int]$ap.Summary.skippedAmbiguous | Should Be 0
+    }
+}
+
 Describe 'campaign-verify - a collided short key is AMBIGUOUS, never a false closure (loop24)' {
     $out = & $script:Mod {
         param($uniqName)

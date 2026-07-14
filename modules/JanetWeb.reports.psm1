@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.19'
+        version  = '2.14.20'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -899,12 +899,18 @@ function Write-ReportsIavmMap {
 }
 
 function New-AcasFinding {
-    param([string]$Hostname,[string]$PluginID,[string]$VulnName,[string]$Severity,[string]$CVE,[string]$Category,[string]$Solution,$KevSet,$IavmMap)
+    # loop40 P1: $IP is the per-row scan IP the parser reads (host-ip / IP Address column).
+    # It is threaded here so the cross-domain collision guard can disambiguate two BARE
+    # short names (e.g. two WEB01s on different IPs) that the FQDN-only signal is blind to.
+    # It is a NEW discriminator field ONLY - $Hostname is unchanged (the fold still keys on
+    # the name), so no closure verdict changes except a genuine >=2-distinct-IP collision.
+    param([string]$Hostname,[string]$PluginID,[string]$VulnName,[string]$Severity,[string]$CVE,[string]$Category,[string]$Solution,$KevSet,$IavmMap,[string]$IP='')
     $status = if ($Category -eq 'NOT OUR PATCH') { 'NOT OUR PATCH' } else { 'Open' }
     $kev = Get-ReportsKevOverlap -CveCell $CVE -KevSet $KevSet
     $iavm = Get-ReportsIavmForCves -CveCell $CVE -IavmMap $IavmMap
     return [PSCustomObject]@{
         Hostname    = $Hostname
+        IP          = $IP
         PluginID    = $PluginID
         VulnName    = $VulnName
         Severity    = $Severity
@@ -1394,9 +1400,13 @@ function Parse-AcasFile {
             $reportHosts = $report.SelectNodes("ReportHost"); if (-not $reportHosts) { continue }
             foreach ($rh in $reportHosts) {
                 $hostname = $rh.GetAttribute("name")
+                # loop40 P1: keep the host-ip even when a name string exists (it used to be
+                # read only as a hostname fallback and then discarded). It is threaded onto
+                # the finding as the IP discriminator for the collision guard.
+                $hostIp = ''
                 $hostProps = $rh.SelectNodes("HostProperties/tag")
                 if ($hostProps) {
-                    $hostFqdn = $null; $hostIp = $null
+                    $hostFqdn = $null
                     foreach ($tag in $hostProps) {
                         $tn = $tag.GetAttribute("name")
                         if ($tn -eq "host-fqdn" -and $tag.InnerText.Trim()) { $hostFqdn = $tag.InnerText.Trim() }
@@ -1424,7 +1434,7 @@ function Parse-AcasFile {
                     if ($solNode) { $solution = $solNode.InnerText.Trim() }
                     $cveVal = Get-NessusCveList -ReportItem $item
                     $category = Categorize-Finding -VulnName $vulnName -Solution $solution -PluginID $pluginID
-                    [void]$findings.Add((New-AcasFinding -Hostname $hostname -PluginID $pluginID -VulnName $vulnName -Severity $severity -CVE $cveVal -Category $category -Solution $solution -KevSet $kev.Set -IavmMap $iavm.Map))
+                    [void]$findings.Add((New-AcasFinding -Hostname $hostname -PluginID $pluginID -VulnName $vulnName -Severity $severity -CVE $cveVal -Category $category -Solution $solution -KevSet $kev.Set -IavmMap $iavm.Map -IP $hostIp))
                 }
             }
         }
@@ -1443,14 +1453,18 @@ function Parse-AcasFile {
         $pluginID = ($fields[$cols.Plugin] -as [string]).Trim()
         if ([string]::IsNullOrWhiteSpace($pluginID)) { continue }
         $hostname = if ($fields.Count -gt $cols.Host) { ($fields[$cols.Host] -as [string]).Trim() } else { '' }
+        # loop40 P1: read the IP column value up front and KEEP it as the finding's IP
+        # discriminator, regardless of whether it also has to stand in as the hostname.
+        # (Previously the IP was consulted only as a name fallback and then discarded.)
+        $rowIp = if ($cols.Ip -ge 0 -and $fields.Count -gt $cols.Ip) { ($fields[$cols.Ip] -as [string]).Trim() } else { '' }
         # AFNET Nessus CSVs often leave DNS Name blank; fall back per-row to
         # NetBIOS then IP before discarding, so the row is only dropped when all
         # host identifiers are blank.
         if ([string]::IsNullOrWhiteSpace($hostname) -and $cols.Netbios -ge 0 -and $fields.Count -gt $cols.Netbios) {
             $hostname = ($fields[$cols.Netbios] -as [string]).Trim()
         }
-        if ([string]::IsNullOrWhiteSpace($hostname) -and $cols.Ip -ge 0 -and $fields.Count -gt $cols.Ip) {
-            $hostname = ($fields[$cols.Ip] -as [string]).Trim()
+        if ([string]::IsNullOrWhiteSpace($hostname) -and $rowIp) {
+            $hostname = $rowIp
         }
         if ([string]::IsNullOrWhiteSpace($hostname)) { continue }
         $vulnName = if ($cols.Vuln -ge 0 -and $fields.Count -gt $cols.Vuln) { ($fields[$cols.Vuln] -as [string]).Trim() } else { "Unknown" }
@@ -1458,7 +1472,7 @@ function Parse-AcasFile {
         $solution = if ($cols.Sol  -ge 0 -and $fields.Count -gt $cols.Sol)  { ($fields[$cols.Sol] -as [string]).Trim() } else { "" }
         $cveVal   = if ($cols.CVE  -ge 0 -and $fields.Count -gt $cols.CVE)  { ($fields[$cols.CVE] -as [string]).Trim() } else { "" }
         $category = Categorize-Finding -VulnName $vulnName -Solution $solution -PluginID $pluginID
-        [void]$findings.Add((New-AcasFinding -Hostname $hostname -PluginID $pluginID -VulnName $vulnName -Severity $severity -CVE $cveVal -Category $category -Solution $solution -KevSet $kev.Set -IavmMap $iavm.Map))
+        [void]$findings.Add((New-AcasFinding -Hostname $hostname -PluginID $pluginID -VulnName $vulnName -Severity $severity -CVE $cveVal -Category $category -Solution $solution -KevSet $kev.Set -IavmMap $iavm.Map -IP $rowIp))
     }
     return $findings
 }
@@ -1500,15 +1514,21 @@ function Compare-AcasScans {
     # patched. Those keys are classified AMBIGUOUS (a new bucket alongside REMEDIATED /
     # STILL OPEN / NEW), never a silent false-close. Reuses the PROVEN loop24 helper
     # Get-ReportsHostKeyCollisions (the same one campaign-verify uses); the fold itself is
-    # UNCHANGED - only a genuine >=2-distinct-FQDN collision demotes a would-be REMEDIATED.
-    # DEFERRED follow-up: thread the scan's IP through New-AcasFinding / Parse-AcasFile to
-    # positively disambiguate the two WEB01s (the parser discards the IP once a name string
-    # exists). Until that schema change lands, AMBIGUOUS-and-surface (never silent-close) is
-    # the correct interim behavior.
+    # UNCHANGED - only a genuine collision demotes a would-be REMEDIATED.
+    # loop40 P1: the scan IP is now threaded through New-AcasFinding / Parse-AcasFile and
+    # passed here (-IPs), so a collision is flagged on >=2 distinct FQDNs OR >=2 distinct IPs.
+    # That closes the short-name-only residual: two BARE WEB01s on different IPs are now caught
+    # (the FQDN-only signal was blind to them). RESIDUAL: a truly IP-LESS short-name-only export
+    # (no IP column at all) remains genuinely undisambiguable and stays unflagged - re-scan by
+    # FQDN or restore the IP to resolve it.
+    # loop40 P1: thread the per-finding scan IP (parallel to the hostname) so the collision
+    # guard also fires on two BARE short names on DIFFERENT IPs (the AFNET short-name-only norm
+    # the FQDN-only signal missed). IP defaults to '' on legacy findings that carry no IP field.
     $allHostnames = New-Object System.Collections.ArrayList
-    foreach ($f in $script:BaselineFindings)   { [void]$allHostnames.Add([string]$f.Hostname) }
-    foreach ($f in $script:ComparisonFindings) { [void]$allHostnames.Add([string]$f.Hostname) }
-    $collisions = Get-ReportsHostKeyCollisions -Hostnames @($allHostnames.ToArray())
+    $allIps       = New-Object System.Collections.ArrayList
+    foreach ($f in $script:BaselineFindings)   { [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP) }
+    foreach ($f in $script:ComparisonFindings) { [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP) }
+    $collisions = Get-ReportsHostKeyCollisions -Hostnames @($allHostnames.ToArray()) -IPs @($allIps.ToArray())
 
     # REMEDIATED: in baseline but NOT in comparison (patched/fixed) - UNLESS the short host
     # key is a cross-domain collision, in which case the closure is AMBIGUOUS (see above).
@@ -1517,21 +1537,21 @@ function Compare-AcasScans {
             $f = $baselineLookup[$key]
             $hk = Get-ReportsAuditHostKey $f.Hostname
             $delta = if ($collisions.Contains($hk)) { 'AMBIGUOUS' } else { 'REMEDIATED' }
-            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta=$delta; Solution=$f.Solution })
+            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; IP=$f.IP; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta=$delta; Solution=$f.Solution })
         }
     }
     # STILL OPEN: in BOTH baseline AND comparison (not fixed)
     foreach ($key in $baselineKeys) {
         if ($comparisonKeys.Contains($key)) {
             $f = $comparisonLookup[$key]
-            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta='STILL OPEN'; Solution=$f.Solution })
+            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; IP=$f.IP; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta='STILL OPEN'; Solution=$f.Solution })
         }
     }
     # NEW: in comparison but NOT in baseline (new findings)
     foreach ($key in $comparisonKeys) {
         if (-not $baselineKeys.Contains($key)) {
             $f = $comparisonLookup[$key]
-            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta='NEW'; Solution=$f.Solution })
+            [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; IP=$f.IP; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta='NEW'; Solution=$f.Solution })
         }
     }
     return $results
@@ -1597,28 +1617,46 @@ function Get-ReportsAuditHostKey {
     return ((($v -split '\.')[0]).ToUpper())
 }
 
-# Detect cross-domain short-name COLLISIONS (ledger row 36): two physically-distinct FQDNs
-# that fold to the SAME Get-ReportsAuditHostKey short key (e.g. web01.us.af.mil +
-# web01.eu.af.mil -> WEB01). The short fold is INTENDED for short-vs-FQDN of ONE host
-# (web01 <-> web01.dom), but two DISTINCT FQDNs sharing a short name are DIFFERENT boxes, so
-# a closure/compare verdict under that shared key is ambiguous. Given the hostnames seen in a
-# scan, returns a case-insensitive HashSet of the short keys backed by >=2 DISTINCT dot-bearing
-# FQDNs. A bare short name (no dot) or a short + single FQDN is NOT a collision (that is the
-# intended fold); an IP key never collides (kept whole). (loop24)
+# Detect cross-domain short-name COLLISIONS (ledger row 36): two physically-distinct hosts
+# that fold to the SAME Get-ReportsAuditHostKey short key. The short fold is INTENDED for
+# short-vs-FQDN of ONE host (web01 <-> web01.dom), but two DIFFERENT boxes sharing a short
+# name make a closure/compare verdict under that shared key ambiguous. A short key is flagged
+# when it is backed by EITHER:
+#   (a) >=2 DISTINCT dot-bearing FQDNs (web01.us.af.mil + web01.eu.af.mil -> WEB01), OR
+#   (b) >=2 DISTINCT non-empty scan IPs (loop40 P1) - the signal that catches two BARE
+#       WEB01 exports (the AFNET short-name-only norm), where the FQDN signal is blind
+#       because neither name has a dot. $IPs is the per-hostname scan IP (parallel array,
+#       $IPs[$i] pairs with $Hostnames[$i]); the caller threads finding.IP through.
+# Both signals are OrdinalIgnoreCase and PURELY ADDITIVE: they can only DEMOTE a would-be
+# closure to AMBIGUOUS, never invent one and never touch the fold. A short + single FQDN,
+# or a short+FQDN sharing ONE IP (one physical box, two name forms), is NOT a collision -
+# that is the intended fold (this is what corrects the loop40 F2 over-fire). An IP-literal
+# hostname is kept whole (never a short key) and never collides.
+# RESIDUAL (documented, not a code gap): a truly IP-LESS short-name-only export (two bare
+# WEB01s, no IP column at all) is genuinely UNDISAMBIGUABLE - both signals are blind, so it
+# is NOT flagged, unchanged from loop39. Restore the IP / re-scan by FQDN to disambiguate.
 function Get-ReportsHostKeyCollisions {
-    param([string[]]$Hostnames)
-    $byKey = @{}
-    foreach ($h in $Hostnames) {
-        $hn = ([string]$h).Trim()
+    param([string[]]$Hostnames, [string[]]$IPs)
+    $byKeyFqdn = @{}   # short key -> set of distinct dot-bearing FQDNs seen under it
+    $byKeyIp   = @{}   # short key -> set of distinct non-empty scan IPs seen under it
+    for ($i = 0; $i -lt $Hostnames.Count; $i++) {
+        $hn = ([string]$Hostnames[$i]).Trim()
         if (-not $hn) { continue }
-        if ($hn -notmatch '\.') { continue }                       # bare short name - not an FQDN
-        if ($hn -match '^\d{1,3}(\.\d{1,3}){3}$') { continue }      # IP literal - never collides
+        if ($hn -match '^\d{1,3}(\.\d{1,3}){3}$') { continue }      # IP-literal hostname - IP key, never a short key
         $key = Get-ReportsAuditHostKey $hn
-        if (-not $byKey.ContainsKey($key)) { $byKey[$key] = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase) }
-        [void]$byKey[$key].Add($hn)
+        if ($hn -match '\.') {                                     # dot-bearing FQDN - contributes to signal (a)
+            if (-not $byKeyFqdn.ContainsKey($key)) { $byKeyFqdn[$key] = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase) }
+            [void]$byKeyFqdn[$key].Add($hn)
+        }
+        $ip = if ($IPs -and $i -lt $IPs.Count) { ([string]$IPs[$i]).Trim() } else { '' }
+        if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$') {                # a real, non-empty IPv4 - contributes to signal (b)
+            if (-not $byKeyIp.ContainsKey($key)) { $byKeyIp[$key] = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase) }
+            [void]$byKeyIp[$key].Add($ip)
+        }
     }
     $collisions = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($k in $byKey.Keys) { if ($byKey[$k].Count -ge 2) { [void]$collisions.Add($k) } }
+    foreach ($k in $byKeyFqdn.Keys) { if ($byKeyFqdn[$k].Count -ge 2) { [void]$collisions.Add($k) } }
+    foreach ($k in $byKeyIp.Keys)   { if ($byKeyIp[$k].Count   -ge 2) { [void]$collisions.Add($k) } }
     return ,$collisions
 }
 
@@ -3767,9 +3805,10 @@ $($rRows.ToString())</tbody></table>
   <span class="chip ok">$($close.Remediated) remediated</span>
   <span class="chip warn">$($close.StillOpen) still open</span>
   <span class="chip bad">$($close.New) new</span>
+  <span class="chip warn">$($close.Ambiguous) ambiguous</span>
   <span class="chip info">$($close.ClosurePct)% closure rate</span>
 </div>
-<div class="src">Closure rate = remediated of (remediated + still-open) from the last Patch Cross-Ref compare this session.</div>
+<div class="src">Closure rate = remediated of (remediated + still-open) from the last Patch Cross-Ref compare this session. AMBIGUOUS findings (a short name shared by distinct hosts/IPs - re-scan by FQDN) are UNCONFIRMED and excluded from the rate, shown separately.</div>
 "@
     } else { & $noteHtml $close.Note }
 
@@ -5376,12 +5415,14 @@ function Invoke-JanetToolAction {
             # host offline during the scan window, or a scoped export, would else FALSE-CLOSE).
             $hostsPresent = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $freshHostnames = New-Object System.Collections.ArrayList
+            $freshIps       = New-Object System.Collections.ArrayList   # loop40 P1: IP discriminator, parallel to $freshHostnames
             $detail = @{}
             foreach ($f in $script:AcasFindings) {
                 $hk = Get-ReportsAuditHostKey $f.Hostname
                 $k = "$hk|$($f.PluginID)"
                 [void]$hostsPresent.Add($hk)
                 [void]$freshHostnames.Add([string]$f.Hostname)
+                [void]$freshIps.Add([string]$f.IP)
                 $isFlagged = ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH')
                 if ($isFlagged) { [void]$attestedNow.Add($k) } else { [void]$openNow.Add($k) }
                 if (-not $detail.ContainsKey($k)) { $detail[$k] = $f }
@@ -5392,7 +5433,7 @@ function Invoke-JanetToolAction {
             # such a key is untrustworthy (which physical host was fixed?), so the classify loop
             # below marks them AMBIGUOUS (never remediated, never auto-close). Warn if any campaign
             # key rides a collided short name.
-            $collisions   = Get-ReportsHostKeyCollisions -Hostnames @($freshHostnames.ToArray())
+            $collisions   = Get-ReportsHostKeyCollisions -Hostnames @($freshHostnames.ToArray()) -IPs @($freshIps.ToArray())
             $campHostKeys = @($campKeys | ForEach-Object { (($_ -split '\|', 2)[0]) })
             $activeCollisions = @($collisions | Where-Object { $campHostKeys -contains $_ })
             if ($activeCollisions.Count -gt 0) {
@@ -5638,13 +5679,20 @@ function Invoke-JanetToolAction {
             $results = Compare-AcasScans
             $script:ComparisonResults = $results
 
+            # loop40 F4: AMBIGUOUS rows (collided short name - a would-be REMEDIATED whose short
+            # host key is shared by distinct hosts/IPs) are NOT audit-joined below (they were never
+            # confirmed closed), so surface their count so the proof output can't imply everything
+            # closed while an unconfirmed finding is hidden.
+            $ambiguousCount = @($results | Where-Object { [string]$_.Delta -eq 'AMBIGUOUS' }).Count
+            if ($ambiguousCount -gt 0) { & $send @{ type='log'; level='warn'; text="$ambiguousCount finding(s) AMBIGUOUS (short name shared by distinct hosts/IPs) - excluded from the closure proof (neither confirmed closed nor open); re-scan by FQDN to resolve." } }
+
             # Only REMEDIATED + STILL OPEN rows get the audit join (NEW findings were
             # absent before, so there is nothing to attribute).
             $subject = @($results | Where-Object { $_.Delta -eq 'REMEDIATED' -or $_.Delta -eq 'STILL OPEN' })
             if ($subject.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No REMEDIATED or STILL OPEN rows in the compare - nothing to prove.' }
                 & $send @{ type='status'; text='Nothing to prove (no closed or still-open findings).' }
-                return @{ rows=@(); summary=@{ total=0; subjects=0; closedTouched=0; closedUntouched=0; openTouched=0; openUntouched=0; worklist=@(); worklistCount=0 } }
+                return @{ rows=@(); summary=@{ total=0; subjects=0; closedTouched=0; closedUntouched=0; openTouched=0; openUntouched=0; ambiguous=$ambiguousCount; worklist=@(); worklistCount=0 } }
             }
 
             # Distinct host keys we care about (drives the reader's WantHosts filter so it
@@ -5706,6 +5754,7 @@ function Invoke-JanetToolAction {
                 total=$rows.Count; subjects=$subject.Count
                 closedTouched=$closedTouched; closedUntouched=$closedUntouched
                 openTouched=$openTouched; openUntouched=$openUntouched
+                ambiguous=$ambiguousCount
                 onShare=$loc.OnShare; source=$loc.Reason
                 windowStart=$startD.ToString('yyyy-MM-dd'); windowEnd=$endD.ToString('yyyy-MM-dd')
                 auditRows=$idxRes.Rows; auditFiles=$idxRes.Files; capped=$idxRes.Capped
@@ -5743,13 +5792,16 @@ function Invoke-JanetToolAction {
             # finding whose short host key is shared by >=2 DISTINCT FQDNs in the loaded/compared
             # set is SKIPPED (left open, surfaced) rather than flipped to Patched - we cannot
             # confirm WHICH physical box a WEB01 remediation belongs to. Reuses the proven loop24
-            # helper; the fold is unchanged. DEFERRED follow-up: thread the scan IP through
-            # New-AcasFinding / Parse-AcasFile to disambiguate the two WEB01s (the parser discards
-            # the IP once a name exists); until then AMBIGUOUS-skip, never a silent false-close.
+            # helper; the fold is unchanged. loop40 P1: the scan IP is now threaded through (-IPs),
+            # so two BARE WEB01s on different IPs (the short-name-only norm) are also caught, not
+            # just the FQDN case. RESIDUAL: a truly IP-less short-name-only set stays undisambiguable.
+            # loop40 P1: thread the scan IP (parallel array) so two BARE WEB01s on different IPs
+            # in the loaded set are detected as a collision and the flip is skipped.
             $applyHostnames = New-Object System.Collections.ArrayList
-            foreach ($finding in $script:AcasFindings) { [void]$applyHostnames.Add([string]$finding.Hostname) }
-            foreach ($r in $remediated)                { [void]$applyHostnames.Add([string]$r.Hostname) }
-            $applyCollisions = Get-ReportsHostKeyCollisions -Hostnames @($applyHostnames.ToArray())
+            $applyIps       = New-Object System.Collections.ArrayList
+            foreach ($finding in $script:AcasFindings) { [void]$applyHostnames.Add([string]$finding.Hostname); [void]$applyIps.Add([string]$finding.IP) }
+            foreach ($r in $remediated)                { [void]$applyHostnames.Add([string]$r.Hostname); [void]$applyIps.Add([string]$r.IP) }
+            $applyCollisions = Get-ReportsHostKeyCollisions -Hostnames @($applyHostnames.ToArray()) -IPs @($applyIps.ToArray())
             $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm')
             $matchCount = 0; $skippedAmbiguous = 0
             foreach ($finding in $script:AcasFindings) {
@@ -6299,7 +6351,7 @@ function Invoke-JanetToolAction {
                     $fs = if (-not [string]::IsNullOrWhiteSpace([string]$_.FirstSeen)) { [string]$_.FirstSeen } else { $newlyStamped++; $todayIso }
                     if ($_.PSObject.Properties['FirstSeen']) { $_.FirstSeen = $fs } else { $_ | Add-Member -NotePropertyName FirstSeen -NotePropertyValue $fs -Force }
                     [ordered]@{
-                        Hostname=$_.Hostname; PluginID=$_.PluginID; VulnName=$_.VulnName; Severity=$_.Severity
+                        Hostname=$_.Hostname; IP=$_.IP; PluginID=$_.PluginID; VulnName=$_.VulnName; Severity=$_.Severity
                         CVE=$_.CVE; Category=$_.Category; Status=$_.Status; Solution=$_.Solution
                         InKEV=$_.InKEV; KevCves=$_.KevCves; IAVA=$_.IAVA
                         FirstSeen=$fs
@@ -6365,8 +6417,10 @@ function Invoke-JanetToolAction {
                 # firstSeen carries the SLA age clock across reloads; reports saved
                 # before this feature carry no FirstSeen, so default to '' (untracked).
                 $fsVal = if ($item.PSObject.Properties['FirstSeen']) { [string]$item.FirstSeen } else { '' }
+                # loop40 P1: IP discriminator; reports saved before this field default to '' (untracked).
+                $ipVal = if ($item.PSObject.Properties['IP']) { [string]$item.IP } else { '' }
                 [void]$script:AcasFindings.Add([PSCustomObject]@{
-                    Hostname=$item.Hostname; PluginID=$item.PluginID; VulnName=$item.VulnName; Severity=$item.Severity
+                    Hostname=$item.Hostname; IP=$ipVal; PluginID=$item.PluginID; VulnName=$item.VulnName; Severity=$item.Severity
                     CVE=$item.CVE; Category=$item.Category; Status=$item.Status; Solution=$item.Solution
                     InKEV=$ov.InKev; KevCves=$ov.KevCves; IAVA=$iv.IAVA
                     FirstSeen=$fsVal
@@ -7085,16 +7139,22 @@ function Invoke-JanetToolAction {
             # ---- (f) Scan closure (only if a compare/closure ran this session) ----
             $closeSec = @{ HasData=$false; Note='No scan comparison this session - run Patch Cross-Ref (Scan Compare or Prove Closure) first.' }
             if ($null -ne $script:ComparisonResults) {
-                $rem=0; $still=0; $new=0
+                $rem=0; $still=0; $new=0; $amb=0
                 foreach ($r in $script:ComparisonResults) {
                     switch ([string]$r.Delta) {
                         'REMEDIATED' { $rem++ }
                         'STILL OPEN' { $still++ }
                         'NEW'        { $new++ }
+                        'AMBIGUOUS'  { $amb++ }
                     }
                 }
+                # loop40 F4: AMBIGUOUS is surfaced as its own count so a brief can never read
+                # "100% closed" while an unconfirmed (collided short-name) finding is hidden. The
+                # closure-rate FORMULA is unchanged (remediated of remediated+still-open) - ambiguous
+                # keys are neither confirmed-closed nor confirmed-open, so they stay out of the ratio
+                # but are now reported alongside it.
                 $closurePct = if (($rem + $still) -gt 0) { [math]::Round(($rem / ($rem + $still)) * 100, 1) } else { 0 }
-                $closeSec = @{ HasData=$true; Remediated=$rem; StillOpen=$still; New=$new; Total=($rem+$still+$new); ClosurePct=$closurePct }
+                $closeSec = @{ HasData=$true; Remediated=$rem; StillOpen=$still; New=$new; Ambiguous=$amb; Total=($rem+$still+$new+$amb); ClosurePct=$closurePct }
             }
 
             $brief = @{ Generated=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Sla=$slaSec; Kev=$kevSec; Squadron=$sqSec; Trend=$trendSec; Route=$routeSec; Closure=$closeSec }
