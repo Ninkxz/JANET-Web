@@ -59,7 +59,7 @@
           'bulk-scan': 'Scan', 'trend': 'Compliance Trend', 'bulk-patch': 'Patch', 'reboot': 'Reboot', 'reboot-schedule': 'Reboot Countdown',
           'reboot-abort': 'Cancel Reboot', 'ping-sweep': 'Ping Sweep', 'winrm-bootstrap': 'Repair WinRM',
           'health-scan': 'Health Scan', 'healer-restart-ccm': 'Restart MECM', 'healer-ccm-repair': 'Repair MECM', 'healer-wmi-repair': 'Repair WMI',
-          'healer-wu-reset': 'Reset WU', 'healer-trigger-checkin': 'MECM Check-In', 'healer-gpupdate': 'gpupdate',
+          'healer-wu-reset': 'Reset WU', 'healer-trigger-checkin': 'MECM Check-In', 'healer-gpupdate': 'gpupdate', 'healer-rdp-rebind': 'Repair RDP',
           'host-info': 'Host Info', 'eventlog-scan': 'Event Log Scan', 'maintenance-lock': 'Maint Lock', 'maintenance-unlock': 'Maint Unlock', 'ad-computers': 'AD Query', 'sccm-available': 'Available', 'sccm-install-available': 'Install Avail', 'clean-user-apps': 'Clean Apps',
           'software-scan': 'Software Scan', 'scan-detail': 'Scan Detail', 'software-uninstall': 'Uninstall',
           'app-list': 'Query Apps', 'app-action': 'App Action', 'unsupported-scan': 'Unsupported Scan',
@@ -93,7 +93,7 @@
               result = r.Result || ''; detail = ((r.App || '') + ' ' + (r.Method || '')).trim(); break;
             }
             case 'app-update-apply': if (asBool(r.Success)) add.updates = 1; result = asBool(r.Success) ? 'Updated' : 'Failed'; break;
-            case 'healer-restart-ccm': case 'healer-ccm-repair': case 'healer-wmi-repair': case 'healer-wu-reset': case 'healer-gpupdate': case 'healer-trigger-checkin':
+            case 'healer-restart-ccm': case 'healer-ccm-repair': case 'healer-wmi-repair': case 'healer-wu-reset': case 'healer-gpupdate': case 'healer-trigger-checkin': case 'healer-rdp-rebind':
               if (asBool(r.Success)) add.repaired = 1; result = asBool(r.Success) ? 'Repaired' : 'Failed'; break;
             case 'reboot': if (asBool(r.Success)) add.reboots = 1; result = asBool(r.Success) ? 'Reboot sent' : 'Failed'; break;
             case 'reboot-schedule': if (asBool(r.Success)) add.reboots = 1; result = asBool(r.Success) ? 'Armed' : 'Failed'; detail = r.RebootAt ? ('~' + r.RebootAt) : detail; break;
@@ -1657,7 +1657,8 @@
           ['healer-wmi-repair', 'Repair WMI', true],
           ['healer-wu-reset', 'Reset Windows Update', true],
           ['healer-trigger-checkin', 'Trigger Check-In', false],
-          ['healer-gpupdate', 'gpupdate /force', true]
+          ['healer-gpupdate', 'gpupdate /force', true],
+          ['healer-rdp-rebind', 'Repair RDP Listener', true]
         ];
         var healerBtns = [];
         healers.forEach(function (hh) {

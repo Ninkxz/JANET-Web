@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  Wpt.SpecExec.Tests.ps1 - Pester 3.4 for the wpt 6.6.2 spec-exec actions wired
+#  Wpt.SpecExec.Tests.ps1 - Pester 3.4 for the wpt 6.6.3 spec-exec actions wired
 #  to the SHARED speculative-execution mitigation engine
 #  (modules\JanetWeb.specfix.psm1 - the ONE copy the ACAS Nemesis tool also calls).
 #
@@ -85,12 +85,13 @@ function Get-SpecVerdict {
     } $Fso $Mask
 }
 
-Describe 'WPT 6.6.2 - spec-exec manifest actions (scan read-only, enable destructive)' {
+Describe 'WPT 6.6.3 - spec-exec manifest actions (scan read-only, enable destructive)' {
 
     $manifest = & $m { Get-JanetToolManifest }
 
-    It 'manifest version is bumped to 6.6.2' {
-        [string]$manifest.version | Should Be '6.6.2'
+    It 'manifest version is at least 6.6.3 (spec-exec ship version)' {
+        # Exact pins rot on every later bump; assert the floor.
+        [version]$manifest.version -ge [version]'6.6.3' | Should Be $true
     }
     It 'spec-exec-scan is a NON-destructive read-only action with a targets input' {
         $a = @($manifest.actions | Where-Object { $_.id -eq 'spec-exec-scan' })[0]
@@ -108,7 +109,7 @@ Describe 'WPT 6.6.2 - spec-exec manifest actions (scan read-only, enable destruc
     }
 }
 
-Describe 'WPT 6.6.2 - spec-exec-enable self-guard drops the dispatcher BEFORE fan-out' {
+Describe 'WPT 6.6.3 - spec-exec-enable self-guard drops the dispatcher BEFORE fan-out' {
 
     # 127.0.0.1 is flagged self by Test-WptHostIsSelf, so it is the only target and
     # the self-guard must strip it: total=0 / selfSkipped=1, NO rows, and NO 'status'
@@ -130,7 +131,7 @@ Describe 'WPT 6.6.2 - spec-exec-enable self-guard drops the dispatcher BEFORE fa
     }
 }
 
-Describe 'WPT 6.6.2 - spec-exec-enable fails CLOSED when the engine source is missing' {
+Describe 'WPT 6.6.3 - spec-exec-enable fails CLOSED when the engine source is missing' {
 
     # Blank the injected engine source in module scope, drive enable at a NON-self
     # target: the action must abort with an engine-unavailable summary and NO fan-out.
@@ -152,7 +153,7 @@ Describe 'WPT 6.6.2 - spec-exec-enable fails CLOSED when the engine source is mi
     }
 }
 
-Describe 'WPT 6.6.2 - SHARED engine remediation (stateful shimmed registry, no real write)' {
+Describe 'WPT 6.6.3 - SHARED engine remediation (stateful shimmed registry, no real write)' {
 
     It 'a VULNERABLE state (value absent) -> enable ORs in 0x800000, sets Mask=3, reads back FIXED' {
         $r = Invoke-SpecEngineEnable -Fso $null -Mask $null
@@ -186,7 +187,7 @@ Describe 'WPT 6.6.2 - SHARED engine remediation (stateful shimmed registry, no r
     }
 }
 
-Describe 'WPT 6.6.2 - SHARED engine read-only verdicts are OR-based on the 0x800000 bit' {
+Describe 'WPT 6.6.3 - SHARED engine read-only verdicts are OR-based on the 0x800000 bit' {
 
     It 'both values absent -> VULNERABLE'                      { (Get-SpecVerdict -Fso $null      -Mask $null) | Should Be 'VULNERABLE' }
     It 'BHI bit set, Mask=3 -> COMPLIANT'                      { (Get-SpecVerdict -Fso 0x800000   -Mask 3)     | Should Be 'COMPLIANT' }

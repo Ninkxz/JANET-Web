@@ -40,8 +40,8 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.6.2'
-        summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
+        version  = '6.8.0'
+        summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
                 id='bulk-scan'; label='Bulk Scan'; kind='stream-table'; destructive=$false
@@ -182,6 +182,16 @@ function Get-JanetToolManifest {
                 )
             },
             @{
+                id='healer-rdp-rebind'; label='Repair RDP Listener'; kind='stream-table'; destructive=$true
+                confirm='Rebind BROKEN RDP-tcp listener certificates (self-signed / expired / missing) to the newest valid CA-issued cert on the target(s)? Healthy CA-issued listeners are never touched; a host with no candidate cert is left untouched. Proceed?'
+                description='Repair a BROKEN RDP-tcp listener certificate (self-signed / expired / missing): rebind to the newest valid CA-issued My-store cert (host-name match, Server Auth EKU, private key). Healthy CA-issued listeners are never touched; no candidate = left untouched. Bind-first - the old cert is cleared only after a successful bind. Ported from the C2C PkiRdp companion (PKI-Fix-ScanFix v1.9).'
+                columns=@('Host','Success','Detail')
+                inputs=@(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
+                )
+            },
+            @{
                 id='software-scan'; label='Software Scan'; kind='table'; destructive=$false
                 description='Single-host registry scan: Win32 apps (HKLM/HKU Uninstall) + Store apps. Returns the uninstall string so Software Uninstall can act on a row.'
                 columns=@('Name','Version','Publisher','InstallDate','Install Type','Size')
@@ -229,7 +239,7 @@ function Get-JanetToolManifest {
             },
             @{
                 id='software-uninstall'; label='Software Uninstall'; kind='stream-table'; destructive=$true
-                description='Uninstall apps on one host by display name or uninstall GUID. Auto-detects type: MSI (msiexec /x /qn /norestart), EXE (quiet/silent uninstall string), or Store app (Remove-AppxPackage -AllUsers). Run a Software Scan first to get exact names.'
+                description='Uninstall apps on one host by display name or uninstall GUID. Auto-detects type: MSI (msiexec /x /qn /norestart, verbose log to %TEMP%), EXE (quiet/silent uninstall string), or Store app (Remove-AppxPackage -AllUsers). After removal, verifies the install folder is actually gone (files remaining = Attention) and removes orphaned uninstall registry keys. MSI 1605 = stale entry (key cleaned), 1618 = another install in progress (retry later). Run a Software Scan first to get exact names.'
                 columns=@('Host','App','Install Type','Result','Detail')
                 inputs=@(
                     @{ name='host'; label='Host'; type='hostpick'; required=$true },
@@ -2534,6 +2544,59 @@ $script:WptGpUpdateBlock = {
     return $r
 }
 
+# --- Healer: RDP listener rebind (PkiRdp port from JanetWeb.c2c.psm1 block Pc) ---
+# Repairs a BROKEN RDP-tcp listener certificate (self-signed / expired / missing).
+# A healthy CA-issued listener is NEVER touched. The replacement cert (newest valid
+# My-store cert matching this host with the Server Authentication EKU 1.3.6.1.5.5.7.3.1
+# + private key) is located FIRST - no candidate = left untouched. Bind FIRST; the
+# destructive clears run only on a successful bind (no dead-listener window).
+$script:WptRdpRebindBlock = {
+    param([string]$Computer, $Cred, [string]$Auth)
+    $r = @{ Host=$Computer; Success=$false; Detail='' }
+    $opt = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 30000 -CancelTimeout 5000 -IdleTimeout 60000
+    $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    try {
+        $out = Invoke-Command @splat -ScriptBlock {
+            $tsgs = Get-CimInstance -Namespace 'root/cimv2/terminalservices' -ClassName 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'" -ErrorAction Stop
+            $rdpHash = (([string]$tsgs.SSLCertificateSHA1Hash) -replace '[^0-9A-Fa-f]', '').ToUpper()
+            $now = Get-Date
+            $lcert = $null
+            if ($rdpHash -and $rdpHash -ne ('0' * 40)) {
+                foreach ($stN in @('My', 'Remote Desktop')) {
+                    $lcert = Get-ChildItem "Cert:\LocalMachine\$stN" -ErrorAction SilentlyContinue |
+                             Where-Object { ((([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]', '').ToUpper()) -eq $rdpHash } |
+                             Select-Object -First 1
+                    if ($lcert) { break }
+                }
+            }
+            $state = if (-not $lcert) { 'missing' } elseif ($lcert.NotAfter -lt $now) { 'expired' } elseif ($lcert.Subject -eq $lcert.Issuer) { 'self-signed' } else { 'healthy' }
+            if ($state -eq 'healthy') {
+                return [pscustomobject]@{ Ok=$true; Msg="RDP listener healthy (CA-issued cert expires $($lcert.NotAfter.ToShortDateString())) - not touched" }
+            }
+            $cand = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
+                (@($_.DnsNameList | ForEach-Object { [string]$_.Unicode } | Where-Object { $_ -eq $env:COMPUTERNAME -or (($_ -split '\.')[0] -eq $env:COMPUTERNAME) }).Count -gt 0) -and $_.NotAfter -gt $now -and $_.HasPrivateKey -and
+                @($_.EnhancedKeyUsageList | Where-Object { [string]$_.ObjectId -eq '1.3.6.1.5.5.7.3.1' }).Count -gt 0
+            } | Sort-Object NotAfter -Descending | Select-Object -First 1
+            if (-not $cand) {
+                return [pscustomobject]@{ Ok=$false; Msg="RDP listener cert is $state but no valid CA-issued My-store cert (Server Auth EKU) matches this host - left untouched" }
+            }
+            # Bind FIRST; only on a successful bind do the destructive clears run. On a bind
+            # failure the old cert/listener are left intact - no dead-listener window.
+            try {
+                Set-CimInstance -InputObject $tsgs -Property @{ SSLCertificateSHA1Hash = [string]$cand.Thumbprint } -ErrorAction Stop | Out-Null
+                Get-ChildItem 'Cert:\LocalMachine\Remote Desktop' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations' -Name 'SelfSignedCertStore' -Value '' -Force -ErrorAction SilentlyContinue
+                return [pscustomobject]@{ Ok=$true; Msg="RDP listener was $state - bound CA-issued cert $($cand.Thumbprint) (expires $($cand.NotAfter.ToShortDateString()))" }
+            } catch {
+                return [pscustomobject]@{ Ok=$false; Msg="RDP listener was $state - bind to CA-issued cert $($cand.Thumbprint) FAILED, old cert/listener left intact: $($_.Exception.Message)" }
+            }
+        }
+        $r.Success = [bool]$out.Ok; $r.Detail = [string]$out.Msg
+    } catch { $r.Detail = $_.Exception.Message }
+    return $r
+}
+
 # --- KB Scan (kbBlock:7684) ---
 $script:WptKbScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
@@ -3979,8 +4042,33 @@ $script:WptSoftwareUninstallBlock = {
         $installed = @()
         foreach ($rp in $regPaths) {
             Get-ItemProperty $rp -EA SilentlyContinue | Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne '' } | ForEach-Object {
-                $installed += [pscustomobject]@{ Name=[string]$_.DisplayName; UninstallString=[string]$_.UninstallString; QuietUninstallString=[string]$_.QuietUninstallString; PSChildName=[string]$_.PSChildName }
+                $installed += [pscustomobject]@{ Name=[string]$_.DisplayName; UninstallString=[string]$_.UninstallString; QuietUninstallString=[string]$_.QuietUninstallString; PSChildName=[string]$_.PSChildName; InstallLocation=[string]$_.InstallLocation }
             }
+        }
+        # Verify-and-clean pass (Remove App - GUI style): after an uninstall
+        # reports success, confirm the install folder is actually gone and
+        # remove the orphaned uninstall registry key from all three hives
+        # (re-verified after removal). FilesRemain=$true means the operator
+        # gets an 'Attention' row instead of a clean 'Removed'.
+        $swHives = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+        $verifyClean = {
+            param([string]$loc, [string]$key)
+            $notes = @(); $filesRemain = $false
+            if (-not [string]::IsNullOrWhiteSpace($loc) -and (Test-Path -LiteralPath $loc)) {
+                $filesRemain = $true; $notes += "files still present: $loc"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($key)) {
+                $stale = @()
+                foreach ($h in $swHives) {
+                    $kp = Join-Path $h $key
+                    if (Test-Path -LiteralPath $kp) {
+                        Remove-Item -LiteralPath $kp -Recurse -Force -EA SilentlyContinue
+                        if (Test-Path -LiteralPath $kp) { $stale += $kp } else { $notes += 'orphaned uninstall key cleaned' }
+                    }
+                }
+                if ($stale.Count) { $notes += "uninstall key still present: $($stale -join '; ')" }
+            }
+            @{ FilesRemain = $filesRemain; Note = (($notes | Select-Object -Unique) -join ' | ') }
         }
         foreach ($raw in $Names) {
             $name = ([string]$raw).Trim()
@@ -4086,12 +4174,27 @@ $script:WptSoftwareUninstallBlock = {
                     if ($pplRestoreFailed) { $result = 'Failed'; $detail = "CRITICAL: RunAsPPL (LSASS protection) NOT restored on this host - re-enable it. $detail" }
                     [void]$results.Add(@{ App=$name; Type=$type; Result=$result; Detail=$detail }); continue
                 }
-                # Direct {GUID} entry -> straight MSI removal.
+                # Direct {GUID} entry -> straight MSI removal (verbose log to %TEMP%,
+                # 1605 = stale entry cleaned, 1618 = another install in progress).
                 if ($name -match '^\{[0-9A-Fa-f\-]+\}$') {
                     $type = 'MSI'
-                    $p = Start-Process msiexec.exe -ArgumentList "/x $name /qn /norestart" -Wait -PassThru -WindowStyle Hidden
-                    if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $result = 'Removed'; $detail = "msiexec /x $name (exit $($p.ExitCode))" }
-                    else { $detail = "msiexec exit $($p.ExitCode)" }
+                    $msiLog = "$env:TEMP\JANET_Uninstall_$($name.Trim('{}')).log"
+                    $p = Start-Process msiexec.exe -ArgumentList "/x $name /qn /norestart /l*v `"$msiLog`"" -Wait -PassThru -WindowStyle Hidden
+                    $null = $p.Handle
+                    $guidEnt = $installed | Where-Object { $_.PSChildName -eq $name } | Select-Object -First 1
+                    $guidLoc = if ($guidEnt) { $guidEnt.InstallLocation } else { '' }
+                    switch ($p.ExitCode) {
+                        0       { $result = 'Removed'; $detail = "msiexec /x $name (exit 0)" }
+                        3010    { $result = 'Removed'; $detail = "msiexec /x $name (exit 3010, reboot pending)" }
+                        1605    { $result = 'Removed'; $detail = "MSI reports product not installed (1605) - stale registry entry" }
+                        1618    { $detail = "another install in progress (1618) - retry later" }
+                        default { $detail = "msiexec exit $($p.ExitCode) - see $msiLog on target" }
+                    }
+                    if ($result -eq 'Removed') {
+                        $vc = & $verifyClean $guidLoc $name
+                        if ($vc.Note) { $detail += " | $($vc.Note)" }
+                        if ($vc.FilesRemain) { $result = 'Attention' }
+                    }
                     [void]$results.Add(@{ App=$name; Type=$type; Result=$result; Detail=$detail }); continue
                 }
                 $match = $installed | Where-Object { $_.Name -like "*$name*" } | Select-Object -First 1
@@ -4106,9 +4209,16 @@ $script:WptSoftwareUninstallBlock = {
                         $type = 'MSI'
                         $guid = $unStr -replace '.*(\{[^\}]+\}).*','$1'
                         if ($guid -match '^\{[0-9A-Fa-f\-]+\}$') {
-                            $p = Start-Process msiexec.exe -ArgumentList "/x $guid /qn /norestart" -Wait -PassThru -WindowStyle Hidden
-                            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $result = 'Removed'; $detail = "$($match.Name): msiexec /x $guid (exit $($p.ExitCode))" }
-                            else { $detail = "msiexec exit $($p.ExitCode)" }
+                            $msiLog = "$env:TEMP\JANET_Uninstall_$($guid.Trim('{}')).log"
+                            $p = Start-Process msiexec.exe -ArgumentList "/x $guid /qn /norestart /l*v `"$msiLog`"" -Wait -PassThru -WindowStyle Hidden
+                            $null = $p.Handle
+                            switch ($p.ExitCode) {
+                                0       { $result = 'Removed'; $detail = "$($match.Name): msiexec /x $guid (exit 0)" }
+                                3010    { $result = 'Removed'; $detail = "$($match.Name): msiexec /x $guid (exit 3010, reboot pending)" }
+                                1605    { $result = 'Removed'; $detail = "$($match.Name): MSI reports product not installed (1605) - stale registry entry" }
+                                1618    { $detail = "$($match.Name): another install in progress (1618) - retry later" }
+                                default { $detail = "msiexec exit $($p.ExitCode) - see $msiLog on target" }
+                            }
                         } else { $detail = "Could not parse MSI product code from: $unStr" }
                     } else {
                         $type = 'EXE'
@@ -4138,8 +4248,15 @@ $script:WptSoftwareUninstallBlock = {
                             else { $detail = "$($match.Name): EXE silent exit $($pe.ExitCode)" }
                         } else { $detail = "No UninstallString for $($match.Name)" }
                     }
-                    # Tanium leaves a stale key behind; only clean it on a genuine removal.
-                    if ($result -eq 'Removed' -and $match.Name -like '*Tanium*') {
+                    # Verify-and-clean on every genuine removal: install folder must be
+                    # gone (files remaining -> Attention) + orphaned uninstall key removed.
+                    if ($result -eq 'Removed') {
+                        $vc = & $verifyClean $match.InstallLocation $match.PSChildName
+                        if ($vc.Note) { $detail += " | $($vc.Note)" }
+                        if ($vc.FilesRemain) { $result = 'Attention' }
+                    }
+                    # Tanium leaves a stale product key behind; only clean it on a genuine removal.
+                    if (($result -eq 'Removed' -or $result -eq 'Attention') -and $match.Name -like '*Tanium*') {
                         Remove-Item -Path 'HKLM:\SOFTWARE\WOW6432Node\Tanium' -Recurse -Force -EA SilentlyContinue
                     }
                 } else {
@@ -5235,6 +5352,14 @@ function Invoke-JanetToolAction {
                 -OkOf { param($r) [bool]$r.Success } -AuditDetail { param($r) $r.Detail } `
                 -RowOf { param($r) @{ Host=$r.Host; Success=[bool]$r.Success; Detail=[string]$r.Detail } }
         }
+        'healer-rdp-rebind' {
+            $threads = Get-WptThreadCount $Params 16
+            return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptRdpRebindBlock -AuditAction 'VulnPatched' `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
+                -OkOf { param($r) [bool]$r.Success } -AuditDetail { param($r) $r.Detail } `
+                -RowOf { param($r) @{ Host=$r.Host; Success=[bool]$r.Success; Detail=[string]$r.Detail } }
+        }
         'app-action' {
             $threads = Get-WptThreadCount $Params 12
             $method = ([string]$Params['method']).Trim(); if ([string]::IsNullOrWhiteSpace($method)) { $method = 'Install' }
@@ -6108,7 +6233,9 @@ function Invoke-JanetToolAction {
                 -AuditDetail { param($r) if ($r.Error) { $r.Error } else { $r.Status } } `
                 -RowOf { param($r)
                     $curStr = if ($r.RegValues -and $r.RegValues.Count -gt 0) { (($r.RegValues.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ') } else { '' }
-                    @{ Host=$r.Host; RegPath=$regPath; CurrentValue=$curStr; ExpectedValue=$expectedStr; Compliant=$(if($r.Status -eq 'Patched'){'Yes'}elseif($r.Reachable){'No'}else{'?'}); Status=[string]$r.Status } }
+                    # booleans, not 'Yes'/'No' strings - the view's asBool() only accepts true/'true'/1,
+                    # so string 'Yes' rendered as COMPLIANT=No on patched hosts. $null = unreachable.
+                    @{ Host=$r.Host; RegPath=$regPath; CurrentValue=$curStr; ExpectedValue=$expectedStr; Compliant=$(if($r.Status -eq 'Patched'){$true}elseif($r.Reachable){$false}else{$null}); Status=[string]$r.Status } }
         }
         'registry-key-apply' {
             $threads = Get-WptThreadCount $Params 16
