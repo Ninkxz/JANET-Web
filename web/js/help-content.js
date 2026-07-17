@@ -103,9 +103,6 @@
       _overview: 'Two hands-on-keyboard capabilities. <b>Open C$</b> launches \\\\&lt;computer&gt;\\C$ in Explorer on your own session (<b>read-only</b>; no admin session). <b>Run Script</b> fans an operator-authored PowerShell block to one or many hosts over WinRM - <b>Destructive</b>, admin-session-gated, and SHA256-audited.',
       opencshare: 'Type a computer name (bare hostname or IPv4) and <b>Open C$</b> to launch \\\\&lt;computer&gt;\\C$ in Windows Explorer on your <b>own</b> machine. <b>Read-only</b> - JANET only opens the share; needs no admin session. The name is strictly validated and the access is audited.',
       runscript: 'Load <b>Targets</b>, type a <b>PowerShell script block</b>, set concurrency + per-host timeout, then <b>RUN</b> (type RUN to confirm). Runs your block verbatim on every target over WinRM and streams captured output per host. <b>Destructive</b> (arbitrary remote code): needs a live admin session; the JANET host is self-guarded out and the exact script is SHA256-audited before it runs.'
-    },
-    beta: {
-      _overview: '<b>Beta Lab</b> - staging ground for experimental, <b>read-only</b> fleet features. None are active right now; new sections appear here as they bake, then graduate into their own tool. (App Versions + Software Inventory moved into Workstation Patching; logged-on user / last boot / pending-reboot into the WPT Bulk Scan grid.)'
     }
   };
 
