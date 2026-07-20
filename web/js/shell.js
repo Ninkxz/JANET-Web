@@ -452,8 +452,17 @@
   var SessionApi = {
     get state() { return Session; },
     onChange: function (fn) { Session._listeners.push(fn); return function () { var i = Session._listeners.indexOf(fn); if (i >= 0) Session._listeners.splice(i, 1); }; },
-    refreshCred: refreshCred, setCred: setCred, clearCred: clearCred, startSession: startSession
+    refreshCred: refreshCred, setCred: setCred, clearCred: clearCred, startSession: startSession,
+    disarm: disarmSession
   };
+  // Mirror a server-side disarm (POST /session/end, DELETE /cred): the server
+  // drops AckGiven+Cred authoritatively; this clears the client copy so the
+  // ADMIN strip goes cold instead of showing a stale armed state.
+  function disarmSession() {
+    Session.ack = false; Session.active = false; Session.credSet = false; Session.user = '';
+    try { sessionStorage.removeItem('janetweb_ack'); sessionStorage.removeItem('janetweb_session'); } catch (e) {}
+    sessionChanged();
+  }
   async function refreshCred() {
     try {
       var st = await api('GET', '/cred');
@@ -471,6 +480,10 @@
   async function clearCred() {
     var r = await api('DELETE', '/cred');
     if (r && r.status) { Session.credSet = !!r.status.set; Session.user = r.status.user || ''; Session.mode = r.status.mode || Session.mode; }
+    // The server also dropped the responsibility ack (the ack was given FOR the
+    // cleared credential) - mirror it so a re-set cred requires a fresh ack.
+    Session.ack = false; Session.active = false;
+    try { sessionStorage.removeItem('janetweb_ack'); sessionStorage.removeItem('janetweb_session'); } catch (e) {}
     sessionChanged();
     return r;
   }

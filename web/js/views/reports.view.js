@@ -122,8 +122,15 @@
 
       // ---------- artifact bar factory --------------------------------------------
       // Report actions deliver generated text on the final summary; show Download +
-      // (for HTML) Open buttons once a run completes. openHtml uses a sandboxed
-      // window with allow-scripts but NOT allow-same-origin (cannot touch our DOM).
+      // (for HTML) Open buttons once a run completes.
+      // SECURITY NOTE (loop-1 review): despite the function name, this window is
+      // SAME-ORIGIN to the SPA (plain window.open, no sandbox attribute is possible
+      // on a window) and /api/report-preview is served with a relaxed CSP
+      // (script-src 'unsafe-inline'). It therefore inherits sessionStorage incl.
+      // the API token. The ONLY barrier between report-field content and
+      // token-theft XSS is the report engine's ConvertTo-HtmlEscaped on every
+      // data field - treat any unescaped field in reports.psm1 as a P1.
+      // Roadmap: render via srcdoc + sandbox="allow-scripts" iframe for a backstop.
       function openHtmlSandboxed(htmlText, titleText) {
         var w = window.open('', '_blank');
         if (!w) {

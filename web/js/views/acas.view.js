@@ -180,7 +180,7 @@
       function doEndSession() {
         var body = el('div');
         var p = el('div', 'muted'); p.style.cssText = 'font-size:11.5px;margin-bottom:8px';
-        p.textContent = 'Record closing notes for this session (written to the ACAS Runs log so they survive an unclean stop). ASI/RFC optional.';
+        p.textContent = 'Record closing notes for this session (written to the ACAS Runs log so they survive an unclean stop). ASI/RFC optional. Saving also ENDS the admin session: the server drops the credential and the responsibility ack.';
         body.appendChild(p);
         var asi = ui.input({ placeholder: 'ASI / RFC (optional)' }); asi.style.cssText += ';width:100%;margin-bottom:8px;font-size:11.5px';
         body.appendChild(asi);
@@ -190,7 +190,10 @@
         ctx.confirm({ title: 'End Session / Notes', body: body, okText: 'Save Notes', cancelText: 'Cancel' }).then(function (ok) {
           if (!ok) return;
           ctx.api('POST', '/session/end', { notes: notes.value || '', asi: asi.value || '' }).then(function (r) {
-            log.append({ text: 'Session notes saved. ' + (r.hostsTouched || 0) + ' host(s) touched, ' + (r.vulnsPatched || 0) + ' patched, ' + (r.failures || 0) + ' failure(s).', level: 'ok' });
+            // The server disarmed (ack + cred dropped); mirror it client-side so
+            // the ADMIN strip goes cold. Re-arming needs a fresh cred + ack.
+            if (ctx.session && ctx.session.disarm) ctx.session.disarm();
+            log.append({ text: 'Session notes saved; admin session DISARMED (cred + ack dropped). ' + (r.hostsTouched || 0) + ' host(s) touched, ' + (r.vulnsPatched || 0) + ' patched, ' + (r.failures || 0) + ' failure(s).', level: 'ok' });
           }).catch(function (e) { log.append({ text: 'End Session failed: ' + (e && e.message), level: 'err' }); });
         });
       }

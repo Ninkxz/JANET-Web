@@ -447,7 +447,11 @@ function Start-JanetWebServer {
                 if ($path -eq '/api/cred') {
                     if ($verb -eq 'GET')    { & $writeJson $resp (Get-JanetWebCredentialStatus -Credential $state.Cred); continue }
                     if ($verb -eq 'POST')   { $r = Prompt-JanetWebCredential; if ($r.ok) { $state.Cred = $r.cred }; & $writeJson $resp @{ ok=$r.ok; message=$r.message; status=(Get-JanetWebCredentialStatus -Credential $state.Cred) }; continue }
-                    if ($verb -eq 'DELETE') { $state.Cred = $null; & $writeJson $resp @{ ok=$true; status=(Get-JanetWebCredentialStatus -Credential $null) }; continue }
+                    # DELETE also drops the responsibility ack: the ack was given FOR the
+                    # credential being cleared. Without this, ack + clear-cred + later
+                    # re-POST /cred re-armed the destructive gate with no fresh ack
+                    # (AckGiven was a one-time-per-process flag).
+                    if ($verb -eq 'DELETE') { $state.Cred = $null; $state.AckGiven = $false; & $writeJson $resp @{ ok=$true; status=(Get-JanetWebCredentialStatus -Credential $null) }; continue }
                 }
 
                 # POST /api/session/start -> record the responsibility acknowledgment.
@@ -558,7 +562,15 @@ function Start-JanetWebServer {
                     if ($shareOk) {
                         try { Write-JanetWebRun -Context $state.LogCtx -Tool 'acas' -RowType 'SessionNotes' -Action 'SessionEnd' -Notes $notes -HostsTotal $state.LogCtx.Hosts.Count -Success $state.LogCtx.RunSuccess -Failed $state.LogCtx.RunFailed } catch {}
                     }
-                    & $writeJson $resp @{ ok=$true; hostsTouched=$state.LogCtx.Hosts.Count; vulnsPatched=$state.LogCtx.Vulns; runCount=$state.LogCtx.RunCount; failures=$state.LogCtx.Failures }
+                    # End Session DISARMS server-side: drop the ack AND the credential so
+                    # the destructive gate ($state.AckGiven -and $state.Cred) goes cold.
+                    # Formerly this handler only recorded notes - the gate stayed armed
+                    # for the life of the process after "End Session", and the operator's
+                    # "I locked it" signal was false. Re-arming requires a fresh POST
+                    # /api/cred + POST /api/session/start ack.
+                    $state.AckGiven = $false
+                    $state.Cred = $null
+                    & $writeJson $resp @{ ok=$true; disarmed=$true; hostsTouched=$state.LogCtx.Hosts.Count; vulnsPatched=$state.LogCtx.Vulns; runCount=$state.LogCtx.RunCount; failures=$state.LogCtx.Failures }
                     continue
                 }
 
