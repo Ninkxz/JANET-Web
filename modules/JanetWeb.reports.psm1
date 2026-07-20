@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.23'
+        version  = '2.14.24'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -1799,7 +1799,15 @@ function Build-RemediationPlan {
         $vn = ($f.VulnName -as [string]).ToLower()
         $app = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' } else { Get-RemediationApp -Category $f.Category }
         if (-not $app) { continue }
-        $key = "$($f.Hostname)|$app"
+        # loop20: key the per-(host,app) bucket on the NORMALIZED audit host key
+        # (IPv4-whole, else pre-dot short name upper) so one physical box exported
+        # as WEB01 in one row and web01.dom in another folds to ONE plan row / ONE
+        # summary host - completing the loop13 sweep that already normalized the
+        # adjacent Other-group host count. The status setter (Invoke mark-remediation)
+        # keys the SAME way, so the persisted status still lines up. Keep the raw
+        # first-seen Hostname for display.
+        $hk  = Get-ReportsAuditHostKey ([string]$f.Hostname)
+        $key = "$hk|$app"
         if (-not $bucket.ContainsKey($key)) {
             $bucket[$key] = @{
                 Hostname        = $f.Hostname
@@ -1875,8 +1883,12 @@ function Build-RemediationPlan {
     $hostsBy = @{ Chrome=@{}; Edge=@{}; Office=@{}; Defender=@{}; KB=@{}; Other=@{} }
     foreach ($r in $rows) {
         if ($r.Status -eq 'Pushed' -or $r.Status -eq 'Skipped') { continue }
-        if (-not $hostsBy[$r.App].ContainsKey($r.Hostname)) {
-            $hostsBy[$r.App][$r.Hostname] = $true
+        # loop20: count DISTINCT hosts per app on the normalized key (rows are now
+        # already one-per-(normalized-host,app), but normalize here too so the summary
+        # can never double-count a short+FQDN pair).
+        $rHk = Get-ReportsAuditHostKey ([string]$r.Hostname)
+        if (-not $hostsBy[$r.App].ContainsKey($rHk)) {
+            $hostsBy[$r.App][$rHk] = $true
             $summary[$r.App]++
         }
     }
@@ -5995,7 +6007,10 @@ function Invoke-JanetToolAction {
                     return @{ rows=@(); summary=@{ total=0; app=$appCanon; status=$statusCanon } }
                 }
                 foreach ($r in $planRows) {
-                    $key = "$($r.Hostname)|$($r.App)"
+                    # loop20: build the status key the SAME normalized way Build-RemediationPlan
+                    # keys its bucket ($hk|$app), so a status marked here is found by the reader
+                    # even when the plan row's display Hostname is an FQDN.
+                    $key = "$(Get-ReportsAuditHostKey ([string]$r.Hostname))|$($r.App)"
                     if ($statusCanon -eq 'Pending') { $script:RemediationStatus.Remove($key) }
                     else { $script:RemediationStatus[$key] = @{ Status=$statusCanon; By=$by; Date=$date; Notes='' } }
                 }

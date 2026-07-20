@@ -77,9 +77,9 @@ Describe 'reports CSV import - a correct template parses findings and does NOT w
     }
 }
 
-Describe 'reports - manifest exact version pin (newest bump = loop-19 wrong-template hint)' {
-    It 'reports is at v2.14.23' {
+Describe 'reports - manifest version floor (loop-19 wrong-template hint landed at 2.14.23)' {
+    It 'reports is at version >= 2.14.23 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '2.14.23'
+        ([version][string]$mani.version -ge [version]'2.14.23') | Should Be $true
     }
 }
