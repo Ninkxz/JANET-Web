@@ -24,17 +24,23 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
 2. ~~Report-preview sandbox backstop~~ — **CLOSED loop 3** (`902a00c`): CSP
    `sandbox allow-scripts` on the preview response (opaque origin — simpler than the
    srcdoc-iframe rebuild). Live-fire caveat: eyeball a report preview in-browser.
-3. **Host-header validation** (loop-1 P3-4, defense-in-depth) — reject `Host` other
-   than `127.0.0.1:<port>` / `localhost:<port>` on the listener.
+3. ~~Host-header validation~~ — **CLOSED loop 4** (`2b7423f`): probe-confirmed
+   exposure, 421 on any Host but `127.0.0.1:<port>`/`localhost:<port>`.
 4. **Token on child-process command line** (loop-1 P3-3) — drop/replace the
    `cmd.exe /c start` browser-open fallback in the launcher.
 5. **SECRET parity backlog** — see per-loop review docs ("SECRET parity:" lines);
    currently: c2c durability trio (pre-series), acas honest-Chrome + worker
    passthrough, session disarm, honest-Edge (wpt+acas; re-route SC pointers for
-   SIPR), report-preview CSP sandbox, wpt audit-Skipped fix.
-6. **SKIP-books-green reporting note** (loop-2 Opus P3-3, pre-existing) — `AcasOkOf`
-   counts `SKIP*` as OK so run-all "patched" tallies include not-installed hosts;
-   split SKIP out of the tallies if the operator wants stricter counts.
+   SIPR), report-preview CSP sandbox, wpt audit-Skipped fix, Host-header guard.
+6. **SKIP-books-green reporting note** (loop-2 Opus P3-3 + loop-4 F14, pre-existing) —
+   `AcasOkOf` counts `SKIP*` as OK so acas run-all "patched" tallies include
+   not-installed hosts; symmetrically wpt's run summary counts a Skipped host under
+   Failed while its audit says Skipped. Reconcile the tallies if the operator wants
+   stricter counts.
+7. **Report-resource-free guard** (loop-4 Opus F8) — the report-preview `sandbox`
+   silently breaks if a future report adds `window.print()`, `<a download>`, or any
+   external `<script src>`/`<link>`/`<img src="/">`. Add a static test asserting the
+   reports.psm1 output stays fully inline so the constraint is discoverable.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -85,3 +91,17 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   iframe rebuild. Tests: +`Server.ReportPreviewSandbox` (10) + 2 audit-map asserts.
   Pester 1042→**1054** green. Process fix adopted: one full-suite run after the
   last code commit (stop racing). SECRET parity: +preview sandbox, +audit-Skipped.
+- **Loop 4 (DONE 2026-07-20):** Opus adversarial self-review of the loop-3 fixes →
+  `janetweb-review-loop4.md` (**GREEN**, 0 P1/P2 — enforcing-header sandbox honored,
+  opaque-origin token-theft closure confirmed, report engine emits zero external
+  resources, audit-map change isolated + `'Skipped'` a legal `-Result`). Forward
+  notes captured: F7 (wording), F8 → new ranked item 7 (report-resource-free guard),
+  F9 (live-fire smoke), F14 → folded into item 6. Sonnet re-verify: all 5 PASS
+  (133/133). **Workstream: closed ranked item 3 — Host-header guard** (`2b7423f`):
+  a raw-socket probe **confirmed** http.sys serves an IP-literal listener regardless
+  of Host (`evil.example.com` → 200), upgrading loop-1's speculative item to
+  confirmed-exposed; guard fails closed at the top of the request loop (before static
+  AND /api) — only `127.0.0.1:$Port`/`localhost:$Port` served, else **421**. Tests:
+  +`Server.HostHeader` (8, real server + raw sockets). Pester 1054→**1063** green
+  (authoritative single post-commit run). New ranked item 7. SECRET parity:
+  +Host-header guard.
