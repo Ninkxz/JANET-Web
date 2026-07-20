@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.4'
+        version  = '6.8.5'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -6216,7 +6216,9 @@ function Invoke-JanetToolAction {
             if (-not $doTemp -and -not $doProf -and -not $doCache) { $doTemp = $true }
             $days = 60; $daysParsed = 0; if ($Params.ContainsKey('days') -and -not [string]::IsNullOrWhiteSpace([string]$Params['days']) -and [int]::TryParse([string]$Params['days'], [ref]$daysParsed)) { $days = $daysParsed }
             $dry = $true
-            if ($Params.ContainsKey('dryrun') -and $null -ne $Params['dryrun']) { $dry = [bool]$Params['dryrun'] }
+            # loop11: ConvertTo-WptBool, not raw [bool] ([bool]'false' is $true in PS -
+            # a dryrun='false' string would silently run dry instead of the operator's live).
+            if ($Params.ContainsKey('dryrun') -and $null -ne $Params['dryrun']) { $dry = ConvertTo-WptBool $Params['dryrun'] }
             $auditAct = if ($dry) { 'TouchHost' } else { 'VulnPatched' }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptCleanBlock -AuditAction $auditAct `
@@ -6250,7 +6252,11 @@ function Invoke-JanetToolAction {
             foreach ($a in 'chrome','firefox','zoom','teams','webex') { if ($Params.ContainsKey($a) -and [bool]$Params[$a]) { [void]$apps.Add($a) } }
             if ($apps.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Select at least one app to clean.' }; return @{ rows=@(); summary=@{ total=$targets.Count } } }
             $appsCsv = (@($apps)) -join ','
-            $dry = $true; if ($Params.ContainsKey('dryrun') -and $null -ne $Params['dryrun']) { $dry = [bool]$Params['dryrun'] }
+            # loop11: coerce via ConvertTo-WptBool, not raw [bool] - [bool]'false' is $true
+            # in PS, which would silently turn a LIVE clean (operator sent dryrun='false')
+            # into a no-op dry run AND skip the live-only self-guard. $dry gates both the
+            # deletion and the self-guard, so this coercion is a destructive trust boundary.
+            $dry = $true; if ($Params.ContainsKey('dryrun') -and $null -ne $Params['dryrun']) { $dry = ConvertTo-WptBool $Params['dryrun'] }
             $auditAct = if ($dry) { 'TouchHost' } else { 'VulnPatched' }
             # Self-guard (loop10 audit): a LIVE clean deletes app binaries (Chrome/
             # Firefox/Zoom/Teams/Webex) from every user profile - removing software

@@ -31,11 +31,36 @@ function Has-SelfGuardWarn($o) {
 }
 $script:Me = $env:COMPUTERNAME
 
-Describe 'WPT 6.8.4 - manifest loads at the bumped version' {
+Describe 'WPT 6.8.5 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is wpt and version is 6.8.4' {
+    It 'manifest id is wpt and version is 6.8.5' {
         [string]$mani.id      | Should Be 'wpt'
-        [string]$mani.version | Should Be '6.8.4'
+        [string]$mani.version | Should Be '6.8.5'
+    }
+}
+
+Describe 'WPT 6.8.5 - clean-user-apps honors a dryrun STRING correctly (loop11 coercion fix)' {
+    # [bool]'false' is $true in PS - the raw coercion would turn a dryrun='false'
+    # string (operator means LIVE) into a dry no-op AND skip the live-only self-guard.
+    # ConvertTo-WptBool maps 'false' -> $false, so a self-only LIVE clean is guarded.
+    It 'dryrun="false" (STRING) is treated as LIVE -> self-guard fires on a self target' {
+        $o = Invoke-Wpt 'clean-user-apps' @{ targets = '127.0.0.1'; chrome = $true; dryrun = 'false' }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+    It 'dryrun="true" (STRING) stays dry -> no self-guard (guard is live-only)' {
+        # dry stays dry: swap the worker block so the dry fan-out makes no real WinRM call.
+        $evs = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$evs.Add($e) }
+        $null = & $m {
+            param($em)
+            $orig = $script:WptCleanUserAppsBlock
+            $script:WptCleanUserAppsBlock = { param($h,$c,$a,$apps,$dry) @{ Host=$h; Status='Dry Run OK'; AppsRemoved=0; FreedMB=0; Detail='fake'; Events=@() } }
+            try {
+                Invoke-JanetToolAction -ActionId 'clean-user-apps' -Params @{ targets='127.0.0.1'; chrome=$true; dryrun='true'; threads=1 } -Credential $null -Emit $em
+            } finally { $script:WptCleanUserAppsBlock = $orig }
+        } $emit
+        @($evs | Where-Object { $_.type -eq 'log' -and $_.level -eq 'warn' -and $_.text -match 'Self-guard' }).Count | Should Be 0
     }
 }
 
