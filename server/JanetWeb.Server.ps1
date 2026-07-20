@@ -379,6 +379,22 @@ function Start-JanetWebServer {
                 $path = $req.Url.AbsolutePath
                 $verb = $req.HttpMethod
 
+                # ---- Host-header guard (loop-4, roadmap item 3) ----
+                # http.sys routes an IP-LITERAL prefix by destination ip:port, NOT by
+                # the Host string - a live probe (loop 4) showed 'Host: evil.example.com'
+                # reaching this loop and being served 200. A DNS-rebound page (attacker
+                # hostname re-resolving to 127.0.0.1) is same-origin to its own name,
+                # letting it read responses from the no-token surfaces (static UI,
+                # report-preview). Fail closed: serve only the two names a legitimate
+                # local browser can send; anything else - including a missing Host -
+                # gets 421 Misdirected and no content. (-ne is case-insensitive in PS,
+                # which matches hostname semantics.)
+                $hostHdr = [string]$req.Headers['Host']
+                if ($hostHdr -ne "127.0.0.1:$Port" -and $hostHdr -ne "localhost:$Port") {
+                    & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes('misdirected (bad Host header)')) 421 'text/plain'
+                    continue
+                }
+
                 # ---- static assets (no token; UI code only) ----
                 # Path-traversal defense + dev/underscore-asset 404 live in the extracted,
                 # unit-tested Get-JanetWebAssetPath (loop13). $null -> 404; a real in-root
