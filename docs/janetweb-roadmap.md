@@ -37,10 +37,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    not-installed hosts; symmetrically wpt's run summary counts a Skipped host under
    Failed while its audit says Skipped. Reconcile the tallies if the operator wants
    stricter counts.
-7. **Report-resource-free guard** (loop-4 Opus F8) — the report-preview `sandbox`
-   silently breaks if a future report adds `window.print()`, `<a download>`, or any
-   external `<script src>`/`<link>`/`<img src="/">`. Add a static test asserting the
-   reports.psm1 output stays fully inline so the constraint is discoverable.
+7. ~~Report-resource-free guard~~ — **CLOSED loop 7** (`928d1ba`): static guard
+   (`Reports.SandboxResourceFree.Tests.ps1`, 12) asserts the report module stays
+   self-contained + the server CSP still leads `sandbox allow-scripts`.
 8. ~~Host-guard test gaps + non-default-port note~~ — **CLOSED loop 6** (`2c96c16`):
    empty/absent-Host + cancel-route cases pinned (probe-first), F1 comment added.
 
@@ -140,3 +139,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   Pester 1072→**1077** green (the baseline run raced the edits and returned 1077 too —
   known SMB file-race; 1072 is the loop-5-close baseline on the untouched tree). No new
   ranked items. SECRET parity: +extended Host-guard cases.
+- **Loop 7 (DONE 2026-07-20):** Opus adversarial self-review of the loop-6 Host-guard
+  tests → `janetweb-review-loop7.md` (**GREEN**, 0 P1/P2 — cancel-route 200 traced to a
+  real idempotent-cancel contract, foreign-Host 421 to the guard-before-`?t=` ordering,
+  raw-socket helper can only fail-closed). Accepted P3 F3 (empty-Host asserts pin exact
+  421, http.sys-build-dependent, false-RED only). No Sonnet re-verify (loop 6 = test +
+  comment). **Workstream: closed ranked item 7 — report-preview sandbox-resource-free
+  guard** (`928d1ba`): `Reports.SandboxResourceFree.Tests.ps1` (12) statically asserts
+  the report module stays self-contained (no external script/link/img/iframe, no
+  src=/href=/download= attr, no @import/url()/print) AND the server CSP still leads
+  `sandbox allow-scripts`, coupling the guard to what it guards so the loop-3 backstop
+  can't silently rot. HTML-context-anchored patterns (a `$src` PS var is not a false
+  positive — caught during authoring). Test-only, no version bump. Pester 1077→**1089**
+  green (authoritative post-commit run). No new ranked items. **Backlog note:** item 7
+  was the last cheap concretely-scoped tracked item — remaining are decision-gated
+  (SECRET parity) or low-value speculative (item 4 token-on-cmdline, item 6 SKIP-tally);
+  loop 8+ rotates to fresh tool deep-dives (acas/reports/c2c engines have unreviewed
+  depth). SECRET parity: +report sandbox resource-free guard.
