@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.1'
+        version  = '6.8.2'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -6399,7 +6399,7 @@ function Invoke-JanetToolAction {
                 -Work $script:WptAppUpdateBlock -AuditAction 'VulnPatched' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $false) } `
                 -OkOf { param($r) ($r.Status -eq 'OK') } `
-                -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ("$($r.Status)" -eq 'Pending') { 'Skipped' } else { 'Failure' } } `
+                -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ("$($r.Status)" -eq 'Pending' -or "$($r.Status)" -eq 'Skipped') { 'Skipped' } else { 'Failure' } } `
                 -AuditDetail ({ param($r) "$($r.Detail)$cmdAuditTag" }.GetNewClosure()) `
                 -RowOf { param($r) @{ Host=$r.Host; Status=[string]$r.Status; Detail=[string]$r.Detail } }
         }

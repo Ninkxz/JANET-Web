@@ -21,11 +21,25 @@ $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -
 $profiles = & $m { Get-WptAppUpdateProfiles }
 $name = 'Microsoft Edge - Update'
 
-Describe 'WPT 6.8.1 - manifest loads at the bumped version' {
+Describe 'WPT 6.8.2 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is wpt and version is 6.8.1' {
+    It 'manifest id is wpt and version is 6.8.2' {
         [string]$mani.id      | Should Be 'wpt'
-        [string]$mani.version | Should Be '6.8.1'
+        [string]$mani.version | Should Be '6.8.2'
+    }
+}
+
+Describe 'WPT 6.8.2 - app-update audit books SKIP as Skipped, not Failure (loop-3 Opus P3-1)' {
+    # A not-installed host (SKIP: from the honest Chrome/Edge Scripts) rendered
+    # Skipped in the UI row but was booked as audit FAILURE - the AuditResultOf
+    # map only special-cased Pending. Both non-attempt states now audit Skipped.
+    $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+    It 'the AuditResultOf map sends both Pending and Skipped to the Skipped bucket' {
+        $lit = '-eq ''Pending'' -or "$($r.Status)" -eq ''Skipped'') { ''Skipped'' }'
+        ($moduleSrc.IndexOf($lit) -ge 0) | Should Be $true
+    }
+    It 'a genuine failure still books Failure (else-arm preserved)' {
+        ($moduleSrc -match "else \{ 'Failure' \}") | Should Be $true
     }
 }
 

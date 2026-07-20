@@ -128,9 +128,12 @@ Describe 'PENDING is its own pipeline state (classifier + audit, static analysis
         ($blk -match "PENDING\*") | Should Be $true
         ($blk -match "'Pending'") | Should Be $true
     }
-    It 'the app-update-apply dispatcher audits a Pending row as Skipped, never plain Failure' {
+    It 'the app-update-apply dispatcher audits Pending AND Skipped rows as Skipped, never plain Failure' {
+        # 6.8.2 (loop-3 Opus P3-1): Skipped joined Pending in the Skipped audit
+        # bucket - a not-installed SKIP host used to book as audit Failure.
         ($moduleSrc -match 'AuditResultOf') | Should Be $true
-        ($moduleSrc -match "-eq 'Pending'\)\s*\{\s*'Skipped'\s*\}") | Should Be $true
+        $lit = '-eq ''Pending'' -or "$($r.Status)" -eq ''Skipped'') { ''Skipped'' }'
+        ($moduleSrc.IndexOf($lit) -ge 0) | Should Be $true
     }
     It 'Invoke-WptFanOut keeps the binary Success/Failure audit default when AuditResultOf is not supplied' {
         ($moduleSrc -match 'if \(\$AuditResultOf\)') | Should Be $true
