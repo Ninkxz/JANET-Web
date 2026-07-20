@@ -49,7 +49,8 @@ Two deliverables:
    comment so a future reader doesn't assume the manual path is unguarded (it is guarded).
 2. **Test-coverage growth (the real value):** before this loop the critical
    live-uninstall-requires-selection refusal had **zero** behavioral coverage (only the
-   self-guard drop was tested). Added `Upr.LiveSelectionRefuse.Tests.ps1` (10 asserts):
+   self-guard drop was tested). Added `Upr.LiveSelectionRefuse.Tests.ps1` (9 asserts;
+   the fix commit message mis-stated 10 — the ledger records the true count):
    manual-uninstall live + no selection → Refused/total 0/no fan-out; manual dry-run does
    NOT refuse (self-guard still short-circuits, no host contact); report-uninstall live +
    no selection (fed a one-row in-memory "Unsupported" CSV so findings>0) → Refused before

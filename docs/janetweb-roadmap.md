@@ -41,6 +41,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    silently breaks if a future report adds `window.print()`, `<a download>`, or any
    external `<script src>`/`<link>`/`<img src="/">`. Add a static test asserting the
    reports.psm1 output stays fully inline so the constraint is discoverable.
+8. **Host-guard test gaps + non-default-port note** (loop-4 Opus F1/F6) — add
+   `Server.HostHeader` cases for a truly absent Host header and the legit
+   `POST /api/job/<id>/cancel?t=` route; one-line code comment that the guard assumes
+   a non-default port (a hardcoded `-Port 80/443` would 421 the UI itself).
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -102,6 +106,22 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   of Host (`evil.example.com` → 200), upgrading loop-1's speculative item to
   confirmed-exposed; guard fails closed at the top of the request loop (before static
   AND /api) — only `127.0.0.1:$Port`/`localhost:$Port` served, else **421**. Tests:
-  +`Server.HostHeader` (8, real server + raw sockets). Pester 1054→**1063** green
+  +`Server.HostHeader` (9, real server + raw sockets). Pester 1054→**1063** green
   (authoritative single post-commit run). New ranked item 7. SECRET parity:
   +Host-header guard.
+- **Loop 5 (DONE 2026-07-20):** Opus adversarial self-review of the loop-4 Host-guard
+  → `janetweb-review-loop5.md` (**GREEN**, 0 P1/P2 — the availability risk cleared
+  against every real caller: sendBeacon/SPA fetches same-origin, launcher poll raw-TCP,
+  prod port always ≥8089 so no bare-Host omission). Sonnet re-verify: all 5 PASS
+  (65/65). **Workstream: fresh deep-dive on `upr`** (destructive Unsupported Product
+  Remediator, never loop-reviewed) → **found solid** on every pattern (confirm-word,
+  dual-path self-guard, DNS-mismatch hard-abort, cmd-less uninstall-string decompose,
+  protected-agent skip, live-requires-selection refusal). Honest clean-deep-dive
+  outcome = **lock in the untested fail-closed behavior** (`373e7cc`): added
+  `Upr.LiveSelectionRefuse.Tests.ps1` (**9** asserts — the critical live-uninstall-
+  requires-selection refusal on BOTH paths, which had zero behavioral coverage; real
+  dispatcher, zero WinRM) + a comment-accuracy fix (shared `$UprWorkerBlock` was
+  mislabeled "report-uninstall only"; the DNS-mismatch abort guards both). No tool
+  behavior changed → no version bump. Pester 1063→**1072** green (authoritative single
+  post-commit run). New ranked item 8 (Opus F1/F6 Host-guard gaps). SECRET parity:
+  +upr refuse coverage + worker comment.
