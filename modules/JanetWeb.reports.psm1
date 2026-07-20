@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.20'
+        version  = '2.14.21'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -1830,8 +1830,10 @@ function Build-RemediationPlan {
                 }
             }
             $g = $otherByPlugin[$pluginIdKey]
-            [void]$g.Hosts.Add($f.Hostname)
-            if ($f.InKEV) { [void]$g.KevHosts.Add($f.Hostname) }
+            # loop13: TargetCount / KevCount count DISTINCT hosts - key on the normalized audit
+            # key so a short+FQDN pair of one host is not counted twice (agrees with CORA).
+            $g_hk = Get-ReportsAuditHostKey ([string]$f.Hostname)
+            if ($g_hk) { [void]$g.Hosts.Add($g_hk); if ($f.InKEV) { [void]$g.KevHosts.Add($g_hk) } }
             $g.FindingCount++
             if ($sevRank -gt $g.SeverityRank) { $g.SeverityRank = $sevRank; $g.MaxSeverity = $f.Severity }
             foreach ($v in (Get-VersionsFromText -Text $f.Solution)) {
@@ -5037,7 +5039,9 @@ function Invoke-JanetToolAction {
                 $kbs = @(Get-ReportsKbsFromText ("$($f.VulnName) $($f.Solution)"))
                 if ($kbs.Count -eq 0) { $noKb++; continue }
                 $withKb++
-                $hn = [string]$f.Hostname
+                # loop13: per-KB host count + the per-host KB set both count DISTINCT hosts -
+                # key on the normalized audit key so short+FQDN of one host folds to one.
+                $hn = Get-ReportsAuditHostKey ([string]$f.Hostname)
                 $sev = [string]$f.Severity
                 $isKev = [bool]$f.InKEV
                 foreach ($kb in $kbs) {
@@ -6154,12 +6158,16 @@ function Invoke-JanetToolAction {
                     else { $bucket = 'ON-TRACK'; $cOnTrack++ }
                 }
 
-                if (-not $perHost.ContainsKey($hn)) { $perHost[$hn] = @{ Host=$hn; Overdue=0; DueSoon=0; OnTrack=0; Untracked=0 } }
+                # loop13: tally per-host by the normalized audit key so a short+FQDN pair of
+                # the SAME host is one row (agrees with CORA UniqueHosts + the SLA ledger key
+                # already used at the top of this loop). Display the normalized key, like CORA.
+                $hk = Get-ReportsAuditHostKey $hn
+                if (-not $perHost.ContainsKey($hk)) { $perHost[$hk] = @{ Host=$hk; Overdue=0; DueSoon=0; OnTrack=0; Untracked=0 } }
                 switch ($bucket) {
-                    'OVERDUE'       { $perHost[$hn].Overdue++ }
-                    'DUE-SOON'      { $perHost[$hn].DueSoon++ }
-                    'ON-TRACK'      { $perHost[$hn].OnTrack++ }
-                    'NEW-UNTRACKED' { $perHost[$hn].Untracked++ }
+                    'OVERDUE'       { $perHost[$hk].Overdue++ }
+                    'DUE-SOON'      { $perHost[$hk].DueSoon++ }
+                    'ON-TRACK'      { $perHost[$hk].OnTrack++ }
+                    'NEW-UNTRACKED' { $perHost[$hk].Untracked++ }
                 }
 
                 $iava = [string]$f.IAVA
@@ -7047,7 +7055,11 @@ function Invoke-JanetToolAction {
                 foreach ($f in $script:AcasFindings) {
                     if (-not (& $openFilter $f)) { continue }
                     if (-not [bool]$f.InKEV) { continue }
-                    if (-not [string]::IsNullOrWhiteSpace([string]$f.Hostname)) { [void]$kevHosts.Add([string]$f.Hostname) }
+                    # loop13: count DISTINCT KEV hosts by the normalized audit key (short+FQDN
+                    # of one host fold to one) so "Hosts=" agrees with CORA. The per-finding
+                    # kevItems row below keeps the RAW hostname (it names the specific finding).
+                    $hk = Get-ReportsAuditHostKey ([string]$f.Hostname)
+                    if (-not [string]::IsNullOrWhiteSpace($hk)) { [void]$kevHosts.Add($hk) }
                     $cve = if (-not [string]::IsNullOrWhiteSpace([string]$f.KevCves)) { [string]$f.KevCves } else { [string]$f.CVE }
                     [void]$kevItems.Add(@{ Host=[string]$f.Hostname; Plugin=[string]$f.PluginID; VulnName=[string]$f.VulnName; CVE=$cve })
                 }
@@ -7222,7 +7234,12 @@ function Invoke-JanetToolAction {
                 if ($f.Status -eq 'Patched' -or $f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH') { continue }
                 if (-not [bool]$f.InKEV) { continue }
                 $kevTotal++
-                $hn = [string]$f.Hostname
+                # loop13: key the host tally on the normalized audit key (IPv4-whole, else
+                # short-name upper) so WEB01 and web01.dom fold to ONE host - agreeing with
+                # CORA's UniqueHosts (Build-CoraSummary uses the same key). Keying on the raw
+                # hostname double-counted a host that appeared as both short + FQDN, making
+                # KevHostsCount contradict UniqueHosts within this same digest.
+                $hn = Get-ReportsAuditHostKey ([string]$f.Hostname)
                 if ([string]::IsNullOrWhiteSpace($hn)) { continue }
                 if (-not $kevHostMap.ContainsKey($hn)) { $kevHostMap[$hn] = 0 }
                 $kevHostMap[$hn] = [int]$kevHostMap[$hn] + 1
