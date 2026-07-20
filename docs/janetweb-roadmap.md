@@ -177,3 +177,23 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   Lockscreen version pin → floor assert. Pester 1089→**1091** green (authoritative
   post-commit run). New ranked item 9 (c2c DHCP-stale local identity, negligible).
   SECRET parity: +c2c orphan-protector fix.
+- **Loop 9 (DONE 2026-07-20):** Opus self-review of the loop-8 c2c fix →
+  `janetweb-review-loop9.md` (**GREEN**, deeper pass — `$beforeIds` scope/population,
+  resolved-id byte-identity, fail-closed-on-throw, remoting-safety, test non-vacuity all
+  confirmed). **Workstream: Opus deep-dive on the wpt destructive engine** (the #1 tool,
+  non-Chrome/Edge paths, never reviewed) → **YELLOW, one P2**: `app-update-apply` — which
+  runs Custom Command (arbitrary remote PowerShell) — was the ONLY destructive dispatcher
+  lacking `Remove-WptSelfTargets`; on the dispatcher the wrong-box guard is a no-op (self
+  dialed by its own name), so an operator `Restart-Computer` in the wave would kill the
+  HttpListener mid-dispatch (self-guarded arbitrary RCE against the dispatcher). **Fixed**
+  (`aadab75`, wpt **6.8.2→6.8.3**): all 3 gapped dispatchers (app-update-apply P2 +
+  app-action/unsupported-uninstall P3 — the latter removing the same Java self-guarded
+  `fix-java` removes) now drop the dispatcher before fan-out via the proven 8-call-site
+  block; + a `confirm=` dialog on the arbitrary-RCE action (its only one missing).
+  Everything else in the engine verified CLEAN (uninstall-string decompose, Install-KB
+  traversal-safe, token allowlist, fan-out creds, fail-closed). `app-update-verify`
+  (read-only) stays unguarded. Tests: `Wpt.SelfGuardApply` (9, real dispatcher, zero
+  WinRM); Edge exact pin → floor. Sonnet re-verify: **7/7 PASS** (8→11 self-guard call
+  sites, helpers untouched, no weakening, no cert files). Pester 1091→**1100** green
+  (authoritative post-commit run). No new ranked items. SECRET parity: +3 wpt self-guards
+  + confirm string.
