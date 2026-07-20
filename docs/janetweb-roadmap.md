@@ -395,8 +395,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   display; only the KEY folds. `Reports.RemediationPlanHostKey.Tests.ps1` (4) drives the real builder:
   short+FQDN (FQDN-first) → 1 row + `Summary.Chrome==1`; distinct hosts → `==2` (no over-merge);
   normalized-key status reads back onto the folded row; + exact 2.14.24 pin (loop-19 pin → floor).
-  Pester **1170→(close)** green. **Host-key normalization sweep COMPLETE** for the per-app rollups.
+  Pester **1170→1174** green. **Host-key normalization sweep COMPLETE** for the per-app rollups.
   No new ranked items. SECRET parity: +Build-RemediationPlan host-key fold.
+- **Loop 21 (DONE 2026-07-21):** Fable-inline. Self-review of loop-20 → **GREEN** (grep confirms the
+  3 normalized sites are the ONLY `"$Hostname|$app"` key consumers; no status orphaned). **Workstream:
+  deep-dive on the remediation-SLA aging math** (drives prioritization + the RMF POA&M export).
+  Verified CORRECT: safe baseline loader (positive-int overrides only, so a typo can't force
+  everything overdue), `Get-ReportsSlaDeadline` KEV-override + severity map, and the bucket rule
+  (date-only today, floored age clamped >=0, `soon=max(3,ceil(25%))`, OVERDUE at `dueIn<0`,
+  deadline-day = DUE-SOON). **The finding (durability) → FIXED**: the boundary rule was HAND-DUPLICATED
+  across the two operator-facing SLA views — sla-aging (`:6188`) and the Executive Command Brief
+  (`:7078`) — identical today but a latent drift the moment one copy is edited, and untested.
+  Consolidated into one pure helper `Get-ReportsSlaBucket -Deadline -Age` (`:992`); both sites call
+  it. Behavior-identical → **NO version bump** (manifest version = behavioral-change signal; this is
+  internal single-source-of-truth consolidation). `Reports.SlaBucket.Tests.ps1` (18) pins every edge:
+  threshold transitions, deadline-day boundary, the 3-day floor beating 25% on short KEV windows, the
+  zero-deadline no-divide guard, + the severity-map/KEV override. Pester **1174→(close)** green. The
+  two SLA dashboards can no longer drift. No new ranked items. SECRET parity: +Get-ReportsSlaBucket
+  consolidation.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
