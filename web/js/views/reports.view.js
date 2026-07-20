@@ -123,14 +123,14 @@
       // ---------- artifact bar factory --------------------------------------------
       // Report actions deliver generated text on the final summary; show Download +
       // (for HTML) Open buttons once a run completes.
-      // SECURITY NOTE (loop-1 review): despite the function name, this window is
-      // SAME-ORIGIN to the SPA (plain window.open, no sandbox attribute is possible
-      // on a window) and /api/report-preview is served with a relaxed CSP
-      // (script-src 'unsafe-inline'). It therefore inherits sessionStorage incl.
-      // the API token. The ONLY barrier between report-field content and
-      // token-theft XSS is the report engine's ConvertTo-HtmlEscaped on every
-      // data field - treat any unescaped field in reports.psm1 as a P1.
-      // Roadmap: render via srcdoc + sandbox="allow-scripts" iframe for a backstop.
+      // SECURITY NOTE (loop-1 review, backstop landed loop-3): the popup itself is
+      // a plain same-origin window.open, but the /api/report-preview response is
+      // served with CSP "sandbox allow-scripts" - the DOCUMENT gets an opaque
+      // origin once it loads, so a hostile script smuggled past field escaping
+      // cannot read the SPA's sessionStorage token or call /api same-origin.
+      // First line of defense is still ConvertTo-HtmlEscaped on every report data
+      // field (treat an unescaped field in reports.psm1 as a P1); the sandbox is
+      // the backstop. Never add allow-same-origin to that CSP.
       function openHtmlSandboxed(htmlText, titleText) {
         var w = window.open('', '_blank');
         if (!w) {

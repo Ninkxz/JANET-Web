@@ -402,11 +402,19 @@ function Start-JanetWebServer {
                 # script-src so the generated report's inline <script> (the Dirty 30
                 # pill filters / live search) runs; a data: URI would inherit the SPA's
                 # strict script-src (CSP3 policy-container inheritance) and stay dead.
+                # The CSP 'sandbox allow-scripts' directive (loop-3, roadmap item 2) is
+                # the XSS backstop: the document gets an OPAQUE origin, so even if an
+                # unescaped report field ever smuggled a hostile <script> past
+                # ConvertTo-HtmlEscaped, it cannot read the SPA's sessionStorage token
+                # (opaque origin -> storage access throws) and cannot call /api
+                # same-origin. The report's own inline script is pure-DOM (pill
+                # filters/search) and runs fine under allow-scripts. Deliberately NO
+                # allow-same-origin - adding it would delete the entire backstop.
                 if ($verb -eq 'GET' -and $path -eq '/api/report-preview') {
                     $rid = [string]$req.QueryString['id']
                     $rp = $null; if (-not [string]::IsNullOrWhiteSpace($rid)) { $rp = $state.ReportPreviews[$rid] }
                     if ($rp) { [void]$state.ReportPreviews.Remove($rid) }
-                    $reportCsp = "default-src 'self'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'"
+                    $reportCsp = "sandbox allow-scripts; default-src 'self'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'"
                     $body = if ($rp) { [string]$rp.Html } else { '<!doctype html><meta charset="utf-8"><title>Report preview</title><body style="font-family:Segoe UI,sans-serif;background:#08080C;color:#c8c8d0;padding:28px">This report preview has expired or was already opened. Re-open it from the Reports tool.</body>' }
                     & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes($body)) 200 'text/html; charset=utf-8' $reportCsp
                     continue
