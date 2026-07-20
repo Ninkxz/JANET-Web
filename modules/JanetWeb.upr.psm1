@@ -877,7 +877,10 @@ $UprWorkerBlock = {
             }
             $candidates = $uniq
 
-            ## --- Uninstall pass (report-uninstall only) ---
+            ## --- Uninstall pass (both uninstall actions) ---
+            ## This worker ($UprWorkerBlock) is SHARED: report-uninstall AND
+            ## manual-uninstall both dispatch it via Invoke-UprFanOut with
+            ## $DoUninstall=$true, so the DNS-mismatch hard-abort below guards BOTH.
             if ($DoUninstall) {
                 ## DNS-mismatch guard (HARD ABORT): UPR uninstall is PERMANENT removal, and
                 ## the Tenable PDF hands back stale/ambiguous host tokens (see ~330-345), so
