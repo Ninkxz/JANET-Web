@@ -127,7 +127,9 @@ Describe 'Secure Boot scan - manifest contract' {
         [bool]$enable.destructive | Should Be $true
     }
 
-    It 'bumps the tool version to 1.6.0' {
-        $man.version | Should Be '1.6.0'
+    It 'tool version is at least 1.6.0' {
+        # Floor assert (wpt-suite precedent): the newest bump's own file
+        # (Secureboot.ConfirmWord, v1.6.1) carries the exact pin; older files floor.
+        ([version]$man.version -ge [version]'1.6.0') | Should Be $true
     }
 }

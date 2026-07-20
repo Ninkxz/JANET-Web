@@ -315,6 +315,21 @@
 
       async function doRun() {
         var isDry = dryCb._cb.checked;
+        // loop15: typed-word confirm on a LIVE firmware write (dry run is a harmless
+        // preflight, no gate) - the destructive-action contract's second barrier, matching
+        // remoteadmin 'RUN' / c2c 'FIX'. The server admin-session gate is the first barrier;
+        // this stops an accidental click from writing Secure Boot across a wave of hosts.
+        if (!isDry) {
+          var okEnable = await ctx.confirm({
+            title: 'Enable Secure Boot on ' + targets.hosts().length + ' host(s)?',
+            danger: true,
+            confirmWord: 'ENABLE',
+            body: 'You are about to write a <b>UEFI Secure Boot firmware setting</b> on ' + targets.hosts().length + ' target host(s). Each enabled host is left <b>PENDING A REBOOT</b>. The JANET dispatcher is auto-excluded (self-guard), and JANET verifies UEFI+GPT boot safety per host and skips anything it cannot confirm safe - but this is a firmware change. Type <b>ENABLE</b> to arm.',
+            list: targets.hosts().slice(0, 6),
+            okText: 'Enable', cancelText: 'Cancel'
+          });
+          if (!okEnable) return;
+        }
         // empty-password gate (live only) -> the desktop's Yes/No confirm
         var allowEmpty = false;
         if (!isDry && (pwInput.value || '') === '') {

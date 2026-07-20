@@ -25,7 +25,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.0'
+        version  = '1.6.1'
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -48,6 +48,7 @@ function Get-JanetToolManifest {
                 description = 'Enable Secure Boot across target machines with OEM-specific WMI payloads (Dell/HP/Lenovo). Validates UEFI+GPT boot safety, detects manufacturer, writes the firmware setting, and polls the result JSON from the C$ admin share. Dry Run does a TCP (5985/5986/445) reachability + WinRM manufacturer preflight only.'
                 kind        = 'stream-table'
                 destructive = $true
+                confirm     = 'Write the UEFI Secure Boot firmware setting on the selected host(s)? Each enabled host is left PENDING A REBOOT; the JANET dispatcher is auto-excluded (self-guard) and JANET skips any host it cannot confirm is on a safe UEFI+GPT boot path. A live run (not Dry Run) requires typing ENABLE to arm. Proceed?'
                 columns     = @('Host','Status','Manufacturer','Before','After','SetResult','Error')
                 inputs      = @(
                     @{ name='targets';            label='Targets (one host per line, max 50)'; type='hostlist'; required=$true },
