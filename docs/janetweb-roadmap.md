@@ -379,8 +379,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   callers pass it). `Reports.WrongTemplateHint.Tests.ps1` (5) drives the real parser via temp CSVs
   + captured `-Emit`: wrong-template warns + names missing columns, plugin-only-missing, positive
   control (parses, no false warn), + exact 2.14.23 pin; prior exact pin in HostCountAgreement → `-ge`
-  floor. Pester **1165→(close)** green. Both importers now fail LOUD on a wrong template. No new
+  floor. Pester **1165→1170** green. Both importers now fail LOUD on a wrong template. No new
   ranked items. SECRET parity: +reports wrong-template hint (Parse-AcasFile).
+- **Loop 20 (DONE 2026-07-21):** Fable-inline. Self-review of loop-19 → **GREEN** (wrong-template
+  warn sits after the empty-header early-return, never false-warns; authoritative 1170). **Workstream:
+  COMPLETE the reports host-key normalization sweep** (standing open item since loop 14). Loops 13-14
+  normalized compare/closure/CORA host counts; the tail was `Build-RemediationPlan` (`:1793`), the
+  Remediation Plan. **The gap (correctness) → FIXED** (reports **2.14.23→2.14.24**): the per-(host,app)
+  bucket key (`:1802`) and per-app summary host count (`:1878`) were keyed on the RAW hostname, so a
+  short+FQDN pair of one box made TWO plan rows + counted TWO hosts — while the ADJACENT Other-group
+  count (`:1852-1855`) had ALREADY been normalized in loop 13 (proof it was an oversight, not intent).
+  The bucket key also doubles as the session status key (read `:1868`, written `:5998`), so the fix
+  normalizes THREE coupled sites (bucket + summary + status setter) on `Get-ReportsAuditHostKey` — or
+  a marked status would land on a key the reader never checks. Raw first-seen Hostname kept for
+  display; only the KEY folds. `Reports.RemediationPlanHostKey.Tests.ps1` (4) drives the real builder:
+  short+FQDN (FQDN-first) → 1 row + `Summary.Chrome==1`; distinct hosts → `==2` (no over-merge);
+  normalized-key status reads back onto the folded row; + exact 2.14.24 pin (loop-19 pin → floor).
+  Pester **1170→(close)** green. **Host-key normalization sweep COMPLETE** for the per-app rollups.
+  No new ranked items. SECRET parity: +Build-RemediationPlan host-key fold.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
