@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.3'
+        version  = '6.8.4'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -5650,7 +5650,7 @@ function Invoke-JanetToolAction {
             $hostList = $guarded.Targets
             if ($hostList.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No host/app pairs to uninstall (check Uninstall-tagged rows on the Unsupported Software Scan grid first, and note the dispatcher host is self-guarded).' }
-                return @{ rows=@(); summary=@{ total=0 } }
+                return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } }
             }
             $totalUnits = [int](($hostList | ForEach-Object { $byHost[$_].Count } | Measure-Object -Sum).Sum)
             & $send @{ type='status'; text="Uninstalling $totalUnits unsupported product(s) across $($hostList.Count) host(s) with $threads thread(s)..." }
@@ -6252,6 +6252,16 @@ function Invoke-JanetToolAction {
             $appsCsv = (@($apps)) -join ','
             $dry = $true; if ($Params.ContainsKey('dryrun') -and $null -ne $Params['dryrun']) { $dry = [bool]$Params['dryrun'] }
             $auditAct = if ($dry) { 'TouchHost' } else { 'VulnPatched' }
+            # Self-guard (loop10 audit): a LIVE clean deletes app binaries (Chrome/
+            # Firefox/Zoom/Teams/Webex) from every user profile - removing software
+            # from the dispatcher is the same harm class as the guarded fix-java /
+            # unsupported-uninstall. Dry-run on self is harmless (preview only), so
+            # guard only the live path (mirrors maintenance-lock hardlock-only).
+            if (-not $dry) {
+                $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+                $targets = $guarded.Targets
+                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to clean (live self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
+            }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send -PerHostTimeoutSeconds 300 `
                 -Work $script:WptCleanUserAppsBlock -AuditAction $auditAct `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $appsCsv, $dry) } `
@@ -6360,12 +6370,14 @@ function Invoke-JanetToolAction {
                 -RowOf { param($r) @{ Host=$r.Host; Version=[string]$r.Version; LastUpdated=[string]$r.LastUpdated; Verified=$(if($null -eq $r.Verified){'n/a'}elseif($r.Verified){'Yes'}else{'No'}); Detail=[string]$r.Detail } }
         }
         'app-update-apply' {
-            # Self-guard (loop9 P2): app-update-apply is the ONLY destructive dispatcher
-            # that lacked it - and it runs the Custom Command profile (arbitrary remote
-            # PowerShell) plus force-update/uninstall profiles. On the dispatcher the
-            # wrong-box guard is a no-op (self is dialed by its own correct name -> no
-            # mismatch), so an operator command like Restart-Computer would kill this
-            # HttpListener mid-dispatch. Drop self BEFORE fan-out, like the other eight.
+            # Self-guard (loop9 P2): app-update-apply runs the Custom Command profile
+            # (arbitrary remote PowerShell) plus force-update/uninstall profiles. On the
+            # dispatcher the wrong-box guard is a no-op (self is dialed by its own correct
+            # name -> no mismatch), so an operator command like Restart-Computer would kill
+            # this HttpListener mid-dispatch. Drop self BEFORE fan-out. (loop10 note: the
+            # loop-9 audit missed clean-user-apps, now also guarded here; the benign-on-self
+            # actions - healers/reboot-abort/message/cleanup/unlock - stay unguarded by
+            # design per the harm-driven self-guard philosophy.)
             $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
             $targets = $guarded.Targets
             if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to run (self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }

@@ -22,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.7'
+        version  = '2.5.8'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -96,6 +96,46 @@ function Test-JanetTargetToken {
         return ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork)
     }
     return ($Token -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$')
+}
+
+# Dispatcher identity + self-guard (loop10 self-guard-coverage audit). deploy-psadt
+# / deploy-msi-bundle install a package (PSADT Deploy-Application.ps1 / msiexec /i)
+# on every target; the wrong-box guard does NOT cover the dispatcher (self is
+# dialed by its own correct name -> no COMPUTERNAME mismatch), so without this an
+# operator wave that includes the JANET host would install arbitrary software on
+# the dispatcher (and a package can reboot it). Mirrors the c2c/upr/remoteadmin
+# identity set: name/FQDN/loopback + every bound NIC IPv4 (DNS-miss-proof).
+function Get-PkgInstallLocalIdentity {
+    if ($script:PkgInstallLocalIdentity) { return ,$script:PkgInstallLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try { $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName; if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) } } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
+    $script:PkgInstallLocalIdentity = $set
+    return ,$set
+}
+
+# True if a target token names this dispatcher host (short/FQDN/IP/loopback).
+function Test-PkgInstallHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-PkgInstallLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }
+    }
+    return $false
 }
 
 function ConvertTo-JanetMsiList {
@@ -688,6 +728,19 @@ function Invoke-JanetToolAction {
     if ($targets.Count -eq 0) {
         & $send @{ type='log'; level='warn'; text='No valid targets.' }
         return @{ rows=@(); summary=@{ total=0 } }
+    }
+
+    # Self-guard (loop10): drop the JANET dispatcher host BEFORE fan-out - a deploy
+    # installs software on the box it runs on otherwise. Unconditional (both deploy
+    # actions always install; there is no dry-run). See Get-PkgInstallLocalIdentity.
+    $selfDrop = @($targets | Where-Object { Test-PkgInstallHostIsSelf $_ })
+    if ($selfDrop.Count -gt 0) {
+        & $send @{ type='log'; level='warn'; text="Self-guard: dropped the JANET dispatcher host from this deploy wave ($($selfDrop -join ', ')) - pkginstall never installs on the box it runs on." }
+        $targets = @($targets | Where-Object { -not (Test-PkgInstallHostIsSelf $_) })
+    }
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to deploy (self-guard).' }
+        return @{ rows=@(); summary=@{ total=0; selfSkipped=$selfDrop.Count } }
     }
 
     # A custom path (UNC/local) overrides the dropdown selection when supplied.

@@ -31,11 +31,40 @@ function Has-SelfGuardWarn($o) {
 }
 $script:Me = $env:COMPUTERNAME
 
-Describe 'WPT 6.8.3 - manifest loads at the bumped version' {
+Describe 'WPT 6.8.4 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is wpt and version is 6.8.3' {
+    It 'manifest id is wpt and version is 6.8.4' {
         [string]$mani.id      | Should Be 'wpt'
-        [string]$mani.version | Should Be '6.8.3'
+        [string]$mani.version | Should Be '6.8.4'
+    }
+}
+
+Describe 'WPT 6.8.4 - clean-user-apps self-guards the dispatcher on a LIVE run (loop10 audit)' {
+    It 'a LIVE clean (dryrun=false) targeting only the dispatcher is emptied before fan-out' {
+        # Live + self short-circuits at the self-guard BEFORE any fan-out - hermetic.
+        $o = Invoke-Wpt 'clean-user-apps' @{ targets = '127.0.0.1'; chrome = $true; dryrun = $false }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+    It 'a DRY-RUN clean on self does NOT self-guard (preview is harmless)' {
+        # dry-run intentionally keeps self in the wave, so it would proceed to fan-out;
+        # swap the worker block for a fake so no real WinRM leaves the box, and assert
+        # the negative: the live-only guard did NOT fire in dry-run.
+        $evs = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$evs.Add($e) }
+        $null = & $m {
+            param($em)
+            $orig = $script:WptCleanUserAppsBlock
+            $script:WptCleanUserAppsBlock = { param($h,$c,$a,$apps,$dry) @{ Host=$h; Status='Dry Run OK'; AppsRemoved=0; FreedMB=0; Detail='fake'; Events=@() } }
+            try {
+                Invoke-JanetToolAction -ActionId 'clean-user-apps' -Params @{ targets='127.0.0.1'; chrome=$true; dryrun=$true; threads=1 } -Credential $null -Emit $em
+            } finally { $script:WptCleanUserAppsBlock = $orig }
+        } $emit
+        @($evs | Where-Object { $_.type -eq 'log' -and $_.level -eq 'warn' -and $_.text -match 'Self-guard' }).Count | Should Be 0
+    }
+    It 'no apps selected -> a plain warn, not the self-guard path' {
+        $o = Invoke-Wpt 'clean-user-apps' @{ targets = '127.0.0.1'; dryrun = $false }
+        (Has-SelfGuardWarn $o) | Should Be $false
     }
 }
 
