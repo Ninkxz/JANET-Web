@@ -336,6 +336,35 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   — every destructive tool now has a full-contract review; the 3 removal paths (upr uninstall,
   adto/c2c writes, certdeploy prune) are allowlisted + gated + sync-guarded. No new ranked
   items. SECRET parity: +certdeploy prune-sync test precision.
+- **Loop 17 (DONE 2026-07-20):** Fable-inline. Self-review of loop-16 → **GREEN** (certdeploy
+  prune-sync test-only, count unchanged). **Pivot: destructive surface exhausted → correctness
+  of the remediation ROUTING.** Workstream: deep-dive on the acas match engine
+  (`Get-AcasVulnGroups` over `Get-AcasProfileMatchTable`) — the classifier that turns a finding's
+  plugin name into the auto-patch profile. A MIS-ROUTE is worse than a miscount: it runs the WRONG
+  fix (or a no-op) on a real vuln. → **GREEN** (`:1642-1657`): first-match-wins with specific
+  rules above generic, and each rule's `Exclude` tokens checked BEFORE its keyword — the exclusions
+  are the only thing stopping the dangerous look-alike mis-routes (Edge WebView2→Edge, Symantec→
+  Defender, Chrome Remote Desktop→Chrome, Access Database Engine/LibreOffice→M365). **The gap
+  (coverage, not correctness) → FIXED** (`bb9e9c2`, test-only, acas stays v1.11.5): the routing
+  itself was untested (only the individual profiles were) — a future match-table edit could
+  silently reintroduce a mis-route. `Acas.MatchTableRouting.Tests.ps1` (13) drives the REAL router
+  with synthetic findings: 4 positive routes (incl. specific-beats-generic) + 5 exclusion
+  non-routes (the safety-critical half) + 4 structural "the Exclude list is present" assertions.
+  Pester **1137→1150** green. No new ranked items. SECRET parity: +acas match-table routing test.
+- **Loop 18 (DONE 2026-07-20):** Fable-inline. Self-review of loop-17 → **GREEN** (routing test-
+  only, 13/13). **Workstream: CSV-INGESTION robustness** — the front of the offline/CSV-fed
+  pipeline, where a mis-parsed row silently corrupts every downstream number. Deep-dive on
+  `ConvertFrom-AcasCsv` (`:1507`, the acas import parser for the most-used remediation tool) →
+  **GREEN**: `Import-Csv -Encoding UTF8` (native BOM + quoted/embedded-comma fields), missing/
+  renamed column returns empty (no throw), host token whitelist-validated before it can become a
+  remote target, msek-* servers skipped, and a **loud wrong-template hint** when rows parse but
+  none map to a host (the column-mismatch case surfaces instead of importing zero). **The gap
+  (coverage) → FIXED** (test-only, acas stays v1.11.5): the parser — the pipeline's front door —
+  was untested end-to-end (only `Test-AcasHostToken` was, in isolation). `Acas.CsvIngestion.Tests.ps1`
+  pins the robustness contract: correct host-pick (DNS>NetBIOS>IP) + field mapping, quoted
+  embedded-comma survival, missing-column tolerance, server-skip, garbled-token rejection, and the
+  wrong-template warn hint. Pester **1150→(close)** green. No new ranked items. SECRET parity:
+  +acas CSV-ingestion robustness test.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
