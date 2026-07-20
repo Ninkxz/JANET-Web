@@ -206,13 +206,87 @@ $script:AcasUpdateProfiles = @{
         }
     }
     'Google Chrome - Update' = @{
-        Desc   = 'GoogleUpdate.exe /ua /installsource scheduler'
+        # Honest port of the wpt 6.5.33 Internet profile. The old Script returned
+        # "OK (Chrome update triggered, exit N)" on ANY GoogleUpdate.exe launch -
+        # policy-blocked / service-disabled / GoogleUpdater-migrated boxes read OK
+        # (later amber) while nothing ever updated. This one pre-checks the known
+        # blockers, prefers the modern GoogleUpdaterTaskSystem* task, then PROVES
+        # the outcome: before/after version poll + staged-update detection. Never
+        # a bare OK for an unverified trigger; unproven triggers return the
+        # acas-native UNCONFIRMED (never PENDING, which AcasOkOf would book green).
+        Desc   = 'Direct Google updater trigger with blocker pre-checks (update policy, services, GoogleUpdater migration) and a proven outcome: before/after version poll + staged new_chrome.exe detection. Hard blockers FAIL with a pointer to the Software Center profile.'
         Script = {
-            $exe = 'C:\Program Files (x86)\Google\Update\GoogleUpdate.exe'
-            if (-not (Test-Path $exe)) { $exe = 'C:\Program Files\Google\Update\GoogleUpdate.exe' }
-            if (-not (Test-Path $exe)) { return 'FAIL: GoogleUpdate.exe not found' }
-            $proc = Start-Process -FilePath $exe -ArgumentList '/ua /installsource scheduler' -Wait -PassThru -NoNewWindow
-            return "OK (Chrome update triggered, exit $($proc.ExitCode))"
+            try {
+                $ckeys = @(
+                    'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}',
+                    'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+                )
+                $getPv = {
+                    foreach ($k in $ckeys) {
+                        if (Test-Path $k) {
+                            $pp = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+                            if ($pp -and $pp.pv) { return "$($pp.pv)" }
+                        }
+                    }
+                    return $null
+                }
+                $before = & $getPv
+                if (-not $before) { return 'SKIP: Chrome (machine-level) not installed' }
+
+                # Blocker pre-check (read-only): an admin update policy of 0 means no
+                # trigger can ever work - report it instead of pretending.
+                $pol = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Google\Update' -ErrorAction SilentlyContinue
+                if ($pol) {
+                    $appPol = $pol.'Update{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+                    if (($null -ne $pol.UpdateDefault -and [int]$pol.UpdateDefault -eq 0) -or ($null -ne $appPol -and [int]$appPol -eq 0)) {
+                        return "FAIL: Chrome auto-update blocked by policy (HKLM\SOFTWARE\Policies\Google\Update) - use the 'Google Chrome - Software Center' profile"
+                    }
+                }
+                # Legacy Google Update services: note Disabled, but don't fail yet -
+                # the modern GoogleUpdater (own task, no gupdate) may be present instead.
+                $gup = Get-Service -Name 'gupdate' -ErrorAction SilentlyContinue
+                $gupDisabled = ($gup -and "$($gup.StartType)" -eq 'Disabled')
+
+                # Find a trigger, newest stack first. The modern GoogleUpdater's
+                # documented trigger is its scheduled task (GoogleUpdaterTaskSystem*);
+                # the updater.exe CLI is undocumented, so we never invoke it directly.
+                $trigger = $null
+                $tasks = @(Get-ScheduledTask -TaskName 'GoogleUpdaterTaskSystem*' -ErrorAction SilentlyContinue)
+                if ($tasks.Count -gt 0) {
+                    $started = @()
+                    foreach ($t in $tasks) { try { Start-ScheduledTask -InputObject $t -ErrorAction Stop; $started += $t.TaskName.Trim() } catch {} }
+                    if ($started.Count -gt 0) { $trigger = 'GoogleUpdater task ' + ($started -join ', ') }
+                }
+                if (-not $trigger) {
+                    $exe = 'C:\Program Files (x86)\Google\Update\GoogleUpdate.exe'
+                    if (-not (Test-Path $exe)) { $exe = 'C:\Program Files\Google\Update\GoogleUpdate.exe' }
+                    if (Test-Path $exe) {
+                        if ($gupDisabled) { return "FAIL: Google Update services disabled (gupdate/gupdatem) and no GoogleUpdater task - use the 'Google Chrome - Software Center' profile" }
+                        Start-Process -FilePath $exe -ArgumentList '/ua','/installsource scheduler' -WindowStyle Hidden -ErrorAction Stop
+                        $trigger = 'legacy GoogleUpdate.exe /ua'
+                    } elseif ($tasks.Count -gt 0) {
+                        return "FAIL: GoogleUpdaterTaskSystem task(s) present but could not be started - use the 'Google Chrome - Software Center' profile"
+                    } else {
+                        return "FAIL: no Google updater on this host (no GoogleUpdaterTaskSystem task, no GoogleUpdate.exe) - use the 'Google Chrome - Software Center' profile"
+                    }
+                }
+
+                # Poll for a real version bump: 90s ceiling (18 x 5s) - enough for a
+                # small delta on a healthy link, short enough not to stall a fleet run.
+                $after = $before
+                for ($i = 0; $i -lt 18; $i++) {
+                    Start-Sleep -Seconds 5
+                    $cur = & $getPv
+                    if ($cur -and $cur -ne $before) { $after = $cur; break }
+                }
+                if ($after -ne $before) { return "OK (Chrome updated $before -> $after)" }
+                foreach ($d in @('C:\Program Files\Google\Chrome\Application','C:\Program Files (x86)\Google\Chrome\Application')) {
+                    if (Test-Path (Join-Path $d 'new_chrome.exe')) {
+                        return "UNCONFIRMED: update staged as new_chrome.exe - applies when Chrome is next relaunched (still v$before now)"
+                    }
+                }
+                return "UNCONFIRMED: update triggered via $trigger; version still $before after 90s - internet/proxy reachability or a slow download; if it never moves use the 'Google Chrome - Software Center' profile"
+            } catch { return "FAIL: $($_.Exception.Message)" }
         }
         Verify = New-AcasClientVerify -Guid '{8A69D345-D564-463c-AFF1-A69D9E530F96}' -RootWow 'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients' -Root 'HKLM:\SOFTWARE\Google\Update\Clients'
     }
@@ -959,7 +1033,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.3'
+        version  = '1.11.4'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1910,6 +1984,15 @@ $script:AcasUpdateWorker = {
             $preV  = if ($result.Pre  -is [hashtable] -and $result.Pre.Version)  { [string]$result.Pre.Version }  else { 'n/a' }
             $postV = if ($result.Post -is [hashtable] -and $result.Post.Version) { [string]$result.Post.Version } else { 'n/a' }
             $marker = "<<PRE=$preV>><<POST=$postV>>"
+            # A profile Script that already classified itself (FAIL/SKIP/UNCONFIRMED)
+            # is authoritative - never rewrap it as the async "version unchanged"
+            # UNCONFIRMED below. Formerly a hard FAIL (policy-block / updater
+            # missing) whose version stayed put rendered amber "async update may
+            # still be in progress" - a PERMANENT blocker masked as a transient
+            # one, for every profile. Only an OK-claiming Script needs probe proof.
+            if ($updateStr -like 'FAIL*' -or $updateStr -like 'SKIP*' -or $updateStr -like 'UNCONFIRMED*') {
+                return "$updateStr $marker"
+            }
             if ($preErr -or $postErr) {
                 # A thrown pre/post probe -> UNCONFIRMED (amber), NEVER Success. Formerly a
                 # both-sides throw fell through to the self-reported "$updateStr" (rendered

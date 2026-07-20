@@ -25,9 +25,9 @@ $SpecProfile = 'Spectre/BHI Mitigation - Enable (CVE-2022-0001)'
 
 Describe 'ACAS 1.11.3 - manifest loads at the bumped version' {
     $manifest = & $mod { Get-JanetToolManifest }
-    It 'manifest id is acas and version is 1.11.3' {
+    It 'manifest id is acas and version is 1.11.4' {
         [string]$manifest.id      | Should Be 'acas'
-        [string]$manifest.version | Should Be '1.11.3'
+        [string]$manifest.version | Should Be '1.11.4'
     }
 }
 
