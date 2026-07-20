@@ -30,11 +30,11 @@ $script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.reports.p
     }
 }
 
-Describe 'reports 2.14.22 - manifest loads at the bumped version' {
+Describe 'reports - manifest loads at or above the loop-13 host-count version' {
     $mani = & $script:Mod { Get-JanetToolManifest }
-    It 'manifest id is reports and version is 2.14.22' {
+    It 'manifest id is reports and version is >= 2.14.22 (floor; exact pin lives in the newest bump test)' {
         [string]$mani.id      | Should Be 'reports'
-        [string]$mani.version | Should Be '2.14.22'
+        ([version][string]$mani.version -ge [version]'2.14.22') | Should Be $true
     }
 }
 

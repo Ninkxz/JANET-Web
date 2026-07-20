@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.22'
+        version  = '2.14.23'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -1454,6 +1454,17 @@ function Parse-AcasFile {
     if (-not $data.Header -or $data.Header.Count -eq 0) { return $findings }
     $cols = Get-AcasColumnMap -Header $data.Header
     if ($cols.Host -lt 0 -or $cols.Plugin -lt 0) {
+        # loop19: the header parsed but the host and/or plugin column could not be
+        # resolved - almost always a wrong export template (renamed/missing columns),
+        # NOT an empty scan. Surface it LOUDLY instead of silently importing zero
+        # findings (which reads to the operator as a clean fleet). Parity with the
+        # acas ConvertFrom-AcasCsv wrong-template hint.
+        if ($Emit) {
+            $miss = @()
+            if ($cols.Host   -lt 0) { $miss += 'a host column (DNS Name / Host / NetBIOS / IP Address)' }
+            if ($cols.Plugin -lt 0) { $miss += 'a plugin column (Plugin / Plugin ID / Nessus ID)' }
+            & $Emit @{ type='log'; level='warn'; text=("Parsed the CSV header but could not find " + ($miss -join ' and ') + " - no findings imported. Check the export matches the expected ACAS/Nessus CSV columns.") }
+        }
         return $findings
     }
     foreach ($fields in $data.Rows) {
