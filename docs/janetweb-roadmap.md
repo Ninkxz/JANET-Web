@@ -41,10 +41,8 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    silently breaks if a future report adds `window.print()`, `<a download>`, or any
    external `<script src>`/`<link>`/`<img src="/">`. Add a static test asserting the
    reports.psm1 output stays fully inline so the constraint is discoverable.
-8. **Host-guard test gaps + non-default-port note** (loop-4 Opus F1/F6) — add
-   `Server.HostHeader` cases for a truly absent Host header and the legit
-   `POST /api/job/<id>/cancel?t=` route; one-line code comment that the guard assumes
-   a non-default port (a hardcoded `-Port 80/443` would 421 the UI itself).
+8. ~~Host-guard test gaps + non-default-port note~~ — **CLOSED loop 6** (`2c96c16`):
+   empty/absent-Host + cancel-route cases pinned (probe-first), F1 comment added.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -125,3 +123,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   behavior changed → no version bump. Pester 1063→**1072** green (authoritative single
   post-commit run). New ranked item 8 (Opus F1/F6 Host-guard gaps). SECRET parity:
   +upr refuse coverage + worker comment.
+  *(Loops 1–5 pushed to gitea.bth0mp.com/bth0mp/JANET-Web master on operator
+  instruction after loop 5; the loop series otherwise commits local-only.)*
+- **Loop 6 (DONE 2026-07-20):** Opus adversarial self-review of the loop-5 upr refuse
+  tests → `janetweb-review-loop6.md` (**GREEN**, 0 P1/P2 — all three dispatcher paths
+  traced non-vacuous: each `Should Match 'Refused'` doubles as proof the parse succeeded
+  and the live gate fired; the dry-run negative would flip visibly if mis-scoped). No
+  Sonnet re-verify (loop 5 changed no destructive code — test+comment only). **Workstream:
+  closed ranked item 8 — the loop-4 Opus F1/F6 Host-guard gaps** (`2c96c16`), probe-first:
+  a raw-socket probe fixed exact behavior, then pinned empty-Host→421, HTTP/1.0-no-Host→421
+  (both reach our guard), HTTP/1.1-no-Host→400 (http.sys, asserted NOT 200), the legit
+  beacon-cancel `POST .../cancel?t=` + good Host→200 (guard doesn't break sendBeacon), and
+  — beyond the note — a FOREIGN Host on the cancel route→**421 before the `?t=` carve-out**
+  (a rebound page can't abuse the beacon token carrier). Plus the F1 non-default-port
+  comment. `Server.HostHeader` 9→14 asserts; comment-only server edit, no behavior change.
+  Pester 1072→**1077** green (the baseline run raced the edits and returned 1077 too —
+  known SMB file-race; 1072 is the loop-5-close baseline on the untouched tree). No new
+  ranked items. SECRET parity: +extended Host-guard cases.
