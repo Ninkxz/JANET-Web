@@ -989,6 +989,25 @@ function Get-ReportsSlaDeadline {
     }
 }
 
+# loop21: SINGLE SOURCE OF TRUTH for the SLA aging boundary rule. Two operator-facing
+# views compute these buckets - the SLA / Finding Aging dashboard (sla-aging) and the
+# Executive Command Brief SLA section - and they MUST agree, or the same fleet reports
+# two different overdue counts. Both used to hand-duplicate this arithmetic; now both
+# call here. Given the remediation window (deadline, days) and the finding's age (days):
+#   OVERDUE   - past the deadline (dueIn < 0)
+#   DUE-SOON  - within the tighter of 25% of the window or 3 days left (dueIn <= soon)
+#   ON-TRACK  - otherwise
+# The deadline day itself (dueIn == 0) is DUE-SOON, not OVERDUE. A zero/absent deadline
+# floors the window to 1 so the 25% math never divides into nonsense.
+function Get-ReportsSlaBucket {
+    param([int]$Deadline, [int]$Age)
+    $dueIn  = $Deadline - $Age
+    $window = if ($Deadline -gt 0) { $Deadline } else { 1 }
+    $soon   = [Math]::Max(3, [int][Math]::Ceiling($window * 0.25))
+    $bucket = if ($dueIn -lt 0) { 'OVERDUE' } elseif ($dueIn -le $soon) { 'DUE-SOON' } else { 'ON-TRACK' }
+    return @{ DueIn = $dueIn; Bucket = $bucket; SoonThreshold = $soon; Window = $window }
+}
+
 # =============================================================================
 #  SLA firstSeen ledger  -  JanetLocal\sla-ledger.json (RUNTIME STATE, gitignored)
 #  Persists the SLA finding-age clock OUTSIDE the working report so it survives a
@@ -6188,12 +6207,12 @@ function Invoke-JanetToolAction {
                     $age = [int][Math]::Floor(($today - $fsDate.Date).TotalDays)
                     if ($age -lt 0) { $age = 0 }
                     $deadline = Get-ReportsSlaDeadline -Config $cfg -Severity ([string]$f.Severity) -InKev $inKev
-                    $dueIn = [int]$deadline - $age
-                    $window = if ([int]$deadline -gt 0) { [int]$deadline } else { 1 }
-                    $soonThreshold = [Math]::Max(3, [int][Math]::Ceiling($window * 0.25))
-                    if ($dueIn -lt 0) { $bucket = 'OVERDUE'; $cOverdue++ }
-                    elseif ($dueIn -le $soonThreshold) { $bucket = 'DUE-SOON'; $cDueSoon++ }
-                    else { $bucket = 'ON-TRACK'; $cOnTrack++ }
+                    $slaB = Get-ReportsSlaBucket -Deadline ([int]$deadline) -Age ([int]$age)   # loop21: shared boundary rule
+                    $dueIn = $slaB.DueIn
+                    $bucket = $slaB.Bucket
+                    if ($bucket -eq 'OVERDUE') { $cOverdue++ }
+                    elseif ($bucket -eq 'DUE-SOON') { $cDueSoon++ }
+                    else { $cOnTrack++ }
                 }
 
                 # loop13: tally per-host by the normalized audit key so a short+FQDN pair of
@@ -7077,11 +7096,10 @@ function Invoke-JanetToolAction {
                     if (-not $parsed) { $cUntracked++; continue }
                     $age = [int][Math]::Floor(($today - $fsDate.Date).TotalDays); if ($age -lt 0) { $age = 0 }
                     $deadline = Get-ReportsSlaDeadline -Config $cfg -Severity ([string]$f.Severity) -InKev $inKev
-                    $dueIn = [int]$deadline - $age
-                    $window = if ([int]$deadline -gt 0) { [int]$deadline } else { 1 }
-                    $soon = [Math]::Max(3, [int][Math]::Ceiling($window * 0.25))
-                    if ($dueIn -lt 0) { $cOverdue++; [void]$overdueList.Add(@{ Host=[string]$f.Hostname; Plugin=[string]$f.PluginID; VulnName=[string]$f.VulnName; Severity=[string]$f.Severity; DueIn=$dueIn }) }
-                    elseif ($dueIn -le $soon) { $cDueSoon++ }
+                    $slaB = Get-ReportsSlaBucket -Deadline ([int]$deadline) -Age ([int]$age)   # loop21: shared boundary rule
+                    $dueIn = $slaB.DueIn
+                    if ($slaB.Bucket -eq 'OVERDUE') { $cOverdue++; [void]$overdueList.Add(@{ Host=[string]$f.Hostname; Plugin=[string]$f.PluginID; VulnName=[string]$f.VulnName; Severity=[string]$f.Severity; DueIn=$dueIn }) }
+                    elseif ($slaB.Bucket -eq 'DUE-SOON') { $cDueSoon++ }
                     else { $cOnTrack++ }
                 }
                 $topOverdue = @($overdueList | Sort-Object @{ Expression = { [int]$_.DueIn } } | Select-Object -First 12)
