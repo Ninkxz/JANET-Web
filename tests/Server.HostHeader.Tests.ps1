@@ -42,6 +42,24 @@ function Invoke-RawGet {
     @{ Status = $statusLine; Raw = $all }
 }
 
+# Send a fully hand-built raw request (arbitrary method / HTTP version / headers)
+# and return the status line. Used for the empty/absent-Host and cancel-route cases
+# that Invoke-RawGet's fixed GET/1.1+Host shape can't express.
+function Invoke-RawRequest {
+    param([string]$Request)
+    $c = New-Object System.Net.Sockets.TcpClient
+    $c.Connect('127.0.0.1', $script:Port)
+    $c.ReceiveTimeout = 6000
+    $s = $c.GetStream()
+    $b = [System.Text.Encoding]::ASCII.GetBytes($Request)
+    $s.Write($b, 0, $b.Length)
+    $sr = New-Object System.IO.StreamReader($s)
+    $all = ''
+    try { $all = $sr.ReadToEnd() } catch {}
+    $sr.Close(); $c.Close()
+    ($all -split "`r`n")[0]
+}
+
 Describe 'Server Host-header guard (DNS-rebinding defense)' {
 
     $serverCmd = ". '$script:Root\server\JanetWeb.Server.ps1'; Start-JanetWebServer -Root '$script:Root' -Port $script:Port -Token '$script:Token'"
@@ -95,6 +113,36 @@ Describe 'Server Host-header guard (DNS-rebinding defense)' {
         $r = Invoke-RawGet '/api/tools' "evil.example.com:$script:Port" $script:Token
         $r.Status | Should Match '421'
         $r.Raw | Should Match 'misdirected'
+    }
+
+    # --- loop-6: absent / empty Host fails closed (Opus loop-4 F6a) ---
+    # Empirically probed (loop 6): an empty Host VALUE and an HTTP/1.0 request with
+    # NO Host both reach our guard -> 421; an HTTP/1.1 request with no Host is
+    # pre-rejected by http.sys -> 400. All three are fail-closed (never 200).
+    It 'REJECTS an empty Host value with 421 (reaches our guard)' {
+        $s = Invoke-RawRequest "GET /api/tools HTTP/1.1`r`nHost: `r`nConnection: close`r`n`r`n"
+        $s | Should Match '421'
+    }
+    It 'REJECTS an HTTP/1.0 request with no Host header at all with 421 (reaches our guard)' {
+        $s = Invoke-RawRequest "GET /api/tools HTTP/1.0`r`nConnection: close`r`n`r`n"
+        $s | Should Match '421'
+    }
+    It 'an HTTP/1.1 request with no Host is rejected (http.sys 400), never served' {
+        $s = Invoke-RawRequest "GET /api/tools HTTP/1.1`r`nConnection: close`r`n`r`n"
+        # http.sys pre-rejects before our loop; the point is it is NOT 200/served.
+        $s | Should Not Match '200'
+    }
+
+    # --- loop-6: the legit beacon-cancel route is not broken, and IS Host-guarded ---
+    # navigator.sendBeacon fires POST /api/job/<id>/cancel?t=<token> on pagehide;
+    # ?t= is its sole token carrier (a beacon can't set the X-Janet-Token header).
+    It 'does NOT 421 the legit cancel route (good Host + ?t=token) - beacon path intact' {
+        $s = Invoke-RawRequest "POST /api/job/none/cancel?t=$script:Token HTTP/1.1`r`nHost: 127.0.0.1:$script:Port`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+        $s | Should Match '200'
+    }
+    It '421s the cancel route on a FOREIGN Host BEFORE the ?t= carve-out (rebind can''t use the beacon carrier)' {
+        $s = Invoke-RawRequest "POST /api/job/none/cancel?t=$script:Token HTTP/1.1`r`nHost: evil.test:$script:Port`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+        $s | Should Match '421'
     }
 
     It 'test server shuts down' {

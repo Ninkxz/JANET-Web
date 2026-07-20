@@ -389,6 +389,10 @@ function Start-JanetWebServer {
                 # local browser can send; anything else - including a missing Host -
                 # gets 421 Misdirected and no content. (-ne is case-insensitive in PS,
                 # which matches hostname semantics.)
+                # ASSUMES a non-default port: the launcher binds 8089..8100, so the
+                # browser always sends Host WITH the port. If the listener were ever
+                # bound to 80/443 the browser would omit the port and this guard would
+                # 421 the UI itself - keep the bind off the scheme-default ports.
                 $hostHdr = [string]$req.Headers['Host']
                 if ($hostHdr -ne "127.0.0.1:$Port" -and $hostHdr -ne "localhost:$Port") {
                     & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes('misdirected (bad Host header)')) 421 'text/plain'
