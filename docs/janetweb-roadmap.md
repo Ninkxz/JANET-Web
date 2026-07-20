@@ -244,15 +244,36 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   destructive-mode trust boundary; no new infra; UI JSON-bool path unchanged). Tests:
   `Wpt.SelfGuardApply` dryrun-string cases (2). Pester 1111→**1113** green (authoritative
   post-commit run). No new ranked items. SECRET parity: +wpt dryrun coercion fix.
+- **Loop 12 (DONE 2026-07-20):** Opus self-review of the loop-11 dryrun coercion →
+  `janetweb-review-loop12.md` (**GREEN**; full truth-table walk, `'false'`-string test
+  non-vacuous; one accepted P3 — unrecognized dryrun→live, non-UI-reachable + self-guard
+  backstopped). **Workstream: Opus deep-dive on adto** — the suite's only DESTRUCTIVE-via-LDAP
+  tool (userAccountControl writes, a different risk class from WinRM fan-out) → **YELLOW, 3
+  fixed** (`68ca436`, adto **0.2.1→0.2.2**). CLEAN: no LDAP-filter injection, DN bind-redirect
+  guard on every write path, UAC read-modify-write with a 6-bit allowlist (no escalation write),
+  confirm gates, IAO RBAC bound to the Windows launching identity. **F1 (P2/borderline P1):**
+  `fix` set ACCOUNTDISABLE on ANY in-domain DN with no object-type guard — a crafted plan
+  naming a **DC or a privileged (adminCount>=1) / break-glass account** would disable it (DoS of
+  a critical AD object). Added a pre-write refusal for a DC (`SERVER_TRUST` bit) or
+  `adminCount>=1` (PROTECTED row + Skipped audit; normal objects unaffected). **F2 (P2):**
+  `validate-iao` reported VALIDATED with no post-commit re-read (fail-open) → now re-reads,
+  VALIDATED only if the stamp persisted else FAILED. **F3 (P3):** bind-redirect rejections now
+  audited. First adto behavior suite `AdTo.WriteGuards.Tests.ps1` (8, `New-AdToEntry` shimmed —
+  no directory bound; non-vacuous via the fake's Committed flag). Sonnet re-verify: **PASS**
+  (guards additive, all existing gates intact, no cert files). Pester 1113→**1121** green
+  (authoritative post-commit run). Accepted F4 (baseline re-read perf nit). No new ranked
+  items. SECRET parity: +adto F1/F2/F3.
 
-## Coverage status (after loop 11)
+## Coverage status (after loop 12)
 Every most-used and most-dangerous tool now carries a documented adversarial review with a
-GREEN (or fixed-to-green) verdict: server/auth/token (loop 1), wpt profiles (1-3) + full
-engine (9) + self-guard audit (10), acas (self-guard-tested + Chrome/Edge), upr (5), c2c (8),
-reports sandbox (3,7), remoteadmin (10), winupgrade (11); plus a suite-wide self-guard audit
-(10). The destructive-action contract (confirm-word + self-guard + wrong-box + fail-closed)
-is now enforced AND test-pinned uniformly. Remaining backlog is decision-gated (SECRET parity)
-or low-value speculative (items 4/6/9) + the benign-on-self do-not-re-flag set (item 10).
-Loop 12+ candidates: the still-undeepdived smaller destructive tools (adto AD-writes,
-secureboot, dhcp, biosfirmware, certdeploy), correctness (not security) deep-dives on the
-read/report paths, or SECRET-parity execution if the operator signs off.
+GREEN (or fixed-to-green) verdict: server/auth/token (1), wpt profiles (1-3) + full engine (9)
++ self-guard audit (10), acas (self-guard-tested + Chrome/Edge), upr (5), c2c (8), reports
+sandbox (3,7), remoteadmin (10), winupgrade (11), **adto AD-writes (12)**; plus a suite-wide
+self-guard audit (10). BOTH destructive surfaces are now covered: the WinRM fan-out contract
+(confirm + self-guard + wrong-box + fail-closed) AND the LDAP AD-write contract (DN-redirect +
+protected-object + fail-closed re-read) — enforced AND test-pinned. Remaining backlog is
+decision-gated (SECRET parity) or low-value speculative (items 4/6/9) + the benign-on-self
+do-not-re-flag set (item 10). Loop 13+ candidates: the last small destructive tools (secureboot,
+dhcp, biosfirmware, certdeploy — all seen GREEN-ish in the loop-10 self-guard audit, none
+deep-dived), correctness (not security) deep-dives on the read/report paths (reports engine,
+KEV/SLA logic, CSV parsers), or SECRET-parity execution if the operator signs off.
