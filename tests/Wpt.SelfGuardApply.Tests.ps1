@@ -1,0 +1,98 @@
+﻿# =============================================================================
+#  Wpt.SelfGuardApply.Tests.ps1 - Pester 3.4 for the loop-9 self-guard gap
+#  closure (wpt v6.8.3). The Opus deep-dive of the wpt destructive engine found
+#  that app-update-apply (which runs the Custom Command profile = ARBITRARY
+#  remote PowerShell, plus force-update/uninstall profiles) was the ONLY
+#  destructive dispatcher WITHOUT the Remove-WptSelfTargets self-guard - so an
+#  operator command like Restart-Computer with the dispatcher in the host list
+#  would kill this HttpListener mid-dispatch (the wrong-box guard is a no-op on
+#  self: self is dialed by its own correct name -> no mismatch). Two sibling
+#  destructive dispatchers (app-action SCCM Install/Uninstall, unsupported-
+#  uninstall) had the same gap. All three now drop the dispatcher BEFORE fan-out.
+#
+#  Each test dispatches the real Invoke-JanetToolAction with a self-only target
+#  (127.0.0.1 / the dispatcher COMPUTERNAME); the self-guard short-circuits to
+#  total=0 with a Self-guard warn BEFORE any runspace/WinRM - so NO host is
+#  contacted. Also asserts the arbitrary-RCE action carries a confirm= string.
+#
+#  Run:  Invoke-Pester -Path .\tests\Wpt.SelfGuardApply.Tests.ps1
+# =============================================================================
+$script:Root = Split-Path $PSScriptRoot -Parent
+$m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
+
+function Invoke-Wpt([string]$aid, [hashtable]$p) {
+    $evs = New-Object System.Collections.ArrayList
+    $emit = { param($e) [void]$evs.Add($e) }
+    $res = & $m { param($a, $pp, $em) Invoke-JanetToolAction -ActionId $a -Params $pp -Credential $null -Emit $em } $aid $p $emit
+    @{ Result = $res; Events = @($evs) }
+}
+function Has-SelfGuardWarn($o) {
+    @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'warn' -and $_.text -match 'Self-guard' }).Count -gt 0
+}
+$script:Me = $env:COMPUTERNAME
+
+Describe 'WPT 6.8.3 - manifest loads at the bumped version' {
+    $mani = & $m { Get-JanetToolManifest }
+    It 'manifest id is wpt and version is 6.8.3' {
+        [string]$mani.id      | Should Be 'wpt'
+        [string]$mani.version | Should Be '6.8.3'
+    }
+}
+
+Describe 'WPT 6.8.3 - app-update-apply self-guards the dispatcher (P2: Custom Command RCE)' {
+    It 'a Custom Command wave targeting ONLY the dispatcher is emptied before fan-out' {
+        $o = Invoke-Wpt 'app-update-apply' @{ targets = '127.0.0.1'; profile = 'Custom Command'; customcommand = 'Restart-Computer -Force' }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+    It 'the dispatcher shortname is also dropped (not just loopback)' {
+        $o = Invoke-Wpt 'app-update-apply' @{ targets = $script:Me; profile = 'Custom Command'; customcommand = 'whoami' }
+        [int]$o.Result.summary.total | Should Be 0
+        [int]$o.Result.summary.selfSkipped | Should Be 1
+    }
+    It 'a built-in profile wave targeting only the dispatcher is likewise emptied' {
+        $o = Invoke-Wpt 'app-update-apply' @{ targets = '127.0.0.1'; profile = 'Microsoft 365 - Force Update' }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+}
+
+Describe 'WPT 6.8.3 - app-action self-guards the dispatcher (P3 consistency)' {
+    It 'an SCCM Uninstall wave targeting only the dispatcher is emptied before fan-out' {
+        $o = Invoke-Wpt 'app-action' @{ targets = '127.0.0.1'; appid = 'ScopeId_X/Application_Y'; method = 'Uninstall' }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+}
+
+Describe 'WPT 6.8.3 - unsupported-uninstall self-guards the dispatcher (P3 consistency)' {
+    It 'a HOST<TAB>App pair naming only the dispatcher is emptied before fan-out' {
+        # The dispatcher gate (line ~5212) requires a non-empty `targets` param before
+        # the switch, so the view sends both; the pairs-derived host list is what is
+        # actually dialed, and the loop-9 self-guard drops the dispatcher from it.
+        $o = Invoke-Wpt 'unsupported-uninstall' @{ targets = '127.0.0.1'; pairs = "127.0.0.1`tJava 8 Update 202" }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+}
+
+Describe 'WPT 6.8.3 - the arbitrary-RCE action carries a loud confirm dialog (P3)' {
+    $mani = & $m { Get-JanetToolManifest }
+    $act = @($mani.actions | Where-Object { $_.id -eq 'app-update-apply' })[0]
+    It 'app-update-apply is destructive AND now has a confirm= string' {
+        [bool]$act.destructive | Should Be $true
+        [string]$act.confirm | Should Not BeNullOrEmpty
+    }
+    It 'the confirm string warns about arbitrary PowerShell and the self-guard' {
+        ([string]$act.confirm -match '(?i)arbitrary') | Should Be $true
+        ([string]$act.confirm -match '(?i)self-guard|dispatcher') | Should Be $true
+    }
+}
+
+Describe 'WPT 6.8.3 - the read-only sibling is NOT self-guarded (no over-guard)' {
+    It 'app-update-verify has no confirm and is not destructive (unchanged)' {
+        $mani = & $m { Get-JanetToolManifest }
+        $v = @($mani.actions | Where-Object { $_.id -eq 'app-update-verify' })[0]
+        [bool]$v.destructive | Should Be $false
+    }
+}

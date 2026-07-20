@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.2'
+        version  = '6.8.3'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -486,6 +486,7 @@ function Get-JanetToolManifest {
             },
             @{
                 id='app-update-apply'; label='App Update Apply'; kind='stream-table'; destructive=$true
+                confirm='Run this app-update profile / custom command on the selected host(s)? The Custom Command profile executes ARBITRARY PowerShell remotely. The JANET dispatcher host is always dropped from the wave (self-guard). Proceed?'
                 description='Run an app-update profile (or custom command) remotely on each target.'
                 columns=@('Host','Status','Detail')
                 inputs=@(
@@ -5444,6 +5445,12 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='At least one CCM_Application Id is required (get it from Software Center Apps).' }
                 return @{ rows=@(); summary=@{ total=0 } }
             }
+            # Self-guard (loop9 P3): SCCM Install/Uninstall/Reinstall/Repair on the
+            # dispatcher would mutate the JANET host itself. Drop self before fan-out
+            # (consistency with fix-java / the other destructive dispatchers).
+            $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+            $targets = $guarded.Targets
+            if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to run (self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
             $revision = ([string]$Params['revision']).Trim()
             $isMachine = $true
             if ($Params.ContainsKey('ismachinetarget') -and $null -ne $Params['ismachinetarget']) { $isMachine = [bool]$Params['ismachinetarget'] }
@@ -5635,11 +5642,17 @@ function Invoke-JanetToolAction {
                 if (-not $byHost[$h].Contains($n)) { [void]$byHost[$h].Add($n) }
             }
             $hostList = @($byHost.Keys)
+            # Self-guard (loop9 P3): never uninstall products from the JANET dispatcher
+            # host. Consistency with fix-java (which removes the SAME Oracle Java this
+            # path can). Drop self before fan-out; $byHost keeps the entry, it is just
+            # never dialed.
+            $guarded = Remove-WptSelfTargets -Targets $hostList -Send $send
+            $hostList = $guarded.Targets
             if ($hostList.Count -eq 0) {
-                & $send @{ type='log'; level='warn'; text='No host/app pairs to uninstall (check Uninstall-tagged rows on the Unsupported Software Scan grid first).' }
+                & $send @{ type='log'; level='warn'; text='No host/app pairs to uninstall (check Uninstall-tagged rows on the Unsupported Software Scan grid first, and note the dispatcher host is self-guarded).' }
                 return @{ rows=@(); summary=@{ total=0 } }
             }
-            $totalUnits = [int](($byHost.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum)
+            $totalUnits = [int](($hostList | ForEach-Object { $byHost[$_].Count } | Measure-Object -Sum).Sum)
             & $send @{ type='status'; text="Uninstalling $totalUnits unsupported product(s) across $($hostList.Count) host(s) with $threads thread(s)..." }
             $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
             $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
@@ -6347,6 +6360,15 @@ function Invoke-JanetToolAction {
                 -RowOf { param($r) @{ Host=$r.Host; Version=[string]$r.Version; LastUpdated=[string]$r.LastUpdated; Verified=$(if($null -eq $r.Verified){'n/a'}elseif($r.Verified){'Yes'}else{'No'}); Detail=[string]$r.Detail } }
         }
         'app-update-apply' {
+            # Self-guard (loop9 P2): app-update-apply is the ONLY destructive dispatcher
+            # that lacked it - and it runs the Custom Command profile (arbitrary remote
+            # PowerShell) plus force-update/uninstall profiles. On the dispatcher the
+            # wrong-box guard is a no-op (self is dialed by its own correct name -> no
+            # mismatch), so an operator command like Restart-Computer would kill this
+            # HttpListener mid-dispatch. Drop self BEFORE fan-out, like the other eight.
+            $guarded = Remove-WptSelfTargets -Targets $targets -Send $send
+            $targets = $guarded.Targets
+            if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='Only target was this dispatcher host - nothing to run (self-guard).' }; return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } } }
             $threads = Get-WptThreadCount $Params 16
             $profName = ([string]$Params['profile']).Trim()
             $remote = $null

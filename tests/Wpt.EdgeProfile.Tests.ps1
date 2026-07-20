@@ -21,11 +21,13 @@ $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -
 $profiles = & $m { Get-WptAppUpdateProfiles }
 $name = 'Microsoft Edge - Update'
 
-Describe 'WPT 6.8.2 - manifest loads at the bumped version' {
+Describe 'WPT - manifest loads at or above the Edge-port version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is wpt and version is 6.8.2' {
+    It 'manifest id is wpt and version is at least 6.8.2' {
         [string]$mani.id      | Should Be 'wpt'
-        [string]$mani.version | Should Be '6.8.2'
+        # Floor assert (wpt-suite precedent): the newest bump's own test file carries
+        # the exact pin (loop 9: Wpt.SelfGuardApply pins 6.8.3); older files floor.
+        ([version]$mani.version -ge [version]'6.8.2') | Should Be $true
     }
 }
 
