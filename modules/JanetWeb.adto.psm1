@@ -308,7 +308,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.1'
+        version  = '0.2.2'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(
@@ -487,12 +487,32 @@ function Invoke-AdToFix {
         if (-not (Test-AdToDnInLocalDomain -Value $dn -ExpectDomainSuffix $expectDom)) {
             $row = @{ Object=$short; Category=''; Status='REJECTED'; Applied=''; Detail='refused: dn is not a plain distinguished name in this host''s domain (bind-redirect guard)'; DN=$dn }
             [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
+            # Audit the redirect refusal (loop12 F3): a plan steering a credentialed write at a
+            # foreign/redirected DN is a security-relevant event and must leave an audit trail,
+            # not just a UI row.
+            & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result='Skipped'; itemCount=0; detail='[REJECTED] bind-redirect guard: dn not a plain distinguished name in this domain' }
             continue
         }
         $rules = @($e.rules)
         try {
             $de  = New-AdToEntry -Dn $dn -Credential $Credential
             $cur = [int]("0" + [string]$de.Properties['userAccountControl'].Value)
+            # Protected-object guard (loop12 F1): this bulk-remediation tool must NEVER modify a
+            # domain controller or an AdminSDHolder-protected (privileged) object. The DN guard
+            # above proves the target is in-domain, but NOT that it is a safe object - a crafted
+            # or fat-fingered plan naming a DC computer object or a break-glass admin account
+            # would otherwise get ACCOUNTDISABLE set (a DoS of a critical AD object). Refuse a
+            # DC (SERVER_TRUST bit in its own UAC) or any object with adminCount>=1, before the
+            # write, and audit the refusal.
+            $isDc = (($cur -band [int]$script:AdToUac.SERVER_TRUST) -ne 0)
+            $adminCount = 0; try { $adminCount = [int]("0" + [string]$de.Properties['adminCount'].Value) } catch {}
+            if ($isDc -or $adminCount -ge 1) {
+                $why = if ($isDc) { 'domain controller (SERVER_TRUST)' } else { 'privileged/protected (adminCount>=1)' }
+                $row = @{ Object=$short; Category=''; Status='PROTECTED'; Applied=''; Detail=("refused: AD TO fix never modifies a $why object"); DN=$dn }
+                [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
+                & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result='Skipped'; itemCount=0; detail=("[PROTECTED] refused: $why") }
+                continue
+            }
             $fx  = Get-AdToFixedUac -Uac $cur -Rules $rules
             $skipNote = if ($fx.Skipped.Count) { " | manual/IAO (not auto-fixed): " + (@($fx.Skipped) -join ', ') } else { '' }
             if ($fx.Applied.Count -eq 0) {
@@ -553,6 +573,8 @@ function Invoke-AdToValidate {
         if (-not (Test-AdToDnInLocalDomain -Value $dn -ExpectDomainSuffix $expectDom)) {
             $row = @{ Object=$short; Status='REJECTED'; Detail='refused: dn is not a plain distinguished name in this host''s domain (bind-redirect guard)'; DN=$dn }
             [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
+            # Audit the redirect refusal (loop12 F3): same rationale as the fix path.
+            & $Send @{ type='audit'; action='AdToIaoValidate'; target=[string]$dn; result='Skipped'; itemCount=0; detail='[REJECTED] bind-redirect guard: dn not a plain distinguished name in this domain' }
             continue
         }
         $stamp = New-AdToRecertStamp -Prefix ([string]$baseline.recertifyStampPrefix) -Date (Get-Date) -By $byId
@@ -565,7 +587,16 @@ function Invoke-AdToValidate {
             $newVal = (@(@($keep) + $stamp)) -join "`n"
             $de.Properties[$attr].Value = $newVal
             $de.CommitChanges()
-            $row = @{ Object=$short; Status='VALIDATED'; Detail=("stamped '{0}' into {1}" -f $stamp, $attr); DN=$dn }
+            # Fail-closed re-read (loop12 F2): mirror the fix path - confirm the stamp actually
+            # persisted before reporting VALIDATED. A referral/replication quirk could let
+            # CommitChanges() return without persisting; reporting a clean IAO recert on an
+            # unpersisted stamp is the fail-open class the c2c persistence-verify work closed.
+            $after = [string]((New-AdToEntry -Dn $dn -Credential $Credential).Properties[$attr].Value)
+            if ($after -match [regex]::Escape($stamp)) {
+                $row = @{ Object=$short; Status='VALIDATED'; Detail=("stamped '{0}' into {1}" -f $stamp, $attr); DN=$dn }
+            } else {
+                $row = @{ Object=$short; Status='FAILED'; Detail=("stamp not present on re-read - commit did not persist into '{0}'" -f $attr); DN=$dn }
+            }
         } catch { $row = @{ Object=$short; Status='FAILED'; Detail=("LDAP write failed: {0}" -f $_.Exception.Message); DN=$dn } }
         [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
         & $Send @{ type='audit'; action='AdToIaoValidate'; target=[string]$dn; result=$(if ([string]$row.Status -eq 'VALIDATED') { 'Success' } else { 'Failure' }); itemCount=1; detail=("IAO '{0}': {1}" -f $byId, $row.Detail) }
