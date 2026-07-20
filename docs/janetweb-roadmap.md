@@ -37,6 +37,11 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    not-installed hosts; symmetrically wpt's run summary counts a Skipped host under
    Failed while its audit says Skipped. Reconcile the tallies if the operator wants
    stricter counts.
+9. **c2c memoized local-identity staleness** (loop-8 Opus P3-2, pre-existing) —
+   `Get-JanetC2cLocalIdentity` caches the dispatcher IP set for the module lifetime; a
+   mid-lifetime DHCP lease change could stale the self-guard's IP entries (name/FQDN
+   still catch self). Negligible on a server-hosted dispatcher; re-resolve per-wave if
+   ever run on a DHCP client.
 7. ~~Report-resource-free guard~~ — **CLOSED loop 7** (`928d1ba`): static guard
    (`Reports.SandboxResourceFree.Tests.ps1`, 12) asserts the report module stays
    self-contained + the server CSP still leads `sandbox allow-scripts`.
@@ -156,3 +161,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   (SECRET parity) or low-value speculative (item 4 token-on-cmdline, item 6 SKIP-tally);
   loop 8+ rotates to fresh tool deep-dives (acas/reports/c2c engines have unreviewed
   depth). SECRET parity: +report sandbox resource-free guard.
+- **Loop 8 (DONE 2026-07-20):** Opus adversarial **deep-dive on c2c (C2C Nemesis
+  v1.15.1)** — the richest destructive surface, never loop-reviewed → `janetweb-review-
+  loop8.md` (**GREEN**, 0 P1/P2). Verified CLEAN with evidence: BitLocker recovery-key
+  never leaks (no `.RecoveryPassword` access anywhere), add→escrow→enable fail-closed
+  order, self-guard + wrong-box + confirm-word + target-token allowlist uniform through
+  one guarded fan-out, cert expiry/persistence, no RCE, no fail-open. **The one gap
+  (P3) fixed** (`144a4b0`, c2c **1.15.1→1.15.2**): escrow-failure orphan protector when
+  the added protector's id is unresolvable (near-impossible) — re-enumerate + remove
+  only RP protectors absent from the pre-Add `$beforeIds` snapshot (never a pre-existing
+  one); strictly additive to a previously-orphaning state, zero regression risk. Tests
+  (`C2c.Enable`): `bothfailblankid` (orphan removed, no leak, still FAIL) + (e3)
+  pre-existing-never-removed + (e) resolved-id pin. Sonnet re-verify: **7/7 PASS**
+  (150 c2c tests green, guards unweakened, additive-only, no key leak, no cert files).
+  Lockscreen version pin → floor assert. Pester 1089→**1091** green (authoritative
+  post-commit run). New ranked item 9 (c2c DHCP-stale local identity, negligible).
+  SECRET parity: +c2c orphan-protector fix.
