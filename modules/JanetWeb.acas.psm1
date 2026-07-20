@@ -291,12 +291,76 @@ $script:AcasUpdateProfiles = @{
         Verify = New-AcasClientVerify -Guid '{8A69D345-D564-463c-AFF1-A69D9E530F96}' -RootWow 'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients' -Root 'HKLM:\SOFTWARE\Google\Update\Clients'
     }
     'Microsoft Edge - Update' = @{
-        Desc   = 'MicrosoftEdgeUpdate.exe /ua /installsource scheduler'
+        # Honest Edge trigger (same treatment the Chrome profile got in 1.11.4;
+        # this one lagged at "OK on any launch"). Pre-checks the EdgeUpdate policy
+        # + service blockers, triggers the updater (exe first - Edge has no
+        # GoogleUpdater-style migration; MicrosoftEdgeUpdateTaskMachineUA* task as
+        # fallback), then PROVES the outcome: before/after version poll + staged
+        # new_msedge.exe detection. Unproven triggers return the acas-native
+        # UNCONFIRMED (never PENDING, which AcasOkOf would book green).
+        Desc   = 'Direct Edge updater trigger with blocker pre-checks (update policy, services) and a proven outcome: before/after version poll + staged new_msedge.exe detection. Hard blockers FAIL with a pointer to the Software Center profile.'
         Script = {
-            $exe = 'C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe'
-            if (-not (Test-Path $exe)) { return 'FAIL: MicrosoftEdgeUpdate.exe not found' }
-            $proc = Start-Process -FilePath $exe -ArgumentList '/ua /installsource scheduler' -Wait -PassThru -NoNewWindow
-            return "OK (Edge update triggered, exit $($proc.ExitCode))"
+            try {
+                $ckeys = @(
+                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}',
+                    'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+                )
+                $getPv = {
+                    foreach ($k in $ckeys) {
+                        if (Test-Path $k) {
+                            $pp = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+                            if ($pp -and $pp.pv) { return "$($pp.pv)" }
+                        }
+                    }
+                    return $null
+                }
+                $before = & $getPv
+                if (-not $before) { return 'SKIP: Edge (machine-level) not installed' }
+
+                # Blocker pre-check (read-only): an admin update policy of 0 means no
+                # trigger can ever work - report it instead of pretending.
+                $pol = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' -ErrorAction SilentlyContinue
+                if ($pol) {
+                    $appPol = $pol.'Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+                    if (($null -ne $pol.UpdateDefault -and [int]$pol.UpdateDefault -eq 0) -or ($null -ne $appPol -and [int]$appPol -eq 0)) {
+                        return "FAIL: Edge auto-update blocked by policy (HKLM\SOFTWARE\Policies\Microsoft\EdgeUpdate) - use the 'Microsoft Edge - Software Center' profile"
+                    }
+                }
+                $eup = Get-Service -Name 'edgeupdate' -ErrorAction SilentlyContinue
+                $eupDisabled = ($eup -and "$($eup.StartType)" -eq 'Disabled')
+
+                # Trigger: the updater exe is Edge's canonical path (no migration
+                # like GoogleUpdater); the UA scheduled task is the fallback.
+                $trigger = $null
+                $exe = 'C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe'
+                if (-not (Test-Path $exe)) { $exe = 'C:\Program Files\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe' }
+                if (Test-Path $exe) {
+                    if ($eupDisabled) { return "FAIL: Edge Update services disabled (edgeupdate/edgeupdatem) - use the 'Microsoft Edge - Software Center' profile" }
+                    Start-Process -FilePath $exe -ArgumentList '/ua','/installsource scheduler' -WindowStyle Hidden -ErrorAction Stop
+                    $trigger = 'MicrosoftEdgeUpdate.exe /ua'
+                } else {
+                    $tasks = @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdateTaskMachineUA*' -ErrorAction SilentlyContinue)
+                    $started = @()
+                    foreach ($t in $tasks) { try { Start-ScheduledTask -InputObject $t -ErrorAction Stop; $started += $t.TaskName.Trim() } catch {} }
+                    if ($started.Count -gt 0) { $trigger = 'EdgeUpdate task ' + ($started -join ', ') }
+                    else { return "FAIL: no Edge updater on this host (no MicrosoftEdgeUpdate.exe, no MicrosoftEdgeUpdateTaskMachineUA task) - use the 'Microsoft Edge - Software Center' profile" }
+                }
+
+                # Poll for a real version bump: 90s ceiling (18 x 5s).
+                $after = $before
+                for ($i = 0; $i -lt 18; $i++) {
+                    Start-Sleep -Seconds 5
+                    $cur = & $getPv
+                    if ($cur -and $cur -ne $before) { $after = $cur; break }
+                }
+                if ($after -ne $before) { return "OK (Edge updated $before -> $after)" }
+                foreach ($d in @('C:\Program Files (x86)\Microsoft\Edge\Application','C:\Program Files\Microsoft\Edge\Application')) {
+                    if (Test-Path (Join-Path $d 'new_msedge.exe')) {
+                        return "UNCONFIRMED: update staged as new_msedge.exe - applies when Edge is next relaunched (still v$before now)"
+                    }
+                }
+                return "UNCONFIRMED: update triggered via $trigger; version still $before after 90s - internet/proxy reachability or a slow download; if it never moves use the 'Microsoft Edge - Software Center' profile"
+            } catch { return "FAIL: $($_.Exception.Message)" }
         }
         Verify = New-AcasClientVerify -Guid '{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' -RootWow 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients' -Root 'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients'
     }
@@ -1033,7 +1097,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.4'
+        version  = '1.11.5'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(

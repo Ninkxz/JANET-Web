@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.0'
+        version  = '6.8.1'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -1119,11 +1119,75 @@ function Get-WptAppUpdateProfiles {
                 'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
         }
         'Microsoft Edge - Update' = @{
+            # Honest Edge trigger (same treatment the Chrome profiles got in 6.5.33;
+            # this one lagged at "OK on any launch"). Pre-checks the EdgeUpdate
+            # policy + service blockers, triggers the updater (exe first - Edge has
+            # no GoogleUpdater-style migration; MicrosoftEdgeUpdateTaskMachineUA*
+            # task as fallback), then PROVES the outcome: before/after version poll
+            # + staged-update (new_msedge.exe) detection. Never a bare OK for an
+            # unverified trigger.
             Script = {
-                $exe = 'C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe'
-                if (-not (Test-Path $exe)) { return 'FAIL: MicrosoftEdgeUpdate.exe not found' }
-                $proc = Start-Process -FilePath $exe -ArgumentList '/ua /installsource scheduler' -Wait -PassThru -NoNewWindow
-                return "OK (Edge update triggered, exit $($proc.ExitCode))"
+                try {
+                    $ckeys = @(
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}',
+                        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+                    )
+                    $getPv = {
+                        foreach ($k in $ckeys) {
+                            if (Test-Path $k) {
+                                $pp = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+                                if ($pp -and $pp.pv) { return "$($pp.pv)" }
+                            }
+                        }
+                        return $null
+                    }
+                    $before = & $getPv
+                    if (-not $before) { return 'SKIP: Edge (machine-level) not installed' }
+
+                    # Blocker pre-check (read-only): an admin update policy of 0 means
+                    # no trigger can ever work - report it instead of pretending.
+                    $pol = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' -ErrorAction SilentlyContinue
+                    if ($pol) {
+                        $appPol = $pol.'Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+                        if (($null -ne $pol.UpdateDefault -and [int]$pol.UpdateDefault -eq 0) -or ($null -ne $appPol -and [int]$appPol -eq 0)) {
+                            return 'FAIL: Edge auto-update blocked by policy (HKLM\SOFTWARE\Policies\Microsoft\EdgeUpdate) - deploy the update via Software Center / MECM instead'
+                        }
+                    }
+                    $eup = Get-Service -Name 'edgeupdate' -ErrorAction SilentlyContinue
+                    $eupDisabled = ($eup -and "$($eup.StartType)" -eq 'Disabled')
+
+                    # Trigger: the updater exe is Edge's canonical path (no migration
+                    # like GoogleUpdater); the UA scheduled task is the fallback.
+                    $trigger = $null
+                    $exe = 'C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe'
+                    if (-not (Test-Path $exe)) { $exe = 'C:\Program Files\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe' }
+                    if (Test-Path $exe) {
+                        if ($eupDisabled) { return 'FAIL: Edge Update services disabled (edgeupdate/edgeupdatem) - deploy the update via Software Center / MECM instead' }
+                        Start-Process -FilePath $exe -ArgumentList '/ua','/installsource scheduler' -WindowStyle Hidden -ErrorAction Stop
+                        $trigger = 'MicrosoftEdgeUpdate.exe /ua'
+                    } else {
+                        $tasks = @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdateTaskMachineUA*' -ErrorAction SilentlyContinue)
+                        $started = @()
+                        foreach ($t in $tasks) { try { Start-ScheduledTask -InputObject $t -ErrorAction Stop; $started += $t.TaskName.Trim() } catch {} }
+                        if ($started.Count -gt 0) { $trigger = 'EdgeUpdate task ' + ($started -join ', ') }
+                        else { return 'FAIL: no Edge updater on this host (no MicrosoftEdgeUpdate.exe, no MicrosoftEdgeUpdateTaskMachineUA task) - deploy the update via Software Center / MECM instead' }
+                    }
+
+                    # Poll for a real version bump: 90s ceiling (18 x 5s).
+                    $after = $before
+                    for ($i = 0; $i -lt 18; $i++) {
+                        Start-Sleep -Seconds 5
+                        $cur = & $getPv
+                        if ($cur -and $cur -ne $before) { $after = $cur; break }
+                    }
+                    if ($after -ne $before) { return "OK (Edge updated $before -> $after)" }
+                    foreach ($d in @('C:\Program Files (x86)\Microsoft\Edge\Application','C:\Program Files\Microsoft\Edge\Application')) {
+                        if (Test-Path (Join-Path $d 'new_msedge.exe')) {
+                            return "PENDING (update staged as new_msedge.exe - applies when Edge is next relaunched; still v$before now)"
+                        }
+                    }
+                    return "PENDING (update triggered via $trigger; version still $before after 90s - internet/proxy reachability or a slow download; re-run Verify in a few minutes, and if it never moves deploy via Software Center / MECM)"
+                } catch { return "FAIL: $($_.Exception.Message)" }
             }
             Verify = New-WptUpdateClientVerify `
                 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' `

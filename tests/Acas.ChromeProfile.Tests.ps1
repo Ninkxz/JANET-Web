@@ -35,9 +35,11 @@ $scName   = 'Google Chrome - Software Center'
 
 Describe 'ACAS 1.11.4 - manifest loads at the bumped version' {
     $manifest = & $m { Get-JanetToolManifest }
-    It 'manifest id is acas and version is 1.11.4' {
+    It 'manifest id is acas and version is at least 1.11.4' {
         [string]$manifest.id      | Should Be 'acas'
-        [string]$manifest.version | Should Be '1.11.4'
+        # Floor assert (wpt-suite precedent 2026-07-16): the newest bump's own
+        # test file carries the exact pin; older files assert a floor.
+        ([version]$manifest.version -ge [version]'1.11.4') | Should Be $true
     }
 }
 

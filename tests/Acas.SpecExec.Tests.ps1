@@ -25,9 +25,12 @@ $SpecProfile = 'Spectre/BHI Mitigation - Enable (CVE-2022-0001)'
 
 Describe 'ACAS 1.11.3 - manifest loads at the bumped version' {
     $manifest = & $mod { Get-JanetToolManifest }
-    It 'manifest id is acas and version is 1.11.4' {
+    It 'manifest id is acas and version is at least 1.11.3' {
         [string]$manifest.id      | Should Be 'acas'
-        [string]$manifest.version | Should Be '1.11.4'
+        # Floor assert (wpt-suite precedent 2026-07-16): exact pins in OLD test
+        # files go stale on every bump; the newest bump's own test carries the
+        # exact pin.
+        ([version]$manifest.version -ge [version]'1.11.3') | Should Be $true
     }
 }
 
