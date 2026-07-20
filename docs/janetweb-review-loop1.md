@@ -67,7 +67,7 @@ quirks); CSV/log injection guarded; CSRF blocked by header+no-CORS; cred memory-
    Script results now pass through (markers appended) ahead of both the probe-error
    wrap and the async rewrap; OK-claiming Scripts still require probe proof.
    acas bumped **1.11.3 → 1.11.4**.
-   Regression: `tests/Acas.ChromeProfile.Tests.ps1` (17 asserts) + version-pin updates
+   Regression: `tests/Acas.ChromeProfile.Tests.ps1` (22 asserts) + version-pin updates
    in `Acas.FixJava.Tests.ps1` / `Acas.SpecExec.Tests.ps1`.
 
 ## SECRET parity
