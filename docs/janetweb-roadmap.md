@@ -47,16 +47,11 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    self-contained + the server CSP still leads `sandbox allow-scripts`.
 8. ~~Host-guard test gaps + non-default-port note~~ — **CLOSED loop 6** (`2c96c16`):
    empty/absent-Host + cancel-route cases pinned (probe-first), F1 comment added.
-11. **Complete the reports host-key normalization sweep** (loop-13) — the remaining
-    lower-impact count sites use the same raw-key pattern the headline sites had:
-    the thirdparty/iavm app-aggregate (`~4773`/`4777`), export-poam per-host counter
-    (`~6246`), and verify the command-brief/planner ACTION paths feed the fixed
-    aggregations. Bounded follow-up; wrap each `$f.Hostname` count key in
-    `Get-ReportsAuditHostKey`, keep raw for display.
-12. **IAVM-map CSV formula-injection guard** (loop-13) — `Write-ReportsIavmMap` (`:872`)
-    quote-wraps but omits the `=+-@` prefix guard every other exporter carries. Low
-    impact (config file, CVE regex-validated) but a guard regression vs the file's own
-    standard.
+11. ~~Complete the reports host-key normalization sweep~~ — **CLOSED loop 14** (`1c3cdb9`):
+    remediation-refresh app-aggregate + export-poam counter normalized; every host tally
+    now agrees with CORA.
+12. ~~IAVM-map CSV formula-injection guard~~ — **CLOSED loop 14** (`1c3cdb9`):
+    `Write-ReportsIavmMap` `$q` now carries the `=+-@` prefix guard.
 10. **Benign-on-self unguarded set (do NOT re-flag)** (loop-10 audit) — these destructive
     fan-outs deliberately lack a self-guard because acting on self is harmless/desirable
     (no reboot/lockout/dispatch-abort, no software install/remove): wpt `reboot-abort`,
@@ -295,6 +290,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   11** (complete the reports host-key sweep — thirdparty/iavm/export-poam) **+ 12** (IAVM-map
   CSV formula guard). SECRET parity: +adto RODC guard + reports host-count normalization.
   *(Operator mid-loop: loop → 15-min cadence + prefer Fable model for agents, from loop 14.)*
+- **Loop 14 (DONE 2026-07-20):** first loop under Fable-preferred / 15-min cadence — the
+  self-review of loop-13 (`0331e66`/`e0a5d51`) and the workstream were done **inline by
+  Fable**, no Opus/Sonnet. Self-review **GREEN** (RODC bit correct, adminCount fail-closed
+  only fires on unparseable, the kb-needed CSV normalized-key display is consistent with
+  CORA). **Workstream: closed ranked items 11 + 12** (`1c3cdb9`, reports **2.14.21→2.14.22**)
+  — completed the host-key normalization sweep (remediation-refresh app-aggregate at `:4776`,
+  which re-aggregates independently of the loop-13 upstream fix and needed its own; export-poam
+  "Finding N" counter at `:6254`/`:6295`) so EVERY host tally agrees with CORA, and added the
+  `=+-@` formula-injection guard to `Write-ReportsIavmMap` (`:872`) so IavmMap.csv matches every
+  other exporter. Tests (`Reports.HostCountAgreement`): remediation-refresh TargetCount==1 for a
+  two-name host + IAVM Title-`=`-prefixed + clean-Title-unchanged. Pester 1127→**1130** green.
+  **Reports correctness is now COMPLETE** (all host counts key on `Get-ReportsAuditHostKey`; all
+  CSV exporters carry the formula guard). No new ranked items. SECRET parity: +reports sweep
+  tail + IAVM guard.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
