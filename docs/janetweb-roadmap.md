@@ -47,6 +47,16 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    self-contained + the server CSP still leads `sandbox allow-scripts`.
 8. ~~Host-guard test gaps + non-default-port note~~ — **CLOSED loop 6** (`2c96c16`):
    empty/absent-Host + cancel-route cases pinned (probe-first), F1 comment added.
+11. **Complete the reports host-key normalization sweep** (loop-13) — the remaining
+    lower-impact count sites use the same raw-key pattern the headline sites had:
+    the thirdparty/iavm app-aggregate (`~4773`/`4777`), export-poam per-host counter
+    (`~6246`), and verify the command-brief/planner ACTION paths feed the fixed
+    aggregations. Bounded follow-up; wrap each `$f.Hostname` count key in
+    `Get-ReportsAuditHostKey`, keep raw for display.
+12. **IAVM-map CSV formula-injection guard** (loop-13) — `Write-ReportsIavmMap` (`:872`)
+    quote-wraps but omits the `=+-@` prefix guard every other exporter carries. Low
+    impact (config file, CVE regex-validated) but a guard regression vs the file's own
+    standard.
 10. **Benign-on-self unguarded set (do NOT re-flag)** (loop-10 audit) — these destructive
     fan-outs deliberately lack a self-guard because acting on self is harmless/desirable
     (no reboot/lockout/dispatch-abort, no software install/remove): wpt `reboot-abort`,
@@ -263,17 +273,35 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   (guards additive, all existing gates intact, no cert files). Pester 1113→**1121** green
   (authoritative post-commit run). Accepted F4 (baseline re-read perf nit). No new ranked
   items. SECRET parity: +adto F1/F2/F3.
+- **Loop 13 (DONE 2026-07-20):** Opus self-review of the loop-12 adto guards →
+  `janetweb-review-loop13.md` (**GREEN**; SERVER_TRUST catches a writable DC, no
+  workstation false-positive, adminCount `"0"+` trick correct, F2 `[string]`-cast dodges
+  the multi-valued `-match` hazard). Its **P3 fixed** (`0331e66`, adto **0.2.2→0.2.3**):
+  a **read-only DC (RODC)** slipped the F1 guard (carries `PARTIAL_SECRETS_ACCOUNT`
+  0x04000000, not SERVER_TRUST, not adminCount-protected) → added the bit + made adminCount
+  parse fail-CLOSED. **Workstream: correctness deep-dive on the reports engine** (the
+  operator's daily deliverable — the risk is a silent MISCOUNT) → **YELLOW, fixed**
+  (`e0a5d51`, reports **2.14.20→2.14.21**). Verified CORRECT: KEV exact-match (not
+  substring), empty-KEV surfaced, CSV formula-guards on all deliverable exporters,
+  div-by-zero guards, Dirty-30, CORA dedup. **P2 (systemic):** CORA deduped hosts by the
+  normalized audit key but ~7 sibling tallies keyed on the RAW hostname → the same host
+  set reported DIFFERENT totals across the tool (short+FQDN), and the posture digest was
+  self-contradictory (deduped UniqueHosts vs raw HostsWithKev). Normalized the HEADLINE
+  count sites (posture-digest KEV map, sla-aging, command-brief KEV, remediation-plan,
+  kb-needed) to `Get-ReportsAuditHostKey`. Test `Reports.HostCountAgreement` (a two-name
+  host = 1 host across sla-aging/kb-needed, agreeing; digest HostsWithKev=1 via CSV).
+  Self-review (Fable, inline) confirmed the one display side-effect (kb-needed CSV shows
+  normalized keys) is consistent with CORA. Pester 1121→**1127** green. **New ranked items
+  11** (complete the reports host-key sweep — thirdparty/iavm/export-poam) **+ 12** (IAVM-map
+  CSV formula guard). SECRET parity: +adto RODC guard + reports host-count normalization.
+  *(Operator mid-loop: loop → 15-min cadence + prefer Fable model for agents, from loop 14.)*
 
-## Coverage status (after loop 12)
-Every most-used and most-dangerous tool now carries a documented adversarial review with a
-GREEN (or fixed-to-green) verdict: server/auth/token (1), wpt profiles (1-3) + full engine (9)
-+ self-guard audit (10), acas (self-guard-tested + Chrome/Edge), upr (5), c2c (8), reports
-sandbox (3,7), remoteadmin (10), winupgrade (11), **adto AD-writes (12)**; plus a suite-wide
-self-guard audit (10). BOTH destructive surfaces are now covered: the WinRM fan-out contract
-(confirm + self-guard + wrong-box + fail-closed) AND the LDAP AD-write contract (DN-redirect +
-protected-object + fail-closed re-read) — enforced AND test-pinned. Remaining backlog is
-decision-gated (SECRET parity) or low-value speculative (items 4/6/9) + the benign-on-self
-do-not-re-flag set (item 10). Loop 13+ candidates: the last small destructive tools (secureboot,
-dhcp, biosfirmware, certdeploy — all seen GREEN-ish in the loop-10 self-guard audit, none
-deep-dived), correctness (not security) deep-dives on the read/report paths (reports engine,
-KEV/SLA logic, CSV parsers), or SECRET-parity execution if the operator signs off.
+## Coverage status (after loop 13)
+Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
+wrong-box + fail-closed) and LDAP AD-write (DN-redirect + protected-object incl. RODC +
+fail-closed re-read). Reviewed tools: server/auth (1), wpt profiles (1-3)+engine (9)+audit
+(10), acas, upr (5), c2c (8), reports sandbox (3,7)+**correctness (13)**, remoteadmin (10),
+winupgrade (11), adto (12-13). Remaining: the reports host-key sweep tail (item 11), the
+IAVM CSV guard (item 12), the last small destructive tools (secureboot/dhcp/biosfirmware/
+certdeploy — GREEN-ish in the loop-10 audit, not deep-dived), more correctness deep-dives on
+read paths, or SECRET-parity execution on operator sign-off.
