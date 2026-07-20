@@ -226,3 +226,33 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   1100→**1111** green (authoritative post-commit run). **New ranked item 10** (benign-on-self
   unguarded set — do NOT re-flag). SECRET parity: +pkginstall deploy guard + wpt
   clean-user-apps guard.
+- **Loop 11 (DONE 2026-07-20):** Opus self-review of the loop-10 self-guards →
+  `janetweb-review-loop11.md` (**GREEN**; the two bypass risks probed both clear — the
+  pkginstall identity-set unary-comma is present so `.Contains` stays case-insensitive, and
+  the `[bool]'false'` gotcha can't bypass the guard since `$dry` drives both guard and mode;
+  one P3 surfaced). Opus deep-dive on **winupgrade** (9 destructive actions, feature-update
+  reboots — the largest unreviewed destructive tool) → **GREEN**: self-guard 1:1 with all 9
+  destructive actions before the single BeginInvoke, CAB leaf-sanitized + DISM no-shell,
+  pin writes value-only to a hardcoded key, wrong-box uniform across all 5 reboot sites,
+  fail-closed throughout; already 7-file tested. One accepted P3 (non-exploitable DISM
+  interpolation — NTFS charset prevents it; PS 5.1 lacks ArgumentList; not worth touching
+  working destructive code). **Workstream: the coercion fix** (`0b1a7c8`, wpt 6.8.4→**6.8.5**)
+  — both deep-dives GREEN, so the deliverable is the one REAL item the self-review found:
+  `clean-user-apps`+`cleanup-disk` coerced `dryrun` with raw `[bool]` (`[bool]'false'` is
+  `$true` in PS → a `'false'` STRING silently ran dry, and for clean-user-apps ALSO skipped
+  its live-only self-guard). Routed both through the existing `ConvertTo-WptBool` (a
+  destructive-mode trust boundary; no new infra; UI JSON-bool path unchanged). Tests:
+  `Wpt.SelfGuardApply` dryrun-string cases (2). Pester 1111→**1113** green (authoritative
+  post-commit run). No new ranked items. SECRET parity: +wpt dryrun coercion fix.
+
+## Coverage status (after loop 11)
+Every most-used and most-dangerous tool now carries a documented adversarial review with a
+GREEN (or fixed-to-green) verdict: server/auth/token (loop 1), wpt profiles (1-3) + full
+engine (9) + self-guard audit (10), acas (self-guard-tested + Chrome/Edge), upr (5), c2c (8),
+reports sandbox (3,7), remoteadmin (10), winupgrade (11); plus a suite-wide self-guard audit
+(10). The destructive-action contract (confirm-word + self-guard + wrong-box + fail-closed)
+is now enforced AND test-pinned uniformly. Remaining backlog is decision-gated (SECRET parity)
+or low-value speculative (items 4/6/9) + the benign-on-self do-not-re-flag set (item 10).
+Loop 12+ candidates: the still-undeepdived smaller destructive tools (adto AD-writes,
+secureboot, dhcp, biosfirmware, certdeploy), correctness (not security) deep-dives on the
+read/report paths, or SECRET-parity execution if the operator signs off.
