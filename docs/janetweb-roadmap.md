@@ -304,6 +304,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   **Reports correctness is now COMPLETE** (all host counts key on `Get-ReportsAuditHostKey`; all
   CSV exporters carry the formula guard). No new ranked items. SECRET parity: +reports sweep
   tail + IAVM guard.
+- **Loop 15 (DONE 2026-07-20):** Fable-inline. Self-review of loop-14 → **GREEN** (reports
+  sweep live, export-poam counter aligned on all 3 sites, IAVM `$q` returns correctly).
+  **Workstream: deep-dive on secureboot** (Enable Secure Boot — a UEFI firmware write that
+  leaves hosts pending reboot; the highest-consequence un-reviewed destructive tool) →
+  **YELLOW, fixed**. Verified CLEAN: positive UEFI+GPT **brick-safety** skip (`:352`),
+  self-guard before fan-out (`:1139`), wrong-box hard-abort BEFORE the password-bearing C$
+  drop (`:571`), fail-closed result polling (`:702`), BIOS-password script self-delete
+  (`:410`). **The gap:** `enable-secure-boot` was `destructive:true` but had NO typed
+  confirm-word — the one destructive tool missing the second barrier every sibling has
+  (remoteadmin 'RUN', c2c/adto 'FIX'); a live fleet firmware write fired from the button on
+  one click. Fixed (`4ab8c05`, secureboot **1.6.0→1.6.1**): manifest `confirm=` + a view-side
+  danger dialog requiring the operator to type **ENABLE**, gated to the LIVE path (Dry Run
+  ungated) — the loop-9 wpt pattern. Additive-only, no existing guard touched (verified).
+  Test `Secureboot.ConfirmWord` (manifest confirm + version + the view requires
+  `confirmWord: 'ENABLE'` positioned inside `if (!isDry)` before `ctx.run`); Scan pin → floor.
+  Pester 1130→**1137** green. **Every destructive tool now carries the full contract**
+  (confirm-word + self-guard + wrong-box + fail-closed) — secureboot was the last gap.
+  No new ranked items. SECRET parity: +secureboot enable typed-confirm barrier.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
