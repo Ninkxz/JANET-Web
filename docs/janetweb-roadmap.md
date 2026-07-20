@@ -363,8 +363,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   was untested end-to-end (only `Test-AcasHostToken` was, in isolation). `Acas.CsvIngestion.Tests.ps1`
   pins the robustness contract: correct host-pick (DNS>NetBIOS>IP) + field mapping, quoted
   embedded-comma survival, missing-column tolerance, server-skip, garbled-token rejection, and the
-  wrong-template warn hint. Pester **1150→(close)** green. No new ranked items. SECRET parity:
+  wrong-template warn hint. Pester **1150→1165** green. No new ranked items. SECRET parity:
   +acas CSV-ingestion robustness test.
+- **Loop 19 (DONE 2026-07-21):** Fable-inline. Self-review of loop-18 → **GREEN** (CSV-ingestion
+  test-only, authoritative 1165). **Workstream: the OTHER CSV front door** — reports'
+  `Parse-AcasFile` (`:1382`), a separate importer from acas's, same offline/CSV robustness
+  questions. Verified GREEN on encoding (`Read-CsvRowsSafe` uses StreamReader UTF-8+BOM-detect +
+  TextFieldParser quoted/multiline/malformed-tolerant), flexible column resolution
+  (`Get-AcasColumnMap`, `[\s._]`-tolerant synonyms), and DNS>NetBIOS>IP per-row host fallback.
+  **The gap (correctness) → FIXED** (`:1456`, reports **2.14.22→2.14.23**): when the header parsed
+  but host and/or plugin column couldn't resolve (wrong template / renamed columns), it did
+  `return $findings` **empty with NO warn** — a silent zero-import that reads as a clean fleet (the
+  false-comfort undercount the offline constraint is vulnerable to). acas already guarded this;
+  reports didn't. Fixed additively: a `warn` naming the missing column(s), `$Emit`-gated (all 3
+  callers pass it). `Reports.WrongTemplateHint.Tests.ps1` (5) drives the real parser via temp CSVs
+  + captured `-Emit`: wrong-template warns + names missing columns, plugin-only-missing, positive
+  control (parses, no false warn), + exact 2.14.23 pin; prior exact pin in HostCountAgreement → `-ge`
+  floor. Pester **1165→(close)** green. Both importers now fail LOUD on a wrong template. No new
+  ranked items. SECRET parity: +reports wrong-template hint (Parse-AcasFile).
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
