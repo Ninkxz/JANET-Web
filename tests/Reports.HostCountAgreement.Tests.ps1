@@ -30,11 +30,57 @@ $script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.reports.p
     }
 }
 
-Describe 'reports 2.14.21 - manifest loads at the bumped version' {
+Describe 'reports 2.14.22 - manifest loads at the bumped version' {
     $mani = & $script:Mod { Get-JanetToolManifest }
-    It 'manifest id is reports and version is 2.14.21' {
+    It 'manifest id is reports and version is 2.14.22' {
         [string]$mani.id      | Should Be 'reports'
-        [string]$mani.version | Should Be '2.14.21'
+        [string]$mani.version | Should Be '2.14.22'
+    }
+}
+
+Describe 'reports host-count sweep tail - remediation-refresh app rows count 1 host (loop14 item 11)' {
+    # ONE logical Chrome host, two name forms. The per-app TargetCount (distinct hosts
+    # behind the fix) must read 1, not 2 - the remediation-refresh app-aggregate now keys
+    # on the normalized audit key like the loop-13 headline sites.
+    It 'the per-app TargetCount is 1 for a two-name-form host (was 2 before the sweep)' {
+        # Two findings = one logical host in two name forms. Whatever app bucket they
+        # classify into, its TargetCount (distinct hosts behind the fix) must read 1.
+        $tc = & $script:Mod {
+            $script:AcasFindings = @(
+                [pscustomobject]@{ Hostname='WEB01';          PluginID='10'; VulnName='Google Chrome < 120 vuln'; Severity='Critical'; CVE='CVE-2024-5555'; Category='Other'; Status='Open'; Solution='Upgrade Google Chrome to 120.'; InKEV=$true;  KevCves='CVE-2024-5555'; IAVA='' }
+                [pscustomobject]@{ Hostname='web01.us.af.mil'; PluginID='10'; VulnName='Google Chrome < 120 vuln'; Severity='High';     CVE='CVE-2024-5555'; Category='Other'; Status='Open'; Solution='Upgrade Google Chrome to 120.'; InKEV=$true;  KevCves='CVE-2024-5555'; IAVA='' }
+            )
+            $res = Invoke-JanetToolAction -ActionId 'remediation-refresh' -Params @{} -Emit { param($e) }
+            $r = @($res.rows)[0]
+            if ($r) { [int]$r.TargetCount } else { -1 }
+        }
+        $tc | Should Be 1
+    }
+}
+
+Describe 'reports IAVM-map CSV formula-injection guard (loop14 item 12)' {
+    It 'a Title beginning with = is prefixed with a single quote (Excel formula guard)' {
+        $line = & $script:Mod {
+            $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('JanetWeb_IavmGuard_' + [guid]::NewGuid().ToString('N') + '.csv')
+            $map = @{ 'CVE-2024-7777' = @{ IAVA='2024-A-0009'; Title='=HYPERLINK("http://evil")' } }
+            Write-ReportsIavmMap -Map $map -Path $tmp
+            $content = Get-Content -LiteralPath $tmp -Raw
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            @($content -split "`r?`n" | Where-Object { $_ -match 'CVE-2024-7777' })[0]
+        }
+        # the Title cell must be neutralized: leading ' before the = (then CSV-quoted for the "()").
+        ($line -match ([regex]::Escape("'=HYPERLINK"))) | Should Be $true
+    }
+    It 'a clean Title is written unchanged (no over-escaping)' {
+        $line = & $script:Mod {
+            $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('JanetWeb_IavmGuard2_' + [guid]::NewGuid().ToString('N') + '.csv')
+            Write-ReportsIavmMap -Map @{ 'CVE-2024-8888' = @{ IAVA='2024-A-0010'; Title='Chrome update' } } -Path $tmp
+            $content = Get-Content -LiteralPath $tmp -Raw
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            @($content -split "`r?`n" | Where-Object { $_ -match 'CVE-2024-8888' })[0]
+        }
+        ($line -match 'Chrome update') | Should Be $true
+        ($line -match "'Chrome") | Should Be $false
     }
 }
 

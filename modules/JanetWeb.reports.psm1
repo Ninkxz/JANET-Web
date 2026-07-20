@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.21'
+        version  = '2.14.22'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -869,7 +869,15 @@ function Get-ReportsIavmForCves {
 # acceptable for a rarely-edited reference list, matching Write-KevCatalog.
 function Write-ReportsIavmMap {
     param([System.Collections.IDictionary]$Map, [string]$Path)
-    $q = { param($v) $s = [string]$v; if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s } }
+    # loop14 (item 12): formula-injection guard (prefix ' when a cell begins = + - @ tab cr),
+    # matching ConvertTo-ReportsCsvCell and every other exporter - IavmMap.csv had only the
+    # quote-wrap. CVE is regex-validated (can't lead with a sigil) but Title/IAVA are free text.
+    $q = {
+        param($v)
+        $s = [string]$v
+        if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
+        if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s }
+    }
     $keys = @($Map.Keys | Sort-Object `
         @{ Expression = { [long]($_ -replace '^CVE-(\d+)-(\d+)$','$1') } }, `
         @{ Expression = { [long]($_ -replace '^CVE-(\d+)-(\d+)$','$2') } })
@@ -4773,8 +4781,12 @@ function Invoke-JanetToolAction {
                     $appAgg[$r.App] = @{ App=$r.App; Hosts=(New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)); KevHosts=(New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)); Crit=0; High=0; Target=$r.TargetVersion }
                 }
                 $a = $appAgg[$r.App]
-                [void]$a.Hosts.Add($r.Hostname)
-                if ($r.HasKev) { [void]$a.KevHosts.Add($r.Hostname) }
+                # loop14 (item 11): TargetCount / KevCount / the affected-host list count
+                # DISTINCT hosts - key on the normalized audit key so a short+FQDN pair of one
+                # host is one host (agrees with CORA + the loop-13 headline fixes). The list is
+                # then shown as normalized keys, consistent with CORA's presentation.
+                $r_hk = Get-ReportsAuditHostKey ([string]$r.Hostname)
+                if ($r_hk) { [void]$a.Hosts.Add($r_hk); if ($r.HasKev) { [void]$a.KevHosts.Add($r_hk) } }
                 if ($r.MaxSeverity -eq 'Critical') { $a.Crit++ }
                 elseif ($r.MaxSeverity -eq 'High') { $a.High++ }
                 if (-not $a.Target -and $r.TargetVersion) { $a.Target = $r.TargetVersion }
@@ -6251,8 +6263,12 @@ function Invoke-JanetToolAction {
             foreach ($f in $open) {
                 $nOpen++
                 $hn = [string]$f.Hostname
-                if (-not $perHostCounter.ContainsKey($hn)) { $perHostCounter[$hn] = 0 }
-                $perHostCounter[$hn]++
+                # loop14 (item 11): the per-host "Finding N" sequence keys on the normalized
+                # audit key so two name forms of one host share one sequence; the POA&M row's
+                # Host column below keeps the RAW name (it identifies the specific finding).
+                $hnKey = Get-ReportsAuditHostKey $hn
+                if (-not $perHostCounter.ContainsKey($hnKey)) { $perHostCounter[$hnKey] = 0 }
+                $perHostCounter[$hnKey]++
                 $isKev = [bool]$f.InKEV; if ($isKev) { $nKev++ }
                 $cat = & $catOf $f.Severity
                 # firstSeen: live, else ledger-backfilled.
@@ -6284,7 +6300,7 @@ function Invoke-JanetToolAction {
                     '', 'ACAS/Tenable scan (J.A.N.E.T.)', 'Ongoing', $comments, [string]$f.Severity,
                     '', $cat, '', [string]$f.VulnName, '', '',
                     '', '', [string]$f.Solution,
-                    '', ("CVE(s): " + [string]$f.CVE), $hn, [string]$perHostCounter[$hn]
+                    '', ("CVE(s): " + [string]$f.CVE), $hn, [string]$perHostCounter[$hnKey]
                 )
                 [void]$sb.AppendLine((($cellVals | ForEach-Object { & $csvQ $_ }) -join ','))
                 if ($nOpen -le 500) {
