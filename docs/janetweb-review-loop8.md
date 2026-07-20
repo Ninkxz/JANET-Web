@@ -37,7 +37,7 @@ Checked-CLEAN with file:line evidence (on record):
   strict-GUID-gated msiexec; Defender offline pkg has an Authenticode + TOCTOU SHA256 re-hash.
 - **No fail-open:** every pillar catch → FAIL; FVE-policy write error aborts the enable.
 
-### The one gap — P3 orphan protector — **FIXED this loop** (`144a4b0`, c2c **1.15.1→1.15.2**)
+### The one gap — P3 orphan protector — **FIXED this loop** (`fb7611f`, c2c **1.15.1→1.15.2**)
 In `$escrowFirst`, if `Add-BitLockerKeyProtector` succeeds but its return yields no resolvable
 protector id (`$newKpId` blank — near-impossible), the escrow-failure cleanup's
 `if ($newKpId){Remove}` was skipped, orphaning the just-added UNescrowed RP protector on a

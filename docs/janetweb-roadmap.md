@@ -167,7 +167,7 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   never leaks (no `.RecoveryPassword` access anywhere), add→escrow→enable fail-closed
   order, self-guard + wrong-box + confirm-word + target-token allowlist uniform through
   one guarded fan-out, cert expiry/persistence, no RCE, no fail-open. **The one gap
-  (P3) fixed** (`144a4b0`, c2c **1.15.1→1.15.2**): escrow-failure orphan protector when
+  (P3) fixed** (`fb7611f`, c2c **1.15.1→1.15.2**): escrow-failure orphan protector when
   the added protector's id is unresolvable (near-impossible) — re-enumerate + remove
   only RP protectors absent from the pre-Add `$beforeIds` snapshot (never a pre-existing
   one); strictly additive to a previously-orphaning state, zero regression risk. Tests
