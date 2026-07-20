@@ -47,6 +47,14 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    self-contained + the server CSP still leads `sandbox allow-scripts`.
 8. ~~Host-guard test gaps + non-default-port note~~ — **CLOSED loop 6** (`2c96c16`):
    empty/absent-Host + cancel-route cases pinned (probe-first), F1 comment added.
+10. **Benign-on-self unguarded set (do NOT re-flag)** (loop-10 audit) — these destructive
+    fan-outs deliberately lack a self-guard because acting on self is harmless/desirable
+    (no reboot/lockout/dispatch-abort, no software install/remove): wpt `reboot-abort`,
+    `winrm-bootstrap`, `healer-*` (restart-ccm/wmi-repair/wu-reset/gpupdate/ccm-repair/
+    rdp-rebind), `remote-message`, `cleanup-disk`, `maintenance-unlock`; acas
+    `preflight-services`; restart `abort-scheduled`. A future self-guard sweep will
+    re-flag them — this is the standing "by design" answer. Guarding them would remove
+    legitimate dispatcher self-repair/self-abort.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -197,3 +205,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   sites, helpers untouched, no weakening, no cert files). Pester 1091→**1100** green
   (authoritative post-commit run). No new ranked items. SECRET parity: +3 wpt self-guards
   + confirm string.
+- **Loop 10 (DONE 2026-07-20):** Opus self-review of the loop-9 wpt self-guards →
+  `janetweb-review-loop10.md` (**GREEN**; no over-guard, `$totalUnits` correct, tests
+  non-vacuous, `confirm=` decorative-parity; N1 fixed, N2 accepted). Opus deep-dive on
+  **remoteadmin** (Run Script = the same RCE class as wpt Custom Command) → **GREEN**: it
+  is the REFERENCE self-guard implementation (drops the dispatcher before fan-out) and
+  already 40+-assert tested; no fix. **Workstream: suite-wide self-guard-coverage audit**
+  (Sonnet swept every tool's destructive actions, extending the loop-9 finding). Flagged 16
+  unguarded destructive fan-outs; applying the repo's HARM-DRIVEN philosophy (guard only
+  when self-action reboots/locks-out/aborts-dispatch or installs/removes software) left **3
+  GENUINE gaps — fixed** (`f4ab266`): pkginstall **deploy-psadt**+**deploy-msi-bundle**
+  (v2.5.7→**2.5.8**, arbitrary package install on the dispatcher, zero self-guard infra →
+  new identity helper + unconditional drop) and wpt **clean-user-apps** (v6.8.3→**6.8.4**,
+  deletes dispatcher app binaries → LIVE-only guard). The other 13 are benign-on-self,
+  unguarded by design (documented). Corrected the loop-9 "the ONLY" comment (clean-user-apps
+  was also unguarded — settled by reading source when the two agents disagreed) + N1.
+  Sonnet re-verify: **8/8 PASS** (guards additive/filter-not-wipe, wrong-box untouched,
+  12 wpt call sites, no cert files). Tests: `PkgInstall.SelfGuard` (8) + `Wpt.SelfGuardApply`
+  clean-user-apps cases (3, incl. hermetic dry-run-not-guarded via faked worker). Pester
+  1100→**1111** green (authoritative post-commit run). **New ranked item 10** (benign-on-self
+  unguarded set — do NOT re-flag). SECRET parity: +pkginstall deploy guard + wpt
+  clean-user-apps guard.
