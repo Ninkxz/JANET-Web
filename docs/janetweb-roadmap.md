@@ -19,10 +19,8 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
 - Every change worth mirroring to SIPR gets a "SECRET parity:" line in the loop review doc.
 
 ## Ranked open items
-1. **Edge always-OK Script** — `'Microsoft Edge - Update'` in BOTH `JanetWeb.wpt.psm1:1121`
-   and `JanetWeb.acas.psm1` still fires `MicrosoftEdgeUpdate.exe /ua` and returns OK
-   unconditionally — same defect shape the Chrome profiles just lost. Same honest port
-   applies (policy key `Policies\Microsoft\EdgeUpdate`, staged `new_msedge.exe`).
+1. ~~Edge always-OK Script~~ — **CLOSED loop 2** (`3dea8b8`): honest port in BOTH
+   modules (wpt 6.8.1 / acas 1.11.5).
 2. **Report-preview sandbox backstop** (loop-1 P3-2) — same-origin popup with token
    access + `unsafe-inline` CSP; escaping is the sole XSS barrier. Render via
    `srcdoc` + `sandbox="allow-scripts"` iframe.
@@ -32,7 +30,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    `cmd.exe /c start` browser-open fallback in the launcher.
 5. **SECRET parity backlog** — see per-loop review docs ("SECRET parity:" lines);
    currently: c2c durability trio (pre-series), acas honest-Chrome + worker
-   passthrough, session disarm.
+   passthrough, session disarm, honest-Edge (wpt+acas; re-route SC pointers for SIPR).
+6. **SKIP-books-green reporting note** (loop-2 Opus P3-3, pre-existing) — `AcasOkOf`
+   counts `SKIP*` as OK so run-all "patched" tallies include not-installed hosts;
+   split SKIP out of the tallies if the operator wants stricter counts.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -51,3 +52,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   post-change (that run enumerated files before the disarm suite landed; its 11
   asserts green in a targeted run — loop 2's baseline records the consolidated count).
   3 P3s accepted/deferred to ranked items. SECRET parity ×3 noted, not executed.
+  *(Consolidated count landed in loop 2: 1013/1013.)*
+- **Loop 2 (DONE 2026-07-20):** Opus adversarial self-review of the loop-1 commits →
+  `janetweb-review-loop2.md` (**GREEN, 0 P1/P2** — round-trip, passthrough ordering,
+  and mid-flight cred capture all traced clean: workers get the PSCredential at
+  dispatch, background runspaces can't see `$state`, listener is serial, so End
+  Session can't strip an in-flight run). Sonnet mechanical re-verify: all 5 checks
+  PASS (122/122 targeted, guards tightened-not-weakened, no cert files, BOM/parse/
+  ASCII clean). **Workstream: closed ranked item 1 — honest Edge updater Scripts in
+  BOTH modules** (`3dea8b8`): policy + service pre-checks, exe-first trigger with
+  `MicrosoftEdgeUpdateTaskMachineUA*` fallback, 90s before/after poll, staged
+  `new_msedge.exe` detect; wpt speaks PENDING, acas speaks UNCONFIRMED (boundary
+  rule pinned by tests). wpt **6.8.0→6.8.1**, acas **1.11.4→1.11.5**; old acas
+  exact-version pins → floor asserts (Opus P3-2). Tests: +2 files (`Wpt.EdgeProfile`
+  12, `Acas.EdgeProfile` 17). Pester 1013→**1042** green (clean post-change full
+  suite). New ranked item 6 (SKIP-books-green tallies). SECRET parity: honest-Edge
+  added to the backlog.
