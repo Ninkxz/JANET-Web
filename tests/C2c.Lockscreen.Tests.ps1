@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 #  C2c.Lockscreen.Tests.ps1 - Pester 3.4 for the v1.9.0 Lock Screen / Wallpaper
 #  Cache fix (fix-lockscreen). Drives the DESTRUCTIVE fix worker's Lockscreen
 #  branch LOCALLY: New-PSSession / Remove-PSSession / Invoke-Command and the
@@ -126,7 +126,9 @@ Describe 'C2C v1.9.0 - fix-lockscreen is wired as an opt-in action, NOT a run-al
     It 'fix-lockscreen maps to the Lockscreen pillar' {
         & $cm { $script:C2cPillarByAction['fix-lockscreen'] } | Should Be 'Lockscreen'
     }
-    It 'reports tool version 1.15.1' {
-        (& $cm { Get-JanetToolManifest }).version | Should Be '1.15.1'
+    It 'reports tool version at least 1.15.1' {
+        # Floor assert (wpt-suite precedent): the newest bump's own test file
+        # (C2c.Enable) carries the exact pin; older files assert a floor.
+        ([version](& $cm { Get-JanetToolManifest }).version -ge [version]'1.15.1') | Should Be $true
     }
 }

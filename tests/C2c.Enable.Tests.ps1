@@ -44,8 +44,13 @@ function Invoke-C2cEnable {
         $script:__usedSpace   = $false
         $script:__escrowId    = ''
         $script:__preexist    = ($Scenario -eq 'preexisthappy' -or $Scenario -eq 'preexistbothfail')
-        $script:__entraThrow  = ($Scenario -eq 'entrafail' -or $Scenario -eq 'bothfail' -or $Scenario -eq 'preexistbothfail')
-        $script:__adThrow     = ($Scenario -eq 'bothfail' -or $Scenario -eq 'preexistbothfail')
+        $script:__entraThrow  = ($Scenario -eq 'entrafail' -or $Scenario -eq 'bothfail' -or $Scenario -eq 'preexistbothfail' -or $Scenario -eq 'bothfailblankid')
+        $script:__adThrow     = ($Scenario -eq 'bothfail' -or $Scenario -eq 'preexistbothfail' -or $Scenario -eq 'bothfailblankid')
+        # bothfailblankid: Add succeeds but returns NO resolvable protector id, so
+        # $newKpId stays blank; escrow then fails and the v1.15.2 orphan-cleanup path
+        # must re-enumerate and remove the just-added protector (never a pre-existing).
+        $script:__blankId     = ($Scenario -eq 'bothfailblankid')
+        $script:__removeIds   = New-Object System.Collections.ArrayList
 
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
@@ -61,6 +66,12 @@ function Invoke-C2cEnable {
                 $kps = @()
                 if ($script:__preexist) { $kps = @([pscustomobject]@{ KeyProtectorType = 'RecoveryPassword'; KeyProtectorId = '{PRE-KP}'; RecoveryPassword = $script:__sentinel }) }
                 return [pscustomobject]@{ ProtectionStatus = 'Off'; VolumeStatus = 'FullyDecrypted'; VolumeType = 'OperatingSystem'; EncryptionPercentage = 0; KeyProtector = $kps }
+            }
+            # blank-id orphan cleanup re-read (Enable never runs in bothfailblankid, so
+            # this call 2 IS the cleanup enumeration): the just-added RP protector now
+            # surfaces with a resolvable id NOT present before the Add ($beforeIds was empty).
+            if ($script:__blankId) {
+                return [pscustomobject]@{ ProtectionStatus = 'Off'; VolumeStatus = 'FullyDecrypted'; VolumeType = 'OperatingSystem'; EncryptionPercentage = 0; KeyProtector = @([pscustomobject]@{ KeyProtectorType = 'RecoveryPassword'; KeyProtectorId = '{LATE-KP}'; RecoveryPassword = $script:__sentinel }) }
             }
             # post-Enable verify re-read
             return [pscustomobject]@{ ProtectionStatus = 'Off'; VolumeStatus = 'EncryptionInProgress'; VolumeType = 'OperatingSystem'; EncryptionPercentage = 2; KeyProtector = @() }
@@ -97,6 +108,9 @@ function Invoke-C2cEnable {
         function script:Add-BitLockerKeyProtector {
             param($MountPoint, [switch]$RecoveryPasswordProtector, $ErrorAction)
             [void]$script:__order.Add('Add')
+            # bothfailblankid: the Add return carries NO resolvable RP protector, so the
+            # engine's add-time id resolution leaves $newKpId blank (the near-impossible case).
+            if ($script:__blankId) { return [pscustomobject]@{ KeyProtector = @() } }
             return [pscustomobject]@{ KeyProtector = @([pscustomobject]@{ KeyProtectorType = 'RecoveryPassword'; KeyProtectorId = '{NEW-KP}'; RecoveryPassword = $script:__sentinel }) }
         }
         function script:BackupToAAD-BitLockerKeyProtector {
@@ -114,6 +128,7 @@ function Invoke-C2cEnable {
         function script:Remove-BitLockerKeyProtector {
             param($MountPoint, $KeyProtectorId, $ErrorAction)
             [void]$script:__order.Add('Remove')
+            [void]$script:__removeIds.Add([string]$KeyProtectorId)
         }
         function script:Enable-BitLocker {
             param($MountPoint, [switch]$TpmProtector, $EncryptionMethod, [switch]$SkipHardwareTest, [switch]$UsedSpaceOnly, $ErrorAction)
@@ -142,6 +157,7 @@ function Invoke-C2cEnable {
                 EntraCalled    = (@($script:__order) -contains 'Entra')
                 AdCalled       = (@($script:__order) -contains 'AD')
                 RemoveCalled   = (@($script:__order) -contains 'Remove')
+                RemoveIds      = @($script:__removeIds.ToArray())
                 EnableCalled   = (@($script:__order) -contains 'Enable')
                 EscrowId       = [string]$script:__escrowId
                 EncMethod      = [string]$script:__encMethod
@@ -208,9 +224,36 @@ Describe 'C2C Mass Fix v1.3.0 - opt-in BitLocker ENABLE (USAF-aligned, escrow-fi
         $r.EntraCalled  | Should Be $true
         $r.AdCalled     | Should Be $true
         $r.RemoveCalled | Should Be $true      # we added it => remove it
+        $r.RemoveIds -contains '{NEW-KP}' | Should Be $true   # the id we resolved at add-time
         $r.EnableCalled | Should Be $false     # enable is unreachable
         $r.EncResult    | Should Be 'FAIL'
         $r.EncDetail    | Should Match 'escrow failed \(Entra \+ AD\) - encryption NOT started'
+    }
+
+    It '(e2, v1.15.2) escrow fails AND the added protector id was UNRESOLVABLE => orphan cleanup re-enumerates and removes it, Enable unreachable, FAIL' {
+        # The near-impossible edge Opus flagged: Add succeeds but its return carries no
+        # resolvable protector id ($newKpId blank). Pre-1.15.2 left the just-added,
+        # unescrowed RecoveryPassword protector orphaned on a still-decrypted volume.
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'bothfailblankid'
+        $r.AddCalled    | Should Be $true
+        $r.EntraCalled  | Should Be $true
+        $r.AdCalled     | Should Be $true
+        $r.RemoveCalled | Should Be $true                      # cleanup ran despite the blank id
+        $r.RemoveIds -contains '{LATE-KP}' | Should Be $true   # re-enumerated + removed the orphan
+        $r.EnableCalled | Should Be $false                     # still fail-closed: no encryption
+        $r.EncResult    | Should Be 'FAIL'
+        $r.EncDetail    | Should Match 'escrow failed \(Entra \+ AD\) - encryption NOT started'
+        $r.Leaked       | Should Be $false                     # recovery password still never leaks
+    }
+
+    It '(e3, v1.15.2) the orphan-cleanup path NEVER removes a pre-existing protector (safety)' {
+        # A pre-existing RP protector routes to REUSE (no Add, $weAdded=$false), so the
+        # cleanup branch is unreachable for it - proven by the pre-existing double-fail
+        # case removing nothing at all.
+        $r = Invoke-C2cEnable -DoEnable $true -Scenario 'preexistbothfail'
+        $r.AddCalled    | Should Be $false
+        $r.RemoveCalled | Should Be $false
+        ($r.RemoveIds -contains '{PRE-KP}') | Should Be $false
     }
 
     It '(f) HAPPY PATH order is Policy -> Add -> escrow -> Enable, result STARTED, XtsAes256 full-volume' {
@@ -293,8 +336,8 @@ Describe 'C2C manifest - C2C Nemesis v1.10.0, per-pillar fix actions (incl. fix-
     It 'keeps the tool id c2c (routes / registry / log names are unchanged)' {
         $man.id | Should Be 'c2c'
     }
-    It 'reports tool version 1.15.1' {
-        $man.version | Should Be '1.15.1'
+    It 'reports tool version 1.15.2' {
+        $man.version | Should Be '1.15.2'
     }
     It 'exposes 12 actions: scan + import + six per-pillar fixes + fix-lockscreen + fix-java + run-all + version-check' {
         @($man.actions).Count | Should Be 12
