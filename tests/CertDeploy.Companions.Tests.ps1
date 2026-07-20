@@ -104,10 +104,27 @@ Describe 'Cert Deploy v1.4.0 - prune allowlist (guard-copy sync + regex shape)' 
         $src = & $cd { $script:CertDeployCompanionsSrc }
         $src.Contains('^CN=DOD (EMAIL|ID|SW|DERILITY) CA-\d+, OU=PKI, OU=DoD') | Should Be $true
     }
-    It 'legacyKeep guard-copy holds EXACTLY the CertDeployLegacyIntermediates thumbprints' {
+    It 'legacyKeep guard-copy holds EXACTLY the CertDeployLegacyIntermediates thumbprints (precise, both directions)' {
+        # loop16: the prune is a trust-anchor DELETION path. The guard copy $legacyKeep and
+        # the master $script:CertDeployLegacyIntermediates are separate literals - a drift in
+        # EITHER direction is dangerous: a MISSING legacy-keep -> prune deletes a cert deploy
+        # just pushed; an EXTRA thumbprint -> a cert silently exempted from pruning. Extract
+        # the ACTUAL $legacyKeep = @( ... ) array from the companion source (not a loose
+        # source-substring, which a comment would satisfy) and assert exact SET EQUALITY with
+        # the master allowlist.
         $src  = & $cd { $script:CertDeployCompanionsSrc }
-        $keys = & $cd { @($script:CertDeployLegacyIntermediates.Keys) }
+        $keys = @(& $cd { @($script:CertDeployLegacyIntermediates.Keys) } | ForEach-Object { ([string]$_).ToUpper() })
         $keys.Count | Should Be 4
-        foreach ($k in $keys) { $src.Contains([string]$k) | Should Be $true }
+
+        # Slice the $legacyKeep = @( ... ) block, then pull every quoted 40-hex thumbprint in it.
+        $blk = [regex]::Match($src, '(?s)\$legacyKeep\s*=\s*@\((.*?)\)')
+        $blk.Success | Should Be $true
+        $guard = @([regex]::Matches($blk.Groups[1].Value, "'([0-9A-Fa-f]{40})'") | ForEach-Object { $_.Groups[1].Value.ToUpper() })
+
+        $guard.Count | Should Be 4
+        # master subset of guard (every pushed legacy-keep is protected from the prune)...
+        foreach ($k in $keys)  { ($guard -contains $k)  | Should Be $true }
+        # ...AND guard subset of master (no extra thumbprint silently exempted).
+        foreach ($g in $guard) { ($keys  -contains $g)  | Should Be $true }
     }
 }
