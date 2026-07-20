@@ -322,6 +322,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   Pester 1130→**1137** green. **Every destructive tool now carries the full contract**
   (confirm-word + self-guard + wrong-box + fail-closed) — secureboot was the last gap.
   No new ranked items. SECRET parity: +secureboot enable typed-confirm barrier.
+- **Loop 16 (DONE 2026-07-20):** Fable-inline. Self-review of loop-15 → **GREEN** (secureboot
+  confirm-word additive; all 6 guards intact). **Workstream: deep-dive on certdeploy** (DoD
+  trust-root push over WinRM, offline/local-bundle) → **GREEN** — verified the full contract
+  (typed `DEPLOY` + self-guard + DNS wrong-box hard-abort before the C$ round-trip + additive-
+  only install with non-CA-anchor rejection + persistence re-verify) AND the one removal path
+  (opt-in `prunePki`, triple-gated: expired + retired-DoD regex + not-legacy-keep, CA-store
+  only). **Fix was in the TEST, not the tool** (`fac190f`, test-only, certdeploy stays 1.4.0):
+  the guard-copy sync check (`$legacyKeep` prune-exclusion must equal the master allowlist, or
+  the prune could delete a cert deploy just pushed) was loose (source-substring, one-direction)
+  → rewrote to extract the actual `$legacyKeep = @(...)` array and assert exact SET EQUALITY
+  both ways. Pester **1137** (test-only, count unchanged). **Destructive-tool coverage COMPLETE**
+  — every destructive tool now has a full-contract review; the 3 removal paths (upr uninstall,
+  adto/c2c writes, certdeploy prune) are allowlisted + gated + sync-guarded. No new ranked
+  items. SECRET parity: +certdeploy prune-sync test precision.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
