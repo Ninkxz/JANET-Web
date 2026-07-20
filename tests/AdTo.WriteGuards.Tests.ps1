@@ -57,11 +57,11 @@ function Invoke-FixWith {
     @{ Result = $res; Events = @($evs) }
 }
 
-Describe 'adto 0.2.2 - manifest loads at the bumped version' {
+Describe 'adto 0.2.3 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is adto and version is 0.2.2' {
+    It 'manifest id is adto and version is 0.2.3' {
         [string]$mani.id      | Should Be 'adto'
-        [string]$mani.version | Should Be '0.2.2'
+        [string]$mani.version | Should Be '0.2.3'
     }
     It 'fix + validate-iao are destructive' {
         foreach ($aid in @('fix','validate-iao')) {
@@ -83,6 +83,15 @@ Describe 'adto F1 - fix REFUSES a domain controller + a privileged object (prote
     It 'an adminCount>=1 (privileged/break-glass) object is PROTECTED, never committed' {
         $de = New-FakeDe -Uac 514 -AdminCount 1        # normal UAC but AdminSDHolder-protected
         $o = Invoke-FixWith -Fake $de -Rule 'inactiveEnabled'
+        $row = @($o.Events | Where-Object { $_.type -eq 'row' })[0]
+        [string]$row.Status | Should Be 'PROTECTED'
+        $de.Committed | Should Be $false
+    }
+    It 'a READ-ONLY DC (PARTIAL_SECRETS_ACCOUNT=0x04000000, no SERVER_TRUST) is PROTECTED (loop13)' {
+        # An RODC computer object carries WORKSTATION_TRUST(0x1000)+PARTIAL_SECRETS_ACCOUNT,
+        # NOT SERVER_TRUST - it slipped the original guard. Now caught.
+        $de = New-FakeDe -Uac (0x1000 -bor 0x04000000) -AdminCount 0
+        $o = Invoke-FixWith -Fake $de -Rule 'staleObject'
         $row = @($o.Events | Where-Object { $_.type -eq 'row' })[0]
         [string]$row.Status | Should Be 'PROTECTED'
         $de.Committed | Should Be $false

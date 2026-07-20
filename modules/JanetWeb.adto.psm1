@@ -23,9 +23,10 @@ $script:AdToUac = @{
     PASSWD_NOTREQD          = 0x00020
     ENCRYPTED_TEXT_PWD      = 0x00080   # reversible encryption
     WORKSTATION_TRUST       = 0x01000
-    SERVER_TRUST            = 0x02000   # domain controller
+    SERVER_TRUST            = 0x02000   # writable domain controller
     DONT_EXPIRE_PASSWORD    = 0x10000
     SMARTCARD_REQUIRED      = 0x40000
+    PARTIAL_SECRETS_ACCOUNT = 0x04000000  # read-only domain controller (RODC) - no SERVER_TRUST bit
 }
 
 # The five categories the operator asked the fleet to be split into.
@@ -308,7 +309,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.2'
+        version  = '0.2.3'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(
@@ -504,10 +505,14 @@ function Invoke-AdToFix {
             # would otherwise get ACCOUNTDISABLE set (a DoS of a critical AD object). Refuse a
             # DC (SERVER_TRUST bit in its own UAC) or any object with adminCount>=1, before the
             # write, and audit the refusal.
-            $isDc = (($cur -band [int]$script:AdToUac.SERVER_TRUST) -ne 0)
-            $adminCount = 0; try { $adminCount = [int]("0" + [string]$de.Properties['adminCount'].Value) } catch {}
+            # loop13: catch a READ-ONLY DC too - an RODC computer object carries
+            # PARTIAL_SECRETS_ACCOUNT, NOT SERVER_TRUST, and is not adminCount-protected, so
+            # it slipped both halves of the original guard (disabling an RODC breaks a branch
+            # office's auth). adminCount parse now fails CLOSED (refuse when uncertain).
+            $isDc = (($cur -band [int]$script:AdToUac.SERVER_TRUST) -ne 0) -or (($cur -band [int]$script:AdToUac.PARTIAL_SECRETS_ACCOUNT) -ne 0)
+            $adminCount = 0; try { $adminCount = [int]("0" + [string]$de.Properties['adminCount'].Value) } catch { $adminCount = 1 }
             if ($isDc -or $adminCount -ge 1) {
-                $why = if ($isDc) { 'domain controller (SERVER_TRUST)' } else { 'privileged/protected (adminCount>=1)' }
+                $why = if ($isDc) { 'domain controller (SERVER_TRUST/RODC)' } else { 'privileged/protected (adminCount>=1)' }
                 $row = @{ Object=$short; Category=''; Status='PROTECTED'; Applied=''; Detail=("refused: AD TO fix never modifies a $why object"); DN=$dn }
                 [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
                 & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result='Skipped'; itemCount=0; detail=("[PROTECTED] refused: $why") }
