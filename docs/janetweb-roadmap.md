@@ -21,16 +21,17 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
 ## Ranked open items
 1. ~~Edge always-OK Script~~ — **CLOSED loop 2** (`3dea8b8`): honest port in BOTH
    modules (wpt 6.8.1 / acas 1.11.5).
-2. **Report-preview sandbox backstop** (loop-1 P3-2) — same-origin popup with token
-   access + `unsafe-inline` CSP; escaping is the sole XSS barrier. Render via
-   `srcdoc` + `sandbox="allow-scripts"` iframe.
+2. ~~Report-preview sandbox backstop~~ — **CLOSED loop 3** (`902a00c`): CSP
+   `sandbox allow-scripts` on the preview response (opaque origin — simpler than the
+   srcdoc-iframe rebuild). Live-fire caveat: eyeball a report preview in-browser.
 3. **Host-header validation** (loop-1 P3-4, defense-in-depth) — reject `Host` other
    than `127.0.0.1:<port>` / `localhost:<port>` on the listener.
 4. **Token on child-process command line** (loop-1 P3-3) — drop/replace the
    `cmd.exe /c start` browser-open fallback in the launcher.
 5. **SECRET parity backlog** — see per-loop review docs ("SECRET parity:" lines);
    currently: c2c durability trio (pre-series), acas honest-Chrome + worker
-   passthrough, session disarm, honest-Edge (wpt+acas; re-route SC pointers for SIPR).
+   passthrough, session disarm, honest-Edge (wpt+acas; re-route SC pointers for
+   SIPR), report-preview CSP sandbox, wpt audit-Skipped fix.
 6. **SKIP-books-green reporting note** (loop-2 Opus P3-3, pre-existing) — `AcasOkOf`
    counts `SKIP*` as OK so run-all "patched" tallies include not-installed hosts;
    split SKIP out of the tallies if the operator wants stricter counts.
@@ -68,3 +69,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   12, `Acas.EdgeProfile` 17). Pester 1013→**1042** green (clean post-change full
   suite). New ranked item 6 (SKIP-books-green tallies). SECRET parity: honest-Edge
   added to the backlog.
+- **Loop 3 (DONE 2026-07-20):** Opus adversarial self-review of the loop-2 Edge port
+  → `janetweb-review-loop3.md` (**GREEN** — wpt live-scriptblock dispatch traced
+  safe, WOW6432Node-first key order confirmed, exe-first fast-fail upheld; the acas
+  no-PENDING test verified genuine). Its P3-1 **fixed in-loop** (`7c79666`, wpt
+  **6.8.1→6.8.2**): wpt app-update audit booked `Skipped` hosts as **Failure** in
+  the Runs CSV (only Pending was special-cased; pre-existing since 6.5.33) — both
+  non-attempt states now audit Skipped, Failure else-arm pinned. P3-2/P3-3 (wording)
+  accepted with rationale. Sonnet re-verify at loop start: all 5 PASS (122/122).
+  **Workstream: closed ranked item 2 — report-preview XSS backstop** (`902a00c`):
+  CSP `sandbox allow-scripts` on the preview response → opaque origin (no
+  sessionStorage token, no same-origin /api even on an escaping miss); report's
+  pure-DOM inline script verified sandbox-compatible; SPA CSP untouched;
+  `allow-same-origin` banned by test; chose the one-header fix over the srcdoc-
+  iframe rebuild. Tests: +`Server.ReportPreviewSandbox` (10) + 2 audit-map asserts.
+  Pester 1042→**1054** green. Process fix adopted: one full-suite run after the
+  last code commit (stop racing). SECRET parity: +preview sandbox, +audit-Skipped.
