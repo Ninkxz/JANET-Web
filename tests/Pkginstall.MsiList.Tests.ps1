@@ -43,3 +43,32 @@ Describe 'ConvertTo-JanetMsiList: keep in-bundle paths, reject traversal' {
         @(& $script:Mod { ConvertTo-JanetMsiList '   ' }).Count | Should Be 0
     }
 }
+
+# -----------------------------------------------------------------------------
+# loop60 (item67): msiexec exit 1638 = "another version already installed" - msiexec REFUSED to
+# install and NOTHING changed, and the installed version is NOT verified >= the package (may still
+# be the OLD vulnerable one). It was mapped to 'AlreadyCompliant' -> host Status 'Success' ->
+# VulnPatched/Success/itemCount=1, a false "patched" audit for an untouched, possibly-vulnerable
+# host. Now the all-1638 host resolves to 'AlreadyInstalled' -> Skipped/itemCount 0. Static analysis
+# (the per-MSI mapping + aggregate live inside the module-less runspace worker $RpiDeployHostScript).
+Describe 'pkginstall 2.5.9 - all-1638 MSI host is Skipped, not a false VulnPatched Success' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'manifest version is exactly 2.5.9 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.9'
+    }
+    It 'the all-1638 aggregate sets host Status AlreadyInstalled (not Success)' {
+        ($src -match '\$installedCount\s*-eq\s*\$totalCount') | Should Be $true
+        ($src -match "\`$res\.Status\s*=\s*'AlreadyInstalled'") | Should Be $true
+    }
+    It 'the harvest routes AlreadyInstalled to the skipped bucket, not ok/fail' {
+        ($src -match "'AlreadyInstalled'\s*\{\s*\`$skipCount\+\+") | Should Be $true
+    }
+    It 'the audit maps AlreadyInstalled to Skipped (itemCount 0, no false VulnPatched)' {
+        ($src -match "'AlreadyInstalled'\s*\{\s*'Skipped'") | Should Be $true
+    }
+    It 'the old false "treated as already compliant" wording is gone' {
+        ($src -match 'treated as already compliant') | Should Be $false
+    }
+}

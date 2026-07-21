@@ -22,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.8'
+        version  = '2.5.9'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -520,15 +520,15 @@ $script:RpiDeployHostScript = {
                             1605    { $status = 'Failed';  $reason = 'Unknown product (1605)' }
                             1618    { $status = 'Failed';  $reason = 'Another install in progress (1618)' }
                             1619    { $status = 'Failed';  $reason = 'Package open failed (1619) - corrupt or locked' }
-                            1638    { $status = 'AlreadyCompliant'; $reason = 'Another version already installed (1638) - treated as already compliant, not a failure' }
+                            1638    { $status = 'AlreadyInstalled'; $reason = 'Another version already installed (1638) - install did NOT run; installed version NOT verified compliant' }
                             default {
                                 if ($null -eq $exit) { $status = 'Failed'; $reason = 'msiexec failed to launch (no exit code)' }
                                 else                 { $status = 'Failed'; $reason = "msiexec exit $exit - see $logFile" }
                             }
                         }
                         $perMsi.Add([pscustomobject]@{ Msi=$rel; ExitCode=$exit; Status=$status; Reason=$reason })
-                        # Only a genuine 'Failed' seeds the first-failure marker. 'AlreadyCompliant'
-                        # (MSI 1638) is a distinct non-failure state and must not trip the fail path.
+                        # Only a genuine 'Failed' seeds the first-failure marker. 'AlreadyInstalled'
+                        # (MSI 1638) is a distinct non-failure, non-success state and must not trip the fail path.
                         if ($status -eq 'Failed' -and -not $firstFailMsi) {
                             $firstFailMsi  = $rel
                             $firstFailExit = $exit
@@ -538,24 +538,30 @@ $script:RpiDeployHostScript = {
 
                     $totalCount     = $perMsi.Count
                     $successCount   = @($perMsi | Where-Object { $_.Status -eq 'Success' }).Count
-                    $compliantCount = @($perMsi | Where-Object { $_.Status -eq 'AlreadyCompliant' }).Count
-                    # Only genuine failures count against the run. AlreadyCompliant (MSI 1638 -
-                    # another version already installed) is neither success nor failure.
+                    # 1638 = another version already installed; msiexec refused, nothing changed, and the
+                    # installed version was NOT verified >= the package (may still be the OLD vulnerable one).
+                    # Neither success nor failure - counted here only to detect the all-1638 (nothing-installed) case.
+                    $installedCount = @($perMsi | Where-Object { $_.Status -eq 'AlreadyInstalled' }).Count
                     $failCount      = @($perMsi | Where-Object { $_.Status -eq 'Failed' }).Count
 
                     if ($totalCount -eq 0) {
                         $res.Status = 'Failed'
                         $res.Reason = 'No MSIs to install (empty selection)'
+                    } elseif ($failCount -eq 0 -and $successCount -eq 0 -and $installedCount -eq $totalCount) {
+                        # loop60 (item67): EVERY MSI returned 1638 - msiexec REFUSED to install because another
+                        # version is present, so NOTHING changed on the box and the installed version was NEVER
+                        # verified >= the package (it may still be the OLD vulnerable one). This is NOT a patch:
+                        # report AlreadyInstalled -> harvest books it Skipped/itemCount 0, never Success/VulnPatched.
+                        $res.Status  = 'AlreadyInstalled'
+                        $res.Reason  = "All $totalCount MSI(s): another version already installed (1638) - install did NOT run; version NOT verified compliant"
+                        $res.ExitCode = 1638
                     } elseif ($failCount -eq 0) {
                         $res.Status = 'Success'
-                        if ($successCount -eq 0 -and $compliantCount -eq $totalCount) {
-                            $res.Reason = "All $totalCount MSI(s) already compliant (another version already installed; nothing to do)"; $res.ExitCode = 1638
-                        }
-                        elseif ($sawRebootInit)   { $res.Reason = "All $totalCount MSI(s) succeeded (reboot initiated)"; $res.ExitCode = 1641 }
-                        elseif ($sawReboot)   { $res.Reason = "All $totalCount MSI(s) succeeded (reboot required)";  $res.ExitCode = 3010 }
+                        if     ($sawRebootInit) { $res.Reason = "All $totalCount MSI(s) succeeded (reboot initiated)"; $res.ExitCode = 1641 }
+                        elseif ($sawReboot)     { $res.Reason = "All $totalCount MSI(s) succeeded (reboot required)";  $res.ExitCode = 3010 }
                         else {
-                            $compliantNote = if ($compliantCount -gt 0) { " ($compliantCount already compliant)" } else { '' }
-                            $res.Reason = "All $totalCount MSI(s) succeeded$compliantNote"; $res.ExitCode = 0
+                            $installedNote = if ($installedCount -gt 0) { " ($installedCount already installed, version unverified)" } else { '' }
+                            $res.Reason = "All $totalCount MSI(s) succeeded$installedNote"; $res.ExitCode = 0
                         }
                     } else {
                         $firstFailReason = ''
@@ -981,6 +987,7 @@ function Invoke-JanetToolAction {
                     'Success'            { $okCount++ }
                     'Success (warnings)' { $okCount++ }   # exit code succeeded (soft-fail surfaced via the distinct status + warn log)
                     'Deferred'           { $deferred++ }
+                    'AlreadyInstalled'   { $skipCount++ } # loop60: MSI 1638 all-refused - nothing installed, version unverified -> skipped, NOT ok/fail
                     default              { $failCount++ }
                 }
 
@@ -996,12 +1003,13 @@ function Invoke-JanetToolAction {
                     'Success'            { 'Success' }
                     'Success (warnings)' { 'Success' }
                     'Deferred'           { 'Skipped' }
+                    'AlreadyInstalled'   { 'Skipped' }   # loop60: 1638 all-refused -> Skipped/itemCount 0, never a false VulnPatched
                     default              { 'Failure' }
                 }
                 $itemCount = if ($auditResult -eq 'Success') { 1 } else { 0 }
                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$auditResult; itemCount=$itemCount; detail="$pkgName $repairTag$detail" }
 
-                & $send @{ type='log'; level=$(if($status -eq 'Success'){''}elseif($status -eq 'Deferred' -or $status -eq 'Success (warnings)'){'warn'}else{'err'}); text="${repairTag}[$($j.Host)] $status : $detail" }
+                & $send @{ type='log'; level=$(if($status -eq 'Success'){''}elseif($status -eq 'Deferred' -or $status -eq 'Success (warnings)' -or $status -eq 'AlreadyInstalled'){'warn'}else{'err'}); text="${repairTag}[$($j.Host)] $status : $detail" }
 
                 $done++
                 & $send @{ type='progress'; done=$done; total=$jobs.Count }

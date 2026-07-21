@@ -28,11 +28,12 @@ function Has-SelfGuardWarn($o) {
 }
 $script:Me = $env:COMPUTERNAME
 
-Describe 'pkginstall 2.5.8 - manifest loads at the bumped version' {
+Describe 'pkginstall manifest (self-guard floor)' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is pkginstall and version is 2.5.8' {
+    It 'manifest id is pkginstall and version is at least 2.5.8' {
+        # Floor: the newest bump's own file holds the exact pin (loop60 = Pkginstall.MsiList, v2.5.9).
         [string]$mani.id      | Should Be 'pkginstall'
-        [string]$mani.version | Should Be '2.5.8'
+        ([version][string]$mani.version -ge [version]'2.5.8') | Should Be $true
     }
     It 'both deploy actions are destructive' {
         foreach ($aid in @('deploy-psadt','deploy-msi-bundle')) {
