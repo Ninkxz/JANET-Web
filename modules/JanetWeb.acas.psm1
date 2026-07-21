@@ -1097,7 +1097,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.6'
+        version  = '1.11.7'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1944,7 +1944,14 @@ $script:AcasUpdateWorker = {
                     $ver2 = $out.Verified
                     $flag = if ($ver2 -eq $true) { 'fresh' } elseif ($null -eq $ver2) { 'n/a' } else { 'stale' }
                     $detail = if ($out.Detail) { " ($([string]$out.Detail))" } else { '' }
-                    return "v=$ver last=$last [$flag]$detail"
+                    # loop26 (item18): a verify-ONLY run is read-only, but its row feeds the shared run
+                    # binder's PATCHED stat card (view: OK -> stat.patched++). Only a CONFIRMED-current
+                    # host ([fresh], Verified=$true) may classify OK; a [stale] host is on the OLD
+                    # (still-vulnerable) version and [n/a] can't be confirmed - both -> UNCONFIRMED so
+                    # AcasUpdateRowOf yields Result UNCONFIRMED (amber, out of the patched tally) instead
+                    # of counting a still-vulnerable host as patched. Mirror of Get-AcasVerifyRowStatus.
+                    $prefix = if ($ver2 -eq $true) { '' } else { 'UNCONFIRMED ' }
+                    return "$prefix" + "v=$ver last=$last [$flag]$detail"
                 }
                 if ($null -eq $out) { return 'OK (no output)' }
                 return [string]$out
@@ -2352,6 +2359,18 @@ $script:AcasPreflightWorker = {
 #                    unchanged after an update). Neither counts as a confirmed OK, so
 #                    both render NOT-green (amber). A genuine bump / plain OK stays OK.
 $script:AcasOkOf = { param($res) (-not ($res -like 'FAIL*')) -and (-not ($res -like 'UNCONFIRMED*')) }
+
+# loop26 (item18): CANONICAL verify-only row status. A verify run is read-only ("change nothing"),
+# but its rows feed the shared run binder that lights the PATCHED stat card for any OK row. A verify
+# row is OK ONLY when the probe CONFIRMS the host is current (Verified=$true); a stale host
+# (Verified=$false, still on the old vulnerable version) or an indeterminate probe (Verified=$null)
+# must be UNCONFIRMED so it does not count as patched. The verify branch mirrors this inline (runs in
+# a module-less runspace, can't call this fn); keep in lockstep. Pure - tested by Acas.VerifyRowStatus.
+function Get-AcasVerifyRowStatus {
+    param($Verified)
+    if ($Verified -eq $true) { return 'OK' }
+    return 'UNCONFIRMED'
+}
 
 # $script:AcasUpdateRowOf -- 8-col update row (patch-selected/auto-patch/run-all)
 #   $stamp is inlined so this is closure-free at module scope.

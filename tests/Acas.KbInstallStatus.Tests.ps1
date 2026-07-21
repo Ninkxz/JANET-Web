@@ -56,9 +56,9 @@ Describe 'Get-AcasKbInstallStatus - skips and no-ops' {
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-25 honest kb-install status)' {
-    It 'acas is at v1.11.6' {
+Describe 'acas - manifest version floor (loop-25 honest kb-install status landed at 1.11.6)' {
+    It 'acas version is >= 1.11.6 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.6'
+        ([version][string]$mani.version -ge [version]'1.11.6') | Should Be $true
     }
 }
