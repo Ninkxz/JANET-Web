@@ -1058,6 +1058,18 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   `"enabled": false` still disables. `AdTo.WriteGuards.Tests.ps1` +4 (real temp overlay, `Get-AdToBaselinePath`-only
   shim — `Test-Path`/`Get-Content` stay real). adto set **20** green. Pester **1427→1431** green. **adto dive
   complete** (F1/F2/F3 closed; F4/F5 speculative). SECRET parity: +adto overlay merge-not-replace.
+- **Loop 56 (DONE 2026-07-21):** self-review of loop-55 → GREEN. Workstream = fresh **Fable deep-dive on
+  remoteadmin** (last sharp un-dived destructive surface: Open C$ + Run Script). **Core is fail-closed** — no
+  P1/P2: worker + aggregator default to Failed/Failure, book Success only on exact `Status -eq 'Success'`, null
+  Status → `''` → Failure/itemCount 0; no coercion; all four safety guards (admin-gate, self-guard incl. NIC IPv4,
+  target-validation, wrong-box hard-abort) present + correctly ordered before fan-out. Acted on **C1 (P3)**: the
+  fan-out result-binding (`:473`) took `Select-Object -First 1` of `EndInvoke`, but the worker returns its result
+  as the **last** stream object (`return $r`, `:306`) — a future/operator stray leak would build the row
+  (Host/Status/Output) from the stray. **FIXED** (remoteadmin **1.0.1→1.0.2**): `-First 1` → `-Last 1`.
+  `RemoteAdmin.Tests.ps1` +2 (stray-leaking fake worker proves the row comes from the return; version pin). set
+  **31** green. C2 (open-cshare "Opened") + S1 (run-script "didn't throw") left **by-design** (dive-judged; S1
+  fix would ADD coercion risk). Pester **1431→1433** green. **remoteadmin dive complete.** SECRET parity: +remoteadmin
+  fan-out `-Last 1` result-binding.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
