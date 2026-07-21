@@ -22,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.9'
+        version  = '2.5.10'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -603,7 +603,11 @@ $script:RpiDeployHostScript = {
                         return $res
                     }
                     Set-Location $deploy.DirectoryName
-                    $global:LASTEXITCODE = 0
+                    # loop61 (item68): pre-seed $null, NOT 0. `& script.ps1` only updates $LASTEXITCODE if the
+                    # script calls exit / Exit-Script (or ends on a native command). A deploy script that returns
+                    # without setting an exit code would otherwise leave a pre-seeded 0 and masquerade as a clean
+                    # exit-0 Success though nothing installed. $null is caught below and booked Failed.
+                    $global:LASTEXITCODE = $null
                     $output   = & $deploy.FullName -DeployMode NonInteractive 2>&1
                     $exitCode = $LASTEXITCODE
                     $outStr   = ($output | Out-String).TrimEnd()
@@ -617,7 +621,13 @@ $script:RpiDeployHostScript = {
                     # flipping clean installs to Failed and writing false audit rows.
                     $successExits = @(0, 1641, 3010)
                     $softFail     = $outStr -match '(?im)^\s*(ERROR|FAILED|FAILURE)\b'
-                    if ($successExits -contains $exitCode) {
+                    if ($null -eq $exitCode) {
+                        # loop61 (item68): the deploy script ran to completion but set NO exit code (never
+                        # called exit / Exit-Script). We cannot confirm it installed anything, so it is Failed -
+                        # never a false Success/VulnPatched. (A terminating error is caught below instead.)
+                        $res.Status = 'Failed'
+                        $res.Reason = 'Deploy-Application.ps1 returned no exit code (never called exit / Exit-Script) - cannot confirm the install ran; treated as Failed'
+                    } elseif ($successExits -contains $exitCode) {
                         $baseReason = switch ($exitCode) {
                             3010 { 'Success (reboot required)' }
                             1641 { 'Success (reboot initiated)' }

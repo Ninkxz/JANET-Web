@@ -55,8 +55,8 @@ Describe 'pkginstall 2.5.9 - all-1638 MSI host is Skipped, not a false VulnPatch
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
 
-    It 'manifest version is exactly 2.5.9 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '2.5.9'
+    It 'manifest version is at least 2.5.9 (floor; newest exact pin = loop61 PSADT Describe, v2.5.10)' {
+        ([version][string]$mani.version -ge [version]'2.5.9') | Should Be $true
     }
     It 'the all-1638 aggregate sets host Status AlreadyInstalled (not Success)' {
         ($src -match '\$installedCount\s*-eq\s*\$totalCount') | Should Be $true
@@ -70,5 +70,32 @@ Describe 'pkginstall 2.5.9 - all-1638 MSI host is Skipped, not a false VulnPatch
     }
     It 'the old false "treated as already compliant" wording is gone' {
         ($src -match 'treated as already compliant') | Should Be $false
+    }
+}
+
+# -----------------------------------------------------------------------------
+# loop61 (item68): the PSADT deploy branch pre-seeded $LASTEXITCODE=0, so a Deploy-Application.ps1
+# that returns WITHOUT calling exit/Exit-Script (sets no exit code) left the pre-seeded 0 and was
+# booked Status 'Success' + VulnPatched though nothing installed. Now pre-seed $null and catch a
+# null exit as Failed BEFORE the success-exit check. Static analysis (the branch lives inside the
+# module-less runspace worker $RpiDeployHostScript).
+Describe 'pkginstall 2.5.10 - a PSADT deploy that sets no exit code is Failed, not a false Success' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'manifest version is exactly 2.5.10 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.10'
+    }
+    It 'pre-seeds $LASTEXITCODE to $null, not 0' {
+        ($src -match '\$global:LASTEXITCODE\s*=\s*\$null') | Should Be $true
+        ($src -match '\$global:LASTEXITCODE\s*=\s*0\b')    | Should Be $false
+    }
+    It 'catches a null exit code as Failed BEFORE the success-exit check (so null cannot match exit 0)' {
+        $idxNull = $src.IndexOf('$null -eq $exitCode')
+        $idxSucc = $src.IndexOf('$successExits -contains $exitCode')
+        ($idxNull -gt 0) | Should Be $true
+        ($idxSucc -gt 0) | Should Be $true
+        ($idxNull -lt $idxSucc) | Should Be $true
+        ($src -match 'returned no exit code') | Should Be $true
     }
 }
