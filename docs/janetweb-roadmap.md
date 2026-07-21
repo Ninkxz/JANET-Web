@@ -32,11 +32,12 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
    currently: c2c durability trio (pre-series), acas honest-Chrome + worker
    passthrough, session disarm, honest-Edge (wpt+acas; re-route SC pointers for
    SIPR), report-preview CSP sandbox, wpt audit-Skipped fix, Host-header guard.
-6. **SKIP-books-green reporting note** (loop-2 Opus P3-3 + loop-4 F14, pre-existing) —
-   `AcasOkOf` counts `SKIP*` as OK so acas run-all "patched" tallies include
-   not-installed hosts; symmetrically wpt's run summary counts a Skipped host under
-   Failed while its audit says Skipped. Reconcile the tallies if the operator wants
-   stricter counts.
+6. **SKIP-books-green reporting note** (loop-2 Opus P3-3 + loop-4 F14) — **acas half REFUTED
+   (loop-25 deep-dive):** `AcasOkOf` (`:2354`) DOES return OK for `SKIP*`, but its only consumer
+   checks `$isSkip` first (`:2473`), so skips land in skipCount with a 'Skipped' audit, NEVER in
+   okCount — no false-clean today (the predicate is a latent hazard if reused raw, not a live bug).
+   Remaining: wpt's run summary counting a Skipped host under Failed while its audit says Skipped —
+   reconcile if the operator wants stricter counts.
 9. **c2c memoized local-identity staleness** (loop-8 Opus P3-2, pre-existing) —
    `Get-JanetC2cLocalIdentity` caches the dispatcher IP set for the module lifetime; a
    mid-lifetime DHCP lease change could stale the self-guard's IP entries (name/FQDN
@@ -82,6 +83,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     `:2468` `"KB$art" -match [regex]::Escape($f)` is an unanchored substring, so a KB filter can show
     a different update's row as Installed in the filtered verify view (mitigated: the full update
     Name is shown). Fix: anchor the article leg (exact) while keeping the free-text Name filter.
+18. **acas Verify/dry-run rows light the PATCHED stat card, incl. still-vulnerable hosts** (loop-25
+    Fable deep-dive, CONFIRMED, HIGH) — the verify branch (`acas :1941`) returns `"v=.. last=.. [stale].."`
+    with no FAIL/UNCONFIRMED prefix → classified OK → `stat.patched++` (`acas.view.js:742`). Running
+    Verify (diagnostic) inflates the PATCHED count with `[stale]` (old-version) hosts. Fix: classify
+    verify from the probe's Verified/stale flag, or stop feeding verify rows into `stat.patched`.
+19. **acas schedule-reboot books VulnPatched Success at schedule time** (loop-25 Fable deep-dive,
+    CONFIRMED) — `:2127` returns `OK (reboot scheduled)`, fan-out `:3314` audits `VulnPatched`, so the
+    Success/Runs-CSV row is booked while the reboot is 5 min out and abortable (`shutdown /a`; rc=1190
+    "already scheduled" also Success). `verify-post-reboot` exists and is honest — book VulnPatched
+    from THAT; audit scheduling as `RebootScheduled`/`TouchHost`.
+20. **acas default-open classification of empty/foreign worker output** (loop-25 Fable deep-dive,
+    SPECULATIVE) — empty EndInvoke / first-item output → `'OK (no output)'` (`:2464`); no reachable
+    leak in shipped workers, but a future profile emitting stray output gets booked patched. Default
+    unknown/empty → UNCONFIRMED; read the LAST output item, not the first.
+21. **acas kb-install shares wpt's loop-22 bugs, unfixed** (loop-25 Fable deep-dive, CONFIRMED) — the
+    acas kb-install worker still has the loose `-like "*$kb*"` KB-match (`:2631/2633`) and the
+    null-ReturnValue-as-success (`:2634`) that wpt fixed in loop 22. Port `Test-WptKbNameMatch`
+    anchoring + the `$null -ne $rv -and` fail-close into AcasKbInstallBlock.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -477,9 +496,21 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   timestamp/unknown (never over-claims), `$false` when stale/failed; scriptblock mirrors it inline +
   surfaces the result in Detail. Read-only verify path, no guard involved; 134 wpt tests green.
   `Wpt.C2rVerify.Tests.ps1` (9) pins every case incl. fresh+Failure→$false + exact 6.8.8 pin
-  (KbInstallResult 6.8.7 exact → floor). Pester **1212→(close)** green. SECRET parity: +honest M365
+  (KbInstallResult 6.8.7 exact → floor). Pester **1212→1221** green. SECRET parity: +honest M365
   C2R verify. wpt verify cluster: #13/#14/#15 done; #16 (Chrome/Edge recency), #17 (verify-patch
   filter), #14b (audit taxonomy) remain.
+- **Loop 25 (DONE 2026-07-21):** Fable-inline + one parallel Fable worker. Self-review of loop-24 →
+  **GREEN**. **Workstream: diversified to acas** (remediation engine) — a bounded Fable worker on "where
+  does un-remediated read as patched?" found 4 false-cleans + **REFUTED item 6** (SKIP-as-OK: the
+  predicate returns OK for SKIP* but the only consumer checks skip FIRST, so skips never hit okCount —
+  updated item 6). **FIXED** (acas **1.11.5→1.11.6**) the highest-harm cluster: kb-install reported an
+  async MECM trigger / UsoClient fire as **OK** (+ VulnPatched audit + PATCHED stat) and let a partial
+  install mask a real error (`:2663`). Pure `Get-AcasKbInstallStatus` (`:2588`) — error→FAIL (never
+  masked), trigger/fire→UNCONFIRMED (AcasOkOf amber, out of the tally), confirmed MSU→OK, skip→SKIP;
+  worker mirrors it inline (module-less runspace) + `$usoTriggered` flag. No guard weakened; 163 acas +
+  FixVerify2 + FixGuards green. `Acas.KbInstallStatus.Tests.ps1` (9) + FixVerify2 rv=0 corrected `^OK`→
+  `^UNCONFIRMED` (it pinned the false-clean) + exact 1.11.6 pin (EdgeProfile exact → floor). Pester
+  **1221→(close)** green. **4 new ranked items (18-21).** SECRET parity: +honest acas kb-install status.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
