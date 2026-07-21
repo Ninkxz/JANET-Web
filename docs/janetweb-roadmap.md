@@ -1299,6 +1299,40 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   (`TROUBLESHOOT:`) + err log (`FIX:`), raw error preserved. +9 helper tests +1 behavioral. subset **41** green.
   Pester **1486→~1496** green. Rollout: wire each tool's failure path loop-by-loop (wpt/acas/pkginstall first).
   SECRET parity: the whole engine + each tool wire.
+- **Loop 71 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-70 → GREEN. Workstream = wire the
+  hint into **acas** (highest-traffic). `Invoke-AcasFanOut` is the generic fan-out behind every acas remote action, so
+  one wire covers them all: on a genuine per-host failure it runs the raw worker result through `Get-JanetTroubleshootHint`
+  and attaches it to a `Hint` row field + a new err log (`FIX:`) — both untruncated; raw result preserved; the 160-char
+  audit detail left as-is. The fan-out previously logged nothing per host, so a recognized failure now also gets a
+  visible drawer line. **Purely additive** (success/skip untouched). acas **1.11.12→1.11.13**; `Acas.FanOutHint.Tests.
+  ps1` +3 behavioral (real fan-out, synthetic failing/succeeding `$Work`; exact pin moved here, C2rVerify floored).
+  **Ran all 186 acas tests** = green (fan-out is shared). Pester **~1496→~1499** green. Next tool: wpt. SECRET parity:
+  +acas fan-out hint wire.
+- **Loop 72 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-71 → GREEN. Workstream = wire the
+  hint into **wpt** (the other most-used). `Invoke-WptFanOut` is wpt's generic fan-out (same callback shape as
+  `Invoke-AcasFanOut`), so one wire covers its actions: on a failure it runs the raw error (else the audit detail)
+  through `Get-JanetTroubleshootHint` and attaches it to a `Hint` row field + an err log (`FIX:`); the audit-detail
+  string is computed once and reused (removing a latent double-eval of `$AuditDetail`); raw error preserved.
+  **Purely additive** (ok rows byte-identical). wpt **6.8.14→6.8.15**; `Wpt.FanOutHint.Tests.ps1` +5 (static analysis,
+  matching wpt's fan-out test style; exact pin moved here, AdobeUninstall floored). **Ran all 182 wpt tests** = green
+  (a self-inflicted test-regex bug caught + fixed). Pester **~1499→~1504** green. Next: pkginstall. SECRET parity:
+  +wpt fan-out hint wire.
+- **Loop 73 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-72 → GREEN. Workstream = wire the
+  hint into **pkginstall** (destructive; 4th tool). No generic fan-out helper — its own harvest loop (`:1042-1068`);
+  after the count switch it computes `$isFail = ($status -notin ok/skip set)` and, on a failure, runs the best error
+  text (`$detail` else `$reason` else `$output`) through `Get-JanetTroubleshootHint` and attaches it to a `Hint` row
+  field + the existing per-host err log (`FIX:`). **Purely additive** (ok/deferred/skipped untouched). pkginstall
+  **2.5.12→2.5.13**; `Pkginstall.MsiList.Tests.ps1` +4 (static analysis; exact pin moved here, loop-63 Describe
+  floored). **Ran full pkginstall suite (47) + FixVerify3 PSADT (21)** = green. Pester **~1504→~1508** green. Next:
+  upr. SECRET parity: +pkginstall harvest hint wire.
+- **Loop 74 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-73 → GREEN. Workstream = wire the
+  hint into **upr** (destructive uninstall; 5th tool). Its fan-out harvest (`:1245-1272`) is multi-row (the `$EmitRows`
+  callback returns several candidate rows per host); the host-level connection error is in `$res.Error`. Hoisted
+  `$ok` above the row loop; on a host-level failure (`(-not $ok) -and $res.Error`) it runs the raw error through
+  `Get-JanetTroubleshootHint` and attaches the hint to **each** emitted row's `Hint` field + an err log (`FIX:`, was
+  only a warn before). **Purely additive** (ok hosts untouched; per-candidate uninstall failures deferred). upr
+  **1.2.4→1.2.5**; `Upr.VerifyResult.Tests.ps1` +4 (static analysis; exact pin moved here, loop-64 Describe floored).
+  **Ran full upr suite (44)** = green. Pester **~1508→~1512** green. Next: dhcp. SECRET parity: +upr harvest hint wire.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
