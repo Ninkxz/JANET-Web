@@ -138,10 +138,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     (`:2804`); a DISM exception still → FIXED "Applied: repair"; a needed driver-removal that fails →
     "NO CHANGES / no fixes necessary". Fix: add fix keys only on confirmed success, track failed attempts
     → FAILED/PARTIAL, Ok=$false on any fail.
-30. **winupgrade Diagnose verdict READY ignores disk/RAM/Secure Boot fails its own scan reported**
-    (loop-31 Fable deep-dive, CONFIRMED — F6) — `:2339-2343` tests only cpu/tpm/block/policy. Supported
-    CPU/TPM + 10GB free → READY, upgrade fails on disk. Fix: fold `[FAIL] Disk` (at least) into the READY
-    gate or a distinct NOT READY reason.
+30. ~~winupgrade Diagnose verdict READY ignores disk/RAM/Secure Boot fails its own scan reported~~ —
+    **CLOSED loop 32** (`Get-WinUpgradeDiagnoseVerdict`, winupgrade 0.5.3): a `[FAIL] Disk`/`RAM`/`Secure
+    Boot` host now reads a distinct NOT READY (after NEEDS POLICY, before READY); summary names the reason.
 31. **winupgrade unparseable sfc output → 'no violations' → CLEAN** (loop-31 Fable deep-dive, CONFIRMED,
     LOW) — `Get-WinUpgradeRepairVerdict :668` / inline mirror `:2606` final `else { 'no violations' }`;
     localized/truncated sfc reads clean, ExitCode never consulted. Fix: no-match → 'unknown', exclude
@@ -622,8 +621,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   upgrade to the wrong build). Now a failed pin **aborts the drive** before the trigger → `PIN FAILED`,
   `Ok=$false`. No guard weakened; 168 winupgrade + FixVerify3 green. `WinUpgrade.Drive.Tests.ps1` +
   `-PinThrows` shim flag + F1 test (thrown pin → PIN FAILED, no TRIGGER/REBOOT) + exact 0.5.2 pin. Pester
-  **1269→(close)** green. **5 new ranked items (27-31)** (F2/F5 high-harm next). SECRET parity:
+  **1269→1271** green. **5 new ranked items (27-31)** (F2/F5 high-harm next). SECRET parity:
   +winupgrade upgrade-drive pin-fail abort.
+- **Loop 32 (DONE 2026-07-21):** Fable-inline. Self-review of loop-31 → **GREEN**. **Workstream:
+  winupgrade deep-dive item 30 (F6)** → **CLOSED** (cleanest high-visibility winupgrade item — the
+  operator go/no-go verdict). The Diagnose verdict (`:2376-2380`) checked ONLY CPU/TPM/[BLOCK]/policy —
+  it IGNORED the `[FAIL] Disk`/`[FAIL] RAM`/`[FAIL] Secure Boot` lines its own scan emitted, so a disk-
+  short host read **READY** and the upgrade failed on disk. **FIXED** (winupgrade **0.5.2→0.5.3**): pure
+  `Get-WinUpgradeDiagnoseVerdict` (`:995`) adds `$diskFail/$ramFail/$sbFail` + a distinct `NOT READY`
+  branch (after NEEDS POLICY, before READY — only reclassifies falsely-READY hosts); the runspace worker
+  mirrors it inline + the summary appends `disk LOW`/`RAM LOW`/`Secure Boot off`. Read-only verdict; 179
+  winupgrade + FixVerify3 green. `Winupgrade.DiagnoseVerdict.Tests.ps1` (11) pins every verdict incl. the
+  higher-precedence ones still winning + static mirror assert + exact 0.5.3 pin (Drive 0.5.2 exact →
+  floor). Pester **1271→(close)** green. Remaining winupgrade items: 27 (staging reboot, HIGH), 28
+  (bypass read-back), 29 (AutoFix, HIGH), 31 (sfc, LOW). SECRET parity: +winupgrade Diagnose disk gate.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
