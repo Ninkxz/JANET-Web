@@ -276,12 +276,11 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
     ALREADY — no realistic trigger, defensive-only, not separately ranked.)_
 
 _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify before acting. adto.psm1 lines.)_
-60. **adto scan reads a null/unreadable userAccountControl as COMPLIANT** (MED-HIGH) — `:370` `ConvertTo-AdToObject`
-    uses `[int]("0"+[string](& $get 'useraccountcontrol'))`; an ACL-hidden UAC absent from the DirectorySearcher
-    result folds to `Uac=0` → `Test-AdToCompliance` (`:180-185`) sees no DONT_EXPIRE / PASSWD_NOTREQD /
-    reversible-encryption → **COMPLIANT** for a service account that live has PASSWD_NOTREQD. (null lastLogon/recert
-    DO fail closed — UAC is the one attribute where unreadable = no-bad-bits.) Same root as the loop-53 F1 fix,
-    different function. Fix: a null UAC → a distinct non-COMPLIANT/unknown verdict.
+60. ~~**adto scan reads a null/unreadable userAccountControl as COMPLIANT**~~ **CLOSED loop 54** (adto 0.2.5):
+    `ConvertTo-AdToObject` now carries a `UacReadable` flag (false when the raw attr is null/empty), and
+    `Test-AdToCompliance` fires a fail-closed **`uacUnreadable`** hit (→ NON-COMPLIANT) + skips the four UAC
+    bad-bit rules when unreadable; non-UAC rules still run; missing key → readable (back-compat).
+    `AdTo.WriteGuards.Tests.ps1` +4.
 61. **adto baseline overlay silently disables a rule on a typo** (MED) — `:84-92` `Get-AdToBaseline` merge: an
     overlay rule omitting `enabled` gets `[bool]$null=$false`, one omitting `appliesTo` gets `@($null)` (never
     fires), so a typo in the operator-editable `adto-baseline.json` turns a rule OFF with no trace → every
@@ -1040,6 +1039,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   WriteGuards.Tests.ps1` +3. adto set **12** green. Pester **1420→1423** green. **Ranked items 60/61** (F2
   scan-side same coercion → COMPLIANT MED-HIGH, F3 overlay silent-disable MED; F4/F5 speculative). SECRET parity:
   +adto null-UAC fail-close.
+- **Loop 54 (DONE 2026-07-21):** Fable-inline. Self-review of loop-53 → **GREEN**. **Closed adto item60 (F2)**,
+  the scan-side twin of loop-53's F1 (same `[int]$null → 0` coercion, different function): `ConvertTo-AdToObject`
+  (`:370`) folded an ACL-hidden UAC to `Uac=0`, so `Test-AdToCompliance`'s bad-bit rules read no violations → a
+  Service account (excluded from the smartcard rule) with a hidden UAC scanned **COMPLIANT** while live it had
+  PASSWD_NOTREQD. **FIXED** (adto **0.2.4→0.2.5**): `ConvertTo-AdToObject` carries `UacReadable`, and
+  `Test-AdToCompliance` fires a fail-closed **`uacUnreadable`** hit (→ NON-COMPLIANT) + skips the four UAC
+  bad-bit rules when unreadable; non-UAC rules still run; missing key → readable (back-compat). `AdTo.WriteGuards.
+  Tests.ps1` +4 (direct `Test-AdToCompliance` calls). adto set **16** green. Pester **1423→1427** green. **Both
+  adto null-UAC false-cleans (F1/F2) closed**; remaining item61 (F3, overlay silent-disable, MED) + F4/F5
+  speculative. SECRET parity: +adto scan UacReadable / uacUnreadable hit.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
