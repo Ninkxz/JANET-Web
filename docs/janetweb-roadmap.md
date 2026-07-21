@@ -243,8 +243,9 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
     false-fresh 0. New pure `Get-C2cSigAgeHours` + inline mirrors. `C2c.SigAge.Tests.ps1` (7).
 54. **c2c AntiMalware fixer books NOCHANGE "already protected" when sig age is unknown** (LOW) — `:1975-1981`;
     the scan FAILs the same state (`:818` requires non-null age). Narrow trigger.
-55. **c2c audit books host Status PARTIAL as `Success`** (LOW) — `:3091`; PARTIAL contains ≥1 pillar FAIL. Row
-    Detail still shows the FAIL. Fix: PARTIAL → a non-Success audit result.
+55. ~~**c2c audit books host Status PARTIAL as `Success`**~~ **CLOSED loop 47** (c2c 1.15.8): new pure
+    `Get-C2cHostAuditResult` — a PARTIAL host (always ≥1 pillar FAIL) now audits `Failure`, and only a
+    fully-FIXED host counts as a patched item (itemCount). `C2c.AuditResult.Tests.ps1` (10).
 56. **c2c version-check ordinal string fallback can report a below-target host as NEWER** (LOW, read-only) —
     `:3248-3255`: `1.8.0_51` vs `1.8.0_491` → CompareOrdinal '5'>'4' → NEWER though 51 < 491. Any non-`a.b.c.d`
     scheme.
@@ -922,6 +923,18 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
   c2c set **71** green. Pester **1373→1380** green. **c2c tail now low/read-only** (items 54–57 + 22/24 cluster)
   — loop 47 weighs a fresh dive (remoteadmin/adto/secureboot/reports) vs the tail. SECRET parity: +c2c sig-age
   null-coercion fail-close.
+- **Loop 47 (DONE 2026-07-21):** Fable-inline. Self-review of loop-46 → **GREEN**. Re-verified F2/item24 (the
+  summary tally folding NOT VERIFIED/SKIP into `nochange`) — it's **view-coupled** (`perPillar` is returned in
+  the run summary `:3215` for the view), so a coordinated JS change, not a one-file edit; deferred. **Closed the
+  definite c2c item55 (F7):** the audit emit (`:3135`) mapped host Status `PARTIAL {'Success'}` + itemCount 1,
+  but the rollup only reaches PARTIAL when `failed>=1` — so a host with a failing pillar was booked VulnPatched
+  **Success** in the ledger (a false-compliance record, the loop-38 audit-honesty class). **FIXED** (c2c
+  **1.15.7→1.15.8**): new pure `Get-C2cHostAuditResult` — FIXED→Success, NO CHANGE/SKIPPED/OFFLINE→Skipped, else
+  (PARTIAL/FAILED/NOT VERIFIED)→**Failure**; only a fully-FIXED host counts as a patched item. Called directly
+  (controller-side, no mirror). `C2c.AuditResult.Tests.ps1` (NEW, 10); SigAge exact pin → floor. c2c set **58**
+  green. Pester **1380→1390** green. **c2c high-harm findings all closed (F1/F5/F3/F7)** — loop 48 should open a
+  fresh dive on an un-reviewed acting tool (certdeploy/adto/remoteadmin) rather than grind the tail (item54/56/57
+  + the 22/24 view-coupled cluster). SECRET parity: +c2c PARTIAL audits Failure.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
