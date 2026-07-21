@@ -361,8 +361,34 @@ Describe 'CertDeploy deploy - the REJECTED token maps to a non-clean row Status 
     }
 }
 
-Describe 'certdeploy - manifest exact version pin (newest bump = loop-49 rejected-anchor honesty)' {
-    It 'certdeploy is at v1.4.2' {
-        (& $cm { Get-JanetToolManifest }).version | Should Be '1.4.2'
+Describe 'certdeploy - manifest version floor (loop-49 rejected-anchor honesty in 1.4.2; exact pin migrated to newest bump)' {
+    It 'certdeploy is at or past v1.4.2' {
+        ([version][string](& $cm { Get-JanetToolManifest }).version -ge [version]'1.4.2') | Should Be $true
+    }
+}
+
+# loop78 (informative-failures theme): the DEPLOY harvest ($emitResult) now, on a host whose
+# audit result is Failure (FAILED / NOT VERIFIED / REJECTED), runs the raw error in $detail
+# through Get-JanetTroubleshootHint and attaches the hint to a Hint row field + an err log
+# (FIX:), the raw detail preserved. Static analysis (the harvest runs inside the fan-out over a
+# real RunspacePool - no swappable-worker seam; the hint's behavior is proven behaviorally in
+# Troubleshoot.Hint.Tests.ps1).
+Describe 'certdeploy 1.4.3 - deploy harvest attaches a troubleshooting hint to a failed host' {
+    $man = & $cm { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Raw
+
+    It 'manifest version is exactly 1.4.3 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.4.3'
+    }
+    It 'certdeploy imports the shared troubleshoot engine' {
+        ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
+    }
+    It 'the deploy harvest computes a hint only for a Failure host and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$auditResult\s*-eq\s*''Failure''\s*-and\s*\$detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        ($src -match 'Detail=\$detail;\s*Hint=\[string\]\$hint') | Should Be $true
+    }
+    It 'the err log carries the FIX hint when one exists (raw detail preserved)' {
+        ($src -match "if \(\`$hint\) \{ &\s*\`$send @\{ type='log'; level='err'") | Should Be $true
+        ($src -match 'FIX: \$hint')                                              | Should Be $true
     }
 }

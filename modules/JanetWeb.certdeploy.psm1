@@ -42,11 +42,16 @@
 #  PowerShell 5.1 only. ASCII-only body; UTF-8 WITH BOM.
 # =============================================================================
 
+# informative-failures (loop78): shared troubleshooting-hint engine. On a per-host
+# DEPLOY failure the harvest turns the raw error into a why+how-to-fix hint. Imported
+# at module scope (controller-side) - never inside a remote runspace block.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.4.2'
+        version  = '1.4.3'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -1332,11 +1337,15 @@ function Invoke-CertDeployDeployAction {
         if ($includeExpired -and $expiredCount -gt 0 -and (@('ROOTS INSTALLED','ROOTS ALREADY PRESENT','NOT VERIFIED') -contains [string]$res.Status)) {
             $detail += " (includes $expiredCount EXPIRED cert(s) - dead trust anchor)"
         }
-        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Missing=''; Detail=$detail }
+        # JANET audit classification, hoisted above the row so the troubleshooting hint can ride it
+        # (same value - switches on the same status). A cert install is a security-state change.
+        $auditResult = switch ([string]$res.Status) { 'ROOTS INSTALLED' {'Success'} 'ROOTS ALREADY PRESENT' {'Skipped'} 'SKIPPED' {'Skipped'} 'OFFLINE' {'Skipped'} default {'Failure'} }
+        # informative-failures (loop78): a failed host (FAILED / NOT VERIFIED / REJECTED) carries a
+        # why+how-to-fix hint derived from the raw detail; raw detail is preserved untouched.
+        $hint = if ($auditResult -eq 'Failure' -and $detail) { Get-JanetTroubleshootHint -Message $detail -Server ([string]$res.Host) } else { '' }
+        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Missing=''; Detail=$detail; Hint=[string]$hint }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
-        # JANET audit: a cert install is a security-state change.
-        $auditResult = switch ($row.Status) { 'ROOTS INSTALLED' {'Success'} 'ROOTS ALREADY PRESENT' {'Skipped'} 'SKIPPED' {'Skipped'} 'OFFLINE' {'Skipped'} default {'Failure'} }
         $itemCount   = if ($row.Status -eq 'ROOTS INSTALLED') { [int]$res.Added } else { 0 }
         & $send @{ type='audit'; action='VulnPatched'; target=$row.Host; result=$auditResult; itemCount=$itemCount; detail=$row.Detail }
         $lvl = 'info'
@@ -1348,6 +1357,7 @@ function Invoke-CertDeployDeployAction {
         elseif ($row.Status -eq 'REJECTED (non-CA)')     { $lvl = 'error' }
         elseif ($row.Status -eq 'FAILED')                { $lvl = 'error' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$res.Host) : $([string]$res.Status) - $([string]$res.Detail)" }
+        if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$res.Host) : $([string]$res.Status) - $([string]$res.Detail) | FIX: $hint" } }
     }
 
     $done = 0
