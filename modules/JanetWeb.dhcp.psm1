@@ -29,7 +29,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.12'
+        version  = '1.1.13'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -1182,7 +1182,8 @@ function Invoke-JanetToolAction {
     # destructive engine). Fail closed, server-side, BEFORE any DHCP session: (1) require the operator to
     # type APPLY (case-insensitive, like adto's -ne 'FIX'); (2) refuse when the target resolves to the box
     # running JANET. connect/load are read-only and ungated.
-    if ($ActionId -in @('apply','bulk-append','bulk-prepend','bulk-remove')) {
+    $isDestructive = $ActionId -in @('apply','bulk-append','bulk-prepend','bulk-remove')
+    if ($isDestructive) {
         if ([string]$Params['confirm'] -ne 'APPLY') {
             & $send @{ type='log'; level='err'; text='Refused: type APPLY (exactly) in Confirm to arm a DHCP option change.' }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
@@ -1202,6 +1203,13 @@ function Invoke-JanetToolAction {
         $parsedOptId = 0
         if ([int]::TryParse($rawOptId.Trim(), [ref]$parsedOptId)) {
             $optionId = $parsedOptId
+        } elseif ($isDestructive) {
+            # loop69 (item77): a non-numeric optionId on a DESTRUCTIVE write must NOT silently fall back to
+            # option 6 (DNS Servers). The operator meant a specific option (60/66/...), typo'd, and defaulting
+            # would live-replace the scope's DNS servers - a wrong-target write. Abort. (A read-only load may
+            # still warn-and-default below: it changes nothing.)
+            & $send @{ type='log'; level='err'; text=("Option ID '$rawOptId' is not numeric - refusing a destructive write rather than defaulting to option 6 (DNS Servers). Enter a numeric option ID (1-254).") }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         } else {
             & $send @{ type='log'; level='warn'; text=("Option ID '$rawOptId' is not numeric; using default 6 (006 DNS Servers).") }
         }

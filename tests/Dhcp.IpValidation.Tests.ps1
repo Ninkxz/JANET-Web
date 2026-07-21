@@ -189,8 +189,8 @@ Describe 'dhcp 1.1.11 - dryRun parse fails closed (unrecognized token stays DRY)
 # could not be confirmed. Now a null result is a Failure. Behavioral: shim the two remote seams (pre-read
 # returns valid current state so the write is reached; the write returns an EMPTY result).
 Describe 'dhcp 1.1.12 - an apply that returns NO result is a Failure, not a false Changed/Success' {
-    It 'manifest version is exactly 1.1.12 (newest bump holds the exact pin)' {
-        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.12'
+    It 'manifest version is at least 1.1.12 (floor; newest exact pin = loop69 optionId Describe, v1.1.13)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.12') | Should Be $true
     }
     It 'apply write returns an empty result -> Status Error, failed=1, audit Failure (not Changed/Success)' {
         $events = New-Object System.Collections.ArrayList
@@ -217,5 +217,31 @@ Describe 'dhcp 1.1.12 - an apply that returns NO result is a Failure, not a fals
         $audit = @($events | Where-Object { $_.type -eq 'audit' })[0]
         [string]$audit.result       | Should Be 'Failure'
         ([string]$audit.detail -match 'NOT confirmed') | Should Be $true
+    }
+}
+
+# loop69 (item77): a non-numeric optionId on a DESTRUCTIVE write silently fell back to option 6 (DNS
+# Servers) - so an operator who meant option 60/66 and typo'd would live-replace the scope's DNS servers,
+# a wrong-target write. Now a destructive action aborts on an unparseable optionId; a read-only load may
+# still warn-and-default (it changes nothing).
+Describe 'dhcp 1.1.13 - a non-numeric optionId aborts a destructive write (no silent retarget to option 6/DNS)' {
+    function Invoke-DhcpAction2([string]$aid, [hashtable]$p) {
+        $evs = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$evs.Add($e) }
+        $res = & $mod { param($a,$pp,$em) Invoke-JanetToolAction -ActionId $a -Params $pp -Credential $null -Emit $em } $aid $p $emit
+        @{ Result = $res; Events = @($evs) }
+    }
+
+    It 'manifest version is exactly 1.1.13 (newest bump holds the exact pin)' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.13'
+    }
+    It 'apply with a non-numeric optionId -> rejected, does NOT default to option 6' {
+        $o = Invoke-DhcpAction2 'apply' @{ targets = 'DHCP-REMOTE-1'; scopeId = '10.0.0.0'; newValues = '10.0.0.1'; confirm = 'APPLY'; optionId = '6o' }
+        [bool]$o.Result.summary.rejected | Should Be $true
+        @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'not numeric' -and $_.text -match 'DNS' }).Count | Should BeGreaterThan 0
+    }
+    It 'a bulk write with a non-numeric optionId -> rejected too' {
+        $o = Invoke-DhcpAction2 'bulk-append' @{ targets = 'DHCP-REMOTE-1'; scopeIds = '10.0.0.0'; ipAddresses = '10.0.0.1'; confirm = 'APPLY'; optionId = 'xyz' }
+        [bool]$o.Result.summary.rejected | Should Be $true
     }
 }
