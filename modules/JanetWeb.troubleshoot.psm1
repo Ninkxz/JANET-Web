@@ -45,13 +45,13 @@ function Get-JanetTroubleshootHint {
     # Privilege not held = authenticated (even local-admin) but missing a specific user right
     # (e.g. SeRemoteShutdownPrivilege). Distinct from access-denied - the account IS trusted,
     # it just lacks the one right this action needs. (folded from restart's numeric mapper, loop 79)
-    if ($m -match '1314\b|ERROR_PRIVILEGE_NOT_HELD|SeRemoteShutdownPrivilege|SeShutdownPrivilege|required\s+privilege\s+is\s+not\s+held|privilege\s+not\s+held') {
+    if ($m -match '\b1314\b|0x80070522|ERROR_PRIVILEGE_NOT_HELD|SeRemoteShutdownPrivilege|SeShutdownPrivilege|required\s+privilege\s+is\s+not\s+held|privilege\s+not\s+held') {
         return "Privilege not held$on (ERROR_PRIVILEGE_NOT_HELD / 1314): the account authenticated and may even be a local admin, but lacks the specific user right this action needs (a remote restart needs SeRemoteShutdownPrivilege). Grant the right in the target's local security policy (secpol.msc -> User Rights Assignment) or by GPO, or use an account that already holds it."
     }
     # Name resolution / host offline / unreachable (a specific "...cannot be resolved"
     # inside a generic WinRM wrapper is a DNS failure -> match it BEFORE the generic
     # WinRM-client-config signature below).
-    if ($m -match 'could\s+not\s+be\s+resolved|cannot\s+be\s+resolved|cannot\s+find\s+the\s+computer|could\s+not\s+be\s+found|No\s+such\s+host\s+is\s+known|destination\s+unreachable|actively\s+refused|A\s+connection\s+attempt\s+failed') {
+    if ($m -match 'could\s+not\s+be\s+resolved|cannot\s+be\s+resolved|cannot\s+find\s+the\s+computer|computer\b.{0,40}could\s+not\s+be\s+found|No\s+such\s+host\s+is\s+known|destination\s+unreachable|actively\s+refused|A\s+connection\s+attempt\s+failed') {
         return "The target$on could not be resolved or reached. Check DNS resolves the name, that the host is powered on and on the network, and that nothing between you and it is blocking the connection (firewall / VLAN / offline)."
     }
     # WinRM not enabled / 5985 blocked / cannot connect
@@ -62,10 +62,12 @@ function Get-JanetTroubleshootHint {
     if ($m -match 'The\s+WinRM\s+client\s+cannot\s+process\s+the\s+request') {
         return "The dispatcher's WinRM client config rejected the request. Inspect: winrm get winrm/config/client. A workgroup/cross-domain target usually needs a TrustedHosts entry, or the auth mode (Negotiate/Kerberos) is misconfigured."
     }
-    # RPC unavailable (135 / dynamic ports) - CIM/DCOM/scheduled-task paths.
-    # 1727 RPC_S_NO_MORE_ENDPOINTS (endpoint mapper not serving) folded in from restart, loop 79.
-    if ($m -match 'RPC\s+server\s+is\s+unavailable|1722|0x800706BA|1727|RPC_S_NO_MORE_ENDPOINTS|no\s+more\s+endpoints') {
-        return "RPC server unavailable$on (0x800706BA/1722, or 1727 no-more-endpoints). The RPC endpoint mapper (TCP 135) or the dynamic RPC port range is firewall-blocked, the mapper is not serving requests, or the target's RPC service is down. This blocks CIM/DCOM/scheduled-task calls; a WinRM-only path may still work."
+    # RPC unavailable (135 / dynamic ports) - CIM/DCOM/scheduled-task paths. Numerics are word-
+    # boundaried so a coincidental substring (a PID/byte-count/KB) does not false-match (loop80). 1727
+    # is RPC_S_CALL_FAILED_DNE (folded from restart, loop79 - corrected from the wrong "no-more-endpoints"
+    # label, which is actually 1753 EPT_S_NOT_REGISTERED, matched here by its real "no more endpoints" text).
+    if ($m -match 'RPC\s+server\s+is\s+unavailable|\b1722\b|0x800706BA|\b1727\b|RPC_S_CALL_FAILED_DNE|no\s+more\s+endpoints') {
+        return "RPC server unavailable$on (0x800706BA/1722, or a related RPC failure such as 1727 or the endpoint mapper reporting no free endpoints). The RPC endpoint mapper (TCP 135) or the dynamic RPC port range is firewall-blocked, the mapper is not serving requests, or the target's RPC service is down. This blocks CIM/DCOM/scheduled-task calls; a WinRM-only path may still work."
     }
     # SMB / admin-share path (copy-to-C$ failures)
     if ($m -match 'bad\s+net\s*path|ERROR_BAD_NETPATH|0x80070035|network\s+path\s+was\s+not\s+found|The\s+network\s+name\s+cannot\s+be\s+found') {

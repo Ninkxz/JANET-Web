@@ -44,7 +44,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'restart'
         name     = 'Restart Scheduler'
-        version  = '1.5.0-beta9'
+        version  = '1.5.0-beta10'
         category = 'Lifecycle'
         summary  = 'Mass scheduled restart for Windows fleets - parallel shutdown.exe /r over WinRM with optional user consent, ping gate, abort, and reboot verification.'
         actions  = @(
@@ -1009,7 +1009,11 @@ function Get-RrsShutdownErrorHint {
     # these six branches used to be duplicated here, but the shared engine is a strict superset
     # (it also folded in this mapper's 1314/1727/ERROR_BAD_NETPATH knowledge). Fall through to
     # the numeric shutdown.exe return code below for the tool-specific / no-usable-detail cases.
-    if ($Detail) {
+    # -1 is restart's OWN synthetic tool-side-timeout sentinel (Detail = 'shutdown.exe timed out after
+    # 30s'); its precise numeric hint below is authoritative, so do NOT delegate it - the shared engine's
+    # generic 'timeout' signature would otherwise shadow it and even suggest raising a per-host timeout
+    # this tool's hardcoded 30s WaitForExit does not expose (loop80 self-review fix).
+    if ($Detail -and $Code -ne -1) {
         $h = Get-JanetTroubleshootHint -Message $Detail
         if ($h) { return $h }
     }
@@ -1019,7 +1023,7 @@ function Get-RrsShutdownErrorHint {
         53    { return 'ERROR_BAD_NETPATH - host offline, DNS lookup failed, or SMB blocked.' }
         1314  { return 'ERROR_PRIVILEGE_NOT_HELD - your account lacks SeRemoteShutdownPrivilege on the target.' }
         1722  { return 'RPC_S_SERVER_UNAVAILABLE - RPC blocked (firewall TCP 135 / dynamic ports) or the target RPC service is down.' }
-        1727  { return 'RPC_S_NO_MORE_ENDPOINTS - Remote Registry / RPC endpoint mapper not serving requests.' }
+        1727  { return 'RPC_S_CALL_FAILED_DNE - the RPC call failed and did not execute; RPC endpoint mapper / RPC service issue on the target.' }
         1115  { return 'ERROR_SHUTDOWN_IN_PROGRESS - target already has a pending shutdown. Use Abort first.' }
         1116  { return 'ERROR_NO_SHUTDOWN_IN_PROGRESS - no scheduled shutdown to abort on this target.' }
         1190  { return 'ALREADY SCHEDULED - target already has a pending restart from a prior dispatch (or another tool). Treated as success: the target IS going to restart. Use Abort to cancel and reschedule.' }

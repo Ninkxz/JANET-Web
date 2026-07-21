@@ -56,6 +56,14 @@ Describe 'restart shutdown-error hint delegates detail text to the shared engine
         (Rrs 1314 '') | Should Match 'PRIVILEGE_NOT_HELD'
         (Rrs 9999 '') | Should Match 'Unknown shutdown.exe return code 9999'
     }
+    It 'rc -1 (synthetic tool-side timeout) keeps its PRECISE numeric hint, not the shared generic timeout (loop80)' {
+        # regression: delegate-then-fallback let the shared "timeout" signature shadow the -1 hint.
+        (Rrs -1 'shutdown.exe timed out after 30s') | Should Match 'Tool-side timeout'
+        (Rrs -1 'shutdown.exe timed out after 30s') | Should Not Match 'raise the per-host timeout'
+    }
+    It 'a genuine remote error on -3 / -4 STILL delegates to the shared engine (richer hint preserved)' {
+        (Rrs -3 'remote: Access is denied') | Should Match 'not a local administrator|not authorized'
+    }
 
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.restart.psm1') -Raw
     It 'restart imports the shared troubleshoot engine and delegates in the mapper' {
@@ -66,7 +74,7 @@ Describe 'restart shutdown-error hint delegates detail text to the shared engine
         ($src -match "return 'WinRM auth: 0x80090351 SEC_E_NO_AUTHENTICATING_AUTHORITY") | Should Be $false
         ($src -match "return 'Target not in the WinRM TrustedHosts")                     | Should Be $false
     }
-    It 'restart manifest bumped to 1.5.0-beta9' {
-        (& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.5.0-beta9'
+    It 'restart manifest bumped to 1.5.0-beta10 (loop80 self-review fixes)' {
+        (& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.5.0-beta10'
     }
 }

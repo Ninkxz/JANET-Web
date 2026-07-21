@@ -53,8 +53,11 @@ Describe 'Get-JanetTroubleshootHint - restart-folded signatures (loop79)' {
         # must NOT be swallowed by the access-denied branch
         (Hint 'SeRemoteShutdownPrivilege') | Should Match 'user right|secpol|SeRemoteShutdownPrivilege'
     }
-    It 'RPC 1727 (no-more-endpoints) maps to the RPC-unavailable guidance' {
-        (Hint 'RPC_S_NO_MORE_ENDPOINTS') | Should Match '135|RPC|endpoint'
+    It 'RPC 1727 (RPC_S_CALL_FAILED_DNE) + the real 1753 endpoint-mapper text map to RPC guidance' {
+        # loop80 corrected the label: 1727 is RPC_S_CALL_FAILED_DNE, not "no-more-endpoints" (that phrase
+        # is error 1753); both route to the RPC hint, but via REAL tokens, not a fabricated one.
+        (Hint 'RPC_S_CALL_FAILED_DNE')                                            | Should Match '135|RPC|endpoint'
+        (Hint 'There are no more endpoints available from the endpoint mapper')   | Should Match '135|RPC|endpoint'
     }
     It 'ERROR_BAD_NETPATH text maps to the SMB / C$ guidance' {
         (Hint 'The operation failed with ERROR_BAD_NETPATH') | Should Match '445|C\$|admin share|SMB'
@@ -64,5 +67,32 @@ Describe 'Get-JanetTroubleshootHint - restart-folded signatures (loop79)' {
     }
     It 'could-not-be-found maps to name-resolution / unreachable guidance' {
         (Hint 'The computer could not be found') | Should Match 'resolve|DNS|reached'
+    }
+}
+
+# loop80 self-review (adversarial Fable review of loop79): the folded numeric tokens must not false-match a
+# coincidental substring, and 'could not be found' must be host-qualified so it does not swallow unrelated
+# "module/user name could not be found" errors. Regression guards for those confirmed false positives.
+Describe 'Get-JanetTroubleshootHint - loop80 false-positive guards (bare-numeric boundaries + narrowed could-not-be-found)' {
+    It '1314 as a coincidental substring (a KB number) does NOT trigger the privilege hint' {
+        (Hint 'Download failed for KB5031314: connection closed') | Should Be ''
+    }
+    It '1727 inside a larger number (a byte count / duration) does NOT trigger the RPC hint' {
+        (Hint 'copy failed after 172799 ms elapsed') | Should Be ''
+    }
+    It 'a non-host "could not be found" (module / user name) does NOT trigger the DNS hint' {
+        (Hint 'The specified module could not be found.') | Should Be ''
+        (Hint 'The user name could not be found.')        | Should Be ''
+    }
+    It 'the genuine host-qualified "computer ... could not be found" still routes to name-resolution' {
+        (Hint "The computer 'WS01' could not be found.") | Should Match 'resolve|DNS|reached'
+    }
+    It 'the real privilege HRESULT 0x80070522 (=win32 1314) routes to privilege-not-held' {
+        (Hint 'Exception from HRESULT: 0x80070522') | Should Match 'Privilege not held|user right'
+    }
+    It 'the standalone word-boundaried codes still route (1314 / 1727 / 1722 alone)' {
+        (Hint 'shutdown returned 1314')     | Should Match 'Privilege not held|user right'
+        (Hint 'the call failed with 1727')  | Should Match '135|RPC|endpoint'
+        (Hint 'RPC error 1722 occurred')    | Should Match '135|RPC'
     }
 }
