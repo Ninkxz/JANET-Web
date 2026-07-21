@@ -1402,6 +1402,19 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   change shared, ran engine+restart+secureboot+all consumers (233) green. Pester **1538→1549** green. Next:
   c2c/certdeploy read-only CHECK ERROR rows; per-candidate upr failures. SECRET parity: +engine corrections +
   restart rc-1 guard + secureboot scan hint.
+- **Loop 81 (DONE 2026-07-21) — informative-failures FOLLOW-UP + loop-80 self-review:** a Fable adversarial
+  subagent on loop-80's commits found **no confirmed new defects** (the `\b` boundaries, `-Code -ne -1` guard, and
+  secureboot scan wire all held under execution) but **1 plausible over-correction**: the loop-80 narrowing
+  `computer\b.{0,40}could not be found` was too tight - a quoted long AFNET FQDN (`'AREA52-...usaf.mil'`, 44-char
+  gap) fell off; **widened to `.{0,80}?`** (module/username still excluded). **Workstream:** wired the hint into
+  **certdeploy's TWO read-only paths** - the `check` harvest (`$status -eq 'CHECK ERROR'`) and the
+  `scan-cert-management` reconciler harvest (`$rec -eq 'CHECK ERROR'`), each mutating `$row['Hint']` + a `FIX:`
+  err log (row from the pure builders, so conditional mutation per the acas pattern; ALL PRESENT/MISSING/OFFLINE
+  + reconciler verdicts self-explain). certdeploy **1.4.3→1.4.4**. Tests: Troubleshoot.Hint +1 (long FQDN),
+  CertDeploy +4. **Glob lesson:** `CertDeploy.*.Tests.ps1` silently EXCLUDES `CertDeploy.Tests.ps1` (needs a middle
+  segment) - correct glob `CertDeploy*.Tests.ps1` (5 files, 97). **loop-37 lesson:** engine change shared, ran
+  engine-consumers+certdeploy (234) green. Pester **1549→1554** green. Next: c2c scan/version harvests;
+  per-candidate upr failures. SECRET parity: +engine window widening + certdeploy read-only wires.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
