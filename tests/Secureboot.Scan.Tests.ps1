@@ -129,7 +129,30 @@ Describe 'Secure Boot scan - manifest contract' {
 
     It 'tool version is at least 1.6.0' {
         # Floor assert (wpt-suite precedent): the newest bump's own file
-        # (Secureboot.ConfirmWord, v1.6.1) carries the exact pin; older files floor.
+        # (the loop57 Describe below, v1.6.2) carries the exact pin; older files floor.
         ([version]$man.version -ge [version]'1.6.0') | Should Be $true
+    }
+}
+
+# -----------------------------------------------------------------------------
+# loop57 (P2): the enable worker polls a result JSON named from the hostname ALONE
+# (SecureBoot_<host>.json) and pre-deletes a stale prior-run file best-effort. If that
+# delete ever silently fails, the poll can replay an OLD SetResult=0 file as THIS run's
+# Success. $taskName (SBE_<random>) is already per-run unique (it names $scriptFile);
+# naming the result file with it too makes a cross-run filename collision impossible, so
+# the poll can only ever read this run's own result. Static analysis (the worker is a
+# module-less runspace scriptblock - not directly invokable without live SMB).
+Describe 'secureboot 1.6.2 - enable result file is per-run unique (no stale-result replay)' {
+    $man = & $script:SbeMod { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
+
+    It 'manifest version is exactly 1.6.2 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.6.2'
+    }
+    It 'names the enable result JSON with the per-run-unique $taskName' {
+        ($src -match '\$resultFile\s*=\s*"[^"]*\$\{taskName\}[^"]*\.json"') | Should Be $true
+    }
+    It 'no longer derives the result filename from the hostname alone' {
+        ($src -match '\$resultFile\s*=\s*"SecureBoot_\$\{comp\}\.json"') | Should Be $false
     }
 }

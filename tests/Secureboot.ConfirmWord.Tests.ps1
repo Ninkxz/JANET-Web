@@ -23,11 +23,13 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Force -PassThru
 $script:View = Get-Content (Join-Path $script:Root 'web\js\views\secureboot.view.js') -Raw
 
-Describe 'secureboot 1.6.1 - manifest' {
+Describe 'secureboot manifest (confirm-word floor)' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'id is secureboot and version is 1.6.1' {
-        [string]$mani.id      | Should Be 'secureboot'
-        [string]$mani.version | Should Be '1.6.1'
+    It 'id is secureboot and version is at least 1.6.1' {
+        # Floor assert: the newest bump's own file carries the exact pin (loop57 =
+        # Secureboot.Scan static-analysis Describe, v1.6.2); older files floor.
+        [string]$mani.id | Should Be 'secureboot'
+        ([version][string]$mani.version -ge [version]'1.6.1') | Should Be $true
     }
     It 'enable-secure-boot is destructive and now carries a confirm string' {
         $en = @($mani.actions | Where-Object { $_.id -eq 'enable-secure-boot' })[0]
