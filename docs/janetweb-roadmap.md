@@ -255,13 +255,11 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
     the per-pillar SUMMARY tally `:3084` folds SKIP/NOT VERIFIED/IN PROGRESS into `nochange` — items 22/24.)_
 
 _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-verify before acting. certdeploy.psm1 lines.)_
-58. **certdeploy DEPLOY: a trust-anchor-guard-rejected (non-CA) but ABSENT cert reads ALREADY/INSTALLED, audit
-    clean** (MED-HIGH) — `:382-387` a wanted cert failing `Test-CertDeployIsCa` is `$rejected++; continue` (not
-    failed, not NotVerified), so the classifier (`:424-432`) reads Added=0 → **ALREADY** ("all present") or,
-    mixed, **INSTALLED**/audit Success, while the anchor is genuinely absent; `| REJECTED n` rides only in
-    Detail. Trigger: any Root/CA cert without BasicConstraints CA=true — an **X.509 v1 root** (no extensions →
-    fail-closed "not a CA") is rejected on every host forever while each deploy reads ALREADY. Fix: a
-    wanted-but-refused-and-absent anchor gets a distinct REJECTED status, out of the clean bucket.
+58. ~~**certdeploy DEPLOY: a trust-anchor-guard-rejected (non-CA) but ABSENT cert reads ALREADY/INSTALLED**~~
+    **CLOSED loop 49** (certdeploy 1.4.2): `Get-CertDeployResultToken` now emits **REJECTED** when `Rejected>0`
+    (after FAIL/NOT VERIFIED, before INSTALLED/ALREADY) → row Status `REJECTED (non-CA)` (error level, own
+    summary bucket) → audit Failure/itemCount 0. The guard itself (correctly refusing a non-CA anchor) is
+    unchanged; only the classification. `CertDeploy.Tests.ps1` +6; two bug-pinning CaValidation tests corrected.
 59. **certdeploy scan-cert-management: registry-denied probes → green "None detected"** (LOW/advisory) —
     `:1461-1495` all detection primitives are `-ErrorAction SilentlyContinue`, so a session-capable but
     registry-denied credential yields `Err=''` → `Get-CertDeployReconcilerVerdict` 'None detected — a manual
@@ -965,6 +963,17 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
   **1390→1395** green. **Ranked items 58/59** (F2 rejected-anchor-reads-ALREADY MED-HIGH, F3 reconciler
   registry-denied-reads-green LOW; F4/F5 speculative structural, not ranked). SECRET parity: +certdeploy
   want-set-empty → Err.
+- **Loop 49 (DONE 2026-07-21):** Fable-inline. Self-review of loop-48 → **GREEN**. **Closed certdeploy item58
+  (F2)**, completing the tool's deploy honesty: `Add-CertDeployBundleToStores` correctly refuses a non-CA cert
+  destined for a trust-anchor store (`:382`) but `Get-CertDeployResultToken` ignored the `Rejected` count, so a
+  refused-and-ABSENT anchor read `ALREADY`/`INSTALLED` → a clean VulnPatched Success while the anchor stayed
+  absent (the guard was right, the reporting lied). **FIXED** (certdeploy **1.4.1→1.4.2**): the classifier emits
+  **REJECTED** when `Rejected>0` (after FAIL/NOT VERIFIED, before INSTALLED/ALREADY) → row `REJECTED (non-CA)`
+  (error level + own summary bucket) → audit Failure/0; honest non-rejection tokens unchanged. `CertDeploy.Tests.
+  ps1` +6; two CaValidation tests that had pinned the old rejected→INSTALLED/ALREADY corrected (loop-37 lesson);
+  loop-48 exact pin → floor. certdeploy set **73** green. Pester **1395→1401** green. **Both certdeploy real dive
+  false-cleans (F1/F2) now closed** — remaining item59 (F3, LOW/advisory) + F4/F5 (speculative). SECRET parity:
+  +certdeploy REJECTED token.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
