@@ -47,9 +47,9 @@ Describe 'wpt - both M365 profiles no longer interpolate an untested exit code i
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-43 M365 exit-code gate)' {
-    It 'wpt is at v6.8.11' {
+Describe 'wpt - manifest version floor (M365 exit-code gate shipped in 6.8.11; exact pin migrated to newest bump)' {
+    It 'wpt is at or past v6.8.11' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.11'
+        ([version][string]$mani.version -ge [version]'6.8.11') | Should Be $true
     }
 }

@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.11'
+        version  = '6.8.12'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -877,6 +877,23 @@ function Get-WptVerifyOk {
 function Get-WptRvAccepted {
     param($ReturnValue)
     return ($null -ne $ReturnValue -and [int]$ReturnValue -eq 0)
+}
+
+# loop50 (item44): PURE canonical clean-user-apps host status. A live clean deletes app binaries per user
+# profile; the worker counts $found paths that existed and $removed that were actually deleted (a locked/
+# running app throws -> ERR event, NOT counted removed). The status was UNCONDITIONALLY 'Success', so a host
+# where every deletion FAILED (Chrome running in all profiles -> $found>0, $removed=0) read Success + lit the
+# ok tile + booked a VulnPatched Success while nothing was removed. Now: nothing found or all removed ->
+# Success; some removed -> Partial; found>0 but none removed -> Failed. The OkOf accepts only Success/Dry Run
+# OK, and the fan-out audits a non-ok host as Failure. The module-less worker mirrors this inline; keep in
+# lockstep. Pure - tested by Wpt.CleanStatus.Tests.ps1.
+function Get-WptCleanStatus {
+    param([int]$Found, [int]$Removed, [bool]$DryRun)
+    if ($DryRun)            { return 'Dry Run OK' }
+    if ($Found -eq 0)       { return 'Success' }   # nothing present to clean
+    if ($Removed -ge $Found){ return 'Success' }   # every found path removed
+    if ($Removed -gt 0)     { return 'Partial' }   # some removed, some failed/locked
+    return 'Failed'                                # found paths but removed none
 }
 
 # Shared Verify scriptblock for both M365 C2R profiles (Force Update and User Visible).
@@ -3633,8 +3650,14 @@ $script:WptCleanUserAppsBlock = {
         $r.Bytes = $res.Bytes; $r.FreedMB = [Math]::Round($res.Bytes / 1MB, 1)
         $r.AppsRemoved = if ($DryRun) { [int]$res.Found } else { [int]$res.Removed }
         $r.Events = @($res.Events)
-        $r.Status = if ($DryRun) { 'Dry Run OK' } else { 'Success' }
-        $r.Detail = if ($DryRun) { "$([int]$res.Found) binary path(s) would be removed, $($r.FreedMB) MB" } else { "$([int]$res.Removed) binary path(s) removed, $($r.FreedMB) MB" }
+        # loop50 (item44): MIRROR of Get-WptCleanStatus - unconditional 'Success' was a false-clean when
+        # every deletion FAILED (found>0, removed=0 -> Success + VulnPatched while nothing was removed).
+        $r.Status = if ($DryRun) { 'Dry Run OK' }
+                    elseif ([int]$res.Found -eq 0)              { 'Success' }
+                    elseif ([int]$res.Removed -ge [int]$res.Found) { 'Success' }
+                    elseif ([int]$res.Removed -gt 0)            { 'Partial' }
+                    else                                        { 'Failed' }
+        $r.Detail = if ($DryRun) { "$([int]$res.Found) binary path(s) would be removed, $($r.FreedMB) MB" } else { "$([int]$res.Removed) of $([int]$res.Found) binary path(s) removed, $($r.FreedMB) MB" }
     } catch { $r.Detail = $_.Exception.Message }
     finally { Remove-PSSession $sess -EA SilentlyContinue }
     return $r
