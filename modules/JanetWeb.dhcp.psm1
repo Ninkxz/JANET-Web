@@ -29,7 +29,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.13'
+        version  = '1.1.14'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -337,17 +337,11 @@ function Invoke-JanetOnDhcpCancelable {
     }
 }
 
-function Get-JanetWsmanAuthHint {
-    # Reproduce the WSMan auth-rejection hint from the original (lines 2074,
-    # 2285) -- generic 'access denied' rarely means a bad password.
-    param([string]$Message, [string]$Server)
-    if ($Message -match 'username or password|access is denied|authentication') {
-        return ("WSMan auth rejection. Common causes: account not in 'DHCP Administrators' on $Server; " +
-                "stale launcher credential; auth mode toggled mid-session; username missing domain prefix " +
-                "(DOMAIN\user or user@domain.com); or account locked out.")
-    }
-    return ''
-}
+# loop75 (informative failures): the thin, auth-only Get-JanetWsmanAuthHint is retired in favour of
+# the shared Get-JanetTroubleshootHint (JanetWeb.troubleshoot.psm1), a strict superset that also maps
+# DNS/RPC/SMB/timeout/no-credential/disk/file-lock signatures. Its 5 dhcp call sites now use the shared
+# engine, so every dhcp failure path (connect/load/apply/bulk) gets the full guidance, not just auth.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
 
 # -----------------------------------------------------------------------------
 #  Remote scriptblocks (lifted verbatim from the original engine)
@@ -567,7 +561,7 @@ function Invoke-JanetDhcpConnect {
         return @{ rows=@($rows); summary=@{ total=1; ok=1; failed=0; scopes=$scopes.Count } }
     } catch {
         $emsg = $_.Exception.Message
-        $hint = Get-JanetWsmanAuthHint -Message $emsg -Server $Server
+        $hint = Get-JanetTroubleshootHint -Message $emsg -Server $Server
         & $Send @{ type='log'; level='err'; text=("Connect to $Server failed: $emsg" + $(if($hint){" -- $hint"}else{''})) }
         $row = @{ Host=$Server; ScopeId=''; SubnetMask=''; Name=''; State='Error'; Description=$emsg; Module='' }
         [void]$rows.Add($row)
@@ -614,7 +608,7 @@ function Invoke-JanetDhcpLoad {
         return @{ rows=@($rows); summary=@{ total=1; ok=1; failed=0; valueCount=$vals.Count } }
     } catch {
         $emsg = $_.Exception.Message
-        $hint = Get-JanetWsmanAuthHint -Message $emsg -Server $Server
+        $hint = Get-JanetTroubleshootHint -Message $emsg -Server $Server
         & $Send @{ type='log'; level='err'; text=("Load failed: $emsg" + $(if($hint){" -- $hint"}else{''})) }
         $row = @{ Host=$Server; ScopeId=$ScopeId; OptionId=$OptionId; Values=''; ValueCount=0; NotSet=$false }
         [void]$rows.Add($row)
@@ -670,7 +664,7 @@ function Invoke-JanetDhcpApply {
     # + a Failure audit and do NOT write. The operator can retry once the read
     # succeeds.
     if ($readErr) {
-        $hint = Get-JanetWsmanAuthHint -Message $readErr -Server $Server
+        $hint = Get-JanetTroubleshootHint -Message $readErr -Server $Server
         # A dry run never attempts a write, so its abort is a read failure
         # (TouchHost), not a config-change failure (VulnPatched).
         $abortAudit = $(if ($DryRun) { 'TouchHost' } else { 'VulnPatched' })
@@ -894,7 +888,7 @@ function Invoke-JanetDhcpApply {
         return @{ rows=@($rows); summary=@{ total=1; ok=1; failed=0; status=$status } }
     } catch {
         $emsg = $_.Exception.Message
-        $hint = Get-JanetWsmanAuthHint -Message $emsg -Server $Server
+        $hint = Get-JanetTroubleshootHint -Message $emsg -Server $Server
         & $Send @{ type='log'; level='err'; text=("APPLY failed: $emsg" + $(if($hint){" -- $hint"}else{''})) }
         # Failed apply -> VulnPatched/Failure (line 2085).
         & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Failure'; itemCount=0; detail=("scope=$ScopeId opt=$OptionId err=$emsg") }
@@ -1061,7 +1055,7 @@ function Invoke-JanetDhcpBulk {
         # Session-level failure (auth, transport) -- the remote loop never ran
         # (line 2282). Emit one Failure audit + an error row per scope.
         $emsg = $_.Exception.Message
-        $hint = Get-JanetWsmanAuthHint -Message $emsg -Server $Server
+        $hint = Get-JanetTroubleshootHint -Message $emsg -Server $Server
         & $Send @{ type='log'; level='err'; text=("Bulk $Mode failed at the session level: $emsg" + $(if($hint){" -- $hint"}else{''})) }
         & $Send @{ type='audit'; action=$failAudit; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode session-level err=$emsg") }
         $done = 0

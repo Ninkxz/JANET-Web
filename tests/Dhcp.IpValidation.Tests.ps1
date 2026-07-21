@@ -232,8 +232,8 @@ Describe 'dhcp 1.1.13 - a non-numeric optionId aborts a destructive write (no si
         @{ Result = $res; Events = @($evs) }
     }
 
-    It 'manifest version is exactly 1.1.13 (newest bump holds the exact pin)' {
-        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.13'
+    It 'manifest version is at least 1.1.13 (floor; newest exact pin = loop75 hint Describe, v1.1.14)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.13') | Should Be $true
     }
     It 'apply with a non-numeric optionId -> rejected, does NOT default to option 6' {
         $o = Invoke-DhcpAction2 'apply' @{ targets = 'DHCP-REMOTE-1'; scopeId = '10.0.0.0'; newValues = '10.0.0.1'; confirm = 'APPLY'; optionId = '6o' }
@@ -243,5 +243,26 @@ Describe 'dhcp 1.1.13 - a non-numeric optionId aborts a destructive write (no si
     It 'a bulk write with a non-numeric optionId -> rejected too' {
         $o = Invoke-DhcpAction2 'bulk-append' @{ targets = 'DHCP-REMOTE-1'; scopeIds = '10.0.0.0'; ipAddresses = '10.0.0.1'; confirm = 'APPLY'; optionId = 'xyz' }
         [bool]$o.Result.summary.rejected | Should Be $true
+    }
+}
+
+# loop75 (informative-failures theme): dhcp's 5 failure-path catches used the thin, auth-only
+# Get-JanetWsmanAuthHint. They now use the shared Get-JanetTroubleshootHint (a strict superset -
+# DNS/RPC/SMB/timeout/etc.), and the dead local function is retired. Static analysis.
+Describe 'dhcp 1.1.14 - failure hints upgraded from thin auth-only to the shared troubleshoot engine' {
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+
+    It 'manifest version is exactly 1.1.14 (newest bump holds the exact pin)' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.14'
+    }
+    It 'dhcp imports the shared troubleshoot engine' {
+        ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
+    }
+    It 'the failure catches use the shared Get-JanetTroubleshootHint (>=5 call sites)' {
+        ([regex]::Matches($src, '\$hint\s*=\s*Get-JanetTroubleshootHint\b').Count -ge 5) | Should Be $true
+    }
+    It 'the dead thin Get-JanetWsmanAuthHint FUNCTION and its calls are gone' {
+        ($src -match 'function Get-JanetWsmanAuthHint')       | Should Be $false
+        ($src -match '=\s*Get-JanetWsmanAuthHint\s*-Message') | Should Be $false
     }
 }
