@@ -18,11 +18,14 @@
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
 # =============================================================================
 
+# loop73: shared error->actionable-hint mapper (why a host failed + how to fix it).
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.12'
+        version  = '2.5.13'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -1047,9 +1050,16 @@ function Invoke-JanetToolAction {
                     default              { $failCount++ }
                 }
 
+                # loop73 (informative failures): on a failure (anything not ok/deferred/skipped),
+                # translate the raw remote detail (else reason/output) into an actionable troubleshooting
+                # hint (why + how to fix). Carried in a Hint row field + appended to the err log; the raw
+                # detail/reason/output are preserved.
+                $isFail = ($status -notin @('Success','Success (warnings)','Deferred','AlreadyInstalled'))
+                $hint = if ($isFail) { Get-JanetTroubleshootHint -Message $(if ($detail) { $detail } elseif ($reasonTxt) { $reasonTxt } else { $outputTxt }) -Server ([string]$j.Host) } else { '' }
+
                 $row = @{
                     Host=$j.Host; Status=$status; Detail="$repairTag$detail"; ExitCode=$exit; Time=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-                    Output=$outputTxt; Reason=$reasonTxt; Repair=$repairTxt; Started=$started; Ended=$ended; Duration=$durTxt
+                    Output=$outputTxt; Reason=$reasonTxt; Repair=$repairTxt; Started=$started; Ended=$ended; Duration=$durTxt; Hint=$hint
                 }
                 [void]$rows.Add($row)
                 & $send (@{ type='row' } + $row)
@@ -1065,7 +1075,7 @@ function Invoke-JanetToolAction {
                 $itemCount = if ($auditResult -eq 'Success') { 1 } else { 0 }
                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$auditResult; itemCount=$itemCount; detail="$pkgName $repairTag$detail" }
 
-                & $send @{ type='log'; level=$(if($status -eq 'Success'){''}elseif($status -eq 'Deferred' -or $status -eq 'Success (warnings)' -or $status -eq 'AlreadyInstalled'){'warn'}else{'err'}); text="${repairTag}[$($j.Host)] $status : $detail" }
+                & $send @{ type='log'; level=$(if($status -eq 'Success'){''}elseif($status -eq 'Deferred' -or $status -eq 'Success (warnings)' -or $status -eq 'AlreadyInstalled'){'warn'}else{'err'}); text="${repairTag}[$($j.Host)] $status : $detail$(if ($hint) { ' | FIX: ' + $hint } else { '' })" }
 
                 $done++
                 & $send @{ type='progress'; done=$done; total=$jobs.Count }

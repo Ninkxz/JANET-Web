@@ -110,8 +110,8 @@ Describe 'pkginstall 2.5.12 - dropped MSI entries are surfaced; an all-invalid s
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
 
-    It 'manifest version is exactly 2.5.12 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '2.5.12'
+    It 'manifest version is at least 2.5.12 (floor; newest exact pin = loop73 hint Describe, v2.5.13)' {
+        ([version][string]$mani.version -ge [version]'2.5.12') | Should Be $true
     }
     It 'blank / all-valid input -> no drops' {
         @(& $script:Mod { Get-JanetMsiListDropped '   ' }).Count | Should Be 0
@@ -138,5 +138,29 @@ Describe 'pkginstall 2.5.12 - dropped MSI entries are surfaced; an all-invalid s
         ($src -match 'refusing rather than installing the whole bundle') | Should Be $true
         # the refuse is gated on the surviving list being empty
         ($src -match "if\s*\(@\(\`$msiList\)\.Count\s*-eq\s*0\)")      | Should Be $true
+    }
+}
+
+# loop73 (informative-failures theme): the pkginstall harvest now, on a per-host failure (status not
+# ok/deferred/skipped), runs the raw remote detail through Get-JanetTroubleshootHint and attaches the
+# hint to a Hint row field + the err log (FIX:), raw detail preserved. Static analysis (the harvest runs
+# inside the fan-out over a real RunspacePool - matches wpt's fan-out test style).
+Describe 'pkginstall 2.5.13 - fan-out attaches a troubleshooting hint to a failed host' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'manifest version is exactly 2.5.13 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.13'
+    }
+    It 'pkginstall imports the shared troubleshoot engine' {
+        ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
+    }
+    It 'the harvest computes a hint only on a failure and attaches it to the Hint row field' {
+        ($src -match '\$isFail\s*=\s*\(\$status\s*-notin')            | Should Be $true
+        ($src -match '\$hint\s*=\s*if\s*\(\$isFail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        ($src -match 'Duration=\$durTxt;\s*Hint=\$hint')              | Should Be $true
+    }
+    It 'the err log appends the FIX hint when one exists (raw detail preserved)' {
+        ($src -match "\`$status : \`$detail\`$\(if \(\`$hint\) \{ ' \| FIX: ' \+ \`$hint \}") | Should Be $true
     }
 }
