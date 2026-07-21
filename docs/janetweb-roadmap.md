@@ -166,7 +166,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     tile (OK row) for a still-vulnerable host, and a *failed* Office C2R update refreshes the same key's mtime
     → reads fresh. The known "copied-registry always-OK" chip, generalized. Verify-only audits TouchHost (harm
     = the stat card / verdict, not the ledger). Fix: compare an actual installed version, or `Verified=$null`
-    → UNCONFIRMED when indeterminate.
+    → UNCONFIRMED when indeterminate. **Office C2R slice CLOSED loop 40** (acas 1.11.12): `Get-AcasC2rVerified`
+    ported from wpt's loop24 fix — Verified true only when fresh AND `LastScenarioResult` succeeded. **Remaining
+    (open):** the Chrome/Edge (`:157`) / Java (`:459`) / Store (`:568`) mtime slices — lower-risk (match wpt's
+    accepted mtime approach, keys not bumped on failed attempts the way C2R's is).
 36. ~~**acas "bumped" success = any pre≠post string inequality**~~ **CLOSED loop 39** (acas 1.11.11): new pure
     `Get-AcasBumpVerdict` + inline worker mirror (`:2084`) — a post in {error,n/a,not installed} or a
     `[version]`-parseable downgrade → UNCONFIRMED (never OK/VulnPatched); `'none'` (Log4j clean) and
@@ -181,6 +184,42 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
 39. **acas Chrome/Edge in-Script proof is direction-agnostic** (loop-38 Fable deep-dive, LOW) — `:280-282`/
     `:353-356`: `$cur -ne $before` → "OK (updated X→Y)" even when Y<X (rollback/channel switch during the poll).
     String compare, not `[version]`+greater-than. Same class as item36, in the profile Script.
+
+_(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-code before acting. wpt.psm1 lines.)_
+40. **wpt app-update profiles self-report OK on a mere trigger / ignored native exit code → VulnPatched** (HIGH)
+    — the systemic gap: success is classified from the Script's `OK…` prefix (`:3427`), so M365 Force/User
+    Visible `:915-916`/`:1224-1225` (`"OK (...exit $ExitCode)"`, code never tested), Trellix `:955`/`:967`
+    (`& $cmd 2>&1 | Out-Null` never throws → "ePO sync sent" on invocation, catch dead), and SC-trigger profiles
+    `:1269`/`:1051`/`:1720` (`Invoke-CimMethod | Out-Null` discards `CCM_Application.Install` rv; sibling `:4643`
+    checks it) all book VulnPatched/Success. The kb-install honest-outcome discipline (loop22/23) never swept
+    across the app-update catalog. Fix: gate each profile's OK on the exit code / rv, else PENDING.
+41. **wpt app-update-verify marks Status='Verified' regardless of `$res.Verified`** (HIGH) — `:3421`
+    unconditional; `:6441` counts it ok, `:4776` audits Success. A Verified=No/n/a (stale, still-vulnerable)
+    host counts in "N ok". (acas honors Verified via `Get-AcasVerifyRowStatus`; wpt doesn't.) Fix: Ok only when
+    `$res.Verified -eq $true`.
+42. **wpt bulk-patch: null WMI ReturnValue = accepted + trigger booked VulnPatched** (HIGH) — `:1989`/`:2016`
+    null rv falls through to "triggered"; `:5356` books VulnPatched/Success. The loop22/23 kb-install null-rv
+    fail-close (`:2808`) was never swept to bulk-patch.
+43. **wpt Oracle Java SC Verify = JavaSoft key mtime <30d, no version target** (HIGH) — `:1312`; the jvm.dll
+    version at `:1300` is displayed, never compared. item35 class, wpt side.
+44. **wpt clean-user-apps Status='Success' even when every deletion failed** (MED-HIGH) — `:3590`/`:3601`/
+    `:6341`; Chrome running in all profiles → 0 removed, Success tile + VulnPatched. Detail is honest.
+45. **wpt verify-and-clean deletes the Uninstall reg key even when FilesRemain** (MED, fleet-level) — `:4192`/
+    `:4325`: row is 'Attention' (counted failure, good) but the key removal is unconditional, so every later
+    registry-driven scan reads the host clean. Fix: only remove the key when files are actually gone.
+46. **wpt Adobe Acrobat 'Removed' if ANY one GUID uninstalled** (MED) — `:4298`/`:4303`: failing GUIDs
+    invisible, `continue`s before the verify-clean files-gone check.
+47. **wpt browser-client Verify = Clients{GUID} mtime <14d, version-blind** (MED) — `:898`; item35 class, wpt
+    side. Less wrong than C2R (Omaha usually rewrites only on a real install — confirm whether a failed update
+    bumps the key).
+48. **wpt fix-java empty engine result (null row) → NOCHANGE → ok + audit Success** (LOW) — `:5841`; engine-
+    absent/thrown cases already fail closed (`:4436`/`:5835`).
+49. **wpt verify-patch counts 'no SCCM client' / 'no matching updates' toward "N verified"** (LOW) — `:2501`/
+    `:6225`; an update absent from CCM can mean installed OR never-deployed.
+50. **wpt Chrome/Edge internet updater direction-agnostic downgrade** (LOW) — `:1126`/`:1201`: `$cur -ne
+    $before` → "OK (updated X→Y)" on a pv downgrade during the poll. Raw string, not `[version]` forward. Same
+    class as item39 (acas). (wpt's degraded-read path IS guarded — `$cur -and` + PENDING — so unlike acas item36
+    it's only the downgrade sliver.)
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -766,6 +805,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   **Remaining acas backlog:** items 35 (verify=mtime-recency, HIGH — needs per-profile required-version
   compare), 37 (Log4j partial-scan), 38 (null→OK latent), 39 (direction-agnostic Script proof). SECRET
   parity: +acas bump-verdict degraded/downgrade fail-close.
+- **Loop 40 (DONE 2026-07-21):** Fable-inline synthesis + one Fable deep-dive worker on **wpt** (most-used,
+  485KB). Self-review of loop-39 → **GREEN**. The dive's actionable immediate: **acas lags wpt** — wpt hardened
+  its M365 C2R verify in loop24 (fresh AND `LastScenarioResult` succeeded, because C2R bumps the key on failed
+  attempts too), but acas's Office C2R verify (`:129`) still used bare mtime-recency, the confirmed worst-case
+  slice of item35. **FIXED** (acas **1.11.11→1.11.12**): new pure `Get-AcasC2rVerified` ported from
+  `Get-WptC2rVerified` + inline generated-scriptblock mirror — Verified true only when fresh AND scenario
+  succeeded, `$false` on stale/failed, `$null` on unknown. `Acas.C2rVerify.Tests.ps1` (NEW, 10, mirrors
+  `Wpt.C2rVerify`); BumpVerdict exact pin → floor. acas verify/profile set **76** green; all-tests symbol grep
+  clean. Pester **1329→1339** green. **The wpt dive also produced a rich backlog (items 40–50)** — systemic
+  finding: wpt classifies success from the profile Script's `OK…` prefix, so the honest-outcome discipline
+  applied to kb-install (loop22/23) + C2R verify (loop24) was never swept across the app-update profile catalog
+  (items 40/41/42 are HIGH). SECRET parity: +acas Office C2R scenario-success verify; wpt items are parity
+  candidates once closed.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
