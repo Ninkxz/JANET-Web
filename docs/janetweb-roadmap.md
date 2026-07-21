@@ -288,10 +288,11 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     disables. +4 tests (real temp overlay, `Get-AdToBaselinePath`-only shim). _(F4/F5 = speculative low:
     adminCount null-read guard-bypass `:513`, admin-pattern-miss categorization `:118`; not ranked.)_
 
-62. **secureboot AlreadyPending re-books Success** (P3) — `:161-262` return `SetResult='AlreadyPending'`; `:718-721`
-    falls through to `'Success'` → `:1263` books `VulnPatched/Success/itemCount=1` though this run wrote nothing.
-    Re-running against an already-staged host inflates the audit + `okCount`. Fix: map `AlreadyPending` → `Skipped`
-    (bucket exists), itemCount 0. _(from loop-57 dive)_
+62. ~~**secureboot AlreadyPending re-books Success**~~ **CLOSED loop 59** (secureboot 1.6.4): added
+    `elseif ($result.SetResult -eq 'AlreadyPending') { 'Skipped' }` to the resolvedStatus chain — the classify already
+    routes `Skipped` → `skipCount`/audit `Skipped`/itemCount 0, so a re-run against a staged host no longer books a
+    fresh `VulnPatched/Success/itemCount=1` or inflates "N enabled". Returned `Skipped` field aligned to status. +3
+    tests (static analysis). _(from loop-57 dive)_
 63. **secureboot "Success"/"N enabled" wording = staged pending-reboot, not enabled** (P3) — `:718`, `:1315`. Heavily
     mitigated (After col + audit detail carry "(pending reboot)"; confirm text says "PENDING A REBOOT"), but the bare
     enum + summary word "enabled" and the **Lenovo** read-back-reflects-staged case (`:184`) omit the pending marker.
@@ -1114,6 +1115,15 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   `Secureboot.ConfirmWord.Tests.ps1` +5 behavioral (exact pin moved here; Scan floored). set **40** green. Remaining
   secureboot items 62/63/65/66 (P3, none a hard firmware false-clean). Pester **1436→1441** green. SECRET parity:
   +secureboot `Get-SbeDryRunSafe` fail-closed dry_run parse.
+- **Loop 59 (DONE 2026-07-21):** self-review of loop-58 → GREEN. Workstream = close **item 62** (last secureboot
+  audit-honesty false-clean): the three vendor branches short-circuit an already-staged host with
+  `SetResult='AlreadyPending'` and **return before re-firing** the set/save (this run writes nothing), but
+  `New-Result` has no `Skipped` property so the resolvedStatus chain fell through to `'Success'` → a re-run booked a
+  fresh `VulnPatched/Success/itemCount=1` and inflated "N enabled". **FIXED** (secureboot **1.6.3→1.6.4**): added
+  `AlreadyPending → 'Skipped'` to the resolvedStatus chain (the classify already routes `Skipped` → skipCount/audit
+  `Skipped`/itemCount 0); returned `Skipped` field aligned to status. `Secureboot.Scan.Tests.ps1` +3 (static
+  analysis; exact pin moved here, ConfirmWord floored). set **43** green. Remaining secureboot items 63/65/66 (P3
+  wording/tally/hardening). Pester **1441→1444** green. SECRET parity: +secureboot `AlreadyPending → Skipped`.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
