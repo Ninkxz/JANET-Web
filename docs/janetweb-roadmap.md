@@ -167,11 +167,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     → reads fresh. The known "copied-registry always-OK" chip, generalized. Verify-only audits TouchHost (harm
     = the stat card / verdict, not the ledger). Fix: compare an actual installed version, or `Verified=$null`
     → UNCONFIRMED when indeterminate.
-36. **acas "bumped" success = any pre≠post string inequality** (loop-38 Fable deep-dive, CONFIRMED, MED-HIGH)
-    — `:2076-2085`: raw string `-ne` (not `[version]`, not directional) → "bumped" → OK → VulnPatched Success.
-    A post-probe degrading to `'error'`/`'n/a'`/`'not installed'`, or a downgrade, counts as a confirmed fix.
-    Fix: require post to parse as `[version]` and be `> pre`, else UNCONFIRMED — WITHOUT regressing non-version
-    profiles (spec-exec returns COMPLIANT/VULNERABLE/DRIFT).
+36. ~~**acas "bumped" success = any pre≠post string inequality**~~ **CLOSED loop 39** (acas 1.11.11): new pure
+    `Get-AcasBumpVerdict` + inline worker mirror (`:2084`) — a post in {error,n/a,not installed} or a
+    `[version]`-parseable downgrade → UNCONFIRMED (never OK/VulnPatched); `'none'` (Log4j clean) and
+    non-version state transitions (spec-exec → COMPLIANT) stay confirmed. `Acas.BumpVerdict.Tests.ps1` (11).
 37. **acas Log4j Verify scans only 2 hardcoded paths but claims a recursive clean** (loop-38 Fable deep-dive,
     CONFIRMED, MED) — `:945-975`: Verify checks only HID + Adobe dirs, reports `Verified=$true` "recursive scan"
     while the remediation Script recurses all of `C:\Program Files*`. Verify-only on a host with a vulnerable
@@ -752,6 +751,21 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   35–39** (verify=mtime-recency HIGH, "bumped"=string-inequality MED-HIGH, Log4j partial-scan MED, null→OK
   latent, direction-agnostic Script proof LOW) — each needs its own design pass (F2/F4 can't be one-liners
   without regressing non-version profiles). SECRET parity: +acas reboot-selected TouchHost audit fix.
+- **Loop 39 (DONE 2026-07-21):** Fable-inline. Self-review of loop-38 → **GREEN**. **Closed a confirmed
+  backlog false-clean: acas F4/item36** — the update worker declared a `"bumped"` (→ OK → PATCHED tile +
+  VulnPatched Success audit) on ANY `preV -ne postV` string inequality (`:2084`), so a post-verify probe that
+  degraded to `'error'` (caught probe, Defender `:204`), `'n/a'` (vanished Office key `:123`), or `'not
+  installed'` (`:146`/`:562`), or a numeric DOWNGRADE, booked a confirmed patch for a host whose state was
+  unknown. **FIXED** (acas **1.11.10→1.11.11**): new PURE `Get-AcasBumpVerdict` (`:2361` area) + inline worker
+  mirror (`:2084`) → `'unconfirmed'` when post ∈ {error,n/a,not installed} or `[version]`-parseable downgrade
+  (post ≤ pre), else `'confirmed'`; deliberately left confirmed = `'none'` (Log4j clean) + non-version state
+  transitions (spec-exec → COMPLIANT, doesn't parse as `[version]`), so no real bump/install/clean/transition
+  is masked. `Acas.BumpVerdict.Tests.ps1` (NEW, 11) pins degraded/downgrade→unconfirmed + the 4 confirmed
+  shapes + a static mirror assert + exact 1.11.11 (RebootAudit exact pin → floor). Full acas verify/profile set
+  **122** green; grepped all tests for touched symbols (loop-37/38 lesson). Pester **1318→1329** green.
+  **Remaining acas backlog:** items 35 (verify=mtime-recency, HIGH — needs per-profile required-version
+  compare), 37 (Log4j partial-scan), 38 (null→OK latent), 39 (direction-agnostic Script proof). SECRET
+  parity: +acas bump-verdict degraded/downgrade fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
