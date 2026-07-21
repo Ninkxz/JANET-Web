@@ -192,7 +192,9 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     (`& $cmd 2>&1 | Out-Null` never throws → "ePO sync sent" on invocation, catch dead), and SC-trigger profiles
     `:1269`/`:1051`/`:1720` (`Invoke-CimMethod | Out-Null` discards `CCM_Application.Install` rv; sibling `:4643`
     checks it) all book VulnPatched/Success. The kb-install honest-outcome discipline (loop22/23) never swept
-    across the app-update catalog. Fix: gate each profile's OK on the exit code / rv, else PENDING.
+    across the app-update catalog. Fix: gate each profile's OK on the exit code / rv, else PENDING. **M365 slice
+    CLOSED loop 43** (wpt 6.8.11): both M365 profiles now FAIL on a nonzero OfficeC2RClient exit (`Wpt.M365Update.
+    Tests.ps1`). **Remaining (open):** the Trellix `$LASTEXITCODE` gate + the SC-trigger profiles' discarded rv.
 41. ~~**wpt app-update-verify marks Status='Verified' regardless of `$res.Verified`**~~ **CLOSED loop 41** (wpt
     6.8.9): new pure `Get-WptVerifyOk` (mirrors `Get-AcasVerifyRowStatus`) — the OkOf now requires reachable
     AND `Verified -eq $true`; a reachable-but-not-verified host audits Skipped (checked, not current), not
@@ -850,6 +852,16 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
   **1348→1356** green. **NEW item51** (HIGH): the deeper trigger≠patched semantic — a merely-accepted async CCM
   trigger books VulnPatched, not a confirmed install (same class as item40). SECRET parity: +wpt null-rv
   fail-close across the CCM-trigger scriptblocks.
+- **Loop 43 (DONE 2026-07-21):** Fable-inline. Self-review of loop-42 → **GREEN**. **Closed item40's M365 slice
+  (HIGH, the worker's top finding)** — both `Microsoft 365 - Force Update` (`:939`) and `Update (User Visible)`
+  (`:1248`) profiles triggered `OfficeC2RClient.exe /update` then `return "OK (…exit $($proc.ExitCode))"`, the
+  exit code interpolated but NEVER tested, so a nonzero exit (real failure) read OK → VulnPatched in
+  app-update-apply. **FIXED** (wpt **6.8.10→6.8.11**): both Scripts FAIL on a nonzero exit; exit 0 stays
+  OK-triggered (the paired `M365C2RVerify` scenario-success gate, loop24, confirms completion). `Wpt.M365Update.
+  Tests.ps1` (NEW, 7) static-analyses both profile blocks + asserts the old form is gone module-wide;
+  BulkPatchRv exact pin → floor. wpt set **57** green; grep clean. Pester **1356→1363** green. **item40 residual
+  (open):** Trellix `$LASTEXITCODE` gate + SC-trigger discarded rv. The clean-port vein is thinning — next loop
+  weighs a fresh dive (c2c/remoteadmin/adto) vs the narrower closes. SECRET parity: +wpt M365 exit-code gate.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
