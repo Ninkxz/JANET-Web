@@ -31,7 +31,7 @@ silently PASS). This also fixes the non-datetime-Deadline case (now falls throug
 skipping both). The scan worker mirrors it inline (runs over WinRM in a module-less runspace — comment-
 linked). Read-only scan path — no destructive fan-out touched. Full c2c set green.
 
-`C2c.PatchOverdue.Tests.ps1` (11) pins the rule: deadline past/future, no-deadline StartTime in/out of
+`C2c.PatchOverdue.Tests.ps1` (10) pins the rule: deadline past/future, no-deadline StartTime in/out of
 grace, and the **fail-closed cases** (no-timestamp → overdue, non-datetime-Deadline → overdue, non-
 datetime-Deadline + usable-old-StartTime → overdue) + a static mirror assert + the exact 1.15.4 pin
 (ImportCompliance 1.15.3 exact → floor).

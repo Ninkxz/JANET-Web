@@ -580,9 +580,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   (and a non-datetime Deadline dropped from the StartTime path too). **FIXED** (c2c **1.15.3→1.15.4**):
   pure `Test-C2cUpdateOverdue` (`:622`) — datetime Deadline past→overdue, else datetime StartTime older
   than grace→overdue, else (no usable timestamp on a missing update)→**overdue** (fail-closed); scan worker
-  mirrors it inline. Read-only scan path; full c2c set green. `C2c.PatchOverdue.Tests.ps1` (11) pins the
+  mirrors it inline. Read-only scan path; full c2c set green. `C2c.PatchOverdue.Tests.ps1` (10) pins the
   rule incl. the fail-closed cases + static mirror assert + exact 1.15.4 pin (ImportCompliance 1.15.3
-  exact → floor). Pester **1259→(close)** green. **c2c scan verdict now FULLY fail-closed.** Remaining
+  exact → floor). Pester **1259→1269** green. **c2c scan verdict now FULLY fail-closed.** Remaining
   c2c items: 22/23/24 (entangled fix-rollup buckets), 26 (AntiMalware fix unknown-age). SECRET parity:
   +c2c Patches overdue fail-close.
 
