@@ -49,9 +49,9 @@ Describe 'wpt bulk-patch remote scriptblocks - both mirror the fail-closed accep
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-42 bulk-patch null-RV fail-close)' {
-    It 'wpt is at v6.8.10' {
+Describe 'wpt - manifest version floor (null-RV fail-close shipped in 6.8.10; exact pin migrated to newest bump)' {
+    It 'wpt is at or past v6.8.10' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.10'
+        ([version][string]$mani.version -ge [version]'6.8.10') | Should Be $true
     }
 }

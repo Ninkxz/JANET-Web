@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.10'
+        version  = '6.8.11'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -936,7 +936,11 @@ function Get-WptAppUpdateProfiles {
                 $c2r = 'C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe'
                 if (-not (Test-Path $c2r)) { return 'FAIL: OfficeC2RClient.exe not found' }
                 $proc = Start-Process -FilePath $c2r -ArgumentList '/update user','/displaylevel=false','/forceappshutdown=true' -Wait -PassThru -NoNewWindow
-                return "OK (Office update triggered, exit $($proc.ExitCode))"
+                # loop43 (item40): gate the OK on the exit code - a nonzero OfficeC2RClient exit is a real
+                # failure (was reported OK on ANY exit). Exit 0 = the update was accepted/started; the paired
+                # C2R Verify (scenario SUCCEEDED) confirms it actually completed.
+                if ($proc.ExitCode -ne 0) { return "FAIL: OfficeC2RClient returned exit $($proc.ExitCode) - update not started" }
+                return "OK (Office update triggered, exit 0)"
             }
             Verify = $script:M365C2RVerify
         }
@@ -1245,7 +1249,10 @@ function Get-WptAppUpdateProfiles {
                 $c2r = 'C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe'
                 if (-not (Test-Path $c2r)) { return 'FAIL: OfficeC2RClient.exe not found' }
                 $proc = Start-Process -FilePath $c2r -ArgumentList '/update user' -Wait -PassThru -NoNewWindow
-                return "OK (Office update triggered, exit $($proc.ExitCode))"
+                # loop43 (item40): gate the OK on the exit code (was reported OK on ANY exit). Exit 0 =
+                # accepted/started; the paired C2R Verify (scenario SUCCEEDED) confirms completion.
+                if ($proc.ExitCode -ne 0) { return "FAIL: OfficeC2RClient returned exit $($proc.ExitCode) - update not started" }
+                return "OK (Office update triggered, exit 0)"
             }
             Verify = $script:M365C2RVerify
         }
