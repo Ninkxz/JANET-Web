@@ -46,9 +46,9 @@ Describe 'c2c scan + fix workers - both mirror the null-age guard (no unguarded 
     }
 }
 
-Describe 'c2c - manifest exact version pin (newest bump = loop-46 sig-age null-coercion fail-close)' {
-    It 'c2c is at v1.15.7' {
+Describe 'c2c - manifest version floor (sig-age null-coercion fail-close shipped in 1.15.7; exact pin migrated)' {
+    It 'c2c is at or past v1.15.7' {
         $man = & $cm { Get-JanetToolManifest }
-        [string]$man.version | Should Be '1.15.7'
+        ([version][string]$man.version -ge [version]'1.15.7') | Should Be $true
     }
 }
