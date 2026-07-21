@@ -344,10 +344,10 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     a read failure as `Status='ReadError'` (declines to write), but the local handler counted it in no bucket, both
     audit `switch` defaults booked `TouchHost/Success`, and the summary read "0 error(s)". Now the counter's tail is a
     fail-closed catch-all + both defaults book Failure + explicit `ReadError → Failure`. +3 tests. _(loop-65 dhcp dive)_
-75. **dhcp destructive actions have NO self-guard and NO confirm-word** (P2, HIGH) — the target filter admits
-    `localhost`/`127.0.0.1`/the dispatcher's own name; every other destructive engine has a pinned self-guard, and
-    certdeploy/pkginstall/etc. require a typed confirm-word. dhcp has neither. Fix: refuse a destructive apply/bulk
-    whose target resolves to the local machine + add a typed confirm. *Hard-rule gap — next dhcp pick.* _(loop-65 dive)_
+75. ~~**dhcp destructive actions have NO self-guard and NO confirm-word**~~ **CLOSED loop 66** (dhcp 1.1.10): the 4
+    write actions (apply + bulk-*) now refuse fail-closed BEFORE any DHCP session unless the operator typed `APPLY`
+    (case-insensitive), and refuse when the target resolves to the box running JANET (`Get-DhcpLocalIdentity`/
+    `Test-DhcpHostIsSelf`, mirroring pkginstall). `connect`/`load` stay ungated. +6 tests. _(loop-65 dive)_
 76. **dhcp `dryRun` fails OPEN on unrecognized values** (P2) — `$asBool` only recognizes `1|true|yes|on`; anything else
     (`"TRUE "`, `"checked"`, `"dry"`) → `$false` → a live destructive write (the secureboot loop-58 class). Fix: strict
     fail-closed parse (`Get-SbeDryRunSafe`-style — unknown stays dry / aborts). _(loop-65 dive)_
@@ -1245,6 +1245,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   confirm-word HIGH, dryRun fail-open, optionId retarget, apply null + no post-write verify, scope reconciliation);
   **dhcp needs a follow-up hardening loop.** Pester **1467→1470** green. SECRET parity: +dhcp bulk fail-closed
   counter/default + ReadError handling.
+- **Loop 66 (DONE 2026-07-21):** self-review of loop-65 → GREEN. Workstream = close **item 75**, the dhcp hard-rule
+  gap: it was the only destructive engine with no self-guard and no typed confirm-word (target filter admitted
+  localhost/127.0.0.1/the dispatcher's own name). **FIXED** (dhcp **1.1.9→1.1.10**): the 4 write actions (apply +
+  bulk-*) now refuse fail-closed BEFORE any DHCP session unless the operator typed `APPLY` (case-insensitive), and
+  refuse when `$server` resolves to the local machine (`Get-DhcpLocalIdentity`/`Test-DhcpHostIsSelf`, mirroring
+  pkginstall/upr); `connect`/`load` stay ungated; no JS. `Dhcp.IpValidation.Tests.ps1` +6 (behavioral: no/wrong
+  confirm → rejected, self target → self-guard rejected; + Test-DhcpHostIsSelf + manifest confirm inputs; exact pin
+  moved here, ReadError Describe floored). **loop-37 lesson applied up front** — grepped every test; FixVerify/
+  FixVerify3 drive dhcp sub-functions directly (below the gate), unaffected; ran all 3 files = **54** green. Remaining
+  dhcp items 76-79. Pester **1470→1476** green. SECRET parity: +dhcp Test-DhcpHostIsSelf self-guard + APPLY confirm-word.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
