@@ -87,6 +87,9 @@ Describe 'Get-JanetTroubleshootHint - loop80 false-positive guards (bare-numeric
     It 'the genuine host-qualified "computer ... could not be found" still routes to name-resolution' {
         (Hint "The computer 'WS01' could not be found.") | Should Match 'resolve|DNS|reached'
     }
+    It 'a quoted long AFNET FQDN in "computer ... could not be found" still routes (loop81 window widened 40->80)' {
+        (Hint "The computer 'AREA52-1234ABC5.area52.afnoapps.usaf.mil' could not be found") | Should Match 'resolve|DNS|reached'
+    }
     It 'the real privilege HRESULT 0x80070522 (=win32 1314) routes to privilege-not-held' {
         (Hint 'Exception from HRESULT: 0x80070522') | Should Match 'Privilege not held|user right'
     }
