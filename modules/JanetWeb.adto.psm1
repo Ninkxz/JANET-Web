@@ -309,7 +309,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.3'
+        version  = '0.2.4'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(
@@ -497,7 +497,20 @@ function Invoke-AdToFix {
         $rules = @($e.rules)
         try {
             $de  = New-AdToEntry -Dn $dn -Credential $Credential
-            $cur = [int]("0" + [string]$de.Properties['userAccountControl'].Value)
+            # loop53 (F1): a NULL / absent / unreadable userAccountControl must NOT coerce to 0. A non-account
+            # object (group / OU / contact - no UAC at all, but binds and passes the DN guard) or an
+            # ACL-denied read would otherwise read $cur=0, which Get-AdToFixedUac computes as "no bad bits ->
+            # already compliant", asserting compliance of bits never read - and a set-op rule would WRITE a
+            # corrupting full UAC (wiping NORMAL_ACCOUNT) before the re-read caught it. Fail closed: we cannot
+            # evaluate or fix a UAC we never read. (A real account's UAC is always non-zero.)
+            $rawUac = $de.Properties['userAccountControl'].Value
+            if ($null -eq $rawUac) {
+                $row = @{ Object=$short; Category=''; Status='FAILED'; Applied=''; Detail='userAccountControl absent/unreadable (not a user/computer account, or read access-denied) - compliance NOT evaluated, nothing changed'; DN=$dn }
+                [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
+                & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result='Failure'; itemCount=0; detail='[FAILED] userAccountControl absent/unreadable - nothing changed' }
+                continue
+            }
+            $cur = [int]$rawUac
             # Protected-object guard (loop12 F1): this bulk-remediation tool must NEVER modify a
             # domain controller or an AdminSDHolder-protected (privileged) object. The DN guard
             # above proves the target is in-domain, but NOT that it is a safe object - a crafted

@@ -57,11 +57,11 @@ function Invoke-FixWith {
     @{ Result = $res; Events = @($evs) }
 }
 
-Describe 'adto 0.2.3 - manifest loads at the bumped version' {
+Describe 'adto 0.2.4 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is adto and version is 0.2.3' {
+    It 'manifest id is adto and version is 0.2.4' {
         [string]$mani.id      | Should Be 'adto'
-        [string]$mani.version | Should Be '0.2.3'
+        [string]$mani.version | Should Be '0.2.4'
     }
     It 'fix + validate-iao are destructive' {
         foreach ($aid in @('fix','validate-iao')) {
@@ -104,6 +104,42 @@ Describe 'adto F1 - fix REFUSES a domain controller + a privileged object (prote
         $de.Committed | Should Be $true
         # ACCOUNTDISABLE (0x2) was OR-ed in
         ([int]$de.Properties['userAccountControl'].Value -band 0x2) | Should Be 2
+    }
+}
+
+Describe 'adto F1b (loop53) - a NULL/unreadable userAccountControl fails closed, never "already compliant"' {
+    # A non-account object (group/OU/contact - no UAC) or an ACL-denied UAC read: Properties.Value is $null.
+    # New-FakeDe types -Uac [int] (can't be null), so build a null-UAC fake inline.
+    function New-FakeDeNullUac {
+        param([int]$AdminCount = 0)
+        $props = @{
+            userAccountControl = [pscustomobject]@{ Value = $null }
+            adminCount         = [pscustomobject]@{ Value = $AdminCount }
+        }
+        $de = [pscustomobject]@{ _props = $props; Committed = $false }
+        Add-Member -InputObject $de -MemberType ScriptProperty -Name Properties -Value { $this._props }
+        Add-Member -InputObject $de -MemberType ScriptMethod  -Name CommitChanges -Value { $this.Committed = $true }
+        $de
+    }
+    It 'a clear-op rule on a null-UAC object -> FAILED (not NO CHANGE "already compliant"); nothing committed' {
+        $de = New-FakeDeNullUac
+        $o = Invoke-FixWith -Fake $de -Rule 'passwordNeverExpires'
+        $row = @($o.Events | Where-Object { $_.type -eq 'row' })[0]
+        [string]$row.Status | Should Be 'FAILED'
+        ([string]$row.Detail) | Should Match '(?i)userAccountControl (absent|unreadable)'
+        $de.Committed | Should Be $false
+    }
+    It 'a set-op rule on a null-UAC object -> FAILED, NO corrupting write (was: wrote a full UAC wiping NORMAL_ACCOUNT)' {
+        $de = New-FakeDeNullUac
+        $o = Invoke-FixWith -Fake $de -Rule 'smartcardNotRequired'
+        $row = @($o.Events | Where-Object { $_.type -eq 'row' })[0]
+        [string]$row.Status | Should Be 'FAILED'
+        $de.Committed | Should Be $false
+    }
+    It 'the FAILED-null path books a Failure audit (not Skipped/Success)' {
+        $de = New-FakeDeNullUac
+        $o = Invoke-FixWith -Fake $de -Rule 'passwordNeverExpires'
+        @($o.Events | Where-Object { $_.type -eq 'audit' -and $_.result -eq 'Failure' }).Count | Should BeGreaterThan 0
     }
 }
 
