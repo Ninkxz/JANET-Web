@@ -39,7 +39,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'remoteadmin'
         name     = 'Remote Admin'
-        version  = '1.0.1'
+        version  = '1.0.2'
         category = 'Operations'
         summary  = 'Two operator hands-on-keyboard capabilities. Open C$: launch \\<computer>\C$ in Explorer on your own session by computer name (strict name validation, audited; needs no admin session). Run Script: fan an operator-authored PowerShell block to one or many hosts over WinRM - arbitrary remote code, so it is destructive and rides the admin-session gate, mirrors the WPT Custom Command SHA256 forensic audit, and self-guards the JANET dispatcher host out of every run.'
         actions  = @(
@@ -470,7 +470,11 @@ function Invoke-JanetToolAction {
                 if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
-                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    # loop56 (C1): the worker returns its result hashtable as the LAST stream object
+                    # (`return $r`). Take -Last 1, not -First 1: if the operator's arbitrary script ever
+                    # leaks a stray object to the output stream before the return, -First 1 would build the
+                    # row from the stray (wrong Host/Status); -Last 1 always yields the returned result.
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -Last 1 }
                     catch { $res = @{ Host=$j.Host; Online=$false; Status='Failed'; Output=''; Error="worker error: $($_.Exception.Message)" } }
                     try { $j.PS.Dispose() } catch {}; $j.PS = $null
                     if ($null -eq $res) { $res = @{ Host=$j.Host; Online=$false; Status='Failed'; Output=''; Error='worker returned no result' } }

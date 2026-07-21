@@ -25,6 +25,9 @@ Describe 'Manifest' {
         ($ids -contains 'open-cshare') | Should Be $true
         ($ids -contains 'run-script') | Should Be $true
     }
+    It 'manifest version is 1.0.2' {
+        [string]$mani.version | Should Be '1.0.2'
+    }
     It 'open-cshare is non-destructive; run-script is destructive' {
         $open = @($mani.actions | Where-Object { $_.id -eq 'open-cshare' })[0]
         $run  = @($mani.actions | Where-Object { $_.id -eq 'run-script' })[0]
@@ -301,5 +304,32 @@ Describe 'run-script fan-out + forensic audit (worker block faked)' {
 
         $res.summary.succeeded | Should Be 1
         $res.summary.scriptSha256 | Should Match '^[0-9a-f]{12}$'
+    }
+
+    # loop56 (C1): the worker returns its result as the LAST stream object. If the operator's script
+    # leaks a stray object to the output stream before the return, the row must still be built from the
+    # RETURN (-Last 1), not the stray (-First 1) - else Host/Status come from garbage.
+    It 'builds the row from the returned result, not a stray leaked object (-Last 1)' {
+        $fake = {
+            param($Computer, $Cred, $Auth, $ScriptText, $TimeoutSeconds, $MaxOutput, $ModulePath)
+            'STRAY-LEAK-OBJECT'   # a stray object emitted to the output stream BEFORE the return
+            return @{ Host = $Computer; Online = $true; Status = 'Success'; Output = "ran on $Computer"; Error = '' }
+        }
+        $events = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$events.Add($e) }
+        $res = & $m {
+            param($fake, $emit)
+            $orig = $script:RemoteAdminScriptBlock
+            $script:RemoteAdminScriptBlock = $fake
+            try {
+                Invoke-JanetToolAction -ActionId 'run-script' -Params @{ targets = 'WS-REMOTE'; script = 'Get-Date'; threads = 2; timeoutSeconds = 30 } -Credential $null -Emit $emit
+            } finally { $script:RemoteAdminScriptBlock = $orig }
+        } $fake $emit
+
+        $row = @($events | Where-Object { $_.type -eq 'row' })[0]
+        $row.Host   | Should Be 'WS-REMOTE'          # from the returned result, not the stray string
+        $row.Status | Should Be 'Success'
+        $row.Output | Should Be 'ran on WS-REMOTE'
+        $res.summary.succeeded | Should Be 1
     }
 }
