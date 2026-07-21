@@ -211,9 +211,11 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     **Failed**, partial → **Partial**, all-removed/nothing-found → Success. The action OkOf (Success/Dry Run OK
     only) + fan-out Failure-audit drop Partial/Failed out of the clean bucket automatically. `Wpt.CleanStatus.
     Tests.ps1` (8). (The sibling disk-cleanup worker's unconditional Success is different semantics, left as-is.)
-45. **wpt verify-and-clean deletes the Uninstall reg key even when FilesRemain** (MED, fleet-level) — `:4192`/
-    `:4325`: row is 'Attention' (counted failure, good) but the key removal is unconditional, so every later
-    registry-driven scan reads the host clean. Fix: only remove the key when files are actually gone.
+45. ~~**wpt verify-and-clean deletes the Uninstall reg key even when FilesRemain**~~ **CLOSED loop 51** (wpt
+    6.8.13): the `$verifyClean` key-removal (`:4250`) is now gated on `-not $filesRemain` — the key is removed
+    only when the product's files are actually gone; if files remain the key is KEPT (deleting it would blind
+    every later registry-driven scan into reading the still-installed product as clean). `Wpt.VerifyClean.
+    Tests.ps1` (5).
 46. **wpt Adobe Acrobat 'Removed' if ANY one GUID uninstalled** (MED) — `:4298`/`:4303`: failing GUIDs
     invisible, `continue`s before the verify-clean files-gone check.
 47. **wpt browser-client Verify = Clients{GUID} mtime <14d, version-blind** (MED) — `:898`; item35 class, wpt
@@ -988,6 +990,17 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
   with the same line but DIFFERENT semantics (best-effort maintenance) — narrowed the assert, didn't widen the
   fix. wpt set **40** green. Pester **1401→1409** green. **Remaining wpt:** item43 (Java SC mtime, HIGH), 45–47
   (MED), 48–50 (LOW), 51 (trigger≠patched, HIGH). SECRET parity: +wpt clean-user-apps honest status.
+- **Loop 51 (DONE 2026-07-21):** Fable-inline. Self-review of loop-50 → **GREEN**. **Closed wpt item45 (MED,
+  fleet-level)** — a distinctive self-blinding false-clean: the software-uninstall verify-and-clean pass removed
+  the product's Uninstall registry key **unconditionally** (`:4250`), even when `$filesRemain` (the install
+  folder still present). So a still-installed product (row correctly 'Attention') lost its registry entry, and
+  every later registry-driven scan (Software Scan / unsupported-product / ACAS) then read the host clean —
+  corrupting the detection substrate other tools rely on. **FIXED** (wpt **6.8.12→6.8.13**): the key-removal is
+  gated on `-not $filesRemain` — removed only when files are actually gone (genuinely orphaned); if files remain
+  it's KEPT with a note. The 'Attention' verdict is unchanged. `Wpt.VerifyClean.Tests.ps1` (NEW, 5, static —
+  the block is an inline module-less scriptblock); CleanStatus exact pin → floor. wpt set **29** +
+  SoftwareUninstall **3** green. Pester **1409→1414** green. **Remaining wpt:** item43 (Java SC mtime, HIGH),
+  46/47 (MED), 48–50 (LOW), 51 (trigger≠patched, HIGH). SECRET parity: +wpt verify-clean files-gone gate.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
