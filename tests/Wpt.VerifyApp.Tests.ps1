@@ -55,9 +55,9 @@ Describe 'wpt verify-app handler - ok keys off the verdict, not "the probe ran"'
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-41 honest verify tally)' {
-    It 'wpt is at v6.8.9' {
+Describe 'wpt - manifest version floor (honest verify tally shipped in 6.8.9; exact pin migrated to newest bump)' {
+    It 'wpt is at or past v6.8.9' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.9'
+        ([version][string]$mani.version -ge [version]'6.8.9') | Should Be $true
     }
 }

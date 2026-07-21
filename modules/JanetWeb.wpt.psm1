@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.9'
+        version  = '6.8.10'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -865,6 +865,18 @@ function Get-WptC2rVerified {
 function Get-WptVerifyOk {
     param($Reachable, $Verified)
     return ([bool]$Reachable -and $Verified -eq $true)
+}
+
+# loop42 (item42): PURE canonical "did the client-SDK method ACCEPT the trigger" predicate. A CCM
+# InstallUpdates / CCM_Application.Install ReturnValue is acceptance ONLY when it is a non-null 0; a
+# NULL ReturnValue (the method returned nothing) did NOT confirm acceptance and must FAIL CLOSED - it
+# was formerly counted as triggered in bulk-patch (both the update path :2001 and the app path :2027),
+# the same false-clean loop22 already fixed in kb-install (:2819). The bulk-patch update/app remote
+# scriptblocks mirror this inline (module-less runspaces, can't call this fn); keep in lockstep.
+# Pure - tested by Wpt.BulkPatchRv.Tests.ps1.
+function Get-WptRvAccepted {
+    param($ReturnValue)
+    return ($null -ne $ReturnValue -and [int]$ReturnValue -eq 0)
 }
 
 # Shared Verify scriptblock for both M365 C2R profiles (Force Update and User Visible).
@@ -1998,8 +2010,11 @@ $script:WptPatchBlock = {
             if (-not $updates) { return @{ Count = 0; Rejected = 0 } }
             $rv = $null
             try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$updates) -Namespace ROOT\ccm\ClientSDK).ReturnValue } catch { $rv = -1 }
-            if ($null -ne $rv -and [int]$rv -ne 0) { return @{ Count = 0; Rejected = @($updates).Count; ReturnValue = [int]$rv } }
-            return @{ Count = @($updates).Count; Rejected = 0 }
+            # loop42: MIRROR of Get-WptRvAccepted (keep in sync) - accepted ONLY on a non-null 0. A NULL
+            # ReturnValue did NOT confirm acceptance -> fail closed (rejected), matching kb-install loop22.
+            # Formerly a null fell through to counted-as-triggered (audit#5 false-clean).
+            if ($null -ne $rv -and [int]$rv -eq 0) { return @{ Count = @($updates).Count; Rejected = 0 } }
+            return @{ Count = 0; Rejected = @($updates).Count; ReturnValue = $(if ($null -eq $rv) { '<null>' } else { [int]$rv }) }
         }
         $r.UpdatesTriggered = [int]$upResult.Count
         if ($upResult.Rejected -gt 0) { $r.Error = "Update trigger rejected by client (ReturnValue=$($upResult.ReturnValue)); $($upResult.Rejected) update(s) NOT installed" }
@@ -2024,7 +2039,9 @@ $script:WptPatchBlock = {
                         IsRebootIfNeeded=$rebootIfNeeded; Priority='High'; Revision="$($app.Revision)"
                     }
                     $rv = (Invoke-CimMethod -Namespace root/ccm/clientSDK -ClassName CCM_Application -MethodName Install -Arguments $param).ReturnValue
-                    if ($null -eq $rv -or [int]$rv -eq 0) { $count++ } else { $rejected++ }
+                    # loop42: MIRROR of Get-WptRvAccepted - accepted ONLY on a non-null 0; a NULL RV did NOT
+                    # confirm acceptance -> rejected (fail closed), matching kb-install loop22. Was null->counted.
+                    if ($null -ne $rv -and [int]$rv -eq 0) { $count++ } else { $rejected++ }
                 } catch { $rejected++ }
             }
             return @{ Count = $count; Rejected = $rejected }
@@ -3893,8 +3910,8 @@ $script:WptSccmInstallBlock = {
                     if ($app.ApplicabilityState -ne 'Applicable') { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Skipped'; Detail="not applicable ($($app.ApplicabilityState))" }); continue }
                     $iargs = @{ EnforcePreference=[uint32]0; Id="$($app.Id)"; IsMachineTarget=[System.Convert]::ToBoolean($app.IsMachineTarget); IsRebootIfNeeded=$false; Priority='High'; Revision="$($app.Revision)" }
                     $rv = (Invoke-CimMethod -Namespace ROOT\ccm\ClientSDK -ClassName CCM_Application -MethodName Install -Arguments $iargs -EA Stop).ReturnValue
-                    if ($null -eq $rv -or [int]$rv -eq 0) { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Triggered'; Detail="Install (v$($app.SoftwareVersion))" }) }
-                    else { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Failed'; Detail="Install rejected by client (ReturnValue=$([int]$rv))" }) }
+                    if ($null -ne $rv -and [int]$rv -eq 0) { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Triggered'; Detail="Install (v$($app.SoftwareVersion))" }) }
+                    else { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Failed'; Detail="Install rejected by client (ReturnValue=$(if($null -eq $rv){'<null>'}else{[int]$rv}))" }) }
                 } catch { [void]$out.Add(@{ Type='App'; Name=$it.Name; Result='Failed'; Detail=$_.Exception.Message }) }
             }
             $upIds = @(($items | Where-Object { $_.Type -eq 'Update' }) | ForEach-Object { $_.Id })
@@ -3903,8 +3920,8 @@ $script:WptSccmInstallBlock = {
                     $allUp = @(Get-CimInstance -Namespace ROOT\ccm\ClientSDK -Class CCM_SoftwareUpdate -EA Stop | Where-Object { $upIds -contains $_.UpdateID })
                     if ($allUp.Count -gt 0) {
                         $rv = (Invoke-CimMethod -Namespace ROOT\ccm\ClientSDK -ClassName CCM_SoftwareUpdatesManager -MethodName InstallUpdates -Arguments @{ CCMUpdates=[ciminstance[]]$allUp } -EA Stop).ReturnValue
-                        if ($null -eq $rv -or [int]$rv -eq 0) { foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Triggered'; Detail='InstallUpdates' }) } }
-                        else { foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Failed'; Detail="InstallUpdates rejected by client (ReturnValue=$([int]$rv))" }) } }
+                        if ($null -ne $rv -and [int]$rv -eq 0) { foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Triggered'; Detail='InstallUpdates' }) } }
+                        else { foreach ($u in $allUp) { [void]$out.Add(@{ Type='Update'; Name=[string]$u.Name; Result='Failed'; Detail="InstallUpdates rejected by client (ReturnValue=$(if($null -eq $rv){'<null>'}else{[int]$rv}))" }) } }
                     } else { [void]$out.Add(@{ Type='Update'; Name="$($upIds.Count) update(s)"; Result='Skipped'; Detail='none matched in CCM_SoftwareUpdate' }) }
                 } catch { [void]$out.Add(@{ Type='Update'; Name="$($upIds.Count) update(s)"; Result='Failed'; Detail=$_.Exception.Message }) }
             }
@@ -4651,10 +4668,12 @@ $script:WptAppActionBlock = {
                 try { $post = @(Get-CimInstance -Namespace 'ROOT\ccm\ClientSDK' -Class CCM_Application -ErrorAction Stop | Where-Object { [string]$_.Id -eq $Id -and [string]$_.Revision -eq $effRev }) | Select-Object -First 1 } catch {}
                 $postEval = & $evalName $post
                 $rvText = if ($null -ne $rv) { "rv=$rv" } else { 'rv=n/a' }
-                if ($null -ne $rv -and [int]$rv -ne 0) {
-                    return @{ OK=$false; Name=[string]$app.Name; Detail="$Mthd returned $rvText (target=$tgt, rev=$effRev). Eval now: $postEval" }
+                # loop42: fail closed on a null rv - a method that returned nothing did NOT confirm the
+                # trigger was accepted (was null -> OK=true -> VulnPatched). Only a non-null 0 is accepted.
+                if ($null -ne $rv -and [int]$rv -eq 0) {
+                    return @{ OK=$true; Name=[string]$app.Name; Detail="$Mthd triggered ($rvText, target=$tgt, rev=$effRev). Eval now: $postEval" }
                 }
-                return @{ OK=$true; Name=[string]$app.Name; Detail="$Mthd triggered ($rvText, target=$tgt, rev=$effRev). Eval now: $postEval" }
+                return @{ OK=$false; Name=[string]$app.Name; Detail="$Mthd returned $rvText (target=$tgt, rev=$effRev). Eval now: $postEval" }
             } catch { return @{ OK=$false; Name=[string]$app.Name; Detail="$Mthd failed: $($_.Exception.Message)" } }
         }
         if ($remote -and $remote.OK) { $r.Result = 'Triggered'; $r.Detail = [string]$remote.Detail }
