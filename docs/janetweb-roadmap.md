@@ -231,6 +231,28 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     (verify)", never Installed. Fix: audit accepted-but-unconfirmed triggers as a touch/pending, reserve
     VulnPatched for a verified install (or add a post-trigger verify).
 
+_(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, re-verify before acting. c2c.psm1 lines.)_
+52. **c2c Monitoring fix books MONITORED off the service being Running, ignoring the Tanium-INSTALLED half**
+    (HIGH) — `:1444-1451`: FIXED requires only the re-read service Running; the scan's Monitoring PASS (`:751`)
+    requires installed AND running. An orphaned service without registered software (registry read failed /
+    half-uninstall) → MONITORED / host FIXED with Detail literally "Tanium not installed". Same class as the
+    loop-44 F1 fix. Fix: require the Tanium-installed check in the fix verdict too.
+53. **c2c scan AntiMalware sig-age `[int]$null → 0` coercion can read READY** (MED) — `:815` (mirror fixer
+    `:1893`): `[int]$mp.AntivirusSignatureAge * 24` coerces a null property to 0 (no throw), defeating the
+    `$null -ne $ageHours` guard → sigFresh → PASS → READY on unreadable signature state. CONFIRMED path,
+    SPECULATIVE trigger. Fix: keep a null age null, don't manufacture 0.
+54. **c2c AntiMalware fixer books NOCHANGE "already protected" when sig age is unknown** (LOW) — `:1975-1981`;
+    the scan FAILs the same state (`:818` requires non-null age). Narrow trigger.
+55. **c2c audit books host Status PARTIAL as `Success`** (LOW) — `:3091`; PARTIAL contains ≥1 pillar FAIL. Row
+    Detail still shows the FAIL. Fix: PARTIAL → a non-Success audit result.
+56. **c2c version-check ordinal string fallback can report a below-target host as NEWER** (LOW, read-only) —
+    `:3248-3255`: `1.8.0_51` vs `1.8.0_491` → CompareOrdinal '5'>'4' → NEWER though 51 < 491. Any non-`a.b.c.d`
+    scheme.
+57. **c2c Firewall PASS/NOCHANGE on an empty `Get-NetFirewallProfile`** (SPECULATIVE) — `:761`/`:1460`: an
+    empty non-throwing collection → `$off.Count -eq 0` → PASS with zero profiles read; the netsh fallback DOES
+    assert 3+3 (`:776`/`:1484`). No known empty-non-throw path. _(F2/F6 from the dive refine the known cluster:
+    the per-pillar SUMMARY tally `:3084` folds SKIP/NOT VERIFIED/IN PROGRESS into `nochange` — items 22/24.)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -862,6 +884,21 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
   BulkPatchRv exact pin → floor. wpt set **57** green; grep clean. Pester **1356→1363** green. **item40 residual
   (open):** Trellix `$LASTEXITCODE` gate + SC-trigger discarded rv. The clean-port vein is thinning — next loop
   weighs a fresh dive (c2c/remoteadmin/adto) vs the narrower closes. SECRET parity: +wpt M365 exit-code gate.
+- **Loop 44 (DONE 2026-07-21):** Fable-inline synthesis + one Fable deep-dive worker on **c2c** (C2C Nemesis,
+  276KB, never comprehensively loop-era-dived). Self-review of loop-43 → **GREEN**. Worker traced the scan,
+  all six fixers, rollup, tally, audit, version check; I re-verified F1. c2c is largely fail-closed (escrow-first
+  BitLocker, RTP re-eval, patch-overdue/import fail-closes, scan CHECK-ERRORS-never-READY, self/wrong-box
+  guards). **Closed F1 (HIGH):** the AntiMalware fixer's `Get-MpComputerStatus`-unavailable else-branch
+  (`:1982`) booked **FIXED** off a mere WinDefend/Sense service flip with RTP/mode/signatures all unread — a
+  broken-Defender host (the ones most likely non-compliant) read AntiMalware PROTECTED → host FIXED →
+  VulnPatched Success. **FIXED** (c2c **1.15.4→1.15.5**): a change we can't confirm is **NOT VERIFIED**, the
+  existing fail-closed state — the host rollup maps it to a NOT VERIFIED host status (never FIXED, `:2360`) and
+  the audit switch to `Failure`/itemCount 0 (`:3090`). Static-analysis test (a behavioral harness needed a
+  `Get-Command` shim that leaked into the sibling scan tests + timed out the suite; NOT VERIFIED rollup/audit is
+  covered by PkiRoots+rollup tests). c2c set **109** green; PatchOverdue exact pin → floor. Pester
+  **1363→1367** green. **Ranked items 52–57** (F5 Monitoring same-class HIGH, F3 sig-age coercion, F4/F7/F8 low,
+  F9 speculative; F2/F6 refine the 22/24 tally/rollup cluster). SECRET parity: +c2c AntiMalware unavailable
+  fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
