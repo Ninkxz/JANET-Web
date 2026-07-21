@@ -53,9 +53,9 @@ Describe 'wpt clean-user-apps - the honest statuses drop out of the ok/audit buc
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-50 clean-user-apps honest status)' {
-    It 'wpt is at v6.8.12' {
+Describe 'wpt - manifest version floor (clean-user-apps honest status shipped in 6.8.12; exact pin migrated)' {
+    It 'wpt is at or past v6.8.12' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.12'
+        ([version][string]$mani.version -ge [version]'6.8.12') | Should Be $true
     }
 }

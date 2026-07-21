@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.12'
+        version  = '6.8.13'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -4247,16 +4247,24 @@ $script:WptSoftwareUninstallBlock = {
             if (-not [string]::IsNullOrWhiteSpace($loc) -and (Test-Path -LiteralPath $loc)) {
                 $filesRemain = $true; $notes += "files still present: $loc"
             }
+            # loop51 (item45): remove the uninstall registry key ONLY when the product's files are ACTUALLY
+            # GONE. If files remain, the product is still installed and the key is NOT orphaned - deleting it
+            # would hide a still-installed product from every later registry-driven scan (Software Scan /
+            # unsupported-product / ACAS), a fleet-level self-blinding false-clean.
             if (-not [string]::IsNullOrWhiteSpace($key)) {
-                $stale = @()
-                foreach ($h in $swHives) {
-                    $kp = Join-Path $h $key
-                    if (Test-Path -LiteralPath $kp) {
-                        Remove-Item -LiteralPath $kp -Recurse -Force -EA SilentlyContinue
-                        if (Test-Path -LiteralPath $kp) { $stale += $kp } else { $notes += 'orphaned uninstall key cleaned' }
+                if ($filesRemain) {
+                    $notes += 'uninstall key KEPT (product files still present - removing it would hide the still-installed product from registry scans)'
+                } else {
+                    $stale = @()
+                    foreach ($h in $swHives) {
+                        $kp = Join-Path $h $key
+                        if (Test-Path -LiteralPath $kp) {
+                            Remove-Item -LiteralPath $kp -Recurse -Force -EA SilentlyContinue
+                            if (Test-Path -LiteralPath $kp) { $stale += $kp } else { $notes += 'orphaned uninstall key cleaned' }
+                        }
                     }
+                    if ($stale.Count) { $notes += "uninstall key still present: $($stale -join '; ')" }
                 }
-                if ($stale.Count) { $notes += "uninstall key still present: $($stale -join '; ')" }
             }
             @{ FilesRemain = $filesRemain; Note = (($notes | Select-Object -Unique) -join ' | ') }
         }
