@@ -254,6 +254,22 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
     assert 3+3 (`:776`/`:1484`). No known empty-non-throw path. _(F2/F6 from the dive refine the known cluster:
     the per-pillar SUMMARY tally `:3084` folds SKIP/NOT VERIFIED/IN PROGRESS into `nochange` — items 22/24.)_
 
+_(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-verify before acting. certdeploy.psm1 lines.)_
+58. **certdeploy DEPLOY: a trust-anchor-guard-rejected (non-CA) but ABSENT cert reads ALREADY/INSTALLED, audit
+    clean** (MED-HIGH) — `:382-387` a wanted cert failing `Test-CertDeployIsCa` is `$rejected++; continue` (not
+    failed, not NotVerified), so the classifier (`:424-432`) reads Added=0 → **ALREADY** ("all present") or,
+    mixed, **INSTALLED**/audit Success, while the anchor is genuinely absent; `| REJECTED n` rides only in
+    Detail. Trigger: any Root/CA cert without BasicConstraints CA=true — an **X.509 v1 root** (no extensions →
+    fail-closed "not a CA") is rejected on every host forever while each deploy reads ALREADY. Fix: a
+    wanted-but-refused-and-absent anchor gets a distinct REJECTED status, out of the clean bucket.
+59. **certdeploy scan-cert-management: registry-denied probes → green "None detected"** (LOW/advisory) —
+    `:1461-1495` all detection primitives are `-ErrorAction SilentlyContinue`, so a session-capable but
+    registry-denied credential yields `Err=''` → `Get-CertDeployReconcilerVerdict` 'None detected — a manual
+    .Default push WILL persist' (`:640`/`:664`) when a reconciler could be present and strip on reboot. Fix:
+    distinguish "read the reconcilers, found none" from "couldn't read them" (probe error → unknown/CHECK ERROR).
+    _(F4/F5 from the dive = SPECULATIVE structural gaps — blank-thumbprint escapes re-verify; zero-item bundle →
+    ALREADY — no realistic trigger, defensive-only, not separately ranked.)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -935,6 +951,20 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
   green. Pester **1380→1390** green. **c2c high-harm findings all closed (F1/F5/F3/F7)** — loop 48 should open a
   fresh dive on an un-reviewed acting tool (certdeploy/adto/remoteadmin) rather than grind the tail (item54/56/57
   + the 22/24 view-coupled cluster). SECRET parity: +c2c PARTIAL audits Failure.
+- **Loop 48 (DONE 2026-07-21):** Fable-inline synthesis + one Fable deep-dive worker on **certdeploy** (Cert
+  Deploy, 110KB, un-reviewed acting tool — installs DoD trust anchors). Self-review of loop-47 → **GREEN**. The
+  dive found certdeploy's core solidly fail-closed (fresh-handle per-thumbprint re-verify, INSTALLED needs
+  Added>0, NOT VERIFIED on stripped certs, hex/case-proof compares, CHECK-on-unreadable-store fails NOISY). But
+  **closed F1:** the CHECK worker parses the wanted thumbprints from JSON on the target, and a null/undeserialized
+  want-set made `Get-CertDeployStoreMissing` skip every store group (`:552`) → 0 present/0 missing/no Err → the
+  admin side read **ALL PRESENT** for a host whose stores were never inspected. **FIXED** (certdeploy
+  **1.4.0→1.4.1**): the reader counts usable (hex, non-blank) thumbprints and returns an `Err` when 0 — the
+  bundle always carries certs, so a zero-count want-set is a deserialization failure, mapped to CHECK ERROR. The
+  guard is in the injected store-reader (fails closed remote + local). `CertDeploy.Tests.ps1` +4 (null/empty/
+  blank → Err; real want doesn't trigger); two 1.4.0 exact pins → floors. certdeploy set **83** green. Pester
+  **1390→1395** green. **Ranked items 58/59** (F2 rejected-anchor-reads-ALREADY MED-HIGH, F3 reconciler
+  registry-denied-reads-green LOW; F4/F5 speculative structural, not ranked). SECRET parity: +certdeploy
+  want-set-empty → Err.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
