@@ -45,9 +45,9 @@ Describe 'acas verify branch - a non-fresh verify row is prefixed UNCONFIRMED' {
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-26 honest verify row)' {
-    It 'acas is at v1.11.7' {
+Describe 'acas - manifest version floor (loop-26 honest verify row landed at 1.11.7)' {
+    It 'acas version is >= 1.11.7 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.7'
+        ([version][string]$mani.version -ge [version]'1.11.7') | Should Be $true
     }
 }

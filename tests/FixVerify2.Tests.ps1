@@ -119,6 +119,15 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
             $s | Should Match 'rejected'
             $s | Should Match 'ReturnValue=5'
         }
+        It 'NULL ReturnValue => <<MECM=0>>, FAIL, reported as <null> (loop27 fail-closed)' {
+            # -Rv -1 makes the shim return a method result WITHOUT a ReturnValue member, so
+            # .ReturnValue is $null - a method that returned nothing must not read as a trigger.
+            $s = Invoke-AcasKb -Rv -1
+            $s | Should Match '<<MECM=0>>'
+            $s | Should Match '^FAIL'
+            $s | Should Match 'rejected'
+            $s | Should Match ([regex]::Escape('ReturnValue=<null>'))
+        }
     }
 }
 
