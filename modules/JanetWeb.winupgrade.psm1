@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.5'
+        version  = '0.5.6'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -665,11 +665,11 @@ function Get-WinUpgradeRepairVerdict {
     elseif ($t -match '(?i)successfully repaired')                  { $sfc = 'repaired' }
     elseif ($t -match '(?i)unable to fix' -or $t -match '(?i)could not fix') { $sfc = 'could not fix' }
     elseif ($t -match '(?i)could not perform the requested operation') { $sfc = 'blocked (pending repair)' }
-    else                                                            { $sfc = 'no violations' }
+    else                                                            { $sfc = 'unknown' }   # unparseable/localized/truncated - do NOT assume clean (fail-closed)
     $dismFailed = ($dism -eq 'error' -or $dism -match '^exit ')
     $sfcFailed  = ($sfc -eq 'error')
     if     ($dismFailed -or $sfcFailed)                                   { $status = 'FAILED' }
-    elseif ($sfc -eq 'could not fix' -or $sfc -eq 'blocked (pending repair)') { $status = 'PARTIAL' }
+    elseif ($sfc -eq 'could not fix' -or $sfc -eq 'blocked (pending repair)' -or $sfc -eq 'unknown') { $status = 'PARTIAL' }
     elseif ($sfc -eq 'repaired' -or $dism -eq 'OK (reboot)')             { $status = 'REPAIRED' }
     else                                                                 { $status = 'CLEAN' }
     $rebootNeeded = ($dism -eq 'OK (reboot)' -or $sfc -eq 'repaired')
@@ -2682,11 +2682,11 @@ $script:WinUpgradeWorker = {
                 elseif ($stx -match '(?i)successfully repaired') { $sfcV='repaired' }
                 elseif ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { $sfcV='could not fix' }
                 elseif ($stx -match '(?i)could not perform the requested operation') { $sfcV='blocked (pending repair)' }
-                else { $sfcV='no violations' }
+                else { $sfcV='unknown' }   # unparseable/localized/truncated - do NOT assume clean (fail-closed)
                 $dismFailed=($dismV -eq 'error' -or $dismV -match '^exit ')
                 $sfcFailed=($sfcV -eq 'error')
                 if     ($dismFailed -or $sfcFailed) { $statusV='FAILED' }
-                elseif ($sfcV -eq 'could not fix' -or $sfcV -eq 'blocked (pending repair)') { $statusV='PARTIAL' }
+                elseif ($sfcV -eq 'could not fix' -or $sfcV -eq 'blocked (pending repair)' -or $sfcV -eq 'unknown') { $statusV='PARTIAL' }
                 elseif ($sfcV -eq 'repaired' -or $dismV -eq 'OK (reboot)') { $statusV='REPAIRED' }
                 else { $statusV='CLEAN' }
                 $rebootNeeded=($dismV -eq 'OK (reboot)' -or $sfcV -eq 'repaired')
@@ -2700,6 +2700,7 @@ $script:WinUpgradeWorker = {
                     'repaired'      { [void]$rlines.Add('[PASS] sfc /scannow: found and repaired corrupt files') }
                     'could not fix' { [void]$rlines.Add('[WARN] sfc /scannow: found corruption it could NOT fully repair - review CBS.log / consider reimage') }
                     'blocked (pending repair)' { [void]$rlines.Add('[WARN] sfc /scannow: could not run (a pending repair/reboot is needed first)') }
+                    'unknown'       { [void]$rlines.Add('[WARN] sfc /scannow: output not recognized - repair state UNKNOWN, NOT confirmed clean') }
                     'error'         { [void]$rlines.Add("[FAIL] sfc /scannow error: $([string]$sfcRes.Error)") }
                 }
 

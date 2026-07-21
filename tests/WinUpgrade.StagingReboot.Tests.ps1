@@ -57,9 +57,9 @@ Describe 'upgrade-drive PHASE:STAGED re-read CLASSIFIES the ~BT tree (no bare Te
     }
 }
 
-Describe 'winupgrade - manifest exact version pin (newest bump = loop-36 staging-reboot guard)' {
-    It 'winupgrade is at v0.5.5' {
+Describe 'winupgrade - manifest version floor (staging-reboot guard shipped in 0.5.5; exact pin migrated to the newest bump)' {
+    It 'winupgrade is at or past v0.5.5' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '0.5.5'
+        ([version][string]$mani.version -ge [version]'0.5.5') | Should Be $true
     }
 }
