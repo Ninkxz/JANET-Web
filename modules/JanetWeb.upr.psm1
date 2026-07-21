@@ -32,7 +32,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.2'
+        version  = '1.2.3'
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE/Store. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -117,6 +117,21 @@ function Get-JanetToolManifest {
 #  Office uninstall visible instead of being hidden as update-class).
 # -----------------------------------------------------------------------------
 function Get-UprCatalogPath { Join-Path $PSScriptRoot '..\JanetLocal\UnsupportedProductCatalog.json' }
+
+# loop35: CANONICAL post-uninstall verify decision. The registry re-verify is the trust-critical
+# step - it catches a lying uninstaller (exit 0 while the product is still installed). It must fail
+# CLOSED: a $null / unreadable verify result -> "could NOT be verified" (NEVER read an empty result as
+# gone - a non-throwing empty Invoke-Command result made [bool]$null.Present = $false = "not present" =
+# a silent OK). Product still present -> FAIL; confirmed gone -> the app result stands (OK, + reboot
+# variant). The uninstall worker mirrors this inline (module-less runspace); keep in lockstep. Pure - tested.
+function Get-UprVerifyResult {
+    param($VerifyOut, [bool]$RebootNeeded, [string]$AppResult)
+    $stillPresent = if ($null -eq $VerifyOut) { $null } else { [bool]$VerifyOut.Present }
+    if     ($null -eq $stillPresent) { return "FAIL (uninstall exit OK but removal could NOT be verified -- product state unreadable) [$AppResult]" }
+    elseif ($stillPresent)           { return "FAIL (uninstall ran but product still present) [$AppResult]" }
+    elseif ($RebootNeeded)           { return "OK (removed, reboot required) [$AppResult]" }
+    else                             { return [string]$AppResult }
+}
 
 function Get-UprCatalogFromFile {
     # Operator-editable override: <JANET Web root>\JanetLocal\UnsupportedProductCatalog.json
@@ -1130,7 +1145,10 @@ $UprWorkerBlock = {
                                 }
                                 return [pscustomobject]@{ Present = [bool]$found }
                             }
-                            $stillPresent = [bool]$vout.Present
+                            # loop35: MIRROR of Get-UprVerifyResult - a $null / empty verify result
+                            # must fail CLOSED (an empty Invoke-Command result made [bool]$null.Present
+                            # = $false = a silent "removed"). $null -> "could NOT be verified" below.
+                            $stillPresent = if ($null -eq $vout) { $null } else { [bool]$vout.Present }
                         } catch {
                             $stillPresent = $null   # unreadable -> fail-closed below
                         }
