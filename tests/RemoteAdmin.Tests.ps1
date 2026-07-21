@@ -25,8 +25,8 @@ Describe 'Manifest' {
         ($ids -contains 'open-cshare') | Should Be $true
         ($ids -contains 'run-script') | Should Be $true
     }
-    It 'manifest version is 1.0.2' {
-        [string]$mani.version | Should Be '1.0.2'
+    It 'manifest version is 1.0.3' {
+        [string]$mani.version | Should Be '1.0.3'
     }
     It 'open-cshare is non-destructive; run-script is destructive' {
         $open = @($mani.actions | Where-Object { $_.id -eq 'open-cshare' })[0]
@@ -331,5 +331,33 @@ Describe 'run-script fan-out + forensic audit (worker block faked)' {
         $row.Status | Should Be 'Success'
         $row.Output | Should Be 'ran on WS-REMOTE'
         $res.summary.succeeded | Should Be 1
+    }
+
+    # loop70: a failed host carries an actionable troubleshooting hint (Get-JanetTroubleshootHint) in the
+    # row Hint field, the persisted audit detail, and the err log - alongside (never replacing) the raw error.
+    It 'a failed host gets a troubleshooting hint in the row, audit, and err log (raw error preserved)' {
+        $fake = {
+            param($Computer, $Cred, $Auth, $ScriptText, $TimeoutSeconds, $MaxOutput, $ModulePath)
+            return @{ Host = $Computer; Online = $false; Status = 'Session error'; Output = ''; Error = 'Connecting to remote server WS-REMOTE failed: 0x80090351 SEC_E_NO_AUTHENTICATING_AUTHORITY' }
+        }
+        $events = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$events.Add($e) }
+        $null = & $m {
+            param($fake, $emit)
+            $orig = $script:RemoteAdminScriptBlock
+            $script:RemoteAdminScriptBlock = $fake
+            try {
+                Invoke-JanetToolAction -ActionId 'run-script' -Params @{ targets = 'WS-REMOTE'; script = 'Get-Date'; threads = 2; timeoutSeconds = 30 } -Credential $null -Emit $emit
+            } finally { $script:RemoteAdminScriptBlock = $orig }
+        } $fake $emit
+
+        $row = @($events | Where-Object { $_.type -eq 'row' })[0]
+        [string]$row.Error | Should Match '0x80090351'          # raw error preserved
+        [string]$row.Hint  | Should Match 'TrustedHosts|realm|CAC'  # actionable hint added
+        $hostAudit = @($events | Where-Object { $_.type -eq 'audit' -and $_.target -eq 'WS-REMOTE' })[0]
+        $hostAudit.result | Should Be 'Failure'
+        ([string]$hostAudit.detail -match 'TROUBLESHOOT:') | Should Be $true
+        $errLog = @($events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'FIX:' })
+        $errLog.Count | Should BeGreaterThan 0
     }
 }

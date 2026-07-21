@@ -35,11 +35,15 @@
 # the helper functions (the run-script worker calls Test-RemoteAdminReachable etc.).
 $script:RemoteAdminModulePath = $PSCommandPath
 
+# loop70: shared error->actionable-hint mapper (translates a cryptic WinRM/auth/DNS
+# failure into "why + how to fix"). Imported like wpt/acas import JanetWeb.javafix.
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'remoteadmin'
         name     = 'Remote Admin'
-        version  = '1.0.2'
+        version  = '1.0.3'
         category = 'Operations'
         summary  = 'Two operator hands-on-keyboard capabilities. Open C$: launch \\<computer>\C$ in Explorer on your own session by computer name (strict name validation, audited; needs no admin session). Run Script: fan an operator-authored PowerShell block to one or many hosts over WinRM - arbitrary remote code, so it is destructive and rides the admin-session gate, mirrors the WPT Custom Command SHA256 forensic audit, and self-guards the JANET dispatcher host out of every run.'
         actions  = @(
@@ -439,6 +443,12 @@ function Invoke-JanetToolAction {
     $emitResult = {
         param($res)
         $rowState.rk++
+        $ok = ([string]$res.Status -eq 'Success')
+        # loop70: on a non-success host, translate the raw error into an actionable
+        # troubleshooting hint (why it failed + how to fix). Carried in a Hint row field,
+        # the persisted audit detail, and the operator-facing err log - the raw Error is
+        # ALWAYS preserved alongside; the hint never replaces it.
+        $hint = if ((-not $ok) -and $res.Error) { Get-JanetTroubleshootHint -Message ([string]$res.Error) -Server ([string]$res.Host) } else { '' }
         $row = @{
             _rk    = ('r{0}' -f $rowState.rk)
             Host   = [string]$res.Host
@@ -446,17 +456,18 @@ function Invoke-JanetToolAction {
             Status = [string]$res.Status
             Output = [string]$res.Output
             Error  = [string]$res.Error
+            Hint   = [string]$hint
         }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
-        $ok = ([string]$res.Status -eq 'Success')
         $auditResult = if ($ok) { 'Success' } else { 'Failure' }
         $detail = "Status=$($res.Status)"
         if ($res.Error) { $detail += "; $($res.Error)" }
+        if ($hint) { $detail += " | TROUBLESHOOT: $hint" }
         $detail += $scriptAuditTag
         & $send @{ type='audit'; action='TouchHost'; target=[string]$res.Host; result=$auditResult; itemCount=$(if ($ok) { 1 } else { 0 }); detail=$detail }
         $lvl = if ($ok) { 'ok' } elseif ([string]$res.Status -eq 'Offline' -or [string]$res.Status -eq 'Timeout') { 'warn' } else { 'err' }
-        & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $($res.Host) : $($res.Status)$(if ($res.Error) { ' - ' + $res.Error } else { '' })" }
+        & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $($res.Host) : $($res.Status)$(if ($res.Error) { ' - ' + $res.Error } else { '' })$(if ($hint) { ' | FIX: ' + $hint } else { '' })" }
     }
 
     $done = 0
