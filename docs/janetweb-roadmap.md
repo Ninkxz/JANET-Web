@@ -96,10 +96,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     SPECULATIVE) — empty EndInvoke / first-item output → `'OK (no output)'` (`:2464`); no reachable
     leak in shipped workers, but a future profile emitting stray output gets booked patched. Default
     unknown/empty → UNCONFIRMED; read the LAST output item, not the first.
-21. **acas kb-install shares wpt's loop-22 bugs, unfixed** (loop-25 Fable deep-dive, CONFIRMED) — the
-    acas kb-install worker still has the loose `-like "*$kb*"` KB-match (`:2631/2633`) and the
-    null-ReturnValue-as-success (`:2634`) that wpt fixed in loop 22. Port `Test-WptKbNameMatch`
-    anchoring + the `$null -ne $rv -and` fail-close into AcasKbInstallBlock.
+21. ~~acas kb-install shares wpt's loop-22 bugs, unfixed~~ — **CLOSED loop 27** (`Test-AcasKbNameMatch`,
+    acas 1.11.8): ported wpt's anchored KB-match (`KB<num>(?!\d)`) + inline `$kbMatch` mirror + the
+    null-ReturnValue fail-close into AcasKbInstallBlock. acas↔wpt kb-install now at parity.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -520,8 +519,18 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   it inline (`$prefix='UNCONFIRMED '` when not fresh) → amber row + out of the tally. One module-side
   change fixes grid + stat. Read-only path, no guard; 156 acas + FixVerify2 green. `Acas.VerifyRowStatus.
   Tests.ps1` (5) pins the verdict + static prefix assert + exact 1.11.7 pin (KbInstallStatus 1.11.6
-  exact → floor). Pester **1230→(close)** green. SECRET parity: +honest acas verify row. Remaining acas
+  exact → floor). Pester **1230→1235** green. SECRET parity: +honest acas verify row. Remaining acas
   items: 19 (schedule-reboot audit), 20 (spec default-open), 21 (acas kb-install KB-match+null-rv).
+- **Loop 27 (DONE 2026-07-21):** Fable-inline. Self-review of loop-26 → **GREEN**. **Workstream:
+  roadmap item 21** (proven port) → **CLOSED**. The acas kb-install MECM scriptblock carried the
+  byte-identical wpt loop-22 bugs: loose `-like "*$kb*"` KB-match (`:2667/2669` — wrong update + skipped
+  MSU fallback) and `$null -eq $rv -or` fail-open (`:2670` — null InstallUpdates return counted as a
+  trigger). **FIXED** (acas **1.11.7→1.11.8**): canonical `Test-AcasKbNameMatch` (`:2596`, port of
+  `Test-WptKbNameMatch`) + inline `$kbMatch` mirror; null-rv fail-close (`$null -ne $rv -and`, null-safe
+  message). No guard weakened; 180 acas + FixVerify2 + FixGuards green. `Acas.KbMatch.Tests.ps1` (11,
+  mirrors wpt) + FixVerify2 acas NULL case (`-Rv -1` → FAIL, `ReturnValue=<null>`) + exact 1.11.8 pin
+  (VerifyRowStatus 1.11.7 exact → floor). Pester **1235→(close)** green. **acas↔wpt kb-install parity
+  complete** (KB-match + null-rv + honest status). SECRET parity: +acas kb-install KB-match + null-rv.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
