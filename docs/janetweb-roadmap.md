@@ -237,10 +237,10 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
     running-but-not-installed box (orphaned service / unreadable uninstall registry) is now NOT VERIFIED (never
     FIXED), aligning the fix verdict with the scan's installed-AND-running PASS. `C2c.MonitoringVerdict.Tests.ps1`
     (6).
-53. **c2c scan AntiMalware sig-age `[int]$null → 0` coercion can read READY** (MED) — `:815` (mirror fixer
-    `:1893`): `[int]$mp.AntivirusSignatureAge * 24` coerces a null property to 0 (no throw), defeating the
-    `$null -ne $ageHours` guard → sigFresh → PASS → READY on unreadable signature state. CONFIRMED path,
-    SPECULATIVE trigger. Fix: keep a null age null, don't manufacture 0.
+53. ~~**c2c scan AntiMalware sig-age `[int]$null → 0` coercion can read READY**~~ **CLOSED loop 46** (c2c
+    1.15.7): both the scan (`:830`) and fix (`:1914`) now guard the fallback — `elseif ($null -ne
+    $mp.AntivirusSignatureAge)` — so a null age stays `$null` (freshness gate treats it as stale), never a
+    false-fresh 0. New pure `Get-C2cSigAgeHours` + inline mirrors. `C2c.SigAge.Tests.ps1` (7).
 54. **c2c AntiMalware fixer books NOCHANGE "already protected" when sig age is unknown** (LOW) — `:1975-1981`;
     the scan FAILs the same state (`:818` requires non-null age). Narrow trigger.
 55. **c2c audit books host Status PARTIAL as `Success`** (LOW) — `:3091`; PARTIAL contains ≥1 pillar FAIL. Row
@@ -911,6 +911,17 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
   mirror assert); loop-44 exact pin → floor. c2c set **85** green. Pester **1367→1373** green. **Principle:** a
   fix verdict must match the scan verdict, else FIXED doesn't mean "will pass" — the general lesson for the c2c
   pillar tail. SECRET parity: +c2c Monitoring installed-half fail-close.
+- **Loop 46 (DONE 2026-07-21):** Fable-inline. Self-review of loop-45 → **GREEN**. **Closed c2c item53 (F3, MED)**
+  on the safety-critical scan READY verdict: the AntiMalware scan (`:830`) and fix (`:1914`) fell back to
+  `[int]$mp.AntivirusSignatureAge * 24` in an `else`, and `[int]$null` coerces to 0 (no throw), so an unreadable
+  signature age manufactured a 0-hour "fresh" age → PASS → READY, defeating the `$null -ne $ageHours` guard.
+  **FIXED** (c2c **1.15.6→1.15.7**): both sites guard the fallback — `elseif ($null -ne
+  $mp.AntivirusSignatureAge)` — so a null age stays `$null` (treated as stale, fail-closed); new pure
+  `Get-C2cSigAgeHours` + inline mirrors (same `[int]`-cast-guard discipline as acas spec-exec).
+  `C2c.SigAge.Tests.ps1` (NEW, 7, pure helper + static assert both sites guarded); Monitoring exact pin → floor.
+  c2c set **71** green. Pester **1373→1380** green. **c2c tail now low/read-only** (items 54–57 + 22/24 cluster)
+  — loop 47 weighs a fresh dive (remoteadmin/adto/secureboot/reports) vs the tail. SECRET parity: +c2c sig-age
+  null-coercion fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
