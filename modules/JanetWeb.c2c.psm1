@@ -52,7 +52,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.15.5'
+        version  = '1.15.6'
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
         actions  = @(
@@ -369,6 +369,21 @@ function Get-C2cTaniumInstalled {
 '@
 # Better-named alias for the new Version Check call site (same one source string).
 $script:C2cInstalledProductSrc = $script:C2cTaniumInstalledSrc
+
+# loop45 (F5): PURE canonical Monitoring fix verdict. The Monitoring pillar is compliant ONLY when the
+# Tanium SOFTWARE is installed (uninstall registry) AND its client service is Running - exactly the
+# scan's Monitoring PASS criteria (installed AND running). The fixer formerly booked FIXED/NOCHANGE off
+# the service alone, so a Running-but-not-installed box (orphaned service / unreadable uninstall registry)
+# read MONITORED while the scan would still quarantine it. Now a Running service with the software NOT
+# detected is NOT VERIFIED (never FIXED). The module-less fix worker mirrors this inline; keep in lockstep.
+# Pure - tested by C2c.MonitoringVerdict.Tests.ps1.
+function Get-C2cMonitoringVerdict {
+    param([bool]$Installed, [bool]$RunNow, [int]$ChangedCount)
+    if (-not $RunNow)    { return 'FAIL' }
+    if (-not $Installed) { return 'NOT VERIFIED' }
+    if ($ChangedCount -gt 0) { return 'FIXED' }
+    return 'NOCHANGE'
+}
 
 # --- Shared WinRM-heal source (opt-in, RPC-based, best-effort) -----------------
 # For a host whose TCP 5985 probe FAILS, attempt remote SCM recovery of the WinRM
@@ -1441,9 +1456,15 @@ $script:C2cFixBlock = {
                     $svc2 = Get-Service -Name $TaniumService -ErrorAction SilentlyContinue
                     $runNow   = ($svc2 -and $svc2.Status -eq 'Running')
                     $startNow = if ($svc2) { [string]$svc2.StartType } else { [string]$svc.StartType }
+                    # MIRROR of Get-C2cMonitoringVerdict (keep in sync): compliant needs the Tanium SOFTWARE
+                    # installed AND the service Running (the scan's PASS criteria). A Running-but-not-installed
+                    # box (orphaned service / unreadable uninstall registry) is NOT VERIFIED, never FIXED -
+                    # booking MONITORED there would claim FIXED for a host the scan still quarantines. (loop45 F5)
                     if (-not $runNow) {
                         $st = if ($svc2) { [string]$svc2.Status } else { [string]$svc.Status }
                         & $add 'Monitoring' 'heal' 'FAIL' "$instTxt; '$TaniumService' still $st after heal attempt"
+                    } elseif (-not $ti.Installed) {
+                        & $add 'Monitoring' 'heal' 'NOT VERIFIED' "'$TaniumService' is Running but Tanium software NOT found in the uninstall registry - monitoring NOT confirmed (orphaned service / unreadable registry)$(if ($changed.Count) { '; service change(s): ' + ($changed -join '; ') } else { '' })"
                     } elseif ($changed.Count -gt 0) {
                         & $add 'Monitoring' 'heal' 'FIXED' "$instTxt; '$TaniumService' healed: $($changed -join '; '); now Running (StartType $startNow)"
                     } else {
