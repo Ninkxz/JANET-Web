@@ -35,12 +35,15 @@ $script:JavaFixSrc = if (Get-Command Get-JanetJavaFixSrc -ErrorAction SilentlyCo
 Import-Module (Join-Path $PSScriptRoot 'JanetWeb.specfix.psm1') -Force -ErrorAction SilentlyContinue
 $script:SpecFixSrc = if (Get-Command Get-JanetSpecFixSrc -ErrorAction SilentlyContinue) { Get-JanetSpecFixSrc } else { '' }
 
+# loop72: shared error->actionable-hint mapper (why a host failed + how to fix it).
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.14'
+        version  = '6.8.15'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -4847,10 +4850,17 @@ function Invoke-WptFanOut {
                     $ok = [bool](& $OkOf $res)
                     if ($ok) { $okCount++ } else { $failCount++ }
                     $row = & $RowOf $res
+                    # loop72 (informative failures): on a failure, translate the raw error (else the audit
+                    # detail) into an actionable troubleshooting hint - carried in a Hint row field + an err
+                    # log (FIX:), both preserving the raw text. Computed before the row so Hint rides with it.
+                    $auditDetailStr = [string](& $AuditDetail $res)
+                    $hint = if (-not $ok) { Get-JanetTroubleshootHint -Message $(if ($res.Error) { [string]$res.Error } else { $auditDetailStr }) -Server ([string]$res.Host) } else { '' }
+                    if ($hint -and ($row -is [hashtable])) { $row['Hint'] = $hint }
                     [void]$rows.Add($row)
                     & $Send (@{ type='row' } + $row)
                     $auditResult = if ($AuditResultOf) { [string](& $AuditResultOf $res $ok) } else { if ($ok) { 'Success' } else { 'Failure' } }
-                    & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$auditResult; itemCount=$(if($ok){1}else{0}); detail=([string](& $AuditDetail $res)) }
+                    & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$auditResult; itemCount=$(if($ok){1}else{0}); detail=$auditDetailStr }
+                    if ($hint) { & $Send @{ type='log'; level='err'; text="$($res.Host) : $(if ($res.Error) { [string]$res.Error } else { 'failed' }) | FIX: $hint" } }
                     # opt-in per-host activity-log line, so a clean run leaves evidence in
                     # the log (e.g. a "No change" patch shows "HOST: 0 updates, 0 apps").
                     if ($LogOf) { $lg = & $LogOf $res; if ($lg) { & $Send (@{ type='log' } + $lg) } }

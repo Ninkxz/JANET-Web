@@ -47,9 +47,9 @@ Describe 'wpt software-uninstall - only an exact Removed counts ok (Attention dr
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-52 Adobe partial-removal honesty)' {
-    It 'wpt is at v6.8.14' {
+Describe 'wpt - manifest version floor (exact pin migrated to the newest bump: loop72 fan-out hint, v6.8.15)' {
+    It 'wpt is at least v6.8.14' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.14'
+        ([version][string]$mani.version -ge [version]'6.8.14') | Should Be $true
     }
 }
