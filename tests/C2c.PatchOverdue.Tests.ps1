@@ -65,9 +65,9 @@ Describe 'c2c scan worker - the overdue predicate has the fail-closed else branc
     }
 }
 
-Describe 'c2c - manifest exact version pin (newest bump = loop-30 patch-overdue fail-close)' {
-    It 'c2c is at v1.15.4' {
+Describe 'c2c - manifest version floor (patch-overdue fail-close shipped in 1.15.4; exact pin migrated to newest bump)' {
+    It 'c2c is at or past v1.15.4' {
         $man = & $script:Mod { Get-JanetToolManifest }
-        [string]$man.version | Should Be '1.15.4'
+        ([version][string]$man.version -ge [version]'1.15.4') | Should Be $true
     }
 }
