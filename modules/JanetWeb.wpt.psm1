@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.5'
+        version  = '6.8.6'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -2700,6 +2700,21 @@ $script:WptKbScanBlock = {
 }
 
 # --- KB Install (MECM-first + MSU fallback; mirrors desktop installBlock 7593-7636) ---
+# loop22: CANONICAL KB-match rule. Does an MECM update (its Name + ArticleID) satisfy a
+# requested KB? Match the ArticleID EXACTLY (normalized, KB-prefix stripped), or the Name
+# containing the KB token bounded so a shorter requested KB can NOT substring-match a longer
+# article - the old `-like "*$kb*"` let a request for KB5034 bind an update named ...KB5034123...,
+# install the WRONG update, mark the real KB handled, and skip the MSU fallback. The kb-install
+# remote scriptblock mirrors this exact logic inline (it runs over WinRM and can't call a module
+# function); keep the two in lockstep. Pure - tested by Wpt.KbMatch.Tests.ps1.
+function Test-WptKbNameMatch {
+    param([string]$UpdateName, [string]$ArticleId, [string]$RequestedKb)
+    $num = ([string]$RequestedKb -replace '^[Kk][Bb]', '').Trim()
+    if (-not $num) { return $false }
+    if (([string]$ArticleId).Trim() -eq $num) { return $true }
+    return ([string]$UpdateName -match ('KB' + [regex]::Escape($num) + '(?!\d)'))
+}
+
 $script:WptKbInstallBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string[]]$KBs, [string]$MsuPath, [bool]$NoReboot)
     $r = @{ Host=$Computer; MECMFound=0; MECMInstalled=0; MSUInstalled=0; Skipped=0; Errors=@(); Details=@() }
@@ -2735,12 +2750,24 @@ $script:WptKbInstallBlock = {
         # ArticleID/Name, then InstallUpdates the matched set.
         $mecm = Invoke-Command -Session $sess -ArgumentList (,$KBs) -EA Stop -ScriptBlock {
             param([string[]]$targetKBs)
+            # loop22: anchored KB match - MIRROR of module Test-WptKbNameMatch (runs remotely,
+            # can't call the module fn). Keep in lockstep. Exact ArticleID, or Name containing
+            # the KB token bounded so KB5034 can't match ...KB5034123... (was a bare -like "*$kb*").
+            $kbMatch = {
+                param($u, $kb)
+                $num = ([string]$kb -replace '^[Kk][Bb]','').Trim()
+                if (-not $num) { return $false }
+                if (([string]$u.ArticleID).Trim() -eq $num) { return $true }
+                return ([string]$u.Name -match ('KB' + [regex]::Escape($num) + '(?!\d)'))
+            }
             $found=@(); $allUpdates=@()
             try { $allUpdates = @(Get-WmiObject -Namespace 'ROOT\ccm\ClientSDK' -Query "SELECT * FROM CCM_SoftwareUpdate WHERE ComplianceState = '0'" -EA Stop) } catch { return @{ Found=@(); Triggered=0; Error="MECM query failed: $($_.Exception.Message)" } }
-            foreach ($kb in $targetKBs) { if (@($allUpdates | Where-Object { $_.Name -like "*$kb*" -or $_.ArticleID -eq ($kb -replace '^KB','') }).Count -gt 0) { $found += $kb } }
+            foreach ($kb in $targetKBs) { if (@($allUpdates | Where-Object { & $kbMatch $_ $kb }).Count -gt 0) { $found += $kb } }
             if ($found.Count -gt 0) {
-                $toInstall = @($allUpdates | Where-Object { $dom=$false; foreach ($kb in $found) { if ($_.Name -like "*$kb*" -or $_.ArticleID -eq ($kb -replace '^KB','')) { $dom=$true; break } }; $dom })
-                if ($toInstall.Count -gt 0) { try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop).ReturnValue; if ($null -eq $rv -or [int]$rv -eq 0) { return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } else { return @{ Found=$found; Triggered=0; Error="Install trigger rejected by client (ReturnValue=$([int]$rv)); $($toInstall.Count) update(s) NOT installed" } } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
+                $toInstall = @($allUpdates | Where-Object { $dom=$false; foreach ($kb in $found) { if (& $kbMatch $_ $kb) { $dom=$true; break } }; $dom })
+                # loop22: FAIL-CLOSED on a null ReturnValue - a method that returned nothing did
+                # NOT confirm acceptance, so it is an error, not a success (was counted as success).
+                if ($toInstall.Count -gt 0) { try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop).ReturnValue; if ($null -ne $rv -and [int]$rv -eq 0) { return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } else { return @{ Found=$found; Triggered=0; Error="Install trigger not confirmed by client (ReturnValue=$(if($null -eq $rv){'<null>'}else{[int]$rv})); $($toInstall.Count) update(s) NOT confirmed" } } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
             }
             return @{ Found=$found; Triggered=0; Error='' }
         }

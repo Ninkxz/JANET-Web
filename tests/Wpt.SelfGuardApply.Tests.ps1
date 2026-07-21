@@ -31,11 +31,11 @@ function Has-SelfGuardWarn($o) {
 }
 $script:Me = $env:COMPUTERNAME
 
-Describe 'WPT 6.8.5 - manifest loads at the bumped version' {
+Describe 'WPT - manifest loads at or above the self-guard-apply version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is wpt and version is 6.8.5' {
+    It 'manifest id is wpt and version is >= 6.8.5 (floor; exact pin lives in the newest bump test)' {
         [string]$mani.id      | Should Be 'wpt'
-        [string]$mani.version | Should Be '6.8.5'
+        ([version][string]$mani.version -ge [version]'6.8.5') | Should Be $true
     }
 }
 
