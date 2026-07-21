@@ -119,6 +119,33 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     CONFIRMED — F6) — `:1885`/`:1960`: the sig heal gates on `($null -ne $ageHours) -and (...)`, so an
     unreadable age skips the heal and lands NOCHANGE/"ALREADY PROTECTED"; the SCAN treats the same
     unknown age as FAIL (`:802`). Fix: null age on the fix path → FAIL/UNVERIFIED, mirroring the scan.
+    NOTE: entangled with items 22/23/24 (the honest UNVERIFIED status routes through the same fix-rollup
+    buckets) — best fixed together in a dedicated c2c fix-rollup-taxonomy loop.
+27. **winupgrade upgrade-drive "STAGED" contaminated by stale staging → reboots an un-staged host**
+    (loop-31 Fable deep-dive, CONFIRMED, HIGH — F2) — the staged re-read (`winupgrade :2215-2226`) sets
+    staged on bare `Test-Path 'C:\$WINDOWS.~BT\Sources'` with NO staleness check, despite
+    `Get-WinUpgradeStagingClass` existing. A rolled-back 24H2 attempt leaves ~BT → reports STAGED → with
+    rebootWhenStaged REBOOTS the host (comes back on 23H2), weakening the "never reboot un-staged"
+    invariant. Fix: apply the staging classifier + require a feature-update-specific signal.
+28. **winupgrade bypass (MoSetup) value asserted but never read-back-verified** (loop-31 Fable deep-dive,
+    CONFIRMED — F3+F4) — Pin bakes "CPU/TPM BYPASS SET" into the message (`:972-987`) but the read-back
+    (`:1131`) checks only the TRV trio; Unpin appends "bypass key removed" (`:1218-1227`) unconditionally
+    after a SilentlyContinue removal. Restrictive MoSetup ACL → DONE while the bypass is still armed / not
+    set. Fix: extend `$pinReadSb` to the MoSetup value on both paths. (F8 SPECULATIVE: ForceDiscovery /
+    AutoFix policy re-writes the TRV pin with no read-back — rides here.)
+29. **winupgrade AutoFix marks fixes applied before confirming + all-failed reads "NO CHANGES"**
+    (loop-31 Fable deep-dive, CONFIRMED, HIGH — F5) — `'repair'` added to `$fixes` BEFORE DISM/SFC run
+    (`:2804`); a DISM exception still → FIXED "Applied: repair"; a needed driver-removal that fails →
+    "NO CHANGES / no fixes necessary". Fix: add fix keys only on confirmed success, track failed attempts
+    → FAILED/PARTIAL, Ok=$false on any fail.
+30. **winupgrade Diagnose verdict READY ignores disk/RAM/Secure Boot fails its own scan reported**
+    (loop-31 Fable deep-dive, CONFIRMED — F6) — `:2339-2343` tests only cpu/tpm/block/policy. Supported
+    CPU/TPM + 10GB free → READY, upgrade fails on disk. Fix: fold `[FAIL] Disk` (at least) into the READY
+    gate or a distinct NOT READY reason.
+31. **winupgrade unparseable sfc output → 'no violations' → CLEAN** (loop-31 Fable deep-dive, CONFIRMED,
+    LOW) — `Get-WinUpgradeRepairVerdict :668` / inline mirror `:2606` final `else { 'no violations' }`;
+    localized/truncated sfc reads clean, ExitCode never consulted. Fix: no-match → 'unknown', exclude
+    from CLEAN.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -585,6 +612,18 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   exact → floor). Pester **1259→1269** green. **c2c scan verdict now FULLY fail-closed.** Remaining
   c2c items: 22/23/24 (entangled fix-rollup buckets), 26 (AntiMalware fix unknown-age). SECRET parity:
   +c2c Patches overdue fail-close.
+- **Loop 31 (DONE 2026-07-21):** Fable-inline + one parallel Fable worker. Self-review of loop-30 →
+  **GREEN**. **Diversified off c2c** (the remaining c2c items 22/23/24/26 are entangled in the fix-rollup
+  buckets — a dedicated-loop overhaul). **Fresh deep-dive on winupgrade** (feature-update pin/push, never
+  loop-reviewed): worker verified the core fail-closed (Pin/Unpin read-back, install-updates nonce-gated,
+  `[int]`/`[version]` compares, unreachable→error), found **7 CONFIRMED false-cleans** on the edges.
+  **FIXED F1** (winupgrade **0.5.1→0.5.2**): upgrade-drive discarded a thrown pin error (`:2187`) and
+  reported green "Pinned + triggered" `Ok=$true` (`:2282-2290`) while triggering WU UNPINNED (host can
+  upgrade to the wrong build). Now a failed pin **aborts the drive** before the trigger → `PIN FAILED`,
+  `Ok=$false`. No guard weakened; 168 winupgrade + FixVerify3 green. `WinUpgrade.Drive.Tests.ps1` +
+  `-PinThrows` shim flag + F1 test (thrown pin → PIN FAILED, no TRIGGER/REBOOT) + exact 0.5.2 pin. Pester
+  **1269→(close)** green. **5 new ranked items (27-31)** (F2/F5 high-harm next). SECRET parity:
+  +winupgrade upgrade-drive pin-fail abort.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
