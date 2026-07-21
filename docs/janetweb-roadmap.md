@@ -64,13 +64,13 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     wpt 6.8.6): anchored ArticleID-exact / bounded-Name-token match so a shorter requested KB
     (KB5034) can't substring-match a longer article (KB5034123), install the wrong update, and
     skip the MSU fallback. Also fail-closed on a null InstallUpdates ReturnValue.
-14. **wpt kb-install reports an unverified async MECM trigger as "Installed" + VulnPatched audit**
-    (loop-22 Fable deep-dive, CONFIRMED, HIGH) — `:5991` Result='Installed' when `MECMInstalled>0`,
-    but `MECMInstalled` = MECM `InstallUpdates` *trigger accepted*, not confirmed installed; the
-    async download/install can fail minutes later, yet the row says Installed and OkOf books a
-    `VulnPatched` Success audit (a false compliance record). Fix needs its own loop (Result label
-    "Triggered (verify)" for MECM vs confirmed "Installed" for MSU exit-0; likely a view change +
-    audit-action review). Highest-harm of the wpt verify false-cleans — pick next.
+14. ~~wpt kb-install reports an unverified async MECM trigger as "Installed"~~ — **CLOSED loop 23**
+    (`Get-WptKbInstallResult`, wpt 6.8.7): any MECM trigger now reads "Triggered (verify)", only a
+    confirmed MSU exit-0 reads "Installed"; the view surfaces the Result and counts only confirmed
+    installs. **Follow-on (14b, open):** the `VulnPatched` audit action still books Success for a
+    MECM-only trigger — the operator-facing false-clean (Result label + installed count) is closed,
+    but the audit taxonomy overstates; re-plumb the fan-out per-row audit action to distinguish
+    trigger-vs-confirmed when the audit surface is next worked.
 15. **wpt M365 C2R "Verified" goes green on a FAILED update** (loop-22 Fable deep-dive, CONFIRMED) —
     `:854` verifies by the ClickToRun\Configuration key LastWriteTime freshness (<7 days), but C2R
     bumps that key's mtime on every update attempt INCLUDING failures (the code reads LastScenario
@@ -450,8 +450,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   scriptblock mirrors it inline; trigger now fail-closed (`$null -ne $rv -and [int]$rv -eq 0`). No
   guard weakened (DNS wrong-box `:2726`, self-guard `:5983` untouched); all 117 wpt tests green.
   `Wpt.KbMatch.Tests.ps1` (11) pins the rule (bug case + boundaries + normalization) + exact 6.8.6
-  pin (SelfGuardApply exact → floor). Pester **1192→(close)** green. No new destructive surface;
-  4 new ranked items (14-17). SECRET parity: +kb-install KB-match anchoring + null-rv fail-close.
+  pin (SelfGuardApply exact → floor). Pester **1192→1203** green — BUT the authoritative run first
+  surfaced a **1-test regression** (1202/1203): the KB-match commit gratuitously reworded the
+  InstallUpdates rejection message ("rejected"→"not confirmed"), breaking `FixVerify2` (`Should Match
+  'rejected'`); the pre-commit gate was a `Wpt.*`-only glob that misses FixVerify2. Repaired at
+  loop-23 start (`c9b22d1`): wording restored, null-fail-close kept + finally tested. 4 new ranked
+  items (14-17). SECRET parity: +kb-install KB-match anchoring + null-rv fail-close.
+- **Loop 23 (DONE 2026-07-21):** Fable-inline. **Repaired the loop-22 regression FIRST** (`c9b22d1`,
+  above) + added its missing null-fail-close test. **Workstream: roadmap item 14** (highest-harm wpt
+  false-clean) → **CLOSED**. kb-install reported an unverified async MECM trigger as "Installed"
+  (server `:6035` + view `wpt.view.js:87` counted every no-error host installed). **FIXED** (wpt
+  **6.8.6→6.8.7**): pure `Get-WptKbInstallResult` (`:2734`) — any MECM trigger → `Triggered (verify)`
+  (errs toward verify, never over-claims), confirmed MSU exit-0 → `Installed`, else `No change`; the
+  view now surfaces `r.Result` and counts only a confirmed `Installed`. No guard weakened; 138 wpt +
+  FixVerify2 green. `Wpt.KbInstallResult.Tests.ps1` (8) pins the helper + view static asserts + exact
+  6.8.7 pin (KbMatch 6.8.6 exact → floor). Pester **1203→(close)** green. Pre-commit gate corrected to
+  full wpt + FixVerify2. Follow-on: the VulnPatched audit still books Success for a MECM-only trigger
+  (label + Detail close the visible false-clean; audit taxonomy is a smaller follow-up to item 14).
+  SECRET parity: +honest kb-install label (Get-WptKbInstallResult + view).
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
