@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.2'
+        version  = '0.5.3'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -984,6 +984,32 @@ $script:WinUpgradePinBlock = {
         $msg += '; CPU/TPM BYPASS SET (MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU=1)'
     }
     $msg
+}
+
+# loop32 (F6): CANONICAL Diagnose one-word verdict from the report markers. The verdict is the
+# operator's GO/NO-GO signal, and it used to check ONLY CPU/TPM/[BLOCK]/policy - it IGNORED the
+# [FAIL] Disk / [FAIL] RAM / [FAIL] Secure Boot lines its own scan reported, so a disk-short host
+# read READY and the upgrade later failed on disk. Now those hardware/capacity fails yield a
+# distinct NOT READY (inserted after NEEDS POLICY, before READY - only reclassifies falsely-READY
+# hosts). The runspace worker mirrors this inline (module-less runspace, can't call this fn); keep
+# in lockstep. Pure - tested by Winupgrade.DiagnoseVerdict.Tests.ps1.
+function Get-WinUpgradeDiagnoseVerdict {
+    param([string]$Report, [string]$Version = '24H2')
+    $on24     = ($Report -match '(?m)^\[PASS\] Already on ')
+    $cpuFail  = ($Report -match '(?m)^\[FAIL\] CPU')
+    $tpmFail  = ($Report -match '(?m)^\[FAIL\] TPM')
+    $bypassOn = ($Report -match '(?m)^\[INFO\] CPU/TPM Bypass : ACTIVE')
+    $hasBlock = ($Report -match '(?m)^\[BLOCK\]')
+    $policyOk = ($Report -match '(?m)^\[PASS\] Target Release Policy')
+    $diskFail = ($Report -match '(?m)^\[FAIL\] Disk')
+    $ramFail  = ($Report -match '(?m)^\[FAIL\] RAM')
+    $sbFail   = ($Report -match '(?m)^\[FAIL\] Secure Boot')
+    if     ($on24)                                       { return "ON $Version" }
+    elseif (($cpuFail -or $tpmFail) -and -not $bypassOn) { return 'HW INCOMPAT' }
+    elseif ($hasBlock)                                   { return 'BLOCKED' }
+    elseif (-not $policyOk)                              { return 'NEEDS POLICY' }
+    elseif ($diskFail -or $ramFail -or $sbFail)          { return 'NOT READY' }
+    else                                                 { return 'READY' }
 }
 
 $script:WinUpgradeWorker = {
@@ -2345,17 +2371,28 @@ $script:WinUpgradeWorker = {
                 $bypassOn = ($report -match '(?m)^\[INFO\] CPU/TPM Bypass : ACTIVE')
                 $hasBlock = ($report -match '(?m)^\[BLOCK\]')
                 $policyOk = ($report -match '(?m)^\[PASS\] Target Release Policy')
+                # loop32 (F6): MIRROR of Get-WinUpgradeDiagnoseVerdict - the verdict IGNORED the
+                # disk/RAM/Secure Boot fails its own scan reported, so a disk-short host read READY and
+                # the upgrade failed on disk. Fold them into a distinct NOT READY (after NEEDS POLICY,
+                # before READY - only reclassifies falsely-READY hosts). Keep in lockstep with the helper.
+                $diskFail = ($report -match '(?m)^\[FAIL\] Disk')
+                $ramFail  = ($report -match '(?m)^\[FAIL\] RAM')
+                $sbFail   = ($report -match '(?m)^\[FAIL\] Secure Boot')
                 $buildM   = [regex]::Match($report, '\(Build (\d+)\)')
                 $buildNum = if ($buildM.Success) { $buildM.Groups[1].Value } else { '?' }
                 if     ($on24)                                       { $verdict = "ON $Version" }
                 elseif (($cpuFail -or $tpmFail) -and -not $bypassOn) { $verdict = 'HW INCOMPAT' }
                 elseif ($hasBlock)                                   { $verdict = 'BLOCKED' }
                 elseif (-not $policyOk)                              { $verdict = 'NEEDS POLICY' }
+                elseif ($diskFail -or $ramFail -or $sbFail)          { $verdict = 'NOT READY' }
                 else                                                 { $verdict = 'READY' }
                 $sum = New-Object System.Collections.ArrayList
                 [void]$sum.Add("Build $buildNum")
                 [void]$sum.Add($(if ($cpuFail) { 'CPU unsupported' } else { 'CPU ok' }))
                 [void]$sum.Add($(if ($tpmFail) { 'TPM<2.0' } else { 'TPM ok' }))
+                if ($diskFail) { [void]$sum.Add('disk LOW') }
+                if ($ramFail)  { [void]$sum.Add('RAM LOW') }
+                if ($sbFail)   { [void]$sum.Add('Secure Boot off') }
                 if ($bypassOn) { [void]$sum.Add('bypass ACTIVE') }
                 [void]$sum.Add($(if ($policyOk) { 'policy set' } else { 'policy not set' }))
                 if ($hasBlock) { [void]$sum.Add('deferral/block present') }

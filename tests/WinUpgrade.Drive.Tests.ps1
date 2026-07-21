@@ -211,9 +211,9 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
     }
 }
 
-Describe 'winupgrade - manifest exact version pin (newest bump = loop-31 upgrade-drive pin-fail abort)' {
-    It 'winupgrade is at v0.5.2' {
+Describe 'winupgrade - manifest version floor (loop-31 upgrade-drive pin-fail abort landed at 0.5.2)' {
+    It 'winupgrade version is >= 0.5.2 (floor; exact pin lives in the newest bump test)' {
         $mani = & $m { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '0.5.2'
+        ([version][string]$mani.version -ge [version]'0.5.2') | Should Be $true
     }
 }
