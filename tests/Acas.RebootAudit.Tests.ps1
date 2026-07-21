@@ -63,9 +63,9 @@ Describe 'reboot-selected audit - the in-card reboot arm is TouchHost, not VulnP
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-38 reboot-selected audit)' {
-    It 'acas is at v1.11.10' {
+Describe 'acas - manifest version floor (reboot-selected audit shipped in 1.11.10; exact pin migrated to newest bump)' {
+    It 'acas is at or past v1.11.10' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.10'
+        ([version][string]$mani.version -ge [version]'1.11.10') | Should Be $true
     }
 }

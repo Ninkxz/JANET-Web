@@ -1097,7 +1097,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.10'
+        version  = '1.11.11'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -2081,6 +2081,19 @@ $script:AcasUpdateWorker = {
                 # amber. A real version bump below stays a confirmed Success/OK.
                 return "UNCONFIRMED: version unchanged after update (async update may still be in progress) | $updateStr $marker"
             }
+            # MIRROR of Get-AcasBumpVerdict (keep in sync): preV != postV alone is NOT a confirmed bump.
+            # A post that degraded to a sentinel the probe emits when it could not read a current version
+            # ('error'/'n/a'/'not installed'), or a numeric DOWNGRADE, is UNCONFIRMED (never OK/VulnPatched);
+            # formerly ANY inequality read as "bumped" -> OK, so a Defender probe returning 'error' booked a
+            # confirmed patch. 'none' (Log4j clean) and non-version state transitions (spec-exec -> COMPLIANT)
+            # are NOT degraded and stay a confirmed bump. (loop39/item36)
+            $bumpDegraded = @('error','n/a','not installed')
+            $bumpPreVer = $null; $bumpPostVer = $null
+            $bumpPreOk  = [version]::TryParse([string]$preV,  [ref]$bumpPreVer)
+            $bumpPostOk = [version]::TryParse([string]$postV, [ref]$bumpPostVer)
+            if (($bumpDegraded -contains ([string]$postV).ToLower()) -or ($bumpPreOk -and $bumpPostOk -and $bumpPostVer -le $bumpPreVer)) {
+                return "UNCONFIRMED: post-update version not confirmed forward ($preV -> $postV; probe degraded or no forward change) | $updateStr $marker"
+            }
             $diff = "bumped: $preV -> $postV"
             return "$updateStr | $diff $marker"
         } catch {
@@ -2359,6 +2372,26 @@ $script:AcasPreflightWorker = {
 #                    unchanged after an update). Neither counts as a confirmed OK, so
 #                    both render NOT-green (amber). A genuine bump / plain OK stays OK.
 $script:AcasOkOf = { param($res) (-not ($res -like 'FAIL*')) -and (-not ($res -like 'UNCONFIRMED*')) }
+
+# loop39 (item36): PURE canonical "did the version actually move FORWARD" classifier for the update
+# pre/post probe. The worker declares a "bumped" (confirmed OK -> lights PATCHED / books VulnPatched)
+# whenever preV != postV; but a post that degraded to a sentinel the probe emits when it could NOT read
+# a current version ('error'/'n/a'/'not installed'), or a numeric DOWNGRADE, is NOT a confirmed fix. This
+# returns 'unconfirmed' for those and 'confirmed' otherwise. 'none' (Log4j clean) is NOT degraded, and a
+# non-version state transition (spec-exec VULNERABLE/DRIFT -> COMPLIANT) does not parse as [version] so it
+# stays 'confirmed'. The caller has already ruled out preV == postV. The update worker mirrors this inline
+# (it runs in a module-less fan-out runspace and can't call this fn); keep in lockstep. Tested by
+# Acas.BumpVerdict.Tests.ps1.
+function Get-AcasBumpVerdict {
+    param([string]$PreV, [string]$PostV)
+    $degraded = @('error','n/a','not installed')
+    if ($degraded -contains ([string]$PostV).ToLower()) { return 'unconfirmed' }
+    $preVer = $null; $postVer = $null
+    $preOk  = [version]::TryParse([string]$PreV,  [ref]$preVer)
+    $postOk = [version]::TryParse([string]$PostV, [ref]$postVer)
+    if ($preOk -and $postOk -and $postVer -le $preVer) { return 'unconfirmed' }
+    return 'confirmed'
+}
 
 # loop26 (item18): CANONICAL verify-only row status. A verify run is read-only ("change nothing"),
 # but its rows feed the shared run binder that lights the PATCHED stat card for any OK row. A verify
