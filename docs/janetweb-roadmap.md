@@ -296,9 +296,10 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     mitigated (After col + audit detail carry "(pending reboot)"; confirm text says "PENDING A REBOOT"), but the bare
     enum + summary word "enabled" and the **Lenovo** read-back-reflects-staged case (`:184`) omit the pending marker.
     Fix: unconditional "(pending reboot)" marker on every non-error live result + "staged" summary wording. _(loop-57 dive)_
-64. **secureboot `Get-SbeBool` fails open toward LIVE for `dry_run`** (P3) — `:1076-1082`→`:1155`: an unrecognized
-    token resolves `$false` → live firmware write. Only bites a direct API caller (the view sends canonical values),
-    but a destructive-mode selector should refuse on ambiguity. Fix: strict `dry_run` parse (unknown → abort). _(loop-57 dive)_
+64. ~~**secureboot `Get-SbeBool` fails open toward LIVE for `dry_run`**~~ **CLOSED loop 58** (secureboot 1.6.3): new
+    `Get-SbeDryRunSafe` at the destructive call site — the live path requires an absent value (manifest default) or an
+    explicit recognized false token; any present-but-unrecognized token stays DRY (fail-safe). `Get-SbeBool` left
+    untouched (shared by attemptOffline/allowEmptyPassword where `$false`-default is correct). +5 behavioral tests. _(loop-57 dive)_
 65. **secureboot scan summary drops `Cancelled` rows** (P3) — `:1051-1057` tallies only the seven named verdicts;
     operator-cancelled hosts (`:1038`) are excluded so `counts` ≠ `total`. Not false-clean (nothing marked
     compliant). Fix: add `Cancelled` to the tally list. _(loop-57 dive)_
@@ -1103,6 +1104,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   staged-vs-enabled wording, `dry_run` fail-open, Cancelled tally gap, best-effort icacls) — none a hard firmware
   false-clean. Pester **1433→1436** green. **secureboot dive complete.** SECRET parity: +secureboot per-run
   `$taskName`-based result filename.
+- **Loop 58 (DONE 2026-07-21):** self-review of loop-57 → GREEN. Workstream = targeted fix of **item 64**, the one
+  loop-57 dive finding that's a **destructive fail-open**: the enable read `dry_run` via the shared `Get-SbeBool`,
+  which resolves any unrecognized token to `$false` → a LIVE firmware write, so a typo (`'ture'`, `'dry'`) on the
+  dry-run selector silently went live. **FIXED** (secureboot **1.6.2→1.6.3**): new `Get-SbeDryRunSafe` at the
+  destructive call site — live only on an absent value (manifest `default=$false`) or an explicit recognized false
+  token; any present-but-unrecognized token stays DRY. `Get-SbeBool` untouched (shared by attemptOffline/
+  allowEmptyPassword where `$false`-default is correct — false-sibling, fixed the site not the helper).
+  `Secureboot.ConfirmWord.Tests.ps1` +5 behavioral (exact pin moved here; Scan floored). set **40** green. Remaining
+  secureboot items 62/63/65/66 (P3, none a hard firmware false-clean). Pester **1436→1441** green. SECRET parity:
+  +secureboot `Get-SbeDryRunSafe` fail-closed dry_run parse.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
