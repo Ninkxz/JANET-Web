@@ -83,8 +83,8 @@ Describe 'pkginstall 2.5.10 - a PSADT deploy that sets no exit code is Failed, n
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
 
-    It 'manifest version is exactly 2.5.10 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '2.5.10'
+    It 'manifest version is at least 2.5.10 (floor; newest exact pin = loop62 SelfGuard gate Describe, v2.5.11)' {
+        ([version][string]$mani.version -ge [version]'2.5.10') | Should Be $true
     }
     It 'pre-seeds $LASTEXITCODE to $null, not 0' {
         ($src -match '\$global:LASTEXITCODE\s*=\s*\$null') | Should Be $true

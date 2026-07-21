@@ -22,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.10'
+        version  = '2.5.11'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -39,7 +39,8 @@ function Get-JanetToolManifest {
                     @{ name='packagePathManual'; label='...or a custom package path (UNC/local)'; type='text'; required=$false },
                     @{ name='packageName'; label='Package name (audit/display; blank = folder name)'; type='text'; required=$false },
                     @{ name='threads';     label='Parallel hosts';                          type='int';      required=$false; default=8 },
-                    @{ name='installTimeoutMin'; label='Per-host install timeout (min)';     type='int';      required=$false; default=30 }
+                    @{ name='installTimeoutMin'; label='Per-host install timeout (min)';     type='int';      required=$false; default=30 },
+                    @{ name='confirm';     label='Type DEPLOY to arm';                     type='text';     required=$true }
                 )
             },
             @{
@@ -57,7 +58,8 @@ function Get-JanetToolManifest {
                     @{ name='msiList';     label='MSIs to install'; type='msi-checklist'; dependsOn='packagePath'; required=$false; help='Pick a bundle above, then check the .msi files to install (all checked by default; uncheck any to skip).' },
                     @{ name='msiArgs';     label='msiexec arguments'; type='text';     required=$false; default='/qn /norestart' },
                     @{ name='threads';     label='Parallel hosts';                  type='int';      required=$false; default=8 },
-                    @{ name='installTimeoutMin'; label='Per-host install timeout (min)'; type='int';      required=$false; default=30 }
+                    @{ name='installTimeoutMin'; label='Per-host install timeout (min)'; type='int';      required=$false; default=30 },
+                    @{ name='confirm';     label='Type DEPLOY to arm';              type='text';     required=$true }
                 )
             }
         )
@@ -725,6 +727,17 @@ function Invoke-JanetToolAction {
     if ($ActionId -ne 'deploy-psadt' -and $ActionId -ne 'deploy-msi-bundle') {
         & $send @{ type='error'; text="Unknown action '$ActionId'." }
         return @{ rows=@(); summary=@{} }
+    }
+
+    # loop62 (item69): confirm-word gate. Pushing/installing arbitrary software fleet-wide is the most
+    # destructive action in the suite, yet it was the ONLY destructive tool with no typed confirm-word
+    # (adto FIX/VALIDATE, secureboot ENABLE, c2c, certdeploy, winrmbridge all have one). Fail-closed,
+    # server-side, BEFORE any target parsing / self-guard / fan-out: refuse unless the operator typed
+    # DEPLOY (exactly). The server admin-session gate + self-guard + wrong-box + IPv4 guards remain; this
+    # adds the missing typed barrier so a stray armed session can't one-click a fleet-wide install.
+    if ([string]$Params['confirm'] -ne 'DEPLOY') {
+        & $send @{ type='log'; level='err'; text='Refused: type DEPLOY (exactly) in Confirm to arm the deploy.' }
+        return @{ rows=@(); summary=@{ total=0; rejected=$true } }
     }
 
     $rawTargets = ConvertTo-JanetHostList ([string]$Params['targets'])

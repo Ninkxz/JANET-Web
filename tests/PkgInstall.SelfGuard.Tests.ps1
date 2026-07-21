@@ -18,6 +18,10 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Force -PassThru
 
 function Invoke-Pkg([string]$aid, [hashtable]$p) {
+    # loop62 (item69): the deploy actions now require a typed DEPLOY confirm-word. Inject it by default
+    # so the self-guard tests reach the self-guard; a test that sets 'confirm' explicitly (e.g. '' or a
+    # wrong word) keeps its value to exercise the gate itself.
+    if (-not $p.ContainsKey('confirm')) { $p = $p.Clone(); $p['confirm'] = 'DEPLOY' }
     $evs = New-Object System.Collections.ArrayList
     $emit = { param($e) [void]$evs.Add($e) }
     $res = & $m { param($a,$pp,$em) Invoke-JanetToolAction -ActionId $a -Params $pp -Credential $null -Emit $em } $aid $p $emit
@@ -79,5 +83,43 @@ Describe 'pkginstall deploy self-guards the dispatcher BEFORE fan-out' {
         $o = Invoke-Pkg 'deploy-psadt' @{ targets = "127.0.0.1`n\\srv\c$" }
         [int]$o.Result.summary.total | Should Be 0
         (Has-SelfGuardWarn $o) | Should Be $true
+    }
+}
+
+# loop62 (item69): pkginstall was the only destructive tool with no typed confirm-word. The deploy
+# actions now refuse fail-closed (server-side, before any target parsing / self-guard / fan-out) unless
+# the operator typed DEPLOY exactly - matching adto FIX/VALIDATE, secureboot ENABLE, etc.
+Describe 'pkginstall 2.5.11 - deploy confirm-word gate (fail-closed)' {
+    $mani = & $m { Get-JanetToolManifest }
+
+    It 'manifest version is exactly 2.5.11 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.11'
+    }
+    It 'both deploy actions declare a required confirm input' {
+        foreach ($aid in @('deploy-psadt','deploy-msi-bundle')) {
+            $a = @($mani.actions | Where-Object { $_.id -eq $aid })[0]
+            $c = @($a.inputs | Where-Object { $_.name -eq 'confirm' })[0]
+            $c              | Should Not BeNullOrEmpty
+            [bool]$c.required | Should Be $true
+        }
+    }
+    It 'refuses deploy-psadt with no/blank confirm-word (rejected, no fan-out)' {
+        $o = Invoke-Pkg 'deploy-psadt' @{ targets = 'WS-REMOTE-1'; confirm = '' }
+        [bool]$o.Result.summary.rejected | Should Be $true
+        [int]$o.Result.summary.total     | Should Be 0
+        @($o.Result.rows).Count          | Should Be 0
+        @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'type DEPLOY' }).Count | Should BeGreaterThan 0
+    }
+    It 'refuses a wrong confirm-word (must be the DEPLOY word; case-insensitive like adto/secureboot)' {
+        $o = Invoke-Pkg 'deploy-msi-bundle' @{ targets = 'WS-REMOTE-1'; confirm = 'INSTALL' }
+        [bool]$o.Result.summary.rejected | Should Be $true
+        # case-insensitive convention: 'deploy' (lowercase) IS accepted, matching adto's -ne 'FIX'
+        $o2 = Invoke-Pkg 'deploy-msi-bundle' @{ targets = '127.0.0.1'; confirm = 'deploy' }
+        [bool]$o2.Result.summary.rejected | Should Be $false
+    }
+    It 'the correct DEPLOY confirm passes the gate (reaches the self-guard, not rejected)' {
+        $o = Invoke-Pkg 'deploy-psadt' @{ targets = '127.0.0.1'; confirm = 'DEPLOY' }
+        [bool]$o.Result.summary.rejected | Should Be $false
+        (Has-SelfGuardWarn $o)           | Should Be $true
     }
 }
