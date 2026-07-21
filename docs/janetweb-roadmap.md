@@ -83,11 +83,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     `:2468` `"KB$art" -match [regex]::Escape($f)` is an unanchored substring, so a KB filter can show
     a different update's row as Installed in the filtered verify view (mitigated: the full update
     Name is shown). Fix: anchor the article leg (exact) while keeping the free-text Name filter.
-18. **acas Verify/dry-run rows light the PATCHED stat card, incl. still-vulnerable hosts** (loop-25
-    Fable deep-dive, CONFIRMED, HIGH) — the verify branch (`acas :1941`) returns `"v=.. last=.. [stale].."`
-    with no FAIL/UNCONFIRMED prefix → classified OK → `stat.patched++` (`acas.view.js:742`). Running
-    Verify (diagnostic) inflates the PATCHED count with `[stale]` (old-version) hosts. Fix: classify
-    verify from the probe's Verified/stale flag, or stop feeding verify rows into `stat.patched`.
+18. ~~acas Verify/dry-run rows light the PATCHED stat card, incl. still-vulnerable hosts~~ — **CLOSED
+    loop 26** (`Get-AcasVerifyRowStatus`, acas 1.11.7): the verify branch now prefixes UNCONFIRMED
+    unless the probe confirms the host is current ([fresh]), so a [stale]/indeterminate host is amber
+    and out of the PATCHED tally instead of counting as patched.
 19. **acas schedule-reboot books VulnPatched Success at schedule time** (loop-25 Fable deep-dive,
     CONFIRMED) — `:2127` returns `OK (reboot scheduled)`, fan-out `:3314` audits `VulnPatched`, so the
     Success/Runs-CSV row is booked while the reboot is 5 min out and abortable (`shutdown /a`; rc=1190
@@ -510,7 +509,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   worker mirrors it inline (module-less runspace) + `$usoTriggered` flag. No guard weakened; 163 acas +
   FixVerify2 + FixGuards green. `Acas.KbInstallStatus.Tests.ps1` (9) + FixVerify2 rv=0 corrected `^OK`→
   `^UNCONFIRMED` (it pinned the false-clean) + exact 1.11.6 pin (EdgeProfile exact → floor). Pester
-  **1221→(close)** green. **4 new ranked items (18-21).** SECRET parity: +honest acas kb-install status.
+  **1221→1230** green. **4 new ranked items (18-21).** SECRET parity: +honest acas kb-install status.
+- **Loop 26 (DONE 2026-07-21):** Fable-inline. Self-review of loop-25 → **GREEN**. **Workstream:
+  roadmap item 18** (HIGH, top remaining acas false-clean) → **CLOSED**. "Verify" is a read-only dry-run,
+  but its rows feed the shared run binder that lights the PATCHED stat card for any OK row
+  (`acas.view.js:742`); the verify branch (`acas:1947`) returned `"v=.. [fresh|stale|n/a].."` with no
+  status prefix → `AcasUpdateRowOf:2367` classified OK → every reachable host counted PATCHED, incl.
+  `[stale]` (Verified=$false = still on the old vulnerable version). **FIXED** (acas **1.11.6→1.11.7**):
+  pure `Get-AcasVerifyRowStatus` (`:2359`) — fresh→OK, stale/n/a→UNCONFIRMED; the verify branch mirrors
+  it inline (`$prefix='UNCONFIRMED '` when not fresh) → amber row + out of the tally. One module-side
+  change fixes grid + stat. Read-only path, no guard; 156 acas + FixVerify2 green. `Acas.VerifyRowStatus.
+  Tests.ps1` (5) pins the verdict + static prefix assert + exact 1.11.7 pin (KbInstallStatus 1.11.6
+  exact → floor). Pester **1230→(close)** green. SECRET parity: +honest acas verify row. Remaining acas
+  items: 19 (schedule-reboot audit), 20 (spec default-open), 21 (acas kb-install KB-match+null-rv).
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
