@@ -2767,7 +2767,7 @@ $script:WptKbInstallBlock = {
                 $toInstall = @($allUpdates | Where-Object { $dom=$false; foreach ($kb in $found) { if (& $kbMatch $_ $kb) { $dom=$true; break } }; $dom })
                 # loop22: FAIL-CLOSED on a null ReturnValue - a method that returned nothing did
                 # NOT confirm acceptance, so it is an error, not a success (was counted as success).
-                if ($toInstall.Count -gt 0) { try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop).ReturnValue; if ($null -ne $rv -and [int]$rv -eq 0) { return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } else { return @{ Found=$found; Triggered=0; Error="Install trigger not confirmed by client (ReturnValue=$(if($null -eq $rv){'<null>'}else{[int]$rv})); $($toInstall.Count) update(s) NOT confirmed" } } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
+                if ($toInstall.Count -gt 0) { try { $rv = (Invoke-WmiMethod -Class CCM_SoftwareUpdatesManager -Name InstallUpdates -ArgumentList (,$toInstall) -Namespace 'ROOT\ccm\ClientSDK' -EA Stop).ReturnValue; if ($null -ne $rv -and [int]$rv -eq 0) { return @{ Found=$found; Triggered=$toInstall.Count; Error='' } } else { return @{ Found=$found; Triggered=0; Error="Install trigger rejected by client (ReturnValue=$(if($null -eq $rv){'<null>'}else{[int]$rv})); $($toInstall.Count) update(s) NOT installed" } } } catch { return @{ Found=$found; Triggered=0; Error="Install trigger failed: $($_.Exception.Message)" } } }
             }
             return @{ Found=$found; Triggered=0; Error='' }
         }
