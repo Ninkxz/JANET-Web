@@ -118,8 +118,8 @@ Describe 'dhcp 1.1.10 - destructive actions gated by confirm-word + self-guard' 
         @{ Result = $res; Events = @($evs) }
     }
 
-    It 'manifest version is exactly 1.1.10 (newest bump holds the exact pin)' {
-        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.10'
+    It 'manifest version is at least 1.1.10 (floor; newest exact pin = loop67 dryRun Describe, v1.1.11)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.10') | Should Be $true
     }
     It 'all four destructive actions require a confirm input; connect/load do not' {
         $mani = & $mod { Get-JanetToolManifest }
@@ -153,5 +153,32 @@ Describe 'dhcp 1.1.10 - destructive actions gated by confirm-word + self-guard' 
         [bool]$o.Result.summary.rejected   | Should Be $true
         [int]$o.Result.summary.selfSkipped | Should Be 1
         @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'Self-guard' }).Count | Should BeGreaterThan 0
+    }
+}
+
+# loop67 (item76): the dry-run selector on the DESTRUCTIVE write actions used the shared $asBool, which
+# resolves any unrecognized token to $false = a LIVE write, so a typo ('TRUE ', 'checked', 'dry') silently
+# wrote to a live DHCP server (secureboot loop-58 class). Get-DhcpDryRunSafe fails CLOSED: a live write
+# needs an absent value or an explicit recognized false; any present-but-unrecognized token stays DRY.
+Describe 'dhcp 1.1.11 - dryRun parse fails closed (unrecognized token stays DRY)' {
+    function DryOf { param($v) & $mod { param($x) Get-DhcpDryRunSafe $x } $v }
+
+    It 'manifest version is exactly 1.1.11 (newest bump holds the exact pin)' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.11'
+    }
+    It 'absent/empty -> live (the documented write default)' {
+        (DryOf $null) | Should Be $false
+        (DryOf '')    | Should Be $false
+    }
+    It 'explicit recognized false tokens -> live' {
+        foreach ($t in 'false','0','no','off','False','OFF') { (DryOf $t) | Should Be $false }
+        (DryOf $false) | Should Be $false
+    }
+    It 'explicit recognized true tokens -> dry' {
+        foreach ($t in 'true','1','yes','on','TRUE') { (DryOf $t) | Should Be $true }
+        (DryOf $true) | Should Be $true
+    }
+    It 'a present-but-UNRECOGNIZED token stays DRY (the fix; $asBool would have gone live)' {
+        foreach ($t in 'dry','checked','maybe','TRUE ','2','y') { (DryOf $t) | Should Be $true }
     }
 }

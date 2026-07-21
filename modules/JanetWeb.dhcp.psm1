@@ -29,7 +29,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.10'
+        version  = '1.1.11'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -1099,6 +1099,20 @@ function Test-DhcpHostIsSelf {
     return $false
 }
 
+# loop67 (item76): fail-CLOSED dry-run parse for the DESTRUCTIVE write actions. The shared $asBool (used
+# for removeOption, where unrecognized->false is safe) resolves ANY unrecognized token to $false = a LIVE
+# write, so a typo on the dry-run selector ('TRUE ' with a trailing space, 'checked', 'dry') silently wrote
+# to a live DHCP server (the secureboot loop-58 class). A destructive-mode selector must not fail open: the
+# LIVE path requires an EXPLICIT recognized false token (false/0/no/off) or an absent value (the manifest
+# default=$false, handled by the caller's ContainsKey guard); any present-but-unrecognized value stays DRY.
+function Get-DhcpDryRunSafe {
+    param($Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return $false }             # absent/empty -> documented default (live)
+    if ($Value -is [bool]) { return [bool]$Value }
+    if (@('false','0','no','off') -contains ([string]$Value).Trim().ToLowerInvariant()) { return $false }  # explicit LIVE
+    return $true                                                            # explicit dry OR unrecognized -> fail SAFE (dry)
+}
+
 # -----------------------------------------------------------------------------
 #  Entry point
 # -----------------------------------------------------------------------------
@@ -1248,7 +1262,7 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             $dryRun = $false
-            if ($Params.ContainsKey('dryRun')) { $dryRun = & $asBool $Params['dryRun'] }
+            if ($Params.ContainsKey('dryRun')) { $dryRun = Get-DhcpDryRunSafe $Params['dryRun'] }   # loop67: fail-closed - unrecognized token stays DRY, never silently live
             # Optimistic-concurrency: the view sends the before-state it loaded so the
             # engine can refuse the replace if the option changed underneath. Absent =>
             # no check (back-compat). Present-but-empty => "must still be unset".
@@ -1287,7 +1301,7 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             $dryRun = $false
-            if ($Params.ContainsKey('dryRun')) { $dryRun = & $asBool $Params['dryRun'] }
+            if ($Params.ContainsKey('dryRun')) { $dryRun = Get-DhcpDryRunSafe $Params['dryRun'] }   # loop67: fail-closed - unrecognized token stays DRY, never silently live
             return Invoke-JanetDhcpBulk -Server $server -ScopeIds $scopeIds -OptionId $optionId `
                      -Ips $parsed.Valid -Mode $mode -Credential $Credential -Send $send -CancelCheck $cancelCheck -DryRun $dryRun
         }
