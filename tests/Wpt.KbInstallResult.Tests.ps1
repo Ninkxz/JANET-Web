@@ -47,9 +47,9 @@ Describe 'wpt view - kb-install surfaces the server Result and counts only confi
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-23 honest kb-install label)' {
-    It 'wpt is at v6.8.7' {
+Describe 'wpt - manifest version floor (loop-23 honest kb-install label landed at 6.8.7)' {
+    It 'wpt version is >= 6.8.7 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.7'
+        ([version][string]$mani.version -ge [version]'6.8.7') | Should Be $true
     }
 }

@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.7'
+        version  = '6.8.8'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -840,6 +840,22 @@ function Get-WptRegKeyCatalog {
     }
 }
 
+# loop24 (item15): CANONICAL M365 C2R verify verdict. "Verified" is TRUE only when the
+# ClickToRun Configuration key was written within the window AND the last update scenario
+# SUCCEEDED. C2R bumps that key on EVERY update attempt INCLUDING failures, so mtime freshness
+# alone was a false-clean: a failed Force Update read Verified with the OLD vulnerable version.
+# $null when there's no timestamp or the result is unknown (never over-claims). The remote
+# M365C2RVerify scriptblock mirrors this exact logic inline (runs over WinRM, can't call a
+# module fn); keep in lockstep. Pure - tested by Wpt.C2rVerify.Tests.ps1.
+function Get-WptC2rVerified {
+    param([bool]$HasTimestamp, [double]$AgeDays, [string]$ScenarioResult, [int]$WindowDays = 7)
+    if (-not $HasTimestamp) { return $null }
+    if ($AgeDays -ge $WindowDays) { return $false }
+    $sr = ([string]$ScenarioResult).Trim()
+    if (-not $sr) { return $null }
+    return [bool]($sr -match '(?i)success')
+}
+
 # Shared Verify scriptblock for both M365 C2R profiles (Force Update and User Visible).
 # Reads the same ClickToRun registry key; no variables differ between the two profiles.
 # Self-contained: runs remotely via Invoke-Command with no closed-over controller vars.
@@ -851,8 +867,15 @@ $script:M365C2RVerify = {
     $key = Get-Item -Path $cfg -ErrorAction SilentlyContinue
     $mod = if ($key) { $key.LastWriteTime } else { $null }
     $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
-    $verified = if ($mod) { ((Get-Date) - $mod).TotalDays -lt 7 } else { $null }
-    return @{ Version=$ver; LastUpdated=$modStr; Verified=$verified; Detail="Scenario=$($p.LastScenario)" }
+    # loop24: MIRROR of Get-WptC2rVerified - fresh AND the last scenario SUCCEEDED. C2R bumps
+    # this key on failed attempts too, so mtime alone would falsely read Verified. Keep in lockstep.
+    $scenarioResult = "$($p.LastScenarioResult)".Trim()
+    $verified =
+        if ($null -eq $mod) { $null }
+        elseif (((Get-Date) - $mod).TotalDays -ge 7) { $false }
+        elseif ($scenarioResult) { [bool]($scenarioResult -match '(?i)success') }
+        else { $null }
+    return @{ Version=$ver; LastUpdated=$modStr; Verified=$verified; Detail="Scenario=$($p.LastScenario); Result=$scenarioResult" }
 }
 
 # Factory: stamps out a self-contained remote Verify scriptblock for browser updater
