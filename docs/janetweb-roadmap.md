@@ -288,6 +288,24 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     disables. +4 tests (real temp overlay, `Get-AdToBaselinePath`-only shim). _(F4/F5 = speculative low:
     adminCount null-read guard-bypass `:513`, admin-pattern-miss categorization `:118`; not ranked.)_
 
+62. **secureboot AlreadyPending re-books Success** (P3) — `:161-262` return `SetResult='AlreadyPending'`; `:718-721`
+    falls through to `'Success'` → `:1263` books `VulnPatched/Success/itemCount=1` though this run wrote nothing.
+    Re-running against an already-staged host inflates the audit + `okCount`. Fix: map `AlreadyPending` → `Skipped`
+    (bucket exists), itemCount 0. _(from loop-57 dive)_
+63. **secureboot "Success"/"N enabled" wording = staged pending-reboot, not enabled** (P3) — `:718`, `:1315`. Heavily
+    mitigated (After col + audit detail carry "(pending reboot)"; confirm text says "PENDING A REBOOT"), but the bare
+    enum + summary word "enabled" and the **Lenovo** read-back-reflects-staged case (`:184`) omit the pending marker.
+    Fix: unconditional "(pending reboot)" marker on every non-error live result + "staged" summary wording. _(loop-57 dive)_
+64. **secureboot `Get-SbeBool` fails open toward LIVE for `dry_run`** (P3) — `:1076-1082`→`:1155`: an unrecognized
+    token resolves `$false` → live firmware write. Only bites a direct API caller (the view sends canonical values),
+    but a destructive-mode selector should refuse on ambiguity. Fix: strict `dry_run` parse (unknown → abort). _(loop-57 dive)_
+65. **secureboot scan summary drops `Cancelled` rows** (P3) — `:1051-1057` tallies only the seven named verdicts;
+    operator-cancelled hosts (`:1038`) are excluded so `counts` ≠ `total`. Not false-clean (nothing marked
+    compliant). Fix: add `Cancelled` to the tally list. _(loop-57 dive)_
+66. **secureboot icacls lock on the password payload is best-effort** (P3) — `:601` `icacls ... 2>$null | Out-Null`;
+    on failure the plaintext BIOS password sits on `C$\Windows\Temp` with inherited ACLs for ~90s (self-delete +
+    finally are backstops). Hardening only. Fix: check icacls exit, abort host on failure. _(loop-57 dive)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -1070,6 +1088,21 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   **31** green. C2 (open-cshare "Opened") + S1 (run-script "didn't throw") left **by-design** (dive-judged; S1
   fix would ADD coercion risk). Pester **1431→1433** green. **remoteadmin dive complete.** SECRET parity: +remoteadmin
   fan-out `-Last 1` result-binding.
+- **Loop 57 (DONE 2026-07-21):** self-review of loop-56 → GREEN. Workstream = fresh **Fable deep-dive on secureboot**
+  (last un-dived acting/hardening tool: enable Secure Boot via SYSTEM scheduled task + read-only scan). **Core is
+  fail-closed** — no P1: task Register/Start failure → Error, vendor null/nonzero → error, Unknown a hard stop,
+  wrong-box hard-abort before the payload drop, scan scores every failure away from compliant, no coercions, full
+  safety stack (confirm-word + admin-gate + 50-host refusal + allow-list + self-guard + wrong-box + in-payload
+  brick-safety). Acted on **P2 stale-result replay**: the enable worker polled a result JSON named from the
+  **hostname alone** (`SecureBoot_<host>.json`, `:505`) and pre-deleted a stale prior-run file best-effort/unverified
+  (`:594`); if that delete ever silently failed, the first-file-with-`SetResult` poll (`:627`) could replay an old
+  `SetResult=0` JSON as this run's Success. **FIXED** (secureboot **1.6.1→1.6.2**): name the result file with the
+  already-per-run-unique `$taskName` (`SBE_<random>`, which already names `$scriptFile`) → cross-run collision
+  impossible, poll can only read this run's own result. `Secureboot.Scan.Tests.ps1` +3 (static analysis; exact pin
+  moved here, ConfirmWord floored). set **35** green. 5 P3s ranked **items 62–66** (AlreadyPending re-books Success,
+  staged-vs-enabled wording, `dry_run` fail-open, Cancelled tally gap, best-effort icacls) — none a hard firmware
+  false-clean. Pester **1433→1436** green. **secureboot dive complete.** SECRET parity: +secureboot per-run
+  `$taskName`-based result filename.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
