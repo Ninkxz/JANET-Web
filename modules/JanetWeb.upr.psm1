@@ -32,8 +32,8 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.3'
-        summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE/Store. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
+        version  = '1.2.4'
+        summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
                 id='report-findings'; label='Report Findings'; kind='table'; destructive=$false
@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
             @{
                 id='report-uninstall'; label='Uninstall Matched'; kind='stream-table'; destructive=$true
                 confirm='Uninstall the PROVEN-EOL products flagged by this report from the affected hosts? With "Dry run" UNCHECKED this permanently removes software. Review/Tanium matches are never removed. Proceed?'
-                description='Same host-centric scan as Scan Hosts, but for each candidate whose decision is Uninstall (proven EOL) and is NOT Tanium, run the per-product uninstall handler (M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE/Store). Review and Tanium matches are reported but never removed. Dry run plans only.'
+                description='Same host-centric scan as Scan Hosts, but for each candidate whose decision is Uninstall (proven EOL) and is NOT Tanium, run the per-product uninstall handler (M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE). Review and Tanium matches are reported but never removed. Dry run plans only.'
                 columns=@('Host','Plugin','Product','Version','Decision','Result')
                 inputs=@(
                     @{ name='report'; label='Tenable report (CSV or PDF)'; type='file'; filter='Tenable report (*.csv;*.pdf)|*.csv;*.pdf|All files (*.*)|*.*'; required=$true },
@@ -1048,17 +1048,22 @@ $UprWorkerBlock = {
                                         ## 32/64-bit siblings, so a family-wide DisplayName re-enumeration
                                         ## here removed products the operator never checked. The candidate's
                                         ## own registry key (PSChildName) / uninstall strings carry its GUID.
+                                        # loop64: extract GUIDs with the STRICT hex-GUID pattern (matching
+                                        # Get-SafeUninstallPlan), NOT the loose \{[^\}]+\} which allowed a crafted
+                                        # registry key/UninstallString to smuggle spaces/switches inside the braces;
+                                        # and pass each GUID as a DISCRETE Start-Process arg so it can't inject extra
+                                        # msiexec switches even if a bad value slipped through.
                                         $adobeGuids = @()
-                                        if ($childName -match '^\{[^\}]+\}$') { $adobeGuids += $childName }
+                                        if ($childName -match '^\{[0-9A-Fa-f\-]{8,}\}$') { $adobeGuids += $childName }
                                         foreach ($hive in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
                                             $item = Get-ItemProperty (Join-Path $hive $childName) -EA SilentlyContinue
-                                            if ($item -and $item.UninstallString -match '(\{[^\}]+\})') { $adobeGuids += $Matches[1] }
+                                            if ($item -and $item.UninstallString -match '(\{[0-9A-Fa-f\-]{8,}\})') { $adobeGuids += $Matches[1] }
                                         }
-                                        if ($unStr -match '(\{[^\}]+\})') { $adobeGuids += $Matches[1] }
+                                        if ($unStr -match '(\{[0-9A-Fa-f\-]{8,}\})') { $adobeGuids += $Matches[1] }
                                         $adobeGuids = @($adobeGuids | Select-Object -Unique)
                                         if ($adobeGuids.Count -eq 0) { return "FAIL (Adobe -- no MSI GUID resolvable for the selected install '$name' [$childName]; nothing removed)" }
                                         foreach ($guid in $adobeGuids) {
-                                            $proc = Start-Process msiexec -ArgumentList "/x $guid /qn /norestart" -Wait -PassThru -NoNewWindow
+                                            $proc = Start-Process msiexec -ArgumentList @('/x', $guid, '/qn', '/norestart') -Wait -PassThru -NoNewWindow
                                             if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { $removed = $true }
                                         }
                                     } finally {
@@ -1080,16 +1085,20 @@ $UprWorkerBlock = {
                                     return "FAIL (Adobe -- $($steps -join ' | '))"
                                 }
                                 ## === Generic handlers ===
-                                if ($type -eq 'Store') {
-                                    Get-AppxPackage -AllUsers -Name "*$name*" -EA SilentlyContinue | Remove-AppxPackage -AllUsers -EA Stop
-                                    return "OK (Store app removed)"
-                                } elseif ($type -eq 'MSI') {
-                                    $guid = $unStr -replace '.*(\{[^\}]+\}).*', '$1'
-                                    if ($guid -match '^\{') {
-                                        $proc = Start-Process msiexec -ArgumentList "/x $guid /qn /norestart" -Wait -PassThru -NoNewWindow
-                                        if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { return "OK (MSI exit $($proc.ExitCode))" }
-                                        else { return "WARN (MSI exit $($proc.ExitCode))" }
-                                    } else { return "FAIL: Could not extract MSI GUID" }
+                                # loop64: the old Store branch (Get-AppxPackage | Remove-AppxPackage -> unconditional
+                                # "OK") was a false-clean landmine - a no-match pipeline threw nothing and returned OK
+                                # with nothing removed, and the registry re-verify can't see Appx. It was dead ($type is
+                                # only ever 'MSI'/'EXE'), so it's removed; a future 'Store' type now fail-closes down the
+                                # EXE path (no UninstallString -> Reject -> FAIL) rather than falsely reporting removed.
+                                if ($type -eq 'MSI') {
+                                    # loop64: route the MSI removal through the SAME injection-safe plan the EXE/Quiet
+                                    # paths use (Get-SafeUninstallPlan rebuilds /x {GUID} from a STRICT hex-GUID as
+                                    # discrete arg tokens). The old path interpolated a registry-derived GUID into a
+                                    # single ArgumentList string, so a crafted UninstallString GUID (spaces/switches
+                                    # before the first '}') could inject extra msiexec switches under the operator cred.
+                                    $u = Invoke-SafeUninstall -UnStr $unStr
+                                    if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010)) { return "OK (MSI exit $($u.ExitCode))" }
+                                    else { return "FAIL (MSI $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                 } else {
                                     ## Exit-code gate (mirrors the MSI handler): treat ONLY 0/3010 as
                                     ## success. A null process (Start-Process failed) or any other exit

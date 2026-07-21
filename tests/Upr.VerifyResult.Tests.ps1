@@ -37,9 +37,42 @@ Describe 'Get-UprVerifyResult - the verify fails CLOSED, never reads empty-as-re
     }
 }
 
-Describe 'upr - manifest exact version pin (newest bump = loop-35 verify fail-close)' {
-    It 'upr is at v1.2.3' {
+Describe 'upr - manifest exact version pin (newest bump = loop-64 generic-handler hardening)' {
+    It 'upr is at v1.2.4' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.2.3'
+        [string]$mani.version | Should Be '1.2.4'
+    }
+}
+
+# loop64: harden the generic uninstall handlers. (1) The MSI handler interpolated a registry-derived
+# GUID into a single msiexec ArgumentList string - a crafted UninstallString GUID could inject extra
+# switches under the operator credential; it now routes through the injection-safe Invoke-SafeUninstall /
+# Get-SafeUninstallPlan (proven in Upr.UninstallStringParse.Tests). (2) The dead Store branch returned an
+# unconditional "OK (Store app removed)" that a no-match pipeline never earned and the registry re-verify
+# could not catch - a false-clean landmine; removed, so a future 'Store' type fail-closes via the EXE path.
+# Static analysis - both handlers live inside the remote WinRM uninstall scriptblock.
+Describe 'upr 1.2.4 - generic uninstall handlers: MSI injection-safe + no Store false-clean' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+
+    It 'the MSI handler routes through the injection-safe Invoke-SafeUninstall' {
+        $idxMsi  = $src.IndexOf("if (`$type -eq 'MSI')")
+        $idxSafe = if ($idxMsi -ge 0) { $src.IndexOf('Invoke-SafeUninstall -UnStr $unStr', $idxMsi) } else { -1 }
+        $idxElse = if ($idxMsi -ge 0) { $src.IndexOf('} else {', $idxMsi) } else { -1 }
+        ($idxMsi -ge 0)  | Should Be $true
+        # the MSI branch reaches an Invoke-SafeUninstall BEFORE its closing '} else {' (the EXE branch)
+        ($idxSafe -gt $idxMsi -and $idxSafe -lt $idxElse) | Should Be $true
+    }
+    It 'the old raw msiexec ArgumentList GUID interpolation is gone' {
+        ($src -match 'Start-Process msiexec -ArgumentList "/x') | Should Be $false
+    }
+    It 'the dead Store unconditional-OK branch is gone (no false-clean landmine)' {
+        ($src -match 'OK \(Store app removed\)') | Should Be $false
+        ($src -match "\`$type -eq 'Store'")      | Should Be $false
+    }
+    It 'the manifest no longer advertises a Store handler' {
+        ($mani.summary -match 'Store') | Should Be $false
+        $ru = @($mani.actions | Where-Object { $_.id -eq 'report-uninstall' })[0]
+        ($ru.description -match 'Store') | Should Be $false
     }
 }
