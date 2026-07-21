@@ -275,6 +275,20 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
     _(F4/F5 from the dive = SPECULATIVE structural gaps — blank-thumbprint escapes re-verify; zero-item bundle →
     ALREADY — no realistic trigger, defensive-only, not separately ranked.)_
 
+_(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify before acting. adto.psm1 lines.)_
+60. **adto scan reads a null/unreadable userAccountControl as COMPLIANT** (MED-HIGH) — `:370` `ConvertTo-AdToObject`
+    uses `[int]("0"+[string](& $get 'useraccountcontrol'))`; an ACL-hidden UAC absent from the DirectorySearcher
+    result folds to `Uac=0` → `Test-AdToCompliance` (`:180-185`) sees no DONT_EXPIRE / PASSWD_NOTREQD /
+    reversible-encryption → **COMPLIANT** for a service account that live has PASSWD_NOTREQD. (null lastLogon/recert
+    DO fail closed — UAC is the one attribute where unreadable = no-bad-bits.) Same root as the loop-53 F1 fix,
+    different function. Fix: a null UAC → a distinct non-COMPLIANT/unknown verdict.
+61. **adto baseline overlay silently disables a rule on a typo** (MED) — `:84-92` `Get-AdToBaseline` merge: an
+    overlay rule omitting `enabled` gets `[bool]$null=$false`, one omitting `appliesTo` gets `@($null)` (never
+    fires), so a typo in the operator-editable `adto-baseline.json` turns a rule OFF with no trace → every
+    violating object scans COMPLIANT. (Whole-file parse failure falls back + notes it; the per-rule silent-off
+    doesn't.) Fix: default a missing `enabled` to true / warn, log disabled overlay rules. _(F4/F5 = speculative
+    low: adminCount null-read guard-bypass `:513`, admin-pattern-miss categorization `:118`; not ranked.)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -1013,6 +1027,19 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
   module-less branch); VerifyClean exact pin → floor. wpt set **16** green. Pester **1414→1420** green.
   **Remaining wpt:** item43 (Java SC mtime, HIGH — the last non-trivial one), 47 (MED), 48–50 (LOW), 51
   (trigger≠patched, HIGH). SECRET parity: +wpt Adobe partial → Attention.
+- **Loop 53 (DONE 2026-07-21):** Fable-inline synthesis + one Fable deep-dive worker on **adto** (AD-TO
+  compliance, 42KB, un-loop-era-dived). Self-review of loop-52 → **GREEN**. The dive confirmed the **write** paths
+  are genuinely fail-closed (the fix's FIXED verdict re-binds a fresh DirectoryEntry and compares the re-read UAC
+  to the computed target, not "write didn't throw"; validate-iao re-reads the stamp; audit maps only FIXED/
+  VALIDATED → Success). The false-cleans are read-side, one `[int]$null → 0` coercion. **Closed F1 (HIGH):** the
+  fix path read UAC via `[int]("0"+[string]…Value)`, so a null/unreadable UAC (a non-account object, or an
+  ACL-denied read) coerced to `$cur=0` → a clear-op rule computed `$fx.Uac=0` → row **NO CHANGE "already
+  compliant"** (bits never read); worse, a set-op rule with `$cur=0` **wrote** a corrupting full UAC (wiping
+  NORMAL_ACCOUNT) before the re-read caught it. **FIXED** (adto **0.2.3→0.2.4**): a `$null` raw UAC → **FAILED**
+  + Failure audit BEFORE any computation/write — closing the false verdict AND the corrupting write. `AdTo.
+  WriteGuards.Tests.ps1` +3. adto set **12** green. Pester **1420→1423** green. **Ranked items 60/61** (F2
+  scan-side same coercion → COMPLIANT MED-HIGH, F3 overlay silent-disable MED; F4/F5 speculative). SECRET parity:
+  +adto null-UAC fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
