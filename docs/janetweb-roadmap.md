@@ -348,9 +348,10 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     write actions (apply + bulk-*) now refuse fail-closed BEFORE any DHCP session unless the operator typed `APPLY`
     (case-insensitive), and refuse when the target resolves to the box running JANET (`Get-DhcpLocalIdentity`/
     `Test-DhcpHostIsSelf`, mirroring pkginstall). `connect`/`load` stay ungated. +6 tests. _(loop-65 dive)_
-76. **dhcp `dryRun` fails OPEN on unrecognized values** (P2) — `$asBool` only recognizes `1|true|yes|on`; anything else
-    (`"TRUE "`, `"checked"`, `"dry"`) → `$false` → a live destructive write (the secureboot loop-58 class). Fix: strict
-    fail-closed parse (`Get-SbeDryRunSafe`-style — unknown stays dry / aborts). _(loop-65 dive)_
+76. ~~**dhcp `dryRun` fails OPEN on unrecognized values**~~ **CLOSED loop 67** (dhcp 1.1.11): new
+    `Get-DhcpDryRunSafe` at both dryRun sites — the live path requires an absent value (manifest default) or an
+    explicit recognized false; any present-but-unrecognized token stays DRY. `$asBool` left untouched (removeOption
+    still uses it, where unrecognized→false is safe). +5 behavioral tests. _(loop-65 dive)_
 77. **dhcp non-numeric `optionId` silently retargets option 6 (DNS)** (P2) — an unparseable optionId warns + proceeds
     with default 6 on a destructive action, so a typo live-replaces the scope's DNS-servers option. Fix: abort on
     unparseable optionId for destructive actions. _(loop-65 dive)_
@@ -1255,6 +1256,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   moved here, ReadError Describe floored). **loop-37 lesson applied up front** — grepped every test; FixVerify/
   FixVerify3 drive dhcp sub-functions directly (below the gate), unaffected; ran all 3 files = **54** green. Remaining
   dhcp items 76-79. Pester **1470→1476** green. SECRET parity: +dhcp Test-DhcpHostIsSelf self-guard + APPLY confirm-word.
+- **Loop 67 (DONE 2026-07-21):** self-review of loop-66 → GREEN. Workstream = close **item 76** (dhcp dryRun
+  fail-open, secureboot loop-58 class): the dryRun selector on the destructive write actions used the shared `$asBool`,
+  which resolves any unrecognized token to `$false` → a LIVE write, so a typo (`'TRUE '`, `'checked'`, `'dry'`)
+  silently wrote to a live DHCP server. **FIXED** (dhcp **1.1.10→1.1.11**): new module function `Get-DhcpDryRunSafe`
+  (mirroring `Get-SbeDryRunSafe`) at both dryRun sites — live only on an absent value (manifest default) or an
+  explicit recognized false; any present-but-unrecognized token stays DRY. `$asBool` untouched (removeOption still
+  uses it — false sibling, fixed the sites not the helper). `Dhcp.IpValidation.Tests.ps1` +5 behavioral (exact pin
+  moved here, confirm/self-guard Describe floored). Ran all 3 dhcp-touching files = **59** green. Remaining dhcp items
+  77-79 (78 = apply null-result/no post-write verify, the last real false-clean). Pester **1476→1481** green. SECRET
+  parity: +dhcp `Get-DhcpDryRunSafe` fail-closed dryRun parse.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
