@@ -316,11 +316,10 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     `$global:LASTEXITCODE=$null` and catch a null exit as `Failed` ("returned no exit code ... cannot confirm the
     install ran") BEFORE the success-exit check — a deploy script that returns without `exit`/`Exit-Script` is no
     longer a false Success/VulnPatched. +3 tests (static analysis, incl. an ordering assert). _(loop-60 dive)_
-69. **pkginstall has NO confirm-word on either destructive deploy action** (P2, HIGH) — the *only* destructive tool in
-    the suite lacking one (adto FIX/VALIDATE, secureboot ENABLE, c2c, certdeploy, winrmbridge all have it); armed by
-    one un-typed button click once an admin session exists. Other layers (admin-gate/self-guard/wrong-box/IPv4)
-    present — a missing layer, not an unguarded path. Fix: module `if ($Params['confirm'] -ne 'DEPLOY') { refuse }` +
-    `confirmWord` in `pkginstall.view.js`. _(loop-60 dive)_
+69. ~~**pkginstall has NO confirm-word on either destructive deploy action**~~ **CLOSED loop 62** (pkginstall 2.5.11):
+    fail-closed module gate `if ([string]$Params['confirm'] -ne 'DEPLOY') { refuse }` at the shared dispatch (before
+    target parsing / self-guard / fan-out) + a required `confirm` "Type DEPLOY to arm" input on both deploy actions
+    (adto pattern, no JS). Case-insensitive like adto's `-ne 'FIX'`. +5 tests. _(loop-60 dive)_
 70. **pkginstall `ConvertTo-JanetMsiList` silent partial drop** (P3) — `:141-154` invalid entries dropped with no
     warn; a partial list then books "All N succeeded", and an all-dropped list falls through to the install-every-
     `*.msi` fallback (scope escalation). Fix: count rejected entries, warn/refuse when a non-empty list filtered
@@ -1165,6 +1164,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   `exit` and relying on the old pre-seed `0` — the exact bug fixed. `Invoke-Psadt` updated to append a real
   `exit 0` (as PSADT `Exit-Script` does) + a behavioral no-exit → Failed test added (commit `26f82ecb7`). Pester
   **1449→1453** green. SECRET parity: +pkginstall PSADT `$LASTEXITCODE=$null` pre-seed + null-exit → Failed.
+- **Loop 62 (DONE 2026-07-21):** self-review of loop-61 → GREEN. Workstream = close **item 69**, a stated-hard-rule
+  gap: pkginstall was the ONLY destructive tool with no typed confirm-word (fleet-wide software install armed by one
+  click once an admin session existed). **FIXED** (pkginstall **2.5.10→2.5.11**): fail-closed module gate at the
+  shared `Invoke-JanetToolAction` dispatch — `if ([string]$Params['confirm'] -ne 'DEPLOY') { refuse rejected }` before
+  any target parsing / self-guard / fan-out — plus a required `confirm` "Type DEPLOY to arm" input on both deploy
+  actions (adto input+gate pattern, no JS). Case-insensitive, matching adto's `-ne 'FIX'`. `PkgInstall.SelfGuard.
+  Tests.ps1` +5 (blank/wrong confirm → rejected; DEPLOY → reaches self-guard; `Invoke-Pkg` injects the word so
+  existing self-guard tests still reach the guard; exact pin moved here, PSADT Describe floored). subset **59** green.
+  pkginstall now has the full destructive guard stack (confirm-word + self-guard + wrong-box + IPv4); remaining item
+  70 (MSI-list silent drop, P3). Pester **1453→1458** green. SECRET parity: +pkginstall DEPLOY confirm-word gate.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
