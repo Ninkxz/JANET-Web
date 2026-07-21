@@ -21,11 +21,14 @@
 #  + a custom progress track, coloured per-host by Status from the row stream.
 # =============================================================================
 
+# loop76: shared error->actionable-hint mapper (why a host failed + how to fix it).
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.4'
+        version  = '1.6.5'
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -1264,6 +1267,11 @@ function Invoke-JanetToolAction {
                     elseif ($isUnknown) { $skipCount++ }
                     elseif (-not $isDryR) { $failCount++ }
 
+                    # loop76 (informative failures): on a real enable failure (not ok/skip/unknown/dry-run),
+                    # translate the raw error into an actionable troubleshooting hint - carried in a Hint row
+                    # field + appended to the err log; the raw error is preserved.
+                    $hint = if ((-not $isOk) -and (-not $isSkip) -and (-not $isUnknown) -and (-not $isDryR) -and $res.Error) { Get-JanetTroubleshootHint -Message ([string]$res.Error) -Server ([string]$res.Computer) } else { '' }
+
                     $row = @{
                         Host         = $res.Computer
                         Status       = $status
@@ -1272,13 +1280,14 @@ function Invoke-JanetToolAction {
                         After        = [string]$res.After
                         SetResult    = [string]$res.SetResult
                         Error        = [string]$res.Error
+                        Hint         = [string]$hint
                     }
                     [void]$rows.Add($row)
                     & $send (@{ type='row' } + $row)
 
                     $lvl = if ($isOk -or $isSkip -or $isDryR -or $isUnknown) { '' } else { 'err' }
                     $detailText = if ($res.Error) { [string]$res.Error } else { "$status ($($res.Manufacturer))" }
-                    & $send @{ type='log'; level=$lvl; text=("{0}: {1} - {2}" -f $res.Computer, $status, $detailText) }
+                    & $send @{ type='log'; level=$lvl; text=(("{0}: {1} - {2}" -f $res.Computer, $status, $detailText) + $(if ($hint) { ' | FIX: ' + $hint } else { '' })) }
 
                     # JANET audit. Enabling Secure Boot is a security-state change ->
                     # VulnPatched. Success + Skipped (already-enabled) both count;

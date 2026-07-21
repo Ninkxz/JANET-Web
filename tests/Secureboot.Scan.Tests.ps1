@@ -166,8 +166,8 @@ Describe 'secureboot 1.6.4 - AlreadyPending resolves to Skipped, not Success (no
     $man = & $script:SbeMod { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
 
-    It 'manifest version is exactly 1.6.4 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.6.4'
+    It 'manifest version is at least 1.6.4 (floor; newest exact pin = loop76 hint Describe, v1.6.5)' {
+        ([version][string]$man.version -ge [version]'1.6.4') | Should Be $true
     }
     It 'the resolvedStatus chain maps SetResult AlreadyPending to Skipped' {
         ($src -match "elseif\s*\(\s*\`$result\.SetResult\s*-eq\s*'AlreadyPending'\s*\)\s*\{\s*'Skipped'\s*\}") | Should Be $true
@@ -175,5 +175,28 @@ Describe 'secureboot 1.6.4 - AlreadyPending resolves to Skipped, not Success (no
     It 'a non-Success (incl. Skipped) row books itemCount 0 - so a Skipped AlreadyPending is not a false patch' {
         ($src -match '\$itemCount\s*=\s*if\s*\(\s*\$isOk\s*\)\s*\{\s*1\s*\}\s*else\s*\{\s*0\s*\}') | Should Be $true
         ($src -match '\$isSkip\s*=\s*\(\s*\$status\s*-eq\s*''Skipped''\s*\)') | Should Be $true
+    }
+}
+
+# loop76 (informative-failures theme): the secureboot ENABLE (destructive) harvest now, on a real
+# enable failure (not ok/skip/unknown/dry-run), runs the raw error through Get-JanetTroubleshootHint
+# and attaches the hint to a Hint row field + appends it to the err log (FIX:), raw error preserved.
+# Static analysis (the harvest runs inside the fan-out over a real RunspacePool).
+Describe 'secureboot 1.6.5 - enable harvest attaches a troubleshooting hint to a failed host' {
+    $man = & $script:SbeMod { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
+
+    It 'manifest version is exactly 1.6.5 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.6.5'
+    }
+    It 'secureboot imports the shared troubleshoot engine' {
+        ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
+    }
+    It 'the enable harvest computes a hint only for a real failure and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\(-not \$isOk\)\s*-and\s*\(-not \$isSkip\)\s*-and\s*\(-not \$isUnknown\)\s*-and\s*\(-not \$isDryR\)\s*-and\s*\$res\.Error\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        ($src -match 'Error        = \[string\]\$res\.Error\s*\r?\n\s*Hint         = \[string\]\$hint') | Should Be $true
+    }
+    It 'the err log appends the FIX hint when one exists' {
+        ($src -match "if \(\`$hint\) \{ ' \| FIX: ' \+ \`$hint \}") | Should Be $true
     }
 }
