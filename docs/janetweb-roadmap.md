@@ -1333,6 +1333,15 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   only a warn before). **Purely additive** (ok hosts untouched; per-candidate uninstall failures deferred). upr
   **1.2.4→1.2.5**; `Upr.VerifyResult.Tests.ps1` +4 (static analysis; exact pin moved here, loop-64 Describe floored).
   **Ran full upr suite (44)** = green. Pester **~1508→~1512** green. Next: dhcp. SECRET parity: +upr harvest hint wire.
+- **Loop 75 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-74 → GREEN. Workstream = **upgrade
+  dhcp** (6th tool) — a special case: dhcp already had a **thin, auth-only** `Get-JanetWsmanAuthHint` in its 5 failure
+  catches (connect/load/apply/bulk), which returned nothing for DNS/RPC/SMB/timeout. **FIXED** (dhcp **1.1.13→1.1.14**):
+  retired the thin local function and swapped all 5 call sites to the shared `Get-JanetTroubleshootHint` (strict
+  superset, drop-in `-Message`/`-Server`), so every dhcp failure gets the full guidance — and consolidated dhcp onto
+  the one fleet engine (one fewer ad-hoc mapper). `Dhcp.IpValidation.Tests.ps1` +4 (static analysis: imports engine,
+  ≥5 shared-hint sites, dead function + calls gone; exact pin moved here, loop-69 Describe floored). **Ran dhcp +
+  FixVerify + FixVerify3 (68)** = green. Pester **~1512→~1516** green. Next: secureboot. SECRET parity: +dhcp swap to
+  shared hint.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
