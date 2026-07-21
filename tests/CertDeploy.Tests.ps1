@@ -326,8 +326,43 @@ Describe 'CertDeploy check - an undeserialized/empty want-set fails closed to Er
     }
 }
 
-Describe 'certdeploy - manifest exact version pin (newest bump = loop-48 want-set-empty fail-close)' {
-    It 'certdeploy is at v1.4.1' {
-        (& $cm { Get-JanetToolManifest }).version | Should Be '1.4.1'
+Describe 'certdeploy - manifest version floor (want-set-empty fail-close shipped in 1.4.1; exact pin migrated)' {
+    It 'certdeploy is at or past v1.4.1' {
+        ([version][string](& $cm { Get-JanetToolManifest }).version -ge [version]'1.4.1') | Should Be $true
+    }
+}
+
+# loop49 (F2): a wanted trust anchor REFUSED by the non-CA guard (e.g. an X.509 v1 root, no
+# BasicConstraints) is absent from the store, yet the classifier ignored the Rejected count and read
+# ALREADY ("all present") or INSTALLED (audit Success). Now Get-CertDeployResultToken emits REJECTED
+# (out of the clean bucket; row -> REJECTED (non-CA), audit -> Failure), even when other certs added.
+Describe 'CertDeploy deploy - a guard-rejected (non-CA) absent anchor is REJECTED, not a clean ALREADY/INSTALLED (loop49 F2)' {
+    It 'Rejected > 0 with nothing added -> REJECTED (not ALREADY)' {
+        (& $cm { Get-CertDeployResultToken @{ Added=0; Already=2; Total=3; FailDetail=''; NotVerified=@(); Rejected=1 } }) | Should Be 'REJECTED'
+    }
+    It 'Rejected > 0 alongside real adds -> REJECTED (not a clean INSTALLED)' {
+        (& $cm { Get-CertDeployResultToken @{ Added=2; Already=0; Total=3; FailDetail=''; NotVerified=@(); Rejected=1 } }) | Should Be 'REJECTED'
+    }
+    It 'no rejections -> the honest tokens are unchanged (INSTALLED / ALREADY / NOT VERIFIED / FAIL)' {
+        (& $cm { Get-CertDeployResultToken @{ Added=1; Already=0; Total=1; FailDetail=''; NotVerified=@(); Rejected=0 } }) | Should Be 'INSTALLED'
+        (& $cm { Get-CertDeployResultToken @{ Added=0; Already=1; Total=1; FailDetail=''; NotVerified=@(); Rejected=0 } }) | Should Be 'ALREADY'
+        (& $cm { Get-CertDeployResultToken @{ Added=1; Already=0; Total=1; FailDetail=''; NotVerified=@('AABB'); Rejected=1 } }) | Should Be 'NOT VERIFIED'
+        (& $cm { Get-CertDeployResultToken @{ Added=0; Already=0; Total=1; FailDetail='boom'; NotVerified=@(); Rejected=1 } }) | Should Be 'FAIL'
+    }
+}
+
+Describe 'CertDeploy deploy - the REJECTED token maps to a non-clean row Status + a Failure audit (static)' {
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Raw
+    It "the token switch maps 'REJECTED' -> a REJECTED (non-CA) row Status" {
+        ($src -match "'REJECTED'\s*\{[^}]*'REJECTED \(non-CA\)'") | Should Be $true
+    }
+    It "the audit default (Failure) catches 'REJECTED (non-CA)' - it is NOT in the Success/Skipped list" {
+        ($src -match "'REJECTED \(non-CA\)' \{'Success'\}") | Should Be $false
+    }
+}
+
+Describe 'certdeploy - manifest exact version pin (newest bump = loop-49 rejected-anchor honesty)' {
+    It 'certdeploy is at v1.4.2' {
+        (& $cm { Get-JanetToolManifest }).version | Should Be '1.4.2'
     }
 }

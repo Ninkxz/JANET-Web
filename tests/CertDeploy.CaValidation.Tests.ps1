@@ -125,12 +125,14 @@ Describe 'CertDeploy Add-CertDeployBundleToStores - trust-anchor guard (Root/CA 
         $r.StoreCount   | Should Be 1                      # store holds ONLY the CA
         $r.StoreHasLeaf | Should Be $false                 # the leaf never landed
         $r.RejectDetail | Should Match 'not a CA certificate'
-        $r.Token        | Should Be 'INSTALLED'
+        # loop49 (F2): a wanted anchor REFUSED and absent makes the deploy not "all present" - REJECTED,
+        # not the old INSTALLED (which read a clean VulnPatched Success while the leaf stayed absent).
+        $r.Token        | Should Be 'REJECTED'
         (@($r.AddedCerts) -join '; ') | Should Match ([regex]::Escape($ca.Thumbprint))
         (@($r.AddedCerts) -join '; ') | Should Not Match ([regex]::Escape($leaf.Thumbprint))
     }
 
-    It 'anchor store (CA/Intermediate): a non-CA leaf is REJECTED, nothing trusted (Token ALREADY)' {
+    It 'anchor store (CA/Intermediate): a non-CA leaf is REJECTED, nothing trusted (Token REJECTED, was ALREADY)' {
         $leaf = New-TestLeafCert
         $r = & $cm {
             param($leafTp, $leafB64, $openerSrc)
@@ -144,7 +146,8 @@ Describe 'CertDeploy Add-CertDeployBundleToStores - trust-anchor guard (Root/CA 
         $r.Added    | Should Be 0
         $r.Rejected | Should Be 1
         $r.Count    | Should Be 0        # nothing landed in the CA anchor store
-        $r.Token    | Should Be 'ALREADY'
+        # loop49 (F2): the refused-and-absent anchor is REJECTED, not the old ALREADY ("all present").
+        $r.Token    | Should Be 'REJECTED'
     }
 
     It 'a real CA cert into an anchor store is ACCEPTED (guard is NON-BREAKING for legit CAs)' {

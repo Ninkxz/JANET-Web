@@ -46,7 +46,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.4.1'
+        version  = '1.4.2'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -428,6 +428,11 @@ function Get-CertDeployResultToken {
     $nv = @()
     try { $nv = @($AddResult.NotVerified) | Where-Object { $_ } } catch { $nv = @() }
     if ($nv.Count -gt 0)               { return 'NOT VERIFIED' }
+    # loop49 (F2): a wanted anchor REFUSED by the trust-anchor guard (non-CA cert destined for Root/CA)
+    # is absent from the store - the deploy did NOT achieve "all present", so it must not read
+    # INSTALLED / ALREADY (a clean/Skipped audit). REJECTED is out of the clean bucket (row -> REJECTED
+    # (non-CA), audit -> Failure), even if other certs added successfully this session.
+    if ([int]$AddResult.Rejected -gt 0) { return 'REJECTED' }
     if ([int]$AddResult.Added -gt 0)   { return 'INSTALLED' }
     return 'ALREADY'
 }
@@ -1181,6 +1186,7 @@ $script:CertDeployDeployBlock = {
         'INSTALLED'    { $r.Status = 'ROOTS INSTALLED';       $r.Detail = "added $($ir.Added) of $($ir.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         'ALREADY'      { $r.Status = 'ROOTS ALREADY PRESENT'; $r.Detail = "all $($ir.Total) already present across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         'NOT VERIFIED' { $r.Status = 'NOT VERIFIED';          $r.Detail = "added $($ir.Added) of $($ir.Total) but $(@($ir.NotVerified).Count) absent on re-read - a reconciler/policy may be stripping in-session" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        'REJECTED'     { $r.Status = 'REJECTED (non-CA)';     $r.Detail = "refused $([int]$ir.Rejected) non-CA cert(s) destined for a trust-anchor store (ABSENT, NOT installed); added $($ir.Added) of $($ir.Total). " + ([string]$ir.RejectDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         default        { $r.Status = 'FAILED';                $r.Detail = "added $($ir.Added) of $($ir.Total); errors: " + ([string]$ir.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
     }
     # Surface exactly WHICH CAs were trusted (Subject CN + thumbprint) so the operator can
@@ -1339,6 +1345,7 @@ function Invoke-CertDeployDeployAction {
         elseif ($row.Status -eq 'OFFLINE')               { $lvl = 'warn' }
         elseif ($row.Status -eq 'SKIPPED')               { $lvl = 'warn' }
         elseif ($row.Status -eq 'NOT VERIFIED')          { $lvl = 'error' }
+        elseif ($row.Status -eq 'REJECTED (non-CA)')     { $lvl = 'error' }
         elseif ($row.Status -eq 'FAILED')                { $lvl = 'error' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$res.Host) : $([string]$res.Status) - $([string]$res.Detail)" }
     }
@@ -1396,9 +1403,10 @@ function Invoke-CertDeployDeployAction {
     $offline     = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
     $skipped     = @($rows | Where-Object { $_.Status -eq 'SKIPPED' }).Count
     $notVerified = @($rows | Where-Object { $_.Status -eq 'NOT VERIFIED' }).Count
-    & $send @{ type='log'; level='ok'; text="Cert Deploy done - INSTALLED: $installed, ALREADY PRESENT: $already, NOT VERIFIED: $notVerified, FAILED: $failed, OFFLINE: $offline, SKIPPED: $skipped." }
-    & $send @{ type='status'; text="Done. $installed installed, $already already-present, $notVerified not-verified, $failed failed of $($rows.Count) row(s)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; installed=$installed; already=$already; notVerified=$notVerified; failed=$failed; offline=$offline; skipped=$skipped; selfSkipped=$selfSkipped.Count; expiredCount=$expiredCount; expiredExcluded=$(if ($includeExpired) { 0 } else { $expiredCount }); source=$bundleSource } }
+    $rejected    = @($rows | Where-Object { $_.Status -eq 'REJECTED (non-CA)' }).Count
+    & $send @{ type='log'; level='ok'; text="Cert Deploy done - INSTALLED: $installed, ALREADY PRESENT: $already, NOT VERIFIED: $notVerified, REJECTED: $rejected, FAILED: $failed, OFFLINE: $offline, SKIPPED: $skipped." }
+    & $send @{ type='status'; text="Done. $installed installed, $already already-present, $notVerified not-verified, $rejected rejected, $failed failed of $($rows.Count) row(s)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; installed=$installed; already=$already; notVerified=$notVerified; rejected=$rejected; failed=$failed; offline=$offline; skipped=$skipped; selfSkipped=$selfSkipped.Count; expiredCount=$expiredCount; expiredExcluded=$(if ($includeExpired) { 0 } else { $expiredCount }); source=$bundleSource } }
 }
 
 # =============================================================================
