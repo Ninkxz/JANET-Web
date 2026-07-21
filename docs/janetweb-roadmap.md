@@ -87,11 +87,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     loop 26** (`Get-AcasVerifyRowStatus`, acas 1.11.7): the verify branch now prefixes UNCONFIRMED
     unless the probe confirms the host is current ([fresh]), so a [stale]/indeterminate host is amber
     and out of the PATCHED tally instead of counting as patched.
-19. **acas schedule-reboot books VulnPatched Success at schedule time** (loop-25 Fable deep-dive,
-    CONFIRMED) — `:2127` returns `OK (reboot scheduled)`, fan-out `:3314` audits `VulnPatched`, so the
-    Success/Runs-CSV row is booked while the reboot is 5 min out and abortable (`shutdown /a`; rc=1190
-    "already scheduled" also Success). `verify-post-reboot` exists and is honest — book VulnPatched
-    from THAT; audit scheduling as `RebootScheduled`/`TouchHost`.
+19. ~~acas schedule-reboot books VulnPatched Success at schedule time~~ — **CLOSED loop 28** (acas
+    1.11.9): schedule-reboot now audits `TouchHost` (scheduling a pending, abortable reboot is a touch,
+    not a confirmed patch); VulnPatched stays on the actual patch-install/update confirmations.
 20. **acas default-open classification of empty/foreign worker output** (loop-25 Fable deep-dive,
     SPECULATIVE) — empty EndInvoke / first-item output → `'OK (no output)'` (`:2464`); no reachable
     leak in shipped workers, but a future profile emitting stray output gets booked patched. Default
@@ -529,8 +527,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   `Test-WptKbNameMatch`) + inline `$kbMatch` mirror; null-rv fail-close (`$null -ne $rv -and`, null-safe
   message). No guard weakened; 180 acas + FixVerify2 + FixGuards green. `Acas.KbMatch.Tests.ps1` (11,
   mirrors wpt) + FixVerify2 acas NULL case (`-Rv -1` → FAIL, `ReturnValue=<null>`) + exact 1.11.8 pin
-  (VerifyRowStatus 1.11.7 exact → floor). Pester **1235→(close)** green. **acas↔wpt kb-install parity
+  (VerifyRowStatus 1.11.7 exact → floor). Pester **1235→1247** green. **acas↔wpt kb-install parity
   complete** (KB-match + null-rv + honest status). SECRET parity: +acas kb-install KB-match + null-rv.
+- **Loop 28 (DONE 2026-07-21):** Fable-inline. Self-review of loop-27 → **GREEN**. **Workstream: roadmap
+  item 19** (the LAST confirmed acas false-clean) → **CLOSED**. `schedule-reboot` fires `shutdown /r /t
+  300` (reboot 5 min out, abortable; rc=1190 "already scheduled" also OK) but booked a **VulnPatched
+  Success** audit at SCHEDULE time (`:3384`) — a false compliance record (inspector sees "patched" for a
+  merely-queued reboot); `verify-post-reboot` already audits TouchHost. **FIXED** (acas **1.11.8→1.11.9**):
+  demote schedule-reboot to `-AuditAction 'TouchHost'` (scheduling is a touch, not a patch); VulnPatched
+  stays on actual patch-install/update confirmations. One line, no guard weakened (self-guard, DNS
+  wrong-box, admin gate intact); 194 acas + guards + gate green. `Acas.RebootAudit.Tests.ps1` (5) isolates
+  the handler block: TouchHost not VulnPatched + verify-post-reboot stays TouchHost + exact 1.11.9 pin
+  (KbMatch 1.11.8 exact → floor). Pester **1247→(close)** green. **acas false-clean cluster COMPLETE**
+  (all confirmed items fixed; only spec item 20 remains). SECRET parity: +schedule-reboot TouchHost audit.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
