@@ -232,11 +232,11 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     VulnPatched for a verified install (or add a post-trigger verify).
 
 _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, re-verify before acting. c2c.psm1 lines.)_
-52. **c2c Monitoring fix books MONITORED off the service being Running, ignoring the Tanium-INSTALLED half**
-    (HIGH) — `:1444-1451`: FIXED requires only the re-read service Running; the scan's Monitoring PASS (`:751`)
-    requires installed AND running. An orphaned service without registered software (registry read failed /
-    half-uninstall) → MONITORED / host FIXED with Detail literally "Tanium not installed". Same class as the
-    loop-44 F1 fix. Fix: require the Tanium-installed check in the fix verdict too.
+52. ~~**c2c Monitoring fix books MONITORED off the service being Running, ignoring the Tanium-INSTALLED half**~~
+    **CLOSED loop 45** (c2c 1.15.6): new pure `Get-C2cMonitoringVerdict` + inline worker mirror — a
+    running-but-not-installed box (orphaned service / unreadable uninstall registry) is now NOT VERIFIED (never
+    FIXED), aligning the fix verdict with the scan's installed-AND-running PASS. `C2c.MonitoringVerdict.Tests.ps1`
+    (6).
 53. **c2c scan AntiMalware sig-age `[int]$null → 0` coercion can read READY** (MED) — `:815` (mirror fixer
     `:1893`): `[int]$mp.AntivirusSignatureAge * 24` coerces a null property to 0 (no throw), defeating the
     `$null -ne $ageHours` guard → sigFresh → PASS → READY on unreadable signature state. CONFIRMED path,
@@ -899,6 +899,18 @@ _(items 52–57: loop-44 c2c Fable deep-dive — worker-CONFIRMED unless noted, 
   **1363→1367** green. **Ranked items 52–57** (F5 Monitoring same-class HIGH, F3 sig-age coercion, F4/F7/F8 low,
   F9 speculative; F2/F6 refine the 22/24 tally/rollup cluster). SECRET parity: +c2c AntiMalware unavailable
   fail-close.
+- **Loop 45 (DONE 2026-07-21):** Fable-inline. Self-review of loop-44 → **GREEN**. **Closed c2c item52 (F5, HIGH)**
+  — the same partial-signal class as loop-44's F1: the Monitoring fixer booked FIXED/NOCHANGE (MONITORED) off the
+  client service being Running (`:1447-1451`), ignoring `$ti.Installed`, though the scan's Monitoring PASS
+  (`:751`) requires installed AND running. A running-but-not-installed box (orphaned service / unreadable
+  uninstall registry) read MONITORED / host FIXED / VulnPatched Success with Detail literally "Tanium not
+  installed", while the scan would still quarantine it. **FIXED** (c2c **1.15.5→1.15.6**): new pure
+  `Get-C2cMonitoringVerdict` (not-running→FAIL; running-but-not-installed→NOT VERIFIED; installed+running+change→
+  FIXED; else→NOCHANGE) + inline worker mirror — aligns the fix verdict with the scan (a MONITORED verdict now
+  genuinely means the box passes). `C2c.MonitoringVerdict.Tests.ps1` (NEW, 6, pure-helper branches + static
+  mirror assert); loop-44 exact pin → floor. c2c set **85** green. Pester **1367→1373** green. **Principle:** a
+  fix verdict must match the scan verdict, else FIXED doesn't mean "will pass" — the general lesson for the c2c
+  pillar tail. SECRET parity: +c2c Monitoring installed-half fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
