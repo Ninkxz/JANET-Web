@@ -163,8 +163,8 @@ Describe 'dhcp 1.1.10 - destructive actions gated by confirm-word + self-guard' 
 Describe 'dhcp 1.1.11 - dryRun parse fails closed (unrecognized token stays DRY)' {
     function DryOf { param($v) & $mod { param($x) Get-DhcpDryRunSafe $x } $v }
 
-    It 'manifest version is exactly 1.1.11 (newest bump holds the exact pin)' {
-        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.11'
+    It 'manifest version is at least 1.1.11 (floor; newest exact pin = loop68 null-result Describe, v1.1.12)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.11') | Should Be $true
     }
     It 'absent/empty -> live (the documented write default)' {
         (DryOf $null) | Should Be $false
@@ -180,5 +180,42 @@ Describe 'dhcp 1.1.11 - dryRun parse fails closed (unrecognized token stays DRY)
     }
     It 'a present-but-UNRECOGNIZED token stays DRY (the fix; $asBool would have gone live)' {
         foreach ($t in 'dry','checked','maybe','TRUE ','2','y') { (DryOf $t) | Should Be $true }
+    }
+}
+
+# loop68 (item78): Invoke-JanetDhcpApply read $applyCall.Result | Select -First 1; a NULL/empty result
+# (the remote apply confirmed neither a Set nor a Remove - an error that didn't throw, a lost pipeline)
+# made [bool]$null.Removed=$false -> Status='Changed' -> a clean VulnPatched/Success for a change that
+# could not be confirmed. Now a null result is a Failure. Behavioral: shim the two remote seams (pre-read
+# returns valid current state so the write is reached; the write returns an EMPTY result).
+Describe 'dhcp 1.1.12 - an apply that returns NO result is a Failure, not a false Changed/Success' {
+    It 'manifest version is exactly 1.1.12 (newest bump holds the exact pin)' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.12'
+    }
+    It 'apply write returns an empty result -> Status Error, failed=1, audit Failure (not Changed/Success)' {
+        $events = New-Object System.Collections.ArrayList
+        $send = { param($e) [void]$events.Add($e) }
+        $res = & $mod {
+            param($snd)
+            function script:Test-JanetWsmanReachable { param($Server, $TimeoutMs = 3000) @{ Reachable = $true; UseSsl = $false } }
+            function script:Invoke-JanetOnDhcp {
+                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $UseSsl)
+                [pscustomobject]@{ Ok = $true; Values = @('10.0.0.9'); NotSet = $false; Err = $null }   # valid pre-read
+            }
+            function script:Invoke-JanetOnDhcpCancelable {
+                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $CancelCheck, $UseSsl)
+                [pscustomobject]@{ Cancelled = $false; Result = @() }   # the WRITE returns NOTHING
+            }
+            try {
+                Invoke-JanetDhcpApply -Server 'TESTSRV' -ScopeId '10.0.0.0' -OptionId 6 -NewValues @('10.0.0.1','10.0.0.2') -Credential $null -Send $snd
+            } finally { Remove-Item function:script:Invoke-JanetOnDhcp, function:script:Invoke-JanetOnDhcpCancelable, function:script:Test-JanetWsmanReachable -EA SilentlyContinue }
+        } $send
+
+        [string]$res.summary.status | Should Be 'Error'
+        [int]$res.summary.failed    | Should Be 1
+        [int]$res.summary.ok        | Should Be 0
+        $audit = @($events | Where-Object { $_.type -eq 'audit' })[0]
+        [string]$audit.result       | Should Be 'Failure'
+        ([string]$audit.detail -match 'NOT confirmed') | Should Be $true
     }
 }

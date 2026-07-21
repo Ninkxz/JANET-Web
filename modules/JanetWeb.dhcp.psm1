@@ -29,7 +29,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.11'
+        version  = '1.1.12'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -851,6 +851,24 @@ function Invoke-JanetDhcpApply {
             return @{ rows=@($rows); summary=@{ total=1; ok=0; failed=1; status='Cancelled' } }
         }
         $applyRes = @($applyCall.Result | Select-Object -First 1)[0]
+        if ($null -eq $applyRes) {
+            # loop68 (item78): the remote apply returned NO result record - it confirmed neither a Set nor
+            # a Remove (an error that didn't throw, a lost/empty pipeline). Previously $applyRes=$null made
+            # [bool]$null.Removed=$false -> Status='Changed' -> a clean VulnPatched/Success for a change we
+            # cannot confirm happened. That is a false-clean: no result -> Failure, never 'Changed'.
+            & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Failure'; itemCount=0; detail=("scope=$ScopeId opt=$OptionId apply returned no result - change NOT confirmed") }
+            $row = @{
+                Host=$Server; ScopeId=$ScopeId; OptionId=$OptionId; Status='Error'
+                OldValues=($orig -join ', '); NewValues=($new -join ', ')
+                Added=($added -join ', '); Removed=($removed -join ', '); Reordered=[bool]$reordered
+                Error='apply returned no result - change NOT confirmed'
+            }
+            [void]$rows.Add($row)
+            & $Send (@{ type='row' } + $row)
+            & $Send @{ type='progress'; done=1; total=1 }
+            & $Send @{ type='status'; text='Apply FAILED: the server returned no result (change not confirmed).' }
+            return @{ rows=@($rows); summary=@{ total=1; ok=0; failed=1; status='Error' } }
+        }
         $status = $(if ([bool]$applyRes.Removed) { 'Removed' } else { 'Changed' })
 
         # JANET central log: a successful Apply changes the server's config
