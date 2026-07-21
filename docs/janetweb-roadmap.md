@@ -71,11 +71,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     MECM-only trigger — the operator-facing false-clean (Result label + installed count) is closed,
     but the audit taxonomy overstates; re-plumb the fan-out per-row audit action to distinguish
     trigger-vs-confirmed when the audit surface is next worked.
-15. **wpt M365 C2R "Verified" goes green on a FAILED update** (loop-22 Fable deep-dive, CONFIRMED) —
-    `:854` verifies by the ClickToRun\Configuration key LastWriteTime freshness (<7 days), but C2R
-    bumps that key's mtime on every update attempt INCLUDING failures (the code reads LastScenario
-    right there). A failed Force Update reads Verified=$true with the old vulnerable version. Fix:
-    verify by version delta (or fail when LastScenarioResult != Success), not key mtime.
+15. ~~wpt M365 C2R "Verified" goes green on a FAILED update~~ — **CLOSED loop 24**
+    (`Get-WptC2rVerified`, wpt 6.8.8): Verified now requires the key fresh AND `LastScenarioResult`
+    = success; fresh-but-failed reads NOT verified, unknown reads $null. No more green-on-failure.
 16. **wpt Chrome/Edge "Verified" = "registry touched in 14 days", not "current"** (loop-22 Fable
     deep-dive, CONFIRMED, by-design-weak) — `New-WptUpdateClientVerify :875` has no target/baseline
     version compare, so a browser updated 10 days ago reads Verified while a newer security build is
@@ -464,10 +462,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   (errs toward verify, never over-claims), confirmed MSU exit-0 → `Installed`, else `No change`; the
   view now surfaces `r.Result` and counts only a confirmed `Installed`. No guard weakened; 138 wpt +
   FixVerify2 green. `Wpt.KbInstallResult.Tests.ps1` (8) pins the helper + view static asserts + exact
-  6.8.7 pin (KbMatch 6.8.6 exact → floor). Pester **1203→(close)** green. Pre-commit gate corrected to
+  6.8.7 pin (KbMatch 6.8.6 exact → floor). Pester **1203→1212** green (0 fail — also re-validated the
+  loop-22 repair). Pre-commit gate corrected to
   full wpt + FixVerify2. Follow-on: the VulnPatched audit still books Success for a MECM-only trigger
   (label + Detail close the visible false-clean; audit taxonomy is a smaller follow-up to item 14).
   SECRET parity: +honest kb-install label (Get-WptKbInstallResult + view).
+- **Loop 24 (DONE 2026-07-21):** Fable-inline. Self-review of loop-23 → **GREEN** (grepped the whole
+  test tree for old kb-install view assertions per the loop-22 lesson; authoritative 1212/0-fail).
+  **Workstream: roadmap item 15** (next wpt verify false-clean) → **CLOSED**. The M365 C2R verify
+  (`$script:M365C2RVerify:854`) decided Verified from ONLY the ClickToRun\Configuration key mtime
+  (`<7 days`), but C2R bumps that key on every attempt INCLUDING failures — a failed Force Update read
+  Verified with the OLD vulnerable version. **FIXED** (wpt **6.8.7→6.8.8**): pure `Get-WptC2rVerified`
+  (`:846`) — Verified TRUE only when fresh AND `LastScenarioResult` shows success, `$null` when no
+  timestamp/unknown (never over-claims), `$false` when stale/failed; scriptblock mirrors it inline +
+  surfaces the result in Detail. Read-only verify path, no guard involved; 134 wpt tests green.
+  `Wpt.C2rVerify.Tests.ps1` (9) pins every case incl. fresh+Failure→$false + exact 6.8.8 pin
+  (KbInstallResult 6.8.7 exact → floor). Pester **1212→(close)** green. SECRET parity: +honest M365
+  C2R verify. wpt verify cluster: #13/#14/#15 done; #16 (Chrome/Edge recency), #17 (verify-patch
+  filter), #14b (audit taxonomy) remain.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
