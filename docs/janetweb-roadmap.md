@@ -320,10 +320,11 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     fail-closed module gate `if ([string]$Params['confirm'] -ne 'DEPLOY') { refuse }` at the shared dispatch (before
     target parsing / self-guard / fan-out) + a required `confirm` "Type DEPLOY to arm" input on both deploy actions
     (adto pattern, no JS). Case-insensitive like adto's `-ne 'FIX'`. +5 tests. _(loop-60 dive)_
-70. **pkginstall `ConvertTo-JanetMsiList` silent partial drop** (P3) — `:141-154` invalid entries dropped with no
-    warn; a partial list then books "All N succeeded", and an all-dropped list falls through to the install-every-
-    `*.msi` fallback (scope escalation). Fix: count rejected entries, warn/refuse when a non-empty list filtered
-    smaller. _(loop-60 dive; P3-5 cancel + S1/S2 = accepted)_
+70. ~~**pkginstall `ConvertTo-JanetMsiList` silent partial drop**~~ **CLOSED loop 63** (pkginstall 2.5.12): new
+    `Get-JanetMsiListDropped` (inverse filter) surfaces dropped rooted/`..` entries; the caller warns per drop and
+    **refuses** a non-blank selection that dropped to empty rather than escalating to install-every-`*.msi`; a blank
+    selection keeps the intentional install-everything path. +5 tests. **pkginstall dive COMPLETE (67-70).** _(loop-60
+    dive; P3-5 cancel + S1/S2 = accepted)_
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -1174,6 +1175,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   existing self-guard tests still reach the guard; exact pin moved here, PSADT Describe floored). subset **59** green.
   pkginstall now has the full destructive guard stack (confirm-word + self-guard + wrong-box + IPv4); remaining item
   70 (MSI-list silent drop, P3). Pester **1453→1458** green. SECRET parity: +pkginstall DEPLOY confirm-word gate.
+- **Loop 63 (DONE 2026-07-21):** self-review of loop-62 → GREEN. Workstream = close **item 70** (last pkginstall dive
+  finding): `ConvertTo-JanetMsiList` silently dropped rooted/`..` entries, so a partial list booked "All N succeeded"
+  for fewer MSIs and an all-invalid non-blank list fell through to install-every-`*.msi` (scope escalation).
+  **FIXED** (pkginstall **2.5.11→2.5.12**): new pure `Get-JanetMsiListDropped` (inverse filter) surfaces the drops;
+  the caller warns per dropped entry and **refuses** a non-blank selection that dropped to empty; a blank selection
+  keeps the intentional install-everything path. `Pkginstall.MsiList.Tests.ps1` +5 (behavioral helper incl. a
+  kept+dropped=all-lines sync invariant + caller-wiring static asserts; exact pin moved here, SelfGuard gate floored).
+  subset **64** green. **pkginstall dive COMPLETE — all 4 findings (67-70) closed; full destructive guard stack +
+  honest result plumbing.** Pester **1458→1463** green. SECRET parity: +pkginstall `Get-JanetMsiListDropped` +
+  warn-per-drop + refuse-all-dropped.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
