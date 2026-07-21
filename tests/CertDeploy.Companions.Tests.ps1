@@ -15,8 +15,8 @@ $cd = Import-Module (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') 
 
 Describe 'Cert Deploy - split companion boxes wiring (prunePki + fixRdp, opt-in, default OFF)' {
 
-    It 'manifest version is 1.4.0' {
-        (& $cd { Get-JanetToolManifest }).version | Should Be '1.4.0'
+    It 'manifest version is at or past 1.4.0 (floor; exact pin lives in the newest bump test)' {
+        ([version][string](& $cd { Get-JanetToolManifest }).version -ge [version]'1.4.0') | Should Be $true
     }
     It 'deploy exposes a prunePki bool input defaulting to OFF' {
         $a = @((& $cd { Get-JanetToolManifest }).actions | Where-Object { $_.id -eq 'deploy' })[0]

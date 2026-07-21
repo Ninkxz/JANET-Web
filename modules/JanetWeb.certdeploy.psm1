@@ -46,7 +46,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.4.0'
+        version  = '1.4.1'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -548,6 +548,17 @@ function Get-CertDeployStoreMissing {
         }
     }
     $out = [pscustomobject]@{ MissRoot=@(); MissCA=@(); MissDis=@(); PresRoot=0; PresCA=0; PresDis=0 }
+    # F1 (loop48): a want-set with ZERO usable thumbprints means the bundle thumbprints did not
+    # deserialize on the target (the bundle always carries certs - Root at minimum). Comparing nothing
+    # yields 0 present / 0 missing, which the check worker would read as ALL PRESENT for a host whose
+    # stores were NEVER inspected. Fail closed: return an Err so the check row becomes CHECK ERROR.
+    $wantCount = 0
+    foreach ($p in @('Root','CA','Disallowed')) {
+        try { $wantCount += @($WantThumbs.$p | ForEach-Object { (([string]$_) -replace '[^0-9A-Fa-f]','') } | Where-Object { $_ }).Count } catch {}
+    }
+    if ($wantCount -eq 0) {
+        return [pscustomobject]@{ MissRoot=@(); MissCA=@(); MissDis=@(); PresRoot=0; PresCA=0; PresDis=0; Err='want-set empty (bundle thumbprints failed to deserialize on target) - stores NOT compared' }
+    }
     foreach ($sm in @(@{ Prop='Root'; Store='Root'; Miss='MissRoot'; Pres='PresRoot' }, @{ Prop='CA'; Store='CA'; Miss='MissCA'; Pres='PresCA' }, @{ Prop='Disallowed'; Store='Disallowed'; Miss='MissDis'; Pres='PresDis' })) {
         $wantTps = @()
         try { $wantTps = @($WantThumbs.($sm.Prop) | ForEach-Object { (([string]$_) -replace '[^0-9A-Fa-f]','') } | Where-Object { $_ }) } catch { $wantTps = @() }

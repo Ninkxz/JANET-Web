@@ -299,3 +299,35 @@ Describe 'CertDeploy manifest - actions + destructive flags + bundle default' {
         @($imp.inputs | Where-Object { $_.name -eq 'csvPath' -and $_.type -eq 'file' }).Count | Should Be 1
     }
 }
+
+# loop48 (F1): the CHECK worker parses the wanted thumbprints from JSON on the target and calls
+# Get-CertDeployStoreMissing. A null / undeserialized want-set made the reader skip every store group
+# (nothing compared) -> 0 present / 0 missing / no Err -> the admin side read ALL PRESENT for a host
+# whose stores were NEVER inspected. The reader now fails closed: a want-set with zero usable
+# thumbprints returns an Err, which the check worker maps to CHECK ERROR (never ALL PRESENT).
+Describe 'CertDeploy check - an undeserialized/empty want-set fails closed to Err, never ALL PRESENT (loop48 F1)' {
+    $emptyOpener = { param($s) $o = New-Object psobject; Add-Member -InputObject $o -MemberType NoteProperty -Name Certificates -Value @(); Add-Member -InputObject $o -MemberType ScriptMethod -Name Close -Value { }; $o }
+    It 'a $null want-set -> Err (bundle thumbprints did not deserialize; stores not compared)' {
+        $miss = & $cm { param($op) Get-CertDeployStoreMissing -WantThumbs $null -StoreOpener $op } $emptyOpener
+        ([string]$miss.Err) | Should Match '(?i)want-set empty'
+    }
+    It 'a want-set with all-empty groups -> Err' {
+        $miss = & $cm { param($op) Get-CertDeployStoreMissing -WantThumbs ([pscustomobject]@{ Root=@(); CA=@(); Disallowed=@() }) -StoreOpener $op } $emptyOpener
+        ([string]$miss.Err) | Should Match '(?i)want-set empty'
+    }
+    It 'a want-set with only blank/non-hex thumbprints -> Err (no usable thumbprints)' {
+        $miss = & $cm { param($op) Get-CertDeployStoreMissing -WantThumbs ([pscustomobject]@{ Root=@('  ',''); CA=@(); Disallowed=@() }) -StoreOpener $op } $emptyOpener
+        ([string]$miss.Err) | Should Match '(?i)want-set empty'
+    }
+    It 'a REAL want-set does NOT trigger the guard (no Err; the wanted cert reads MISSING from an empty store)' {
+        $miss = & $cm { param($op) Get-CertDeployStoreMissing -WantThumbs ([pscustomobject]@{ Root=@('1111111111111111111111111111111111111111'); CA=@(); Disallowed=@() }) -StoreOpener $op } $emptyOpener
+        ([string]$miss.Err) | Should Be ''
+        (@($miss.MissRoot).Count) | Should Be 1
+    }
+}
+
+Describe 'certdeploy - manifest exact version pin (newest bump = loop-48 want-set-empty fail-close)' {
+    It 'certdeploy is at v1.4.1' {
+        (& $cm { Get-JanetToolManifest }).version | Should Be '1.4.1'
+    }
+}
