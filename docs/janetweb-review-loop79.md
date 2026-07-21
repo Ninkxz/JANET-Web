@@ -39,7 +39,7 @@ any non-matching Detail falls to the numeric switch exactly as before. Net delet
 ### Tests
 - `Troubleshoot.Hint.Tests.ps1` +5 (behavioral): privilege-not-held is distinct from access-denied; RPC 1727;
   ERROR_BAD_NETPATH; unknown-security-error → Kerberos; could-not-be-found → name-resolution.
-- `Restart.Guards.Tests.ps1` +4 (behavioral + static): a detail-string failure returns the shared hint
+- `Restart.Guards.Tests.ps1` +5 (behavioral + static): a detail-string failure returns the shared hint
   (incl. privilege-not-held the old mapper never had); the numeric switch still owns 1190/1115/1314/unknown;
   restart imports the engine + delegates in the mapper; the 6 duplicated branches are gone; manifest beta9.
 - **loop-37 lesson:** the engine change is shared by ALL wired tools, so I ran the engine + restart + every

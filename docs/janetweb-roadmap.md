@@ -1381,9 +1381,9 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   branches replaced with one `Get-JanetTroubleshootHint -Message $Detail` call, then fall through to the (unchanged)
   numeric switch for tool-specific sentinels; restart imports the engine. Behavior-preserving (delegate-then-
   fallback = restart's original precedence). Net deletion (~18 dup lines). restart **1.5.0-beta8→beta9**;
-  `Troubleshoot.Hint.Tests.ps1` +5, `Restart.Guards.Tests.ps1` +4 (behavioral both arms + static: engine enriched,
+  `Troubleshoot.Hint.Tests.ps1` +5, `Restart.Guards.Tests.ps1` +5 (behavioral both arms + static: engine enriched,
   restart delegates, dup branches gone). **loop-37 lesson:** engine change is shared, ran engine+restart+all 12
-  engine-consumer files (210) green. Pester **~1528→~1537** green. **The last ad-hoc mapper is gone - the engine is
+  engine-consumer files (210) green. Pester **1528→1538** green. **The last ad-hoc mapper is gone - the engine is
   the single source of hint truth.** Next: c2c/certdeploy read-only CHECK ERROR rows; per-candidate upr failures.
   SECRET parity: +shared-engine enrichment + restart-fork delegation.
 
