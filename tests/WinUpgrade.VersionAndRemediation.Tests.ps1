@@ -92,14 +92,16 @@ Describe 'Get-WinUpgradeRepairVerdict - DISM exit code + sfc text -> row verdict
         $v.Status | Should Be 'PARTIAL'
     }
 
-    It 'unrecognized / empty sfc text falls back to "no violations" (current default behavior)' {
-        # NOTE: this is the module's actual fallback (no keyword matched -> clean).
-        # Flagged in the report as a possible false-negative risk for garbled/unexpected
-        # sfc output that isn't explicitly SfcError - NOT enshrined as "correct", just pinned.
+    It 'unrecognized / empty sfc text reads UNKNOWN -> PARTIAL, never a false CLEAN (loop37 #31 fail-close)' {
+        # Was the module's old fallback (no keyword matched -> "no violations" -> CLEAN), flagged in
+        # the report as a false-negative risk. loop37 closed it: an unparseable/localized/truncated sfc
+        # now reads 'unknown' and the verdict is PARTIAL (not confirmed clean), never CLEAN.
         $v = & $m { Get-WinUpgradeRepairVerdict -DismExit 0 -SfcText 'some unrecognized sfc output' }
-        $v.Sfc | Should Be 'no violations'
+        $v.Sfc    | Should Be 'unknown'
+        $v.Status | Should Be 'PARTIAL'
         $v2 = & $m { Get-WinUpgradeRepairVerdict -DismExit 0 -SfcText '' }
-        $v2.Sfc | Should Be 'no violations'
+        $v2.Sfc    | Should Be 'unknown'
+        $v2.Status | Should Not Be 'CLEAN'
     }
 }
 
