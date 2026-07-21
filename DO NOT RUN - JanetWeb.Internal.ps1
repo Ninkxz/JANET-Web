@@ -122,7 +122,13 @@ if ($resolvedPort -ne $Port) {
 # ponytail: tiny TOCTOU between this probe and the server's bind; harmless on single-user loopback.
 
 # --- session token (per launch) ------------------------------------------------
-$token = [guid]::NewGuid().ToString('N')
+# loop34: mint the /api session token from an EXPLICIT cryptographic RNG (256-bit, lowercase hex)
+# rather than [guid]::NewGuid() - it is a security credential guarding the execution surface, so its
+# unpredictability should be a documented crypto guarantee, not a reliance on the GUIDv4-is-CSPRNG-
+# on-Windows implementation detail. MIRROR of New-JanetWebSecureToken (server/JanetWeb.Server.ps1);
+# inlined because this launcher runs pure-PowerShell with no modules loaded. Keep in lockstep.
+$__rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $__tb = New-Object byte[] 32; $__rng.GetBytes($__tb); $token = (([System.BitConverter]::ToString($__tb)) -replace '-','').ToLowerInvariant() } finally { $__rng.Dispose() }
 $url   = "http://127.0.0.1:$Port/?t=$token"
 
 Write-Host ""

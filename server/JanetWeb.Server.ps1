@@ -92,6 +92,21 @@ function Get-JanetWebSafeUploadSubdir {
     return @{ Name = [guid]::NewGuid().ToString('N').Substring(0,8); Shared = $false }
 }
 
+# loop34: mint an access credential from an EXPLICIT cryptographic RNG. The session token and the
+# report-preview retrieval key are security credentials (a leak/guess reaches the /api execution
+# surface or a rendered report); they were [guid]::NewGuid() which on Windows is CSPRNG-backed but
+# relies on that implementation detail rather than a documented crypto contract. This mints 32 bytes
+# (256 bits) from RandomNumberGenerator as lowercase hex - an explicit, robust guarantee. The
+# (no-modules) launcher mirrors this inline for the session token; keep in lockstep. Pure - tested.
+function New-JanetWebSecureToken {
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $bytes = New-Object byte[] 32
+        $rng.GetBytes($bytes)
+        return (([System.BitConverter]::ToString($bytes)) -replace '-','').ToLowerInvariant()
+    } finally { $rng.Dispose() }
+}
+
 function Start-JanetWebServer {
     param(
         [Parameter(Mandatory)] [string]$Root,
@@ -719,7 +734,7 @@ function Start-JanetWebServer {
                         $rpOld = $state.ReportPreviews[$rk]
                         if ($rpOld -and ((Get-Date) - $rpOld.At).TotalMinutes -gt 5) { [void]$state.ReportPreviews.Remove($rk) }
                     }
-                    $rid = [guid]::NewGuid().ToString('N')
+                    $rid = New-JanetWebSecureToken   # loop34: explicit CSPRNG (was [guid]::NewGuid())
                     $state.ReportPreviews[$rid] = @{ Html = $html; At = (Get-Date) }
                     & $writeJson $resp @{ ok=$true; id=$rid }
                     continue
