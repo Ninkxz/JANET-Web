@@ -43,9 +43,29 @@ Describe 'verify-post-reboot audit - still TouchHost (confirming a reboot is a t
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-28 schedule-reboot audit)' {
-    It 'acas is at v1.11.9' {
+# loop38 (item34): the IN-CARD 'reboot-selected' arm is the sibling the loop28 fix missed - it booked
+# VulnPatched at schedule time (same false compliance record). Its worker/row differ from schedule-reboot
+# (it has a self-guard + an 'already-pending' row), so isolate its own handler block. Now TouchHost.
+Describe 'reboot-selected audit - the in-card reboot arm is TouchHost, not VulnPatched (loop38 fix)' {
+    # The reboot-selected arm lives inside the by-key handler; isolate from its ActionId guard to the
+    # else (verify) branch so we test ONLY the reboot sub-block, not the verify-selected sibling below it.
+    # Terminate on the branch-split '} else {' that sits on its OWN line (newline + indent); the inline
+    # rowOf carries a '} else { ''scheduled'' }' that a bare '} else {' would wrongly stop at.
+    $script:RsBlock = ([regex]::Match($script:Src, "(?s)if \(\`$ActionId -eq 'reboot-selected'\) \{.*?\r?\n\s+\} else \{")).Value
+    It 'the reboot-selected sub-block was isolated' {
+        ($script:RsBlock.Length -gt 0) | Should Be $true
+    }
+    It 'reboot-selected audits TouchHost (scheduling is a touch, not a confirmed patch)' {
+        ($script:RsBlock -match "AuditAction 'TouchHost'") | Should Be $true
+    }
+    It 'reboot-selected does NOT book VulnPatched at schedule time (the false-clean fix)' {
+        ($script:RsBlock -match "AuditAction 'VulnPatched'") | Should Be $false
+    }
+}
+
+Describe 'acas - manifest exact version pin (newest bump = loop-38 reboot-selected audit)' {
+    It 'acas is at v1.11.10' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.9'
+        [string]$mani.version | Should Be '1.11.10'
     }
 }

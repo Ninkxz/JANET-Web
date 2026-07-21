@@ -1097,7 +1097,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.9'
+        version  = '1.11.10'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -3626,8 +3626,13 @@ function Invoke-JanetToolAction {
                 $rowOf = { param($res, $hostName, $ctx) @{ Host=$hostName; Result=$(if ($res -like 'FAIL*') { 'failed' } elseif ($res -match 'already') { 'already-pending' } else { 'scheduled' }); 'Exit Code'=(Get-AcasMarker $res 'EXIT'); Timestamp=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Detail=(Remove-AcasMarkers $res) } }
                 $okOf  = $script:AcasOkOf
                 $detOf = $script:AcasDetOfPlain
+                # loop38 (item34): this in-card 'reboot-selected' arm is the sibling the loop28 fix
+                # MISSED - scheduling an abortable reboot (shutdown /r /t 300; rc=1190 "already
+                # scheduled" also OK) is a TOUCH, not a confirmed patch. Booking VulnPatched here was
+                # a false compliance record (audit ledger shows a host patched that only had a reboot
+                # queued). Audit TouchHost, matching schedule-reboot (:3389) and verify-post-reboot.
                 $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootWorker -Threads $threads `
-                           -RowOf $rowOf -OkOf $okOf -AuditAction 'VulnPatched' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
+                           -RowOf $rowOf -OkOf $okOf -AuditAction 'TouchHost' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
                            -RunAction 'Reboot' -RunScope $vulnDisplay -RunMode 'Reboot'
                 & $send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
                 return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
