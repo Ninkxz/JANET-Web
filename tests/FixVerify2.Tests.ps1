@@ -251,9 +251,9 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
     }
 
     Context 'version' {
-        It 'winupgrade is at v0.5.4 (loop33 bypass read-back verify)' {
+        It 'winupgrade version is >= 0.5.4 (loop33 bypass read-back; floor - exact pin in the newest bump test)' {
             $mani = & $m { Get-JanetToolManifest }
-            [string]$mani.version | Should Be '0.5.4'
+            ([version][string]$mani.version -ge [version]'0.5.4') | Should Be $true
         }
     }
 }

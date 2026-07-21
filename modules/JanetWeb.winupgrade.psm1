@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.4'
+        version  = '0.5.5'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -2276,7 +2276,21 @@ $script:WinUpgradeWorker = {
                                 $pfro = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
                                 if ($pfro -and $pfro.PendingFileRenameOperations) { $p = $true }
                             }
-                            if (-not $p -and (Test-Path -LiteralPath 'C:\$WINDOWS.~BT\Sources')) { $p = $true }
+                            # loop36 (F2): a ROLLED-BACK feature-update attempt leaves the C:\$WINDOWS.~BT
+                            # tree behind while NOTHING is in progress. A bare Test-Path counted that STALE
+                            # tree as "staged" and rebooted an un-staged host (it comes back on the old
+                            # build), weakening the "never reboot an un-staged host" invariant. CLASSIFY
+                            # the tree (mirror of Get-WinUpgradeStagingClass: rollback marker / age / setup
+                            # process); only an Active/Recent staging counts as staged, a Stale one does not.
+                            if (-not $p -and (Test-Path -LiteralPath 'C:\$WINDOWS.~BT\Sources')) {
+                                $btItem = Get-Item -LiteralPath 'C:\$WINDOWS.~BT' -Force -ErrorAction SilentlyContinue
+                                $ageH = if ($btItem) { ((Get-Date) - $btItem.LastWriteTime).TotalHours } else { 9999 }
+                                $setupProcs = @(Get-Process -Name 'SetupHost','SetupPrep','Windows10UpgraderApp','SetupPlatformTool' -ErrorAction SilentlyContinue)
+                                $rollback = $false; $btPanther = 'C:\$WINDOWS.~BT\Sources\Panther'
+                                if (Test-Path -LiteralPath $btPanther) { foreach ($lg in @('setupact.log','setuperr.log')) { $lp = Join-Path $btPanther $lg; if (Test-Path -LiteralPath $lp) { try { if (Select-String -Path $lp -Pattern 'rollback|roll back|abort' -ErrorAction SilentlyContinue | Select-Object -First 1) { $rollback = $true; break } } catch {} } } }
+                                $cls = if ($rollback) { 'Stale' } elseif ($setupProcs.Count -gt 0) { 'Active' } elseif ($ageH -gt 24) { 'Stale' } else { 'Recent' }
+                                if ($cls -ne 'Stale') { $p = $true }
+                            }
                             [pscustomobject]@{ Staged = $p }
                         }
                         $icS = $baseIc.Clone(); $icS.ScriptBlock = $stSb
