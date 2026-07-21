@@ -326,6 +326,20 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     selection keeps the intentional install-everything path. +5 tests. **pkginstall dive COMPLETE (67-70).** _(loop-60
     dive; P3-5 cancel + S1/S2 = accepted)_
 
+71. ~~**upr generic uninstall handlers: MSI-GUID injection + Store false-clean**~~ **CLOSED loop 64** (upr 1.2.4):
+    the generic-MSI + Adobe handlers extracted a GUID with a loose `\{[^}]+\}` and interpolated it into a raw msiexec
+    `ArgumentList` string (crafted `UninstallString` could inject switches under the operator cred) → routed the
+    generic-MSI path through the injection-safe `Invoke-SafeUninstall`, and tightened Adobe's 3 GUID extractions to a
+    strict hex pattern + discrete args (static assert widened the fix to the class). The dead Store branch returned an
+    unconditional `OK (Store app removed)` invisible to the registry re-verify → removed (future `Store` type
+    fail-closes via EXE), "Store" dropped from the manifest. +4 tests. _(loop-64 upr dive; core else fail-closed)_
+72. **upr 3010 reboot flag lost for Adobe/M365 OK strings** (P3) — those handlers' OK strings don't embed the exit
+    code, so a reboot-pending removal reports plain OK (missing advisory, NOT a false-clean — the registry re-verify
+    confirms the product is gone). Fix: surface the exit code / a `3010` token from the Adobe/M365 handlers. _(loop-64 dive)_
+73. **upr IPv4 wrong-box skip + empty-probe-proceed** (P3, speculative/by-design) — IPv4-literal targets skip the DNS
+    wrong-box name check and an empty COMPUTERNAME probe proceeds; documented house pattern (self-guard still checks
+    NIC-IP membership). No change strictly required. _(loop-64 dive)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -1185,6 +1199,18 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   subset **64** green. **pkginstall dive COMPLETE — all 4 findings (67-70) closed; full destructive guard stack +
   honest result plumbing.** Pester **1458→1463** green. SECRET parity: +pkginstall `Get-JanetMsiListDropped` +
   warn-per-drop + refuse-all-dropped.
+- **Loop 64 (DONE 2026-07-21):** self-review of loop-63 → GREEN. Workstream = fresh **Fable deep-dive on upr**
+  (Unsupported Product Remediator — bulk-uninstall over WinRM). **Core fail-closed** — mandatory post-uninstall
+  registry re-verify catches a lying uninstaller, exit-code-gated OK, sound proven-gating (RemoveSet only restricts),
+  no coercions, all four safety guards. Acted on **item 71**: (1) the generic-MSI + Adobe handlers extracted a GUID
+  with loose `\{[^}]+\}` and interpolated it into a raw msiexec `ArgumentList` string (injection under operator cred) →
+  routed generic-MSI through the injection-safe `Invoke-SafeUninstall`; a static assert caught the SAME flaw in the
+  Adobe handler (loop-42 class-widen) → strict hex GUID + discrete args; (2) removed the dead Store branch's
+  unconditional `OK (Store app removed)` false-clean landmine (future `Store` → EXE fail-close) + dropped "Store" from
+  the manifest. **FIXED** (upr **1.2.3→1.2.4**): `Upr.VerifyResult.Tests.ps1` +4 (static analysis; `Get-SafeUninstallPlan`
+  injection-safety already proven by `UninstallStringParse`). subset **40** green. Items 72 (3010 label) + 73 (IPv4
+  wrong-box, by-design) ranked. Pester **1463→1467** green. SECRET parity: +upr Invoke-SafeUninstall routing /
+  strict-GUID + Store-branch removal.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
