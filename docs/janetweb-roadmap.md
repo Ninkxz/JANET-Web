@@ -281,12 +281,12 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     `Test-AdToCompliance` fires a fail-closed **`uacUnreadable`** hit (→ NON-COMPLIANT) + skips the four UAC
     bad-bit rules when unreadable; non-UAC rules still run; missing key → readable (back-compat).
     `AdTo.WriteGuards.Tests.ps1` +4.
-61. **adto baseline overlay silently disables a rule on a typo** (MED) — `:84-92` `Get-AdToBaseline` merge: an
-    overlay rule omitting `enabled` gets `[bool]$null=$false`, one omitting `appliesTo` gets `@($null)` (never
-    fires), so a typo in the operator-editable `adto-baseline.json` turns a rule OFF with no trace → every
-    violating object scans COMPLIANT. (Whole-file parse failure falls back + notes it; the per-rule silent-off
-    doesn't.) Fix: default a missing `enabled` to true / warn, log disabled overlay rules. _(F4/F5 = speculative
-    low: adminCount null-read guard-bypass `:513`, admin-pattern-miss categorization `:118`; not ranked.)_
+61. ~~**adto baseline overlay silently disables a rule on a typo**~~ **CLOSED loop 55** (adto 0.2.6): `:84-92`
+    `Get-AdToBaseline` now **merges** each overlay rule onto the embedded default (fail-closed `enabled=$true` base
+    for unknown rule names), overriding only fields the overlay explicitly provides (`$null -ne $r.<field>`). An
+    overlay tuning one knob (or a typo) no longer nulls `enabled`/`appliesTo`; an explicit `"enabled": false` still
+    disables. +4 tests (real temp overlay, `Get-AdToBaselinePath`-only shim). _(F4/F5 = speculative low:
+    adminCount null-read guard-bypass `:513`, admin-pattern-miss categorization `:118`; not ranked.)_
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -1049,6 +1049,15 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   Tests.ps1` +4 (direct `Test-AdToCompliance` calls). adto set **16** green. Pester **1423→1427** green. **Both
   adto null-UAC false-cleans (F1/F2) closed**; remaining item61 (F3, overlay silent-disable, MED) + F4/F5
   speculative. SECRET parity: +adto scan UacReadable / uacUnreadable hit.
+- **Loop 55 (DONE 2026-07-21):** self-review of loop-54 → GREEN. Workstream = adto **item61 (F3)**, the last real
+  adto dive finding: `Get-AdToBaseline` (`:84-92`) merged an overlay's `rules` by **replacing** the rule entry, so
+  an overlay tuning one field (or a typo) nulled the others — a missing `enabled` became `[bool]$null=$false`
+  (rule OFF), a missing `appliesTo` became `@($null)` (never fires) — silently scanning every violating object
+  **COMPLIANT**. **FIXED** (adto **0.2.5→0.2.6**): the overlay now **merges** onto the embedded default (fail-closed
+  `enabled=$true` base for unknown rule names), overriding only fields it explicitly provides; an explicit
+  `"enabled": false` still disables. `AdTo.WriteGuards.Tests.ps1` +4 (real temp overlay, `Get-AdToBaselinePath`-only
+  shim — `Test-Path`/`Get-Content` stay real). adto set **20** green. Pester **1427→1431** green. **adto dive
+  complete** (F1/F2/F3 closed; F4/F5 speculative). SECRET parity: +adto overlay merge-not-replace.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
