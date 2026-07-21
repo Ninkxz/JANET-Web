@@ -58,9 +58,33 @@ Describe 'c2c audit emit - only a fully-FIXED host counts as a patched item (ite
     }
 }
 
-Describe 'c2c - manifest exact version pin (newest bump = loop-47 PARTIAL audit honesty)' {
-    It 'c2c is at v1.15.8' {
+Describe 'c2c - manifest version floor (exact pin migrated to the newest bump: loop77 hint Describe, v1.15.9)' {
+    It 'c2c is at least v1.15.8' {
         $man = & $cm { Get-JanetToolManifest }
-        [string]$man.version | Should Be '1.15.8'
+        ([version][string]$man.version -ge [version]'1.15.8') | Should Be $true
+    }
+}
+
+# loop77 (informative-failures theme): the c2c Mass-Fix / run-all harvest ($emitResult) now, on a host
+# whose audit result is Failure, runs the raw error in $res.Detail through Get-JanetTroubleshootHint and
+# attaches the hint to a Hint row field + an err log (FIX:), raw detail preserved. Static analysis (the
+# harvest runs inside the fan-out over a real RunspacePool).
+Describe 'c2c 1.15.9 - fix harvest attaches a troubleshooting hint to a failed host' {
+    $man = & $cm { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
+
+    It 'manifest version is exactly 1.15.9 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.15.9'
+    }
+    It 'c2c imports the shared troubleshoot engine' {
+        ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
+    }
+    It 'the fix harvest computes a hint only for a Failure host and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$auditResult\s*-eq\s*''Failure''\s*-and\s*\$res\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        ($src -match 'Detail=\[string\]\$res\.Detail;\s*Hint=\[string\]\$hint') | Should Be $true
+    }
+    It 'the err log carries the FIX hint when one exists' {
+        ($src -match "if \(\`$hint\) \{ &\s*\`$send @\{ type='log'; level='err'") | Should Be $true
+        ($src -match 'FIX: \$hint')                                             | Should Be $true
     }
 }
