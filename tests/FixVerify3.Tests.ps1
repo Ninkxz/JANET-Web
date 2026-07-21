@@ -112,12 +112,15 @@ Describe 'FIX 2 - pkginstall PSADT soft-fail is Success (warnings) (JanetWeb.pkg
     $script:__deployBlock = & ([scriptblock]::Create($sbe.Extent.Text))
 
     function Invoke-Psadt {
-        param([string]$DeployOutput)
+        param([string]$DeployOutput, [string]$ExitLine = 'exit 0')
         $pkg = Join-Path ([System.IO.Path]::GetTempPath()) ('psadt_' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $pkg -Force | Out-Null
-        # No 'exit' -> $LASTEXITCODE stays at the 0 the block sets before invoking, so the
-        # scenario is a SUCCESS exit code with (optionally) ERROR/FAILED output lines.
-        $body = 'param($DeployMode)' + "`r`n" + $DeployOutput
+        # A real PSADT package ends in Exit-Script, which calls `exit <code>`; the fake deploy models
+        # that with a trailing 'exit 0' (default) so the scenario is a genuine SUCCESS exit code with
+        # (optionally) ERROR/FAILED output lines. loop61 (item68): the block now pre-seeds $LASTEXITCODE
+        # to $null, NOT 0, so a script that sets NO exit code (ExitLine='') is booked Failed - pass ''
+        # to exercise that path. (Relying on the old pre-seed 0 to fake a success exit was the bug.)
+        $body = 'param($DeployMode)' + "`r`n" + $DeployOutput + "`r`n" + $ExitLine
         Set-Content -LiteralPath (Join-Path $pkg 'Deploy-Application.ps1') -Value $body -Encoding UTF8
         $loc = Get-Location
         try {
@@ -143,6 +146,14 @@ Describe 'FIX 2 - pkginstall PSADT soft-fail is Success (warnings) (JanetWeb.pkg
     It 'clean output => plain Success (happy path unchanged)' {
         $r = Invoke-Psadt -DeployOutput "Write-Output 'Installation completed OK'"
         $r.Status | Should Be 'Success'
+    }
+    It 'loop61 (item68): a deploy that sets NO exit code => Failed, not a false Success' {
+        # ExitLine='' -> the fake Deploy-Application.ps1 never calls exit, so $LASTEXITCODE stays at the
+        # $null pre-seed. Pre-loop61 this inherited the pre-seeded 0 and booked a clean Success.
+        $r = Invoke-Psadt -DeployOutput "Write-Output 'installing...'" -ExitLine ''
+        $r.ExitCode | Should BeNullOrEmpty
+        $r.Status   | Should Be 'Failed'
+        $r.Reason   | Should Match 'no exit code'
     }
 }
 
