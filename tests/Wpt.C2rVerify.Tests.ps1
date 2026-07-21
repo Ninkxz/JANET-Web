@@ -52,9 +52,9 @@ Describe 'wpt M365 C2R verify scriptblock - gates on the scenario result, not ju
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-24 honest C2R verify)' {
-    It 'wpt is at v6.8.8' {
+Describe 'wpt - manifest version floor (honest C2R verify shipped in 6.8.8; exact pin migrated to newest bump)' {
+    It 'wpt is at or past v6.8.8' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.8'
+        ([version][string]$mani.version -ge [version]'6.8.8') | Should Be $true
     }
 }

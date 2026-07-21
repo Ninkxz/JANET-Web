@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.8'
+        version  = '6.8.9'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -854,6 +854,17 @@ function Get-WptC2rVerified {
     $sr = ([string]$ScenarioResult).Trim()
     if (-not $sr) { return $null }
     return [bool]($sr -match '(?i)success')
+}
+
+# loop41 (item41): a verify-only row counts toward the "N verified" tally + a Success audit ONLY when
+# the probe actually CONFIRMED the host is current (Verified=$true). WptAppUpdateBlock sets Status='Verified'
+# for ANY returned probe, so a reachable host whose probe read Verified=No (stale, still on the vulnerable
+# version) or n/a (indeterminate) formerly counted OK and audited Success - a false-clean on the verify tile.
+# Now the ok predicate keys off the actual verdict, not "the probe ran". Mirrors acas Get-AcasVerifyRowStatus.
+# Pure - tested by Wpt.VerifyApp.Tests.ps1.
+function Get-WptVerifyOk {
+    param($Reachable, $Verified)
+    return ([bool]$Reachable -and $Verified -eq $true)
 }
 
 # Shared Verify scriptblock for both M365 C2R profiles (Force Update and User Visible).
@@ -6438,8 +6449,9 @@ function Invoke-JanetToolAction {
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptAppUpdateBlock -AuditAction 'TouchHost' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $true) } `
-                -OkOf { param($r) ($r.Reachable -and $r.Status -eq 'Verified') } `
-                -AuditDetail { param($r) "Version=$($r.Version) LastUpdated=$($r.LastUpdated)" } `
+                -OkOf { param($r) (Get-WptVerifyOk $r.Reachable $r.Verified) } `
+                -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ($r.Reachable -and "$($r.Status)" -eq 'Verified') { 'Skipped' } else { 'Failure' } } `
+                -AuditDetail { param($r) "Version=$($r.Version) LastUpdated=$($r.LastUpdated) Verified=$(if($null -eq $r.Verified){'n/a'}elseif($r.Verified){'Yes'}else{'No'})" } `
                 -RowOf { param($r) @{ Host=$r.Host; Version=[string]$r.Version; LastUpdated=[string]$r.LastUpdated; Verified=$(if($null -eq $r.Verified){'n/a'}elseif($r.Verified){'Yes'}else{'No'}); Detail=[string]$r.Detail } }
         }
         'app-update-apply' {
