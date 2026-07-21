@@ -56,9 +56,9 @@ Describe 'acas Office C2R verify scriptblock - gates on the scenario result, not
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-40 honest Office C2R verify)' {
-    It 'acas is at v1.11.12' {
+Describe 'acas - manifest version floor (exact pin migrated to the newest bump: loop71 fan-out hint, v1.11.13)' {
+    It 'acas is at least v1.11.12' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.12'
+        ([version][string]$mani.version -ge [version]'1.11.12') | Should Be $true
     }
 }

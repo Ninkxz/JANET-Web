@@ -42,6 +42,9 @@ try { . ([scriptblock]::Create($script:AcasJavaFixSrc)) } catch {}
 # Also dot-sourced here so the engine resolves in module scope for unit tests.
 Import-Module (Join-Path $PSScriptRoot 'JanetWeb.specfix.psm1') -Force -ErrorAction SilentlyContinue
 $script:AcasSpecFixSrc = if (Get-Command Get-JanetSpecFixSrc -ErrorAction SilentlyContinue) { Get-JanetSpecFixSrc } else { '' }
+
+# loop71: shared error->actionable-hint mapper (why a host failed + how to fix it).
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
 try { . ([scriptblock]::Create($script:AcasSpecFixSrc)) } catch {}
 
 # -----------------------------------------------------------------------------
@@ -1122,7 +1125,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.12'
+        version  = '1.11.13'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -2554,6 +2557,12 @@ function Invoke-AcasFanOut {
                     else             { $failCount++ }
 
                     $row = & $RowOf $resStr $pj.Host $pj.Context
+                    # loop71 (informative failures): on a genuine failure (not ok, not a skip), translate the
+                    # raw worker result into an actionable troubleshooting hint. Carried in a Hint row field
+                    # and an err log (both untruncated) - the raw result is preserved; the 160-char audit
+                    # detail is left as-is (the hint is longer than that cap would allow).
+                    $hint = if ((-not $ok) -and (-not $isSkip)) { Get-JanetTroubleshootHint -Message $resStr -Server ([string]$pj.Host) } else { '' }
+                    if ($hint -and ($row -is [hashtable])) { $row['Hint'] = $hint }
                     [void]$rows.Add($row)
                     & $Send (@{ type='row' } + $row)
 
@@ -2563,6 +2572,7 @@ function Invoke-AcasFanOut {
                     $auditCount  = if ($isSkip -or -not $ok) { 0 } else { 1 }
                     & $Send @{ type='audit'; action=$AuditAction; target=$pj.Host;
                                result=$auditResult; itemCount=$auditCount; detail=$detail }
+                    if ($hint) { & $Send @{ type='log'; level='err'; text="$($pj.Host) : $resStr | FIX: $hint" } }
 
                     $done++
                     & $Send @{ type='progress'; done=$done; total=$psJobs.Count }
