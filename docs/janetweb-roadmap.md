@@ -216,8 +216,10 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     only when the product's files are actually gone; if files remain the key is KEPT (deleting it would blind
     every later registry-driven scan into reading the still-installed product as clean). `Wpt.VerifyClean.
     Tests.ps1` (5).
-46. **wpt Adobe Acrobat 'Removed' if ANY one GUID uninstalled** (MED) — `:4298`/`:4303`: failing GUIDs
-    invisible, `continue`s before the verify-clean files-gone check.
+46. ~~**wpt Adobe Acrobat 'Removed' if ANY one GUID uninstalled**~~ **CLOSED loop 52** (wpt 6.8.14): the Adobe
+    branch now counts per-GUID success/failure (`:4364`) — all GUIDs removed → Removed; some failed while others
+    succeeded → **Attention** (a not-clean bucket; `$isOk` at `:5265` requires an exact Removed); all failed →
+    the default Failed. Failing GUIDs' exit codes ride in the detail. `Wpt.AdobeUninstall.Tests.ps1` (6).
 47. **wpt browser-client Verify = Clients{GUID} mtime <14d, version-blind** (MED) — `:898`; item35 class, wpt
     side. Less wrong than C2R (Omaha usually rewrites only on a real install — confirm whether a failed update
     bumps the key).
@@ -1001,6 +1003,16 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
   the block is an inline module-less scriptblock); CleanStatus exact pin → floor. wpt set **29** +
   SoftwareUninstall **3** green. Pester **1409→1414** green. **Remaining wpt:** item43 (Java SC mtime, HIGH),
   46/47 (MED), 48–50 (LOW), 51 (trigger≠patched, HIGH). SECRET parity: +wpt verify-clean files-gone gate.
+- **Loop 52 (DONE 2026-07-21):** Fable-inline. Self-review of loop-51 → **GREEN**. **Closed wpt item46 (MED)** in
+  the same software-uninstall path: Adobe Acrobat registers multiple MSI product-code GUIDs, and the branch set
+  `$removed=$true` on ANY one GUID uninstalling (`:4364`) with per-GUID failures untracked → read a clean
+  `Removed` (counter `:5265` books ok) for a PARTIAL uninstall while Adobe stayed installed via the failed GUIDs.
+  **FIXED** (wpt **6.8.13→6.8.14**): the branch counts per-GUID success/failure — all removed → Removed; some
+  failed while others succeeded → **Attention** (not-clean, `$isOk` requires exact Removed); all failed → default
+  Failed; failing GUIDs' exit codes in the detail. `Wpt.AdobeUninstall.Tests.ps1` (NEW, 6, static — inline
+  module-less branch); VerifyClean exact pin → floor. wpt set **16** green. Pester **1414→1420** green.
+  **Remaining wpt:** item43 (Java SC mtime, HIGH — the last non-trivial one), 47 (MED), 48–50 (LOW), 51
+  (trigger≠patched, HIGH). SECRET parity: +wpt Adobe partial → Attention.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
