@@ -355,13 +355,17 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
 77. **dhcp non-numeric `optionId` silently retargets option 6 (DNS)** (P2) — an unparseable optionId warns + proceeds
     with default 6 on a destructive action, so a typo live-replaces the scope's DNS-servers option. Fix: abort on
     unparseable optionId for destructive actions. _(loop-65 dive)_
-78. **dhcp apply null-result → Changed/Success; no post-write verify** (P2) — a null remote apply result coerces
-    `[bool]$null.Removed=$false` → `Status='Changed'`/Success; neither apply nor bulk re-reads the option after the
-    write to confirm the value actually became the intended one. Fix: treat null result as Failure + add a post-write
-    re-read compare. _(loop-65 dive)_
+78. ~~**dhcp apply null-result → Changed/Success**~~ **CLOSED loop 68** (dhcp 1.1.12): a null remote apply result
+    coerced `[bool]$null.Removed=$false` → `Status='Changed'`/Success for an unconfirmable change. Now a null
+    `$applyCall.Result` books Failure (`Status='Error'`, `failed=1`, "change NOT confirmed"), mirroring the catch. +2
+    behavioral tests. _(loop-65 dive; the post-write-verify half split to item 80)_
 79. **dhcp bulk doesn't reconcile returned records vs requested scopes** (P3) — a missing scope in the result set gets
     no row/audit/error (summary "0 error(s)"). Fix: emit an Error/abandoned row per requested scope with no returned
     record. _(loop-65 dive)_
+80. **dhcp apply/bulk have NO post-write re-read verification** (P2, NEW) — neither re-reads the option after the
+    Set/Remove to confirm the value actually became the intended one (only a *pre*-write stale check on bulk); success
+    is inferred from "the cmdlet didn't throw." Fix: a mandatory post-write re-read + compare (upr's re-verify pattern).
+    The most valuable remaining dhcp hardening; a bigger add — its own loop. _(loop-65 dive; split from item 78)_
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -1266,6 +1270,15 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   moved here, confirm/self-guard Describe floored). Ran all 3 dhcp-touching files = **59** green. Remaining dhcp items
   77-79 (78 = apply null-result/no post-write verify, the last real false-clean). Pester **1476→1481** green. SECRET
   parity: +dhcp `Get-DhcpDryRunSafe` fail-closed dryRun parse.
+- **Loop 68 (DONE 2026-07-21):** self-review of loop-67 → GREEN (+ corrected loop-67 count 1479→1481, a miscount).
+  Workstream = close **item 78** (the last dhcp false-clean): `Invoke-JanetDhcpApply` read the write result via
+  `Select -First 1`; a null/empty result made `[bool]$null.Removed=$false` → `Status='Changed'` → a clean
+  VulnPatched/Success for an unconfirmable change. **FIXED** (dhcp **1.1.11→1.1.12**): a null `$applyRes` books
+  Failure (`Status='Error'`, `failed=1`, "change NOT confirmed"), mirroring the catch. `Dhcp.IpValidation.Tests.ps1`
+  +2 behavioral (two-seam shim: valid pre-read, empty write → Error/Failure; exact pin moved here, dryRun Describe
+  floored). Ran all 3 dhcp-touching files = **61** green. The post-write-verify half split to **item 80** (the most
+  valuable remaining dhcp hardening — its own loop). Remaining dhcp items 77/79/80. Pester **1481→1483** green.
+  SECRET parity: +dhcp apply null-result → Failure guard.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
