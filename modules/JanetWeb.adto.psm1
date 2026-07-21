@@ -148,6 +148,11 @@ function Test-AdToCompliance {
     param([hashtable]$Obj, [string]$Category, [hashtable]$Baseline, [datetime]$Now = [datetime]::UtcNow)
     $b = $Baseline; if (-not $b) { $b = Get-AdToBaseline }
     $uac = [int]($Obj.Uac)
+    # loop54 (F2): an unreadable UAC (ACL-hidden / non-account object) folds to 0 above; a fresh scan carries
+    # UacReadable=$false. When it's false the UAC bad-bit rules cannot be trusted (0 reads as "no bad bits"),
+    # so we fire a fail-closed uacUnreadable hit instead of silently passing. (Absent flag = readable, for
+    # any caller/test that builds an object by hand.)
+    $uacReadable = if ($Obj.ContainsKey('UacReadable')) { [bool]$Obj.UacReadable } else { $true }
     $disabled = ($uac -band $script:AdToUac.ACCOUNTDISABLE) -ne 0
 
     $hits = New-Object System.Collections.ArrayList
@@ -176,13 +181,14 @@ function Test-AdToCompliance {
     }
 
     if ($Category -in @('User','Admin','Service')) {
+        if (-not $uacReadable) { [void]$hits.Add('uacUnreadable'); [void]$parts.Add('userAccountControl absent/unreadable -> UAC compliance NOT confirmed (fail-closed)') }
         if (-not $disabled -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.inactiveDays) { & $fire 'inactiveEnabled' @($b.inactiveDays) }
-        if (($uac -band $script:AdToUac.DONT_EXPIRE_PASSWORD) -ne 0) { & $fire 'passwordNeverExpires' $null }
-        if (($uac -band $script:AdToUac.PASSWD_NOTREQD) -ne 0)       { & $fire 'passwordNotRequired' $null }
-        if (($uac -band $script:AdToUac.ENCRYPTED_TEXT_PWD) -ne 0)   { & $fire 'reversibleEncryption' $null }
+        if ($uacReadable -and (($uac -band $script:AdToUac.DONT_EXPIRE_PASSWORD) -ne 0)) { & $fire 'passwordNeverExpires' $null }
+        if ($uacReadable -and (($uac -band $script:AdToUac.PASSWD_NOTREQD) -ne 0))       { & $fire 'passwordNotRequired' $null }
+        if ($uacReadable -and (($uac -band $script:AdToUac.ENCRYPTED_TEXT_PWD) -ne 0))   { & $fire 'reversibleEncryption' $null }
         if ([string]::IsNullOrWhiteSpace([string]$Obj.Description))  { & $fire 'descriptionMissing' $null }
         if ([string]::IsNullOrWhiteSpace([string]$Obj.Manager))     { & $fire 'managerMissing' $null }
-        if (($uac -band $script:AdToUac.SMARTCARD_REQUIRED) -eq 0)   { & $fire 'smartcardNotRequired' $null }
+        if ($uacReadable -and (($uac -band $script:AdToUac.SMARTCARD_REQUIRED) -eq 0))   { & $fire 'smartcardNotRequired' $null }
         if ($Category -eq 'Admin' -and @($Obj.ServicePrincipalName).Count -gt 0) { & $fire 'adminHasSpn' $null }
         $recert = Get-AdToRecertDate ([string]$Obj.RecertValue) ([string]$b.recertifyStampPrefix)
         if ($null -eq $recert -or ($Now - $recert).TotalDays -gt [double]$b.recertifyDays) { & $fire 'recertifyOverdue' @($b.recertifyDays, $b.recertifyStampPrefix) }
@@ -309,7 +315,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.4'
+        version  = '0.2.5'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(
@@ -362,12 +368,17 @@ function ConvertTo-AdToObject {
     $cls = @($p['objectclass']); $isComputer = ($cls -contains 'computer')
     $ll1 = [string](& $get 'lastlogontimestamp'); $ll2 = [string](& $get 'lastlogon')
     $ll  = if ($ll1) { $ll1 } else { $ll2 }
+    # loop54 (F2): an ACL-hidden userAccountControl is simply absent from the DirectorySearcher result, so
+    # [int]("0"+[string]$null)=0 reads as "no bad bits" -> COMPLIANT. Carry a UacReadable flag so the
+    # compliance test can fail closed on an unreadable UAC instead of silently passing it.
+    $uacRaw = (& $get 'useraccountcontrol')
     @{
         SamAccountName       = [string](& $get 'samaccountname')
         DistinguishedName    = [string](& $get 'distinguishedname')
         ObjectClass          = if ($isComputer) { 'computer' } else { 'user' }
         OperatingSystem      = [string](& $get 'operatingsystem')
-        Uac                  = [int]("0" + [string](& $get 'useraccountcontrol'))
+        Uac                  = [int]("0" + [string]$uacRaw)
+        UacReadable          = (-not [string]::IsNullOrEmpty([string]$uacRaw))
         ServicePrincipalName = @($p['serviceprincipalname'])
         AdminCount           = [int]("0" + [string](& $get 'admincount'))
         LastLogonTicks       = $ll

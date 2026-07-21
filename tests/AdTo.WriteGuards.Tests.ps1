@@ -57,11 +57,11 @@ function Invoke-FixWith {
     @{ Result = $res; Events = @($evs) }
 }
 
-Describe 'adto 0.2.4 - manifest loads at the bumped version' {
+Describe 'adto 0.2.5 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is adto and version is 0.2.4' {
+    It 'manifest id is adto and version is 0.2.5' {
         [string]$mani.id      | Should Be 'adto'
-        [string]$mani.version | Should Be '0.2.4'
+        [string]$mani.version | Should Be '0.2.5'
     }
     It 'fix + validate-iao are destructive' {
         foreach ($aid in @('fix','validate-iao')) {
@@ -140,6 +140,33 @@ Describe 'adto F1b (loop53) - a NULL/unreadable userAccountControl fails closed,
         $de = New-FakeDeNullUac
         $o = Invoke-FixWith -Fake $de -Rule 'passwordNeverExpires'
         @($o.Events | Where-Object { $_.type -eq 'audit' -and $_.result -eq 'Failure' }).Count | Should BeGreaterThan 0
+    }
+}
+
+Describe 'adto F2b (loop54) - the SCAN reads an unreadable userAccountControl as NON-COMPLIANT, not COMPLIANT' {
+    $base = & $m { Get-AdToBaseline }
+    $now  = [datetime]'2026-07-21T00:00:00Z'
+    $recent = $now.AddDays(-1).ToFileTimeUtc()
+    It 'a Service account with UacReadable=$false -> a uacUnreadable hit (NON-COMPLIANT), never silently COMPLIANT' {
+        $obj = @{ Uac=0; UacReadable=$false; LastLogonTicks=$recent; Description='svc'; Manager='CN=M,DC=t,DC=l'; RecertValue=''; ServicePrincipalName=@() }
+        $r = & $m { param($o,$b,$n) Test-AdToCompliance -Obj $o -Category 'Service' -Baseline $b -Now $n } $obj $base $now
+        [string]$r.Status | Should Be 'NON-COMPLIANT'
+        (@($r.Rules) -contains 'uacUnreadable') | Should Be $true
+    }
+    It 'a readable UAC (UacReadable=$true, no bad bits) does NOT get the uacUnreadable hit (no over-flag)' {
+        $obj = @{ Uac=0x200; UacReadable=$true; LastLogonTicks=$recent; Description='svc'; Manager='CN=M,DC=t,DC=l'; RecertValue=''; ServicePrincipalName=@() }
+        $r = & $m { param($o,$b,$n) Test-AdToCompliance -Obj $o -Category 'Service' -Baseline $b -Now $n } $obj $base $now
+        (@($r.Rules) -contains 'uacUnreadable') | Should Be $false
+    }
+    It 'a readable UAC with PASSWD_NOTREQD (0x20) set is still flagged - the real bad-bit path still works' {
+        $obj = @{ Uac=(0x200 -bor 0x20); UacReadable=$true; LastLogonTicks=$recent; Description='svc'; Manager='CN=M,DC=t,DC=l'; RecertValue=''; ServicePrincipalName=@() }
+        $r = & $m { param($o,$b,$n) Test-AdToCompliance -Obj $o -Category 'Service' -Baseline $b -Now $n } $obj $base $now
+        (@($r.Rules) -contains 'passwordNotRequired') | Should Be $true
+    }
+    It 'an object built WITHOUT a UacReadable key is treated as readable (back-compat)' {
+        $obj = @{ Uac=0x200; LastLogonTicks=$recent; Description='svc'; Manager='CN=M,DC=t,DC=l'; RecertValue=''; ServicePrincipalName=@() }
+        $r = & $m { param($o,$b,$n) Test-AdToCompliance -Obj $o -Category 'Service' -Baseline $b -Now $n } $obj $base $now
+        (@($r.Rules) -contains 'uacUnreadable') | Should Be $false
     }
 }
 
