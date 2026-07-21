@@ -112,6 +112,23 @@ function New-AcasSoftwareCenterScript {
     return [scriptblock]::Create($body)
 }
 
+# loop40 (item35, Office C2R slice): CANONICAL Office C2R verify verdict, PORTED from wpt's proven
+# Get-WptC2rVerified (loop24/item15). "Verified" is TRUE only when the ClickToRun Configuration key
+# was written within the window AND the last update scenario SUCCEEDED. C2R bumps that key on EVERY
+# update attempt INCLUDING failures, so mtime freshness ALONE was a false-clean: a failed Office
+# update read Verified with the OLD, still-vulnerable version. $null when there's no timestamp or the
+# scenario result is unknown (never over-claims). New-AcasOfficeC2RVerify's generated remote
+# scriptblock mirrors this inline (runs over WinRM, can't call a module fn); keep in lockstep.
+# Pure - tested by Acas.C2rVerify.Tests.ps1.
+function Get-AcasC2rVerified {
+    param([bool]$HasTimestamp, [double]$AgeDays, [string]$ScenarioResult, [int]$WindowDays = 7)
+    if (-not $HasTimestamp) { return $null }
+    if ($AgeDays -ge $WindowDays) { return $false }
+    $sr = ([string]$ScenarioResult).Trim()
+    if (-not $sr) { return $null }
+    return [bool]($sr -match '(?i)success')
+}
+
 # Builder for the Office C2R version-probe Verify blocks (4 profiles ran identical
 # registry reads; only the Detail suffix differed). $Detail is literal text embedded
 # into the (double-quoted) Detail string, so a "$($p.LastScenario)" sub-expression in
@@ -126,7 +143,15 @@ function New-AcasOfficeC2RVerify {
             $key = Get-Item -Path $cfg -ErrorAction SilentlyContinue
             $mod = if ($key) { $key.LastWriteTime } else { $null }
             $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
-            $verified = if ($mod) { ((Get-Date) - $mod).TotalDays -lt 7 } else { $null }
+            # loop40 (item35): MIRROR of Get-AcasC2rVerified (ported from wpt loop24) - fresh AND the
+            # last scenario SUCCEEDED. C2R bumps this key on failed attempts too, so mtime alone would
+            # falsely read Verified with the OLD version. $null when unknown. Keep in lockstep.
+            $scenarioResult = "$($p.LastScenarioResult)".Trim()
+            $verified =
+                if ($null -eq $mod) { $null }
+                elseif (((Get-Date) - $mod).TotalDays -ge 7) { $false }
+                elseif ($scenarioResult) { [bool]($scenarioResult -match '(?i)success') }
+                else { $null }
             return @{ Version = $ver; LastUpdated = $modStr; Verified = $verified; Detail = "__DETAIL__" }
 '@
     return [scriptblock]::Create($body.Replace('__DETAIL__', $Detail))
@@ -1097,7 +1122,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.11'
+        version  = '1.11.12'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(

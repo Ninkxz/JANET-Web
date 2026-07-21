@@ -61,9 +61,9 @@ Describe 'acas update worker - the inline bump mirror carries the degraded/downg
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-39 bump-verdict fail-close)' {
-    It 'acas is at v1.11.11' {
+Describe 'acas - manifest version floor (bump-verdict shipped in 1.11.11; exact pin migrated to newest bump)' {
+    It 'acas is at or past v1.11.11' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.11'
+        ([version][string]$mani.version -ge [version]'1.11.11') | Should Be $true
     }
 }
