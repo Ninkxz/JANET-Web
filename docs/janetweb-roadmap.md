@@ -1342,6 +1342,15 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   ≥5 shared-hint sites, dead function + calls gone; exact pin moved here, loop-69 Describe floored). **Ran dhcp +
   FixVerify + FixVerify3 (68)** = green. Pester **~1512→~1516** green. Next: secureboot. SECRET parity: +dhcp swap to
   shared hint.
+- **Loop 76 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-75 → GREEN. Workstream = wire the
+  hint into **secureboot** (7th tool; destructive enable path). The ENABLE harvest (`:1262-1296`) carries the raw
+  WinRM/BIOS error in `$res.Error` with a four-way classify already computed. On a real failure (`(-not $isOk) -and
+  (-not $isSkip) -and (-not $isUnknown) -and (-not $isDryR) -and $res.Error`) it runs the error through
+  `Get-JanetTroubleshootHint` and attaches it to a `Hint` row field + the existing per-host err log (`FIX:`).
+  **Purely additive** (ok/skip/unknown/dry-run untouched). secureboot **1.6.4→1.6.5**; `Secureboot.Scan.Tests.ps1` +4
+  (static analysis; exact pin moved here, loop-59 Describe floored). **Ran full secureboot suite (47)** = green. Pester
+  **~1516→~1520** green. Next: c2c. Noted: scan CHECK ERROR path for a follow-up. SECRET parity: +secureboot enable
+  harvest hint wire.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
