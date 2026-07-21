@@ -29,7 +29,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.8'
+        version  = '1.1.9'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -978,9 +978,13 @@ function Invoke-JanetDhcpBulk {
             $after    = @($r.After  | ForEach-Object { [string]$_ })
             $rowError = $(if ($r.Error) { [string]$r.Error } else { '' })
 
+            # loop65 (item74): the final branch is a fail-CLOSED catch-all. Previously only Error/Stale
+            # counted as errors, so the remote's own 'ReadError' refusal (it declined to write because it
+            # could not read the current value) matched NO bucket - uncounted, and the summary read
+            # "0 error(s)". Anything that is not a change or a genuine no-change is an error.
             if     ($status -in @('Changed','Removed','WouldChange','WouldRemove')) { $changed++ }
             elseif ($status -eq 'NoChange') { $nochange++ }
-            elseif ($status -in @('Error','Stale')) { $errs++ }
+            else { $errs++ }
 
             # JANET central log per scope (lines 2263-2268): Changed/Removed are
             # state changes (VulnPatched/Success), NoChange is a TouchHost/Skipped,
@@ -991,8 +995,9 @@ function Invoke-JanetDhcpBulk {
                     'WouldChange' { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Success'; itemCount=$after.Count; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId would-change") } }
                     'WouldRemove' { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Success'; itemCount=0; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId would-remove") } }
                     'NoChange'    { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Skipped'; itemCount=0; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId no-change") } }
+                    'ReadError'   { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId REFUSED: could not read current value (nothing previewed)") } }
                     'Error'       { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId err=$rowError") } }
-                    default       { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Success'; itemCount=0; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId") } }
+                    default       { & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode DRY RUN scope=$($r.ScopeId) opt=$OptionId unexpected status '$status' - treated as failure") } }
                 }
             } else {
                 switch ($status) {
@@ -1000,8 +1005,9 @@ function Invoke-JanetDhcpBulk {
                     'Removed'  { & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Success'; itemCount=1; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId removed") } }
                     'NoChange' { & $Send @{ type='audit'; action='TouchHost';   target=$Server; result='Skipped'; itemCount=0; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId no-change") } }
                     'Stale'    { & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId refused: stale (concurrent change)") } }
+                    'ReadError' { & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId REFUSED: could not read current value - nothing written") } }
                     'Error'    { & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId err=$rowError") } }
-                    default    { & $Send @{ type='audit'; action='TouchHost';   target=$Server; result='Success'; itemCount=0; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId") } }
+                    default    { & $Send @{ type='audit'; action='VulnPatched'; target=$Server; result='Failure'; itemCount=0; detail=("bulk-$Mode scope=$($r.ScopeId) opt=$OptionId unexpected status '$status' - treated as failure") } }
                 }
             }
 

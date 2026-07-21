@@ -65,3 +65,43 @@ Describe 'dhcp Get-JanetValidIpList - split / validate / canonicalize / dedupe' 
         (@($r.Invalid) -join ',') | Should Be 'nope,999.1.1.1'
     }
 }
+
+# loop65 (item74): the remote DHCP bulk script fail-closes on a read failure (Status='ReadError' -
+# it declines to write because it could not read the current option value). The LOCAL bulk result
+# handler then laundered that refusal: 'ReadError' matched no counter bucket, both audit switch
+# defaults booked TouchHost/Success, and the summary read "0 error(s)". Now the counter's final
+# branch is a fail-closed catch-all and both switch defaults book Failure, with an explicit
+# ReadError case. Behavioral (shim the remote call) + a static assert that no default books Success.
+Describe 'dhcp 1.1.9 - a bulk ReadError scope is a Failure, never a laundered Success' {
+    It 'manifest version is 1.1.9' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.9'
+    }
+    It 'a ReadError scope -> Failure audit, counted in summary.failed, honest row status' {
+        $events = New-Object System.Collections.ArrayList
+        $send = { param($e) [void]$events.Add($e) }
+        $res = & $mod {
+            param($snd)
+            function script:Invoke-JanetOnDhcpCancelable {
+                param($Server, $Script, $Arguments, $Credential, $CancelCheck, $UseSsl)
+                @{ Cancelled = $false; Result = @(
+                    [pscustomobject]@{ ScopeId = '192.168.1.0'; Status = 'ReadError'; Before = @(); After = @(); Error = 'RPC failure reading option 6' }
+                ) }
+            }
+            try {
+                Invoke-JanetDhcpBulk -Server 'DHCP01' -ScopeIds @('192.168.1.0') -OptionId 6 -Ips @('10.0.0.1') -Mode 'Append' -Credential $null -Send $snd -CancelCheck { $false } -DryRun $false
+            } finally { Remove-Item function:script:Invoke-JanetOnDhcpCancelable -ErrorAction SilentlyContinue }
+        } $send
+
+        [int]$res.summary.failed | Should Be 1
+        [int]$res.summary.ok     | Should Be 0
+        $audit = @($events | Where-Object { $_.type -eq 'audit' })[0]
+        [string]$audit.result    | Should Be 'Failure'
+        ([string]$audit.detail -match 'REFUSED') | Should Be $true
+        $row = @($events | Where-Object { $_.type -eq 'row' })[0]
+        [string]$row.Status      | Should Be 'ReadError'
+    }
+    It 'neither bulk audit switch default books Success (fail-closed default)' {
+        $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+        ($src -match "default\s*\{[^}]*result='Success'[^}]*bulk-") | Should Be $false
+    }
+}
