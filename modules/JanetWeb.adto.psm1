@@ -84,11 +84,17 @@ function Get-AdToBaseline {
             if ($j.rules) {
                 foreach ($rn in @($j.rules.PSObject.Properties.Name)) {
                     $r = $j.rules.$rn
-                    $def.rules[$rn] = @{
-                        enabled     = [bool]$r.enabled
-                        appliesTo   = @($r.appliesTo)
-                        requiresIao = [bool]$r.requiresIao
-                    }
+                    # loop55 (F3): MERGE the overlay rule onto the embedded default, do NOT replace it. An
+                    # overlay entry tuning one field (or a typo) previously nulled the others - a missing
+                    # 'enabled' became [bool]$null=$false (rule OFF), a missing 'appliesTo' became @($null)
+                    # (never fires), silently scanning every violating object COMPLIANT with no trace. Only
+                    # override a field the overlay EXPLICITLY provides; omitted fields keep the default.
+                    $base = if ($def.rules.ContainsKey($rn)) { $def.rules[$rn] } else { @{ enabled=$true; appliesTo=@(); requiresIao=$false } }
+                    $merged = @{ enabled=[bool]$base.enabled; appliesTo=@($base.appliesTo); requiresIao=[bool]$base.requiresIao }
+                    if ($null -ne $r.enabled)     { $merged.enabled     = [bool]$r.enabled }
+                    if ($null -ne $r.appliesTo)   { $merged.appliesTo   = @($r.appliesTo) }
+                    if ($null -ne $r.requiresIao) { $merged.requiresIao = [bool]$r.requiresIao }
+                    $def.rules[$rn] = $merged
                 }
             }
             $def['Source'] = "overlay $path"
@@ -315,7 +321,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.5'
+        version  = '0.2.6'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(

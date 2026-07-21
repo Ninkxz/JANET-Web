@@ -57,11 +57,11 @@ function Invoke-FixWith {
     @{ Result = $res; Events = @($evs) }
 }
 
-Describe 'adto 0.2.5 - manifest loads at the bumped version' {
+Describe 'adto 0.2.6 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is adto and version is 0.2.5' {
+    It 'manifest id is adto and version is 0.2.6' {
         [string]$mani.id      | Should Be 'adto'
-        [string]$mani.version | Should Be '0.2.5'
+        [string]$mani.version | Should Be '0.2.6'
     }
     It 'fix + validate-iao are destructive' {
         foreach ($aid in @('fix','validate-iao')) {
@@ -238,5 +238,43 @@ Describe 'adto F2 - validate-iao is FAIL-CLOSED: VALIDATED only when the stamp r
         $row = @($o.Events | Where-Object { $_.type -eq 'row' })[0]
         [string]$row.Status | Should Be 'FAILED'
         @($o.Events | Where-Object { $_.type -eq 'audit' -and $_.result -eq 'Failure' }).Count | Should BeGreaterThan 0
+    }
+}
+
+# loop55 (F3, item61): an overlay entry that tunes ONE field of a rule (or a typo) must NOT silently
+# disable the rule. Old merge REPLACED the rule with the overlay's fields, so a missing 'enabled' became
+# [bool]$null=$false (rule OFF) and a missing 'appliesTo' became @($null) (never fires) -> every violating
+# object scanned COMPLIANT with no trace. Now the overlay MERGES onto the embedded default.
+Describe 'adto F3b (loop55) - baseline overlay merges, does not silently disable a rule on a typo' {
+    # Read Get-AdToBaseline with a partial overlay supplied via a real temp file (shim only the path
+    # resolver - adto-specific - so Test-Path/Get-Content stay real and cannot leak into sibling tests).
+    function Get-OverlaidBaseline {
+        param([string]$Json)
+        $tmp = Join-Path $env:TEMP ("adto-overlay-loop55-$PID.json")
+        Set-Content -LiteralPath $tmp -Value $Json -Encoding UTF8
+        try {
+            & $m {
+                param($p)
+                function script:Get-AdToBaselinePath { $p }
+                try { Get-AdToBaseline } finally { Remove-Item function:script:Get-AdToBaselinePath -ErrorAction SilentlyContinue }
+            } $tmp
+        } finally { Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'overlay tuning only requiresIao keeps the default enabled=true (not silently OFF)' {
+        $b = Get-OverlaidBaseline -Json '{ "rules": { "passwordNotRequired": { "requiresIao": true } } }'
+        [bool]$b.rules['passwordNotRequired'].enabled | Should Be $true
+    }
+    It 'overlay tuning only requiresIao keeps the default appliesTo (rule still fires)' {
+        $b = Get-OverlaidBaseline -Json '{ "rules": { "passwordNotRequired": { "requiresIao": true } } }'
+        (@($b.rules['passwordNotRequired'].appliesTo) -contains 'User') | Should Be $true
+    }
+    It 'the field the overlay DID provide is applied' {
+        $b = Get-OverlaidBaseline -Json '{ "rules": { "passwordNotRequired": { "requiresIao": true } } }'
+        [bool]$b.rules['passwordNotRequired'].requiresIao | Should Be $true
+    }
+    It 'an EXPLICIT enabled=false still disables the rule (intentional override honored)' {
+        $b = Get-OverlaidBaseline -Json '{ "rules": { "passwordNotRequired": { "enabled": false } } }'
+        [bool]$b.rules['passwordNotRequired'].enabled | Should Be $false
     }
 }
