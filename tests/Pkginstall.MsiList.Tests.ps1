@@ -99,3 +99,44 @@ Describe 'pkginstall 2.5.10 - a PSADT deploy that sets no exit code is Failed, n
         ($src -match 'returned no exit code') | Should Be $true
     }
 }
+
+# -----------------------------------------------------------------------------
+# loop63 (item70): ConvertTo-JanetMsiList silently drops rooted / '..' entries, so a partial selection
+# was reported as a clean "All N succeeded" for fewer MSIs, and an all-invalid non-blank selection fell
+# through to the install-EVERY-*.msi fallback (scope escalation). Get-JanetMsiListDropped surfaces the
+# drops; the caller warns per drop and REFUSES an all-dropped non-blank selection. Behavioral test of the
+# pure helper + static analysis of the caller wiring.
+Describe 'pkginstall 2.5.12 - dropped MSI entries are surfaced; an all-invalid selection is refused' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'manifest version is exactly 2.5.12 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.12'
+    }
+    It 'blank / all-valid input -> no drops' {
+        @(& $script:Mod { Get-JanetMsiListDropped '   ' }).Count | Should Be 0
+        @(& $script:Mod { Get-JanetMsiListDropped "a.msi`r`nx64\b.msi" }).Count | Should Be 0
+    }
+    It 'returns exactly the rooted / traversal entries that ConvertTo-JanetMsiList drops' {
+        $raw = "a.msi`n..\evil.msi`nb.msi`nC:\x.msi"
+        $dropped = @(& $script:Mod { param($r) Get-JanetMsiListDropped $r } $raw)
+        $kept    = @(& $script:Mod { param($r) ConvertTo-JanetMsiList $r } $raw)
+        ($dropped -contains '..\evil.msi') | Should Be $true
+        ($dropped -contains 'C:\x.msi')    | Should Be $true
+        $dropped.Count | Should Be 2
+        $kept.Count    | Should Be 2
+        # kept and dropped are disjoint and together cover every non-blank line (predicates in sync)
+        ($kept.Count + $dropped.Count) | Should Be 4
+    }
+    It 'an all-invalid non-blank selection drops everything (caller then refuses)' {
+        $raw = "C:\x.msi`n..\y.msi"
+        @(& $script:Mod { param($r) Get-JanetMsiListDropped $r } $raw).Count | Should Be 2
+        @(& $script:Mod { param($r) ConvertTo-JanetMsiList  $r } $raw).Count | Should Be 0
+    }
+    It 'the caller warns per drop and refuses an all-dropped selection (does NOT fall through to install-everything)' {
+        ($src -match 'Get-JanetMsiListDropped')                       | Should Be $true
+        ($src -match 'refusing rather than installing the whole bundle') | Should Be $true
+        # the refuse is gated on the surviving list being empty
+        ($src -match "if\s*\(@\(\`$msiList\)\.Count\s*-eq\s*0\)")      | Should Be $true
+    }
+}

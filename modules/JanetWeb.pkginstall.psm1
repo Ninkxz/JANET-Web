@@ -22,7 +22,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.11'
+        version  = '2.5.12'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -152,6 +152,19 @@ function ConvertTo-JanetMsiList {
     # entries like 'x64\foo.msi' are kept.
     @($Raw -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object {
         $_ -and -not [System.IO.Path]::IsPathRooted($_) -and ($_ -notmatch '(^|[\\/])\.\.([\\/]|$)')
+    })
+}
+
+function Get-JanetMsiListDropped {
+    # loop63 (item70): the INVERSE of ConvertTo-JanetMsiList - the non-blank entries it silently drops
+    # (rooted path or '..' traversal). The caller warns per dropped entry so a partial selection isn't
+    # reported as a clean "All N succeeded", and REFUSES a non-blank selection that dropped to empty so
+    # an all-invalid list can't silently escalate to the install-EVERY-*.msi fallback. Blank -> @() (the
+    # intentional install-everything path stays). Kept in sync with ConvertTo-JanetMsiList's predicate.
+    param([string]$Raw)
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return @() }
+    @($Raw -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object {
+        $_ -and ([System.IO.Path]::IsPathRooted($_) -or ($_ -match '(^|[\\/])\.\.([\\/]|$)'))
     })
 }
 
@@ -830,7 +843,27 @@ function Invoke-JanetToolAction {
     $msiArgs = '/qn /norestart'
     if ($mode -eq 'MSI') {
         $msiList = ConvertTo-JanetMsiList ([string]$Params['msiList'])
-        if ($singleMsiLeaf) { $msiList = @($singleMsiLeaf) }
+        if ($singleMsiLeaf) {
+            $msiList = @($singleMsiLeaf)
+        } else {
+            # loop63 (item70): surface every entry ConvertTo-JanetMsiList dropped (rooted / '..'), so a
+            # partial selection isn't quietly reported as a clean "All N succeeded" for fewer MSIs; and
+            # REFUSE a non-blank selection that dropped to EMPTY rather than falling through to the
+            # install-EVERY-*.msi fallback (a scope escalation the operator never asked for). A blank
+            # selection produces no drops and keeps the intentional install-everything path below.
+            $droppedMsi = Get-JanetMsiListDropped ([string]$Params['msiList'])
+            if (@($droppedMsi).Count -gt 0) {
+                foreach ($d in $droppedMsi) {
+                    & $send @{ type='log'; level='warn'; text="MSI entry rejected (rooted path or '..' traversal - must stay inside the bundle): $d" }
+                }
+                if (@($msiList).Count -eq 0) {
+                    $n = @($droppedMsi).Count
+                    & $send @{ type='log'; level='err'; text="All $n selected MSI entr$(if ($n -eq 1) { 'y' } else { 'ies' }) were rejected (rooted/traversal) - refusing rather than installing the whole bundle." }
+                    & $send @{ type='status'; text='Aborted: every selected MSI entry was invalid (rooted/traversal).' }
+                    return @{ rows=@(); summary=@{ total=$targets.Count; ok=0; failed=0; deferred=0; rejected=$true } }
+                }
+            }
+        }
         if ([string]$Params['msiArgs']) { $msiArgs = [string]$Params['msiArgs'] }
         # $msiArgs is interpolated raw after the /i "<msi>" and /L*v "<log>" tokens.
         # An embedded double-quote would break that quoting and could re-target the

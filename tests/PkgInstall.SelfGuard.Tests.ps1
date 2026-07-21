@@ -92,8 +92,8 @@ Describe 'pkginstall deploy self-guards the dispatcher BEFORE fan-out' {
 Describe 'pkginstall 2.5.11 - deploy confirm-word gate (fail-closed)' {
     $mani = & $m { Get-JanetToolManifest }
 
-    It 'manifest version is exactly 2.5.11 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '2.5.11'
+    It 'manifest version is at least 2.5.11 (floor; newest exact pin = loop63 MsiList Describe, v2.5.12)' {
+        ([version][string]$mani.version -ge [version]'2.5.11') | Should Be $true
     }
     It 'both deploy actions declare a required confirm input' {
         foreach ($aid in @('deploy-psadt','deploy-msi-bundle')) {
