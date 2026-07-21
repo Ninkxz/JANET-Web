@@ -1351,6 +1351,14 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   (static analysis; exact pin moved here, loop-59 Describe floored). **Ran full secureboot suite (47)** = green. Pester
   **~1516→~1520** green. Next: c2c. Noted: scan CHECK ERROR path for a follow-up. SECRET parity: +secureboot enable
   harvest hint wire.
+- **Loop 77 (DONE 2026-07-21) — informative-failures theme:** self-review of loop-76 → GREEN. Workstream = wire the
+  hint into **c2c** (8th tool; destructive Mass-Fix). Per-host results carry the raw error in `$res.Detail`
+  (`"Session: <exc>"`, `"Probe: <exc>"`). In the Mass-Fix harvest `$emitResult` (`:3135`), hoisted
+  `$auditResult = Get-C2cHostAuditResult $res.Status` to the top (same value) and, on a `Failure` host, ran
+  `$res.Detail` through `Get-JanetTroubleshootHint`, attaching a `Hint` row field + an err log (`FIX:`). **Purely
+  additive** (FIXED/NOCHANGE untouched). c2c **1.15.8→1.15.9**; `C2c.AuditResult.Tests.ps1` +4 (static analysis; exact
+  pin moved here, loop-47 Describe floored). Ran C2c.AuditResult (14) + full c2c suite = green. Pester **~1520→~1524**
+  green. Next: certdeploy. SECRET parity: +c2c Mass-Fix harvest hint wire.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
