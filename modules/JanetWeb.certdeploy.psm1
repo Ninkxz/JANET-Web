@@ -51,7 +51,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.4.3'
+        version  = '1.4.4'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -1028,15 +1028,20 @@ function Invoke-CertDeployCheckAction {
     $emitResult = {
         param($res)
         $row = Get-CertDeployCheckRow -Res $res -BundleCertCount ([int]$bundle.CertCount) -SubjectMap $subjectMap -LegacyInBundleCa $legacyInBundleCa
+        $status = [string]$row.Status
+        # informative-failures (loop81): a CHECK ERROR carries the raw probe/session/DNS error in Detail on
+        # this read-only path; turn it into a why+how-to-fix hint. ALL PRESENT/MISSING/OFFLINE self-explain.
+        $hint = if ($status -eq 'CHECK ERROR' -and $row.Detail) { Get-JanetTroubleshootHint -Message ([string]$row.Detail) -Server ([string]$row.Host) } else { '' }
+        if ($hint) { $row['Hint'] = [string]$hint }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
-        $status = [string]$row.Status
         $lvl = 'info'
         if     ($status -eq 'ALL PRESENT') { $lvl = 'ok' }
         elseif ($status -like 'MISSING*')  { $lvl = 'warn' }
         elseif ($status -eq 'OFFLINE')     { $lvl = 'warn' }
         elseif ($status -eq 'CHECK ERROR') { $lvl = 'error' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$row.Host) : $status - $([string]$row.Detail)" }
+        if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$row.Host) : $status - $([string]$row.Detail) | FIX: $hint" } }
     }
 
     $done = 0
@@ -1592,15 +1597,20 @@ function Invoke-CertDeployScanAction {
     $emitResult = {
         param($res)
         $row = Get-CertDeployScanRow -Res $res
+        $rec = [string]$row.Reconciler
+        # informative-failures (loop81): a CHECK ERROR carries the raw probe/session/DNS error in Detail on
+        # this read-only reconciler scan; turn it into a why+how-to-fix hint. OFFLINE / verdicts self-explain.
+        $hint = if ($rec -eq 'CHECK ERROR' -and $row.Detail) { Get-JanetTroubleshootHint -Message ([string]$row.Detail) -Server ([string]$row.Host) } else { '' }
+        if ($hint) { $row['Hint'] = [string]$hint }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
-        $rec = [string]$row.Reconciler
         $lvl = 'info'
         if     ($rec -eq 'None detected') { $lvl = 'ok' }
         elseif ($rec -eq 'OFFLINE')       { $lvl = 'warn' }
         elseif ($rec -eq 'CHECK ERROR')   { $lvl = 'error' }
         else                              { $lvl = 'warn' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$row.Host) : $rec - $([string]$row.Detail)" }
+        if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$row.Host) : $rec - $([string]$row.Detail) | FIX: $hint" } }
     }
 
     $done = 0

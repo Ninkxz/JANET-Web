@@ -377,8 +377,8 @@ Describe 'certdeploy 1.4.3 - deploy harvest attaches a troubleshooting hint to a
     $man = & $cm { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Raw
 
-    It 'manifest version is exactly 1.4.3 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.4.3'
+    It 'manifest version is at or past 1.4.3 (deploy-harvest hint; exact pin migrated to newest bump)' {
+        ([version][string]$man.version -ge [version]'1.4.3') | Should Be $true
     }
     It 'certdeploy imports the shared troubleshoot engine' {
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
@@ -387,8 +387,34 @@ Describe 'certdeploy 1.4.3 - deploy harvest attaches a troubleshooting hint to a
         ($src -match '\$hint\s*=\s*if\s*\(\$auditResult\s*-eq\s*''Failure''\s*-and\s*\$detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
         ($src -match 'Detail=\$detail;\s*Hint=\[string\]\$hint') | Should Be $true
     }
-    It 'the err log carries the FIX hint when one exists (raw detail preserved)' {
+    It 'the deploy err log carries the FIX hint when one exists (raw detail preserved)' {
         ($src -match "if \(\`$hint\) \{ &\s*\`$send @\{ type='log'; level='err'") | Should Be $true
         ($src -match 'FIX: \$hint')                                              | Should Be $true
+    }
+}
+
+# loop81 (informative-failures follow-up): the two READ-ONLY paths - the cert CHECK harvest and the
+# scan-cert-management reconciler harvest - now, on a host-level CHECK ERROR (raw probe/session/DNS error in
+# Detail), run it through Get-JanetTroubleshootHint and attach a Hint row field + a FIX: err log, raw detail
+# preserved. ALL PRESENT/MISSING/OFFLINE (check) and the reconciler verdicts/OFFLINE (scan) self-explain, so
+# the hint is scoped to CHECK ERROR. Static analysis (both harvests run inside a fan-out over a real RunspacePool).
+Describe 'certdeploy 1.4.4 - read-only check + scan harvests attach a hint to a CHECK ERROR host' {
+    $man = & $cm { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Raw
+
+    It 'manifest version is exactly 1.4.4 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.4.4'
+    }
+    It 'the check harvest computes a hint only for a CHECK ERROR status and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$status\s*-eq\s*''CHECK ERROR''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+    }
+    It 'the scan harvest computes a hint only for a CHECK ERROR reconciler verdict and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$rec\s*-eq\s*''CHECK ERROR''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+    }
+    It 'both read-only harvests mutate the row Hint and emit a gated FIX err log' {
+        # the $row['Hint'] mutation form is unique to the read-only harvests (deploy uses a row literal) -> 2
+        ([regex]::Matches($src, "if \(\`$hint\) \{ \`$row\['Hint'\] = \[string\]\`$hint \}").Count) | Should Be 2
+        # the row-based err log ($row.Host, not deploy's $res.Host) -> exactly the two read-only paths
+        ([regex]::Matches($src, "level='err'; text=`"\`$\(\[string\]\`$row\.Host\).*FIX: \`$hint").Count) | Should Be 2
     }
 }
