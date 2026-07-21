@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.1'
+        version  = '0.5.2'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -2185,6 +2185,17 @@ $script:WinUpgradeWorker = {
                         $icP = $baseIc.Clone(); $icP.ScriptBlock = $PinBlock; $icP.ArgumentList = @($Version, $Product, $Bypass)
                         $pinOut = [string](Invoke-Command @icP); $r.WasPinned = $true
                     } catch { $pinOut = "pin error: $($_.Exception.Message)"; $r.WasPinned = $false }
+
+                    # loop31 (F1): a FAILED pin must ABORT the drive. Triggering Windows Update
+                    # without a successful pin lets WU upgrade the host to the LATEST feature update
+                    # instead of the pinned target (the exact thing the pin prevents), and reporting
+                    # green "Pinned + triggered" while the pin threw is a false-clean (the pin error
+                    # was being discarded). Fail-closed: no pin -> no trigger, surface the error.
+                    if (-not $r.WasPinned) {
+                        $r.Status = 'PIN FAILED'; $r.Ok = $false
+                        $r.Detail = "Pin did NOT apply - upgrade NOT triggered (an unpinned trigger could upgrade to the wrong build). $pinOut"
+                        return $r
+                    }
 
                     # -- 4) TRIGGER Windows Update (best-effort accelerator; NOT a guaranteed install) --
                     & $pushStep 'Triggering' 'Triggering Windows Update detect/download/install...'

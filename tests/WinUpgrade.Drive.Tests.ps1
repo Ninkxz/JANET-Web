@@ -97,13 +97,15 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
         param(
             [string]$Computer, [int]$OsBuild = 22631, [string]$Report = '',
             [bool]$StagedAfter = $false, [bool]$Bypass = $false,
-            [bool]$RebootWhenStaged = $false, [int]$Countdown = 300, [bool]$DryRun = $false
+            [bool]$RebootWhenStaged = $false, [int]$Countdown = 300, [bool]$DryRun = $false,
+            [bool]$PinThrows = $false
         )
         return & $m {
-            param($Computer,$OsBuild,$Report,$StagedAfter,$Bypass,$RebootWhenStaged,$Countdown,$DryRun)
+            param($Computer,$OsBuild,$Report,$StagedAfter,$Bypass,$RebootWhenStaged,$Countdown,$DryRun,$PinThrows)
             Set-Variable -Name __ob    -Scope script -Value $OsBuild
             Set-Variable -Name __rep   -Scope script -Value $Report
             Set-Variable -Name __st    -Scope script -Value $StagedAfter
+            Set-Variable -Name __pinx  -Scope script -Value $PinThrows
             Set-Variable -Name __calls -Scope script -Value (New-Object System.Collections.ArrayList)
             Set-Variable -Name __rbcd  -Scope script -Value $null
             function script:Invoke-Command {
@@ -116,7 +118,7 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
                 if ($t -match 'PHASE:TRIGGER') { [void]$script:__calls.Add('TRIGGER'); return 'triggered: UsoClient StartScan, StartDownload, StartInstall' }
                 if ($t -match 'PHASE:STAGED')  { [void]$script:__calls.Add('STAGED');  return ([pscustomobject]@{ Staged = [bool]$script:__st }) }
                 if ($t -match 'PHASE:REBOOT')  { [void]$script:__calls.Add('REBOOT'); Set-Variable -Name __rbcd -Scope script -Value ([int]$ArgumentList[0]); return @{ ExitCode = 0; Error = '' } }
-                if ($t -match 'doBypass')      { [void]$script:__calls.Add('PIN'); return 'ProductVersion=Windows 11; TargetReleaseVersionInfo=24H2' }
+                if ($t -match 'doBypass')      { [void]$script:__calls.Add('PIN'); if ($script:__pinx) { throw 'Access is denied (policy write)' }; return 'ProductVersion=Windows 11; TargetReleaseVersionInfo=24H2' }
                 return $null
             }
             try {
@@ -132,9 +134,9 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
                 return @{ Row = $row; Calls = @($script:__calls); RebootCd = $script:__rbcd }
             } finally {
                 Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue
-                Remove-Variable -Name __ob,__rep,__st,__calls,__rbcd -Scope script -ErrorAction SilentlyContinue
+                Remove-Variable -Name __ob,__rep,__st,__pinx,__calls,__rbcd -Scope script -ErrorAction SilentlyContinue
             }
-        } $Computer $OsBuild $Report $StagedAfter $Bypass $RebootWhenStaged $Countdown $DryRun
+        } $Computer $OsBuild $Report $StagedAfter $Bypass $RebootWhenStaged $Countdown $DryRun $PinThrows
     }
 
     It 'INVARIANT #2: a host already on 26100 -> Skipped, no PIN, no REBOOT' {
@@ -192,5 +194,26 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
         ($out.Calls -contains 'REBOOT') | Should Be $false
         [bool]$out.Row.Rebooted | Should Be $false
         $out.Row.Status | Should Be 'STAGED'
+    }
+
+    It 'loop31 F1: a FAILED pin ABORTS the drive - PIN FAILED, NOT green, no TRIGGER/REBOOT' {
+        # The pin policy write throws (access denied). An unpinned trigger could upgrade the host
+        # to the LATEST build instead of the target, so the drive must abort - not report the old
+        # false-clean green "Pinned + triggered".
+        $out = Invoke-DriveWorker -Computer 'WS-PINFAIL' -OsBuild 22631 -RebootWhenStaged $true -StagedAfter $true -PinThrows $true
+        ($out.Calls -contains 'PIN')     | Should Be $true    # the pin was attempted
+        ($out.Calls -contains 'TRIGGER') | Should Be $false   # ...and aborted BEFORE the trigger
+        ($out.Calls -contains 'REBOOT')  | Should Be $false
+        [bool]$out.Row.WasPinned | Should Be $false
+        $out.Row.Status | Should Be 'PIN FAILED'
+        [bool]$out.Row.Ok | Should Be $false
+        $out.Row.Detail | Should Match 'not triggered'
+    }
+}
+
+Describe 'winupgrade - manifest exact version pin (newest bump = loop-31 upgrade-drive pin-fail abort)' {
+    It 'winupgrade is at v0.5.2' {
+        $mani = & $m { Get-JanetToolManifest }
+        [string]$mani.version | Should Be '0.5.2'
     }
 }
