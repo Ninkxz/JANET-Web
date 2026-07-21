@@ -29,7 +29,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.9'
+        version  = '1.1.10'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -70,7 +70,8 @@ function Get-JanetToolManifest {
                     @{ name='optionId';     label='Option ID'; type='int'; required=$false; default=6 },
                     @{ name='newValues';    label='New values (ordered, one IPv4 per line; leave blank ONLY with Remove option checked)'; type='textarea'; required=$false },
                     @{ name='removeOption'; label='Remove option (delete the option from the scope; requires blank New values)'; type='bool'; required=$false; default=$false },
-                    @{ name='dryRun';       label='Dry run (preview the diff, change nothing)'; type='bool'; required=$false; default=$false }
+                    @{ name='dryRun';       label='Dry run (preview the diff, change nothing)'; type='bool'; required=$false; default=$false },
+                    @{ name='confirm';      label='Type APPLY to arm'; type='text'; required=$true }
                 )
             },
             @{
@@ -85,7 +86,8 @@ function Get-JanetToolManifest {
                     @{ name='scopeIds';    label='Scope IDs (one dotted quad per line)'; type='textarea'; required=$true },
                     @{ name='optionId';    label='Option ID'; type='int'; required=$false; default=6 },
                     @{ name='ipAddresses'; label='IPs to append (one per line)'; type='textarea'; required=$true },
-                    @{ name='dryRun';      label='Dry run (preview per-scope before/after, change nothing)'; type='bool'; required=$false; default=$false }
+                    @{ name='dryRun';      label='Dry run (preview per-scope before/after, change nothing)'; type='bool'; required=$false; default=$false },
+                    @{ name='confirm';     label='Type APPLY to arm'; type='text'; required=$true }
                 )
             },
             @{
@@ -100,7 +102,8 @@ function Get-JanetToolManifest {
                     @{ name='scopeIds';    label='Scope IDs (one dotted quad per line)'; type='textarea'; required=$true },
                     @{ name='optionId';    label='Option ID'; type='int'; required=$false; default=6 },
                     @{ name='ipAddresses'; label='IPs to prepend (one per line)'; type='textarea'; required=$true },
-                    @{ name='dryRun';      label='Dry run (preview per-scope before/after, change nothing)'; type='bool'; required=$false; default=$false }
+                    @{ name='dryRun';      label='Dry run (preview per-scope before/after, change nothing)'; type='bool'; required=$false; default=$false },
+                    @{ name='confirm';     label='Type APPLY to arm'; type='text'; required=$true }
                 )
             },
             @{
@@ -115,7 +118,8 @@ function Get-JanetToolManifest {
                     @{ name='scopeIds';    label='Scope IDs (one dotted quad per line)'; type='textarea'; required=$true },
                     @{ name='optionId';    label='Option ID'; type='int'; required=$false; default=6 },
                     @{ name='ipAddresses'; label='IPs to remove (one per line)'; type='textarea'; required=$true },
-                    @{ name='dryRun';      label='Dry run (preview per-scope before/after, change nothing)'; type='bool'; required=$false; default=$false }
+                    @{ name='dryRun';      label='Dry run (preview per-scope before/after, change nothing)'; type='bool'; required=$false; default=$false },
+                    @{ name='confirm';     label='Type APPLY to arm'; type='text'; required=$true }
                 )
             }
         )
@@ -1059,6 +1063,43 @@ function Invoke-JanetDhcpBulk {
 }
 
 # -----------------------------------------------------------------------------
+#  loop66 (item75): self-guard for the destructive DHCP-option writes. dhcp is the
+#  DHCP admin tool - it must NEVER rewrite DHCP scope options on the box running
+#  JANET itself. Mirrors the pkginstall/upr self-guard identity set (COMPUTERNAME
+#  + FQDN + short + loopback + every bound NIC IPv4).
+# -----------------------------------------------------------------------------
+function Get-DhcpLocalIdentity {
+    if ($script:DhcpLocalIdentity) { return ,$script:DhcpLocalIdentity }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
+    try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
+    try { $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName; if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) } } catch {}
+    try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
+    $script:DhcpLocalIdentity = $set
+    return ,$set
+}
+function Test-DhcpHostIsSelf {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $self = Get-DhcpLocalIdentity
+    if ($self.Contains($Target)) { return $true }
+    if ($Target -match '^127\.') { return $true }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Target, [ref]$ip)) {
+        if ($self.Contains(($Target -split '\.')[0])) { return $true }
+    }
+    return $false
+}
+
+# -----------------------------------------------------------------------------
 #  Entry point
 # -----------------------------------------------------------------------------
 
@@ -1103,6 +1144,22 @@ function Invoke-JanetToolAction {
         return @{ rows=@(); summary=@{ total=0 } }
     }
     $server = [string]$servers[0]
+
+    # loop66 (item75): destructive-action guards. The write actions (apply + bulk-*) modify DHCP scope
+    # options on a live server, yet dhcp had NO typed confirm-word and NO self-guard (unlike every other
+    # destructive engine). Fail closed, server-side, BEFORE any DHCP session: (1) require the operator to
+    # type APPLY (case-insensitive, like adto's -ne 'FIX'); (2) refuse when the target resolves to the box
+    # running JANET. connect/load are read-only and ungated.
+    if ($ActionId -in @('apply','bulk-append','bulk-prepend','bulk-remove')) {
+        if ([string]$Params['confirm'] -ne 'APPLY') {
+            & $send @{ type='log'; level='err'; text='Refused: type APPLY (exactly) in Confirm to arm a DHCP option change.' }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+        }
+        if (Test-DhcpHostIsSelf $server) {
+            & $send @{ type='log'; level='err'; text="Self-guard: refusing to modify DHCP options on '$server' - it is (or resolves to) the machine running JANET." }
+            return @{ rows=@(); summary=@{ total=0; rejected=$true; selfSkipped=1 } }
+        }
+    }
 
     # OptionId (shared by load/apply/bulk). Default 6 (006 DNS Servers).
     # Non-numeric input falls back to the documented default (a bare TryParse

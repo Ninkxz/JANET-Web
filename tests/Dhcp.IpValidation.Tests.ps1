@@ -73,8 +73,8 @@ Describe 'dhcp Get-JanetValidIpList - split / validate / canonicalize / dedupe' 
 # branch is a fail-closed catch-all and both switch defaults book Failure, with an explicit
 # ReadError case. Behavioral (shim the remote call) + a static assert that no default books Success.
 Describe 'dhcp 1.1.9 - a bulk ReadError scope is a Failure, never a laundered Success' {
-    It 'manifest version is 1.1.9' {
-        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.9'
+    It 'manifest version is at least 1.1.9 (floor; newest exact pin = loop66 destructive-guards Describe, v1.1.10)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.9') | Should Be $true
     }
     It 'a ReadError scope -> Failure audit, counted in summary.failed, honest row status' {
         $events = New-Object System.Collections.ArrayList
@@ -103,5 +103,55 @@ Describe 'dhcp 1.1.9 - a bulk ReadError scope is a Failure, never a laundered Su
     It 'neither bulk audit switch default books Success (fail-closed default)' {
         $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
         ($src -match "default\s*\{[^}]*result='Success'[^}]*bulk-") | Should Be $false
+    }
+}
+
+# loop66 (item75): dhcp was the only destructive engine with NO self-guard and NO typed confirm-word -
+# the target filter admitted localhost/127.0.0.1/the dispatcher's own name. The 4 write actions (apply +
+# bulk-*) now refuse fail-closed BEFORE any DHCP session unless the operator typed APPLY, and refuse when
+# the target resolves to the box running JANET. connect/load are read-only and ungated.
+Describe 'dhcp 1.1.10 - destructive actions gated by confirm-word + self-guard' {
+    function Invoke-DhcpAction([string]$aid, [hashtable]$p) {
+        $evs = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$evs.Add($e) }
+        $res = & $mod { param($a,$pp,$em) Invoke-JanetToolAction -ActionId $a -Params $pp -Credential $null -Emit $em } $aid $p $emit
+        @{ Result = $res; Events = @($evs) }
+    }
+
+    It 'manifest version is exactly 1.1.10 (newest bump holds the exact pin)' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.10'
+    }
+    It 'all four destructive actions require a confirm input; connect/load do not' {
+        $mani = & $mod { Get-JanetToolManifest }
+        foreach ($aid in @('apply','bulk-append','bulk-prepend','bulk-remove')) {
+            $a = @($mani.actions | Where-Object { $_.id -eq $aid })[0]
+            $c = @($a.inputs | Where-Object { $_.name -eq 'confirm' })[0]
+            $c                | Should Not BeNullOrEmpty
+            [bool]$c.required | Should Be $true
+        }
+        foreach ($aid in @('connect','load')) {
+            $a = @($mani.actions | Where-Object { $_.id -eq $aid })[0]
+            @($a.inputs | Where-Object { $_.name -eq 'confirm' }).Count | Should Be 0
+        }
+    }
+    It 'Test-DhcpHostIsSelf: loopback and this box are self; a remote name is not' {
+        (& $mod { Test-DhcpHostIsSelf '127.0.0.1' }) | Should Be $true
+        (& $mod { param($h) Test-DhcpHostIsSelf $h } $env:COMPUTERNAME) | Should Be $true
+        (& $mod { Test-DhcpHostIsSelf 'DHCP-REMOTE-XYZ' }) | Should Be $false
+    }
+    It 'apply with no confirm-word -> rejected before any DHCP session' {
+        $o = Invoke-DhcpAction 'apply' @{ targets = 'DHCP-REMOTE-1'; scopeId = '192.168.1.0'; newValues = '10.0.0.1' }
+        [bool]$o.Result.summary.rejected | Should Be $true
+        @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'type APPLY' }).Count | Should BeGreaterThan 0
+    }
+    It 'apply with a wrong confirm-word -> rejected' {
+        $o = Invoke-DhcpAction 'bulk-append' @{ targets = 'DHCP-REMOTE-1'; scopeIds = '192.168.1.0'; ipAddresses = '10.0.0.1'; confirm = 'YES' }
+        [bool]$o.Result.summary.rejected | Should Be $true
+    }
+    It 'apply with APPLY but a SELF target -> self-guard rejected (selfSkipped=1)' {
+        $o = Invoke-DhcpAction 'apply' @{ targets = '127.0.0.1'; scopeId = '192.168.1.0'; newValues = '10.0.0.1'; confirm = 'APPLY' }
+        [bool]$o.Result.summary.rejected   | Should Be $true
+        [int]$o.Result.summary.selfSkipped | Should Be 1
+        @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'Self-guard' }).Count | Should BeGreaterThan 0
     }
 }
