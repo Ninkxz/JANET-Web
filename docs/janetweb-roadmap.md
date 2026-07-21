@@ -121,12 +121,13 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     unknown age as FAIL (`:802`). Fix: null age on the fix path → FAIL/UNVERIFIED, mirroring the scan.
     NOTE: entangled with items 22/23/24 (the honest UNVERIFIED status routes through the same fix-rollup
     buckets) — best fixed together in a dedicated c2c fix-rollup-taxonomy loop.
-27. **winupgrade upgrade-drive "STAGED" contaminated by stale staging → reboots an un-staged host**
-    (loop-31 Fable deep-dive, CONFIRMED, HIGH — F2) — the staged re-read (`winupgrade :2215-2226`) sets
-    staged on bare `Test-Path 'C:\$WINDOWS.~BT\Sources'` with NO staleness check, despite
-    `Get-WinUpgradeStagingClass` existing. A rolled-back 24H2 attempt leaves ~BT → reports STAGED → with
-    rebootWhenStaged REBOOTS the host (comes back on 23H2), weakening the "never reboot un-staged"
-    invariant. Fix: apply the staging classifier + require a feature-update-specific signal.
+27. ~~winupgrade upgrade-drive "STAGED" contaminated by stale staging → reboots an un-staged host~~ —
+    **CLOSED loop 36** (winupgrade 0.5.5): the `PHASE:STAGED` re-read now classifies the ~BT tree
+    (`Get-WinUpgradeStagingClass` rule) and counts staged only when not Stale, so a rolled-back tree no
+    longer triggers a reboot. **Follow-on (27b, open):** the generic CBS/WU/PFRO pending-reboot markers
+    (checked first) can still read a non-feature-update pending as staged; demoting them is nuanced (a CBS
+    RebootPending can be a completed feature update, so demoting risks a false-negative). Requires a
+    feature-update-specific pending signal.
 28. ~~winupgrade bypass (MoSetup) value asserted but never read-back-verified~~ — **CLOSED loop 33**
     (winupgrade 0.5.4): `$pinReadSb` now reads the MoSetup value (`BypassPresent`); Pin requires it set
     when bypass requested ("BYPASS NOT VERIFIED"), Unpin requires it gone ("NOT REMOVED ... bypass"), so
@@ -680,8 +681,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   EMPTY `$vout` hit `[bool]$null.Present`=$false="removed" (`:1133`). Pure `Get-UprVerifyResult` (`:119`)
   — `$null` verify → "could NOT be verified", never OK; worker mirrors the null-check inline. 36 upr
   tests green. `Upr.VerifyResult.Tests.ps1` (6) pins the fail-close + still-present/gone/reboot + exact
-  1.2.3 pin. Pester **1293→(close)** green. 2 new ranked items (32-33, both spec/display). SECRET
+  1.2.3 pin. Pester **1293→1299** green. 2 new ranked items (32-33, both spec/display). SECRET
   parity: +upr verify fail-close.
+- **Loop 36 (DONE 2026-07-21):** Fable-inline. Self-review of loop-35 → **GREEN**. **Closed a deferred
+  HIGH-harm item: winupgrade #27 (F2)** → the `rebootWhenStaged` re-read set `Staged=true` off a BARE
+  `Test-Path 'C:\$WINDOWS.~BT\Sources'` (`:2278`), so a ROLLED-BACK (stale) ~BT tree made an un-staged
+  host read staged and get REBOOTED (back on the old build). **FIXED** (winupgrade **0.5.4→0.5.5**): the
+  `PHASE:STAGED` re-read now CLASSIFIES the ~BT tree inline (mirror of `Get-WinUpgradeStagingClass`:
+  rollback marker/age/setup process) and counts staged ONLY when not `Stale`. Coverage: classifier
+  decision unit-tested (Diagnose24h2), reboot gate proven by Drive INVARIANT #4, + `WinUpgrade.StagingReboot.
+  Tests.ps1` (8) pins the classifier reboot contract + a static assert the re-read classifies + exact
+  0.5.5 pin (FixVerify2 0.5.4 exact → floor). Full winupgrade + FixVerify2/3 green. Pester **1299→(close)**
+  green. **Left ranked (27b):** the generic CBS/WU/PFRO pending-reboot can still read a non-feature-update
+  pending as staged (nuanced — CBS can be a completed feature update). SECRET parity: +staging classifier.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
