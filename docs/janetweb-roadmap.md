@@ -1359,6 +1359,17 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   additive** (FIXED/NOCHANGE untouched). c2c **1.15.8→1.15.9**; `C2c.AuditResult.Tests.ps1` +4 (static analysis; exact
   pin moved here, loop-47 Describe floored). Ran C2c.AuditResult (14) + full c2c suite = green. Pester **~1520→~1524**
   green. Next: certdeploy. SECRET parity: +c2c Mass-Fix harvest hint wire.
+- **Loop 78 (DONE 2026-07-21) — informative-failures theme, PRIMARY ROLLOUT COMPLETE:** self-review of loop-77 →
+  GREEN. Workstream = wire the hint into **certdeploy** (9th and LAST tool on the primary list; destructive DEPLOY).
+  Per-host results carry the raw error in `$res.Detail` (`"Session: <exc>"`, `"Probe: <exc>"`, `"worker error: …"`,
+  `"per-host timeout …"`). In the deploy harvest `$emitResult` (`:1331`), hoisted the `$auditResult` status switch to
+  the top (switching on `[string]$res.Status`, same value) and, on a `Failure` host (FAILED/NOT VERIFIED/REJECTED),
+  ran `$detail` through `Get-JanetTroubleshootHint`, attaching a `Hint` row field + an err log (`FIX:`). **Purely
+  additive** (INSTALLED/ALREADY/SKIPPED/OFFLINE untouched; raw detail preserved). certdeploy **1.4.2→1.4.3**;
+  `CertDeploy.Tests.ps1` +4 (static analysis; exact pin moved here, loop-49's 1.4.2 pin floored). Full certdeploy
+  suite (6 files, 59) + full suite green. Pester **~1524→~1528** green. **9-tool primary rollout done.** Next:
+  follow-ups (fold restart's numeric-code hints into the shared engine; c2c/certdeploy read-only CHECK ERROR rows;
+  per-candidate upr failures; grow the signature set). SECRET parity: +certdeploy deploy harvest hint wire.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
