@@ -340,6 +340,28 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     wrong-box name check and an empty COMPUTERNAME probe proceeds; documented house pattern (self-guard still checks
     NIC-IP membership). No change strictly required. _(loop-64 dive)_
 
+74. ~~**dhcp bulk ReadError laundered to Success**~~ **CLOSED loop 65** (dhcp 1.1.9): the remote bulk script fail-closes
+    a read failure as `Status='ReadError'` (declines to write), but the local handler counted it in no bucket, both
+    audit `switch` defaults booked `TouchHost/Success`, and the summary read "0 error(s)". Now the counter's tail is a
+    fail-closed catch-all + both defaults book Failure + explicit `ReadError → Failure`. +3 tests. _(loop-65 dhcp dive)_
+75. **dhcp destructive actions have NO self-guard and NO confirm-word** (P2, HIGH) — the target filter admits
+    `localhost`/`127.0.0.1`/the dispatcher's own name; every other destructive engine has a pinned self-guard, and
+    certdeploy/pkginstall/etc. require a typed confirm-word. dhcp has neither. Fix: refuse a destructive apply/bulk
+    whose target resolves to the local machine + add a typed confirm. *Hard-rule gap — next dhcp pick.* _(loop-65 dive)_
+76. **dhcp `dryRun` fails OPEN on unrecognized values** (P2) — `$asBool` only recognizes `1|true|yes|on`; anything else
+    (`"TRUE "`, `"checked"`, `"dry"`) → `$false` → a live destructive write (the secureboot loop-58 class). Fix: strict
+    fail-closed parse (`Get-SbeDryRunSafe`-style — unknown stays dry / aborts). _(loop-65 dive)_
+77. **dhcp non-numeric `optionId` silently retargets option 6 (DNS)** (P2) — an unparseable optionId warns + proceeds
+    with default 6 on a destructive action, so a typo live-replaces the scope's DNS-servers option. Fix: abort on
+    unparseable optionId for destructive actions. _(loop-65 dive)_
+78. **dhcp apply null-result → Changed/Success; no post-write verify** (P2) — a null remote apply result coerces
+    `[bool]$null.Removed=$false` → `Status='Changed'`/Success; neither apply nor bulk re-reads the option after the
+    write to confirm the value actually became the intended one. Fix: treat null result as Failure + add a post-write
+    re-read compare. _(loop-65 dive)_
+79. **dhcp bulk doesn't reconcile returned records vs requested scopes** (P3) — a missing scope in the result set gets
+    no row/audit/error (summary "0 error(s)"). Fix: emit an Error/abandoned row per requested scope with no returned
+    record. _(loop-65 dive)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -1211,6 +1233,18 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   injection-safety already proven by `UninstallStringParse`). subset **40** green. Items 72 (3010 label) + 73 (IPv4
   wrong-box, by-design) ranked. Pester **1463→1467** green. SECRET parity: +upr Invoke-SafeUninstall routing /
   strict-GUID + Store-branch removal.
+- **Loop 65 (DONE 2026-07-21):** self-review of loop-64 → GREEN. Workstream = fresh **Fable deep-dive on dhcp**
+  (DHCP scope-option admin, 4 destructive server-config actions, thinly tested). **First non-fail-closed core in a
+  while** — found a real **P1** (item 74): the remote bulk script fail-closes a read failure as `Status='ReadError'`
+  (declines to write), but the local `Invoke-JanetDhcpBulk` handler counted it in no bucket, both audit `switch`
+  defaults booked `TouchHost/Success`, and the summary read "0 error(s)" — so refusing to touch 20 scopes reported
+  clean + wrote 20 Success audit rows. **FIXED** (dhcp **1.1.8→1.1.9**): counter tail → fail-closed catch-all
+  (`else { $errs++ }`), both bulk audit `switch` defaults → Failure, explicit `ReadError → Failure`. `Dhcp.IpValidation.
+  Tests.ps1` +3 (behavioral — shim the remote call → ReadError audits Failure + `summary.failed`; static — no default
+  books Success). subset **11** green. Dive found dhcp materially under-guarded — **items 75-79** ranked (no self-guard/
+  confirm-word HIGH, dryRun fail-open, optionId retarget, apply null + no post-write verify, scope reconciliation);
+  **dhcp needs a follow-up hardening loop.** Pester **1467→1470** green. SECRET parity: +dhcp bulk fail-closed
+  counter/default + ReadError handling.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
