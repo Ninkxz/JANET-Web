@@ -644,8 +644,22 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   (`BypassPresent`); Pin requires it set when `$Bypass` (else "BYPASS NOT VERIFIED"); Unpin requires it
   gone when `$RemoveBypass` (else "NOT REMOVED ... bypass"). Additive/fail-closed; 198 winupgrade +
   FixVerify2/3 green. `FixVerify2` FIX-2 harness gains `-Bypass`/`-RemoveBypass` + 4 cases + exact 0.5.4
-  pin (DiagnoseVerdict 0.5.3 exact → floor). Pester **1282→(close)** green. Remaining winupgrade items:
+  pin (DiagnoseVerdict 0.5.3 exact → floor). Pester **1282→1287** green. Remaining winupgrade items:
   27 (staging reboot, HIGH), 29 (AutoFix, HIGH), 31 (sfc, LOW). SECRET parity: +winupgrade bypass read-back.
+- **Loop 34 (DONE 2026-07-21):** Fable-inline + one parallel Fable worker. Self-review of loop-33 →
+  **GREEN**. **Diversified workstream TYPE to SECURITY:** a fresh deep-dive on the server/auth/token
+  boundary (loopback HttpListener + token-gated `/api` = the execution surface), un-reviewed since loops
+  1-4. **Verdict GREEN — boundary solid:** constant-time-compared token centrally enforced on every
+  `/api` route (destructive actions +session-gated, default-DENY); canonicalize-and-root-checked static
+  serve (no traversal); custom-header token + Host guard defeat CSRF/DNS-rebinding; loopback-only bind;
+  bounded bodies; no XSS/IEX; report-preview sandbox intact; the `?t=` carrier (item 4 neighborhood) is
+  well-contained (no-referrer + SPA-strip + header-only for real routes). **The one actionable item
+  (defense-in-depth) → FIXED:** the session token + report-preview retrieval key were `[guid]::NewGuid()`
+  (CSPRNG-backed on Windows but implementation-dependent). New pure `New-JanetWebSecureToken`
+  (`Server.ps1:95`) mints 256-bit hex from `RandomNumberGenerator`; rid uses it, launcher inlines a
+  mirror. 76 server tests green. `Server.SecureToken.Tests.ps1` (6): helper format/distinctness + static
+  launcher/rid CSPRNG asserts. No version bump (server files). Pester **1287→(close)** green. SECRET
+  parity: +CSPRNG access-credential mint.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
