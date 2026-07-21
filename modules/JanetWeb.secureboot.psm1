@@ -28,7 +28,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.5'
+        version  = '1.6.6'
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -991,10 +991,14 @@ function Invoke-SbeScanAction {
             if ($res.OsBuild -and $res.OsBuild -ne '?') { [void]$parts.Add("OS build $($res.OsBuild)") }
             $detail = ($parts -join '; ')
         }
+        # informative-failures (loop80): a host-level CHECK ERROR carries the raw probe/session/DNS
+        # error in $detail; turn it into a why+how-to-fix hint on this read-only scan path. OFFLINE and
+        # DNS MISMATCH already carry a complete actionable detail, so scope the hint to CHECK ERROR.
+        $hint = if ($verdict -eq 'CHECK ERROR' -and $hostStatus -ne 'OK' -and $detail) { Get-JanetTroubleshootHint -Message $detail -Server ([string]$res.Computer) } else { '' }
         $row = @{
             Host=[string]$res.Computer; Ping=[string]$res.Ping; Verdict=$verdict
             SecureBoot=[string]$res.SecureBoot; Firmware=[string]$res.Firmware; Disk=[string]$res.Disk
-            Manufacturer=[string]$res.Manufacturer; Model=[string]$res.Model; Detail=$detail
+            Manufacturer=[string]$res.Manufacturer; Model=[string]$res.Model; Detail=$detail; Hint=[string]$hint
         }
         [void]$rows.Add($row)
         if ($verdict -eq 'READY TO ENABLE') { [void]$readyHosts.Add((([string]$res.Computer) -split '\.')[0]) }
@@ -1010,6 +1014,7 @@ function Invoke-SbeScanAction {
             default                 { 'info' }
         }
         & $send @{ type='log'; level=$lvl; text=("{0}: {1} - SB={2} FW={3} Disk={4} [{5} {6}]" -f $res.Computer, $verdict, $res.SecureBoot, $res.Firmware, $res.Disk, $res.Manufacturer, $res.Model) }
+        if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$res.Computer) : $verdict - $detail | FIX: $hint" } }
     }
 
     $done = 0

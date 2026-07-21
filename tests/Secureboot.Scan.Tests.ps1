@@ -182,12 +182,12 @@ Describe 'secureboot 1.6.4 - AlreadyPending resolves to Skipped, not Success (no
 # enable failure (not ok/skip/unknown/dry-run), runs the raw error through Get-JanetTroubleshootHint
 # and attaches the hint to a Hint row field + appends it to the err log (FIX:), raw error preserved.
 # Static analysis (the harvest runs inside the fan-out over a real RunspacePool).
-Describe 'secureboot 1.6.5 - enable harvest attaches a troubleshooting hint to a failed host' {
+Describe 'secureboot - manifest version floor (loop76 enable-harvest hint in 1.6.5; exact pin migrated to newest bump)' {
     $man = & $script:SbeMod { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
 
-    It 'manifest version is exactly 1.6.5 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.6.5'
+    It 'manifest version is at or past 1.6.5' {
+        ([version][string]$man.version -ge [version]'1.6.5') | Should Be $true
     }
     It 'secureboot imports the shared troubleshoot engine' {
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
@@ -196,7 +196,29 @@ Describe 'secureboot 1.6.5 - enable harvest attaches a troubleshooting hint to a
         ($src -match '\$hint\s*=\s*if\s*\(\(-not \$isOk\)\s*-and\s*\(-not \$isSkip\)\s*-and\s*\(-not \$isUnknown\)\s*-and\s*\(-not \$isDryR\)\s*-and\s*\$res\.Error\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
         ($src -match 'Error        = \[string\]\$res\.Error\s*\r?\n\s*Hint         = \[string\]\$hint') | Should Be $true
     }
-    It 'the err log appends the FIX hint when one exists' {
+    It 'the enable err log appends the FIX hint when one exists' {
         ($src -match "if \(\`$hint\) \{ ' \| FIX: ' \+ \`$hint \}") | Should Be $true
+    }
+}
+
+# loop80 (informative-failures follow-up): the READ-ONLY scan harvest ($emitResult in Invoke-SbeScanAction)
+# now, on a host-level CHECK ERROR (verdict = the host status, carrying the raw probe/session/DNS error in
+# $detail), runs it through Get-JanetTroubleshootHint and attaches the hint to a Hint row field + an err log
+# (FIX:), raw detail preserved. OFFLINE/DNS MISMATCH already carry a complete detail, so the hint is scoped
+# to CHECK ERROR. Static analysis (the scan harvest runs inside the fan-out over a real RunspacePool).
+Describe 'secureboot 1.6.6 - scan harvest attaches a troubleshooting hint to a CHECK ERROR host' {
+    $man = & $script:SbeMod { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
+
+    It 'manifest version is exactly 1.6.6 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.6.6'
+    }
+    It 'the scan harvest computes a hint only for a host-level CHECK ERROR and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$verdict\s*-eq\s*''CHECK ERROR''\s*-and\s*\$hostStatus\s*-ne\s*''OK''\s*-and\s*\$detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        ($src -match 'Detail=\$detail;\s*Hint=\[string\]\$hint') | Should Be $true
+    }
+    It 'the scan err log carries the FIX hint when one exists (raw detail preserved)' {
+        ($src -match "if \(\`$hint\) \{ &\s*\`$send @\{ type='log'; level='err'") | Should Be $true
+        ($src -match 'FIX: \$hint')                                              | Should Be $true
     }
 }
