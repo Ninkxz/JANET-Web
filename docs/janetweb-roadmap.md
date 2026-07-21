@@ -1289,6 +1289,16 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   exact pin moved here, null-result Describe floored). Ran all 3 dhcp-touching files = **64** green. Remaining dhcp
   items 79 (P3 reconciliation) + 80 (P2 post-write verify, the last substantive hardening). Pester **1483→1486** green.
   SECRET parity: +dhcp `$isDestructive` optionId abort.
+- **Loop 70 (DONE 2026-07-21) — NEW THEME "informative failures":** per operator directive, shift from making
+  failures HONEST (loops 37-69) to making them INFORMATIVE — when something can't be done, surface WHY + HOW to fix.
+  Only 2 of ~21 tools translated errors to guidance (restart `Get-RrsShutdownErrorHint`, dhcp `Get-JanetWsmanAuthHint`);
+  the rest showed bare `"FAIL: <msg>"`. **Built** shared `JanetWeb.troubleshoot.psm1` → `Get-JanetTroubleshootHint`
+  (generalizes restart's mapper; Kerberos 0x80090351 / TrustedHosts / access-denied-vs-logon-failure / DNS / RPC-135 /
+  C$-445 / timeout / no-cred / disk / file-lock; most-specific-first; `''` on unknown — never guesses). **First wire:**
+  remoteadmin `$emitResult` (1.0.2→1.0.3) — a failed host now carries the hint in a `Hint` row field + audit
+  (`TROUBLESHOOT:`) + err log (`FIX:`), raw error preserved. +9 helper tests +1 behavioral. subset **41** green.
+  Pester **1486→~1496** green. Rollout: wire each tool's failure path loop-by-loop (wpt/acas/pkginstall first).
+  SECRET parity: the whole engine + each tool wire.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
