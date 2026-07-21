@@ -308,6 +308,24 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     on failure the plaintext BIOS password sits on `C$\Windows\Temp` with inherited ACLs for ~90s (self-delete +
     finally are backstops). Hardening only. Fix: check icacls exit, abort host on failure. _(loop-57 dive)_
 
+67. ~~**pkginstall msiexec 1638 booked a false VulnPatched Success**~~ **CLOSED loop 60** (pkginstall 2.5.9): an
+    all-1638 host ("another version already installed"; msiexec refused, nothing installed, version unverified) now
+    resolves to `'AlreadyInstalled'` → harvest `skipCount` + audit `Skipped`/itemCount 0, not `Success`/VulnPatched.
+    +5 tests (static analysis). _(from loop-60 pkginstall dive)_
+68. ~~**pkginstall PSADT branch pre-seeds `$LASTEXITCODE=0`**~~ **CLOSED loop 61** (pkginstall 2.5.10): pre-seed
+    `$global:LASTEXITCODE=$null` and catch a null exit as `Failed` ("returned no exit code ... cannot confirm the
+    install ran") BEFORE the success-exit check — a deploy script that returns without `exit`/`Exit-Script` is no
+    longer a false Success/VulnPatched. +3 tests (static analysis, incl. an ordering assert). _(loop-60 dive)_
+69. **pkginstall has NO confirm-word on either destructive deploy action** (P2, HIGH) — the *only* destructive tool in
+    the suite lacking one (adto FIX/VALIDATE, secureboot ENABLE, c2c, certdeploy, winrmbridge all have it); armed by
+    one un-typed button click once an admin session exists. Other layers (admin-gate/self-guard/wrong-box/IPv4)
+    present — a missing layer, not an unguarded path. Fix: module `if ($Params['confirm'] -ne 'DEPLOY') { refuse }` +
+    `confirmWord` in `pkginstall.view.js`. _(loop-60 dive)_
+70. **pkginstall `ConvertTo-JanetMsiList` silent partial drop** (P3) — `:141-154` invalid entries dropped with no
+    warn; a partial list then books "All N succeeded", and an all-dropped list falls through to the install-every-
+    `*.msi` fallback (scope escalation). Fix: count rejected entries, warn/refuse when a non-empty list filtered
+    smaller. _(loop-60 dive; P3-5 cancel + S1/S2 = accepted)_
+
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
   server/auth/token layer → `janetweb-review-loop1.md` (YELLOW). Found & fixed **1 P2**
@@ -1124,6 +1142,29 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   `Skipped`/itemCount 0); returned `Skipped` field aligned to status. `Secureboot.Scan.Tests.ps1` +3 (static
   analysis; exact pin moved here, ConfirmWord floored). set **43** green. Remaining secureboot items 63/65/66 (P3
   wording/tally/hardening). Pester **1441→1444** green. SECRET parity: +secureboot `AlreadyPending → Skipped`.
+- **Loop 60 (DONE 2026-07-21):** self-review of loop-59 → GREEN. Workstream = fresh **Fable deep-dive on pkginstall**
+  (most substantial un-dived destructive tool — MSI/PSADT push+install). **Core fail-closed** (Status inits Failed,
+  null exit → Failed, copy SHA256-verified, no coercions, self/wrong-box/IPv4 guards pinned). Acted on **P2-2** (item
+  67): msiexec **1638** ("another version already installed" — install did NOT run, version unverified) was mapped to
+  `AlreadyCompliant` → all-1638 host Status `Success` → `VulnPatched/Success/itemCount=1`, a false patch for an
+  untouched, possibly-vulnerable host. **FIXED** (pkginstall **2.5.8→2.5.9**): all-1638 host → `'AlreadyInstalled'` →
+  harvest `skipCount` + audit `Skipped`/itemCount 0 (mirrors loop-59 AlreadyPending); mixed wave stays Success with an
+  "already installed, version unverified" note. `Pkginstall.MsiList.Tests.ps1` +5 (static analysis; exact pin moved
+  here, SelfGuard floored). set **30** green. 3 more findings ranked **items 68** (PSADT `$LASTEXITCODE=0` pre-seed,
+  HIGH), **69** (no confirm-word on the destructive deploy — hard-rule gap, HIGH), **70** (MSI-list silent partial
+  drop). Pester **1444→1449** green. SECRET parity: +pkginstall all-1638 → AlreadyInstalled/Skipped.
+- **Loop 61 (DONE 2026-07-21):** self-review of loop-60 → GREEN. Workstream = close **item 68** (pkginstall's second
+  false-clean): the PSADT deploy branch pre-seeded `$global:LASTEXITCODE=0`, so a `Deploy-Application.ps1` that
+  returned without `exit`/`Exit-Script` left the 0 → `$exitCode=0` → Status `Success` + VulnPatched though nothing
+  installed. **FIXED** (pkginstall **2.5.9→2.5.10**): pre-seed `$null` and catch a null exit as `Failed`
+  ("returned no exit code ... cannot confirm the install ran") BEFORE the success-exit check. `Pkginstall.MsiList.
+  Tests.ps1` +3 (static analysis incl. an ordering assert; exact pin moved here, all-1638 Describe floored). set
+  **33** green. Both pkginstall dive false-cleans (67/68) closed; remaining item 69 (no confirm-word — hard-rule
+  gap, HIGH — next pick) + item 70 (MSI-list silent drop). **Full-suite catch (loop-37 lesson):** the module change
+  broke 3 EXISTING *behavioral* PSADT tests in `FixVerify3.Tests.ps1` that faked a "success exit" by NOT calling
+  `exit` and relying on the old pre-seed `0` — the exact bug fixed. `Invoke-Psadt` updated to append a real
+  `exit 0` (as PSADT `Exit-Script` does) + a behavioral no-exit → Failed test added (commit `26f82ecb7`). Pester
+  **1449→1453** green. SECRET parity: +pkginstall PSADT `$LASTEXITCODE=$null` pre-seed + null-exit → Failed.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
