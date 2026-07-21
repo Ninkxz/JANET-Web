@@ -45,9 +45,9 @@ Describe 'c2c Monitoring fix worker - the inline mirror gates FIXED/NOCHANGE on 
     }
 }
 
-Describe 'c2c - manifest exact version pin (newest bump = loop-45 Monitoring installed-half fail-close)' {
-    It 'c2c is at v1.15.6' {
+Describe 'c2c - manifest version floor (Monitoring installed-half fail-close shipped in 1.15.6; exact pin migrated)' {
+    It 'c2c is at or past v1.15.6' {
         $man = & $cm { Get-JanetToolManifest }
-        [string]$man.version | Should Be '1.15.6'
+        ([version][string]$man.version -ge [version]'1.15.6') | Should Be $true
     }
 }

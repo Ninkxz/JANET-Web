@@ -52,7 +52,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.15.6'
+        version  = '1.15.7'
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
         actions  = @(
@@ -383,6 +383,20 @@ function Get-C2cMonitoringVerdict {
     if (-not $Installed) { return 'NOT VERIFIED' }
     if ($ChangedCount -gt 0) { return 'FIXED' }
     return 'NOCHANGE'
+}
+
+# loop46 (F3/item53): PURE canonical Defender signature-age in hours from the two MpComputerStatus fields.
+# The scan + fix fell back to `[int]$mp.AntivirusSignatureAge * 24` in an else, and `[int]$null` coerces to 0
+# (no throw) - so an UNREADABLE signature age manufactured a 0-hour "fresh" age that passed the AntiMalware
+# freshness gate (scan -> PASS -> READY, the quarantine go/no-go), defeating the downstream `$null -ne $ageHours`
+# guard. Now a null age stays $null, which the freshness gate treats as stale (fail-closed). The scan + fix
+# workers (module-less) mirror the datetime/age logic inline; keep in lockstep. Pure - tested by C2c.SigAge.Tests.ps1.
+function Get-C2cSigAgeHours {
+    param($LastUpdated, $SignatureAge)
+    if ($LastUpdated -is [datetime]) { return [math]::Round(((Get-Date) - $LastUpdated).TotalHours, 1) }
+    if ($LastUpdated -and ($LastUpdated -as [datetime])) { return [math]::Round(((Get-Date) - ([datetime]$LastUpdated)).TotalHours, 1) }
+    if ($null -ne $SignatureAge) { try { return [int]$SignatureAge * 24 } catch { return $null } }
+    return $null
 }
 
 # --- Shared WinRM-heal source (opt-in, RPC-based, best-effort) -----------------
@@ -827,7 +841,10 @@ $script:C2cProbeBlock = {
                 $ageHours = $null
                 if ($lastUpd -is [datetime]) { $ageHours = [math]::Round(((Get-Date) - $lastUpd).TotalHours, 1) }
                 elseif ($lastUpd -and ($lastUpd -as [datetime])) { $ageHours = [math]::Round(((Get-Date) - ([datetime]$lastUpd)).TotalHours, 1) }
-                else { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
+                # loop46 (F3): MIRROR of Get-C2cSigAgeHours - a NULL AntivirusSignatureAge stays $null (the
+                # freshness gate treats $null as stale/fail). Was `else { [int]$null -> 0 }`: a 0h "fresh" age
+                # that PASSED the AntiMalware check -> READY on a host with unreadable signature state.
+                elseif ($null -ne $mp.AntivirusSignatureAge) { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
                 # TASKORD bar: STRICT < 7 days (168h). $sigMaxHours (default 24) is now an
                 # advisory fleet budget only - a breach is noted, never failed.
                 $sigFresh = ($null -ne $ageHours) -and ($ageHours -lt 168)
@@ -1911,7 +1928,8 @@ $script:C2cFixBlock = {
                     $ageHours = $null
                     if ($lastUpd -is [datetime]) { $ageHours = [math]::Round(((Get-Date) - $lastUpd).TotalHours, 1) }
                     elseif ($lastUpd -and ($lastUpd -as [datetime])) { $ageHours = [math]::Round(((Get-Date) - ([datetime]$lastUpd)).TotalHours, 1) }
-                    else { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
+                    # loop46 (F3): MIRROR of Get-C2cSigAgeHours - a NULL age stays $null (was coerced to 0 = false "fresh").
+                    elseif ($null -ne $mp.AntivirusSignatureAge) { try { $ageHours = [int]$mp.AntivirusSignatureAge * 24 } catch { $ageHours = $null } }
                     $isPassive = ($mode -match '(?i)passive|edr')
                     $isActive  = ($mode) -and (-not $isPassive)
                     # Force RTP ONLY when Active (never fight the MDE passive/EDR config).
