@@ -156,6 +156,32 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     discarded, so "5 ok, 0 failed" can print over a run that removed nothing. The rows, per-app Failure
     audits, and `itemCount` stay honest (no product is ever COUNTED removed) — a wording hazard. Fix:
     word the uninstall status as "N host(s) processed" / surface the removed count.
+34. ~~**acas reboot-selected books VulnPatched at reboot-schedule time**~~ **CLOSED loop 38** (acas 1.11.10):
+    the in-card reboot arm (`:3630`) audited `VulnPatched` Success for an abortable scheduled reboot — the
+    same false-compliance record loop28 fixed on the `schedule-reboot` sibling but missed here. Now
+    `TouchHost`, matching both siblings. `Acas.RebootAudit.Tests.ps1` extended.
+35. **acas verify probes equate "registry key recently modified" with "patched"** (loop-38 Fable deep-dive,
+    CONFIRMED, HIGH) — Office/Chrome/Edge/Java/Store Verify set `Verified=$true` from key `LastWriteTime`
+    recency (`:129`/`:157`/`:459`/`:568`), never vs the required version; a verify-only run lights the PATCHED
+    tile (OK row) for a still-vulnerable host, and a *failed* Office C2R update refreshes the same key's mtime
+    → reads fresh. The known "copied-registry always-OK" chip, generalized. Verify-only audits TouchHost (harm
+    = the stat card / verdict, not the ledger). Fix: compare an actual installed version, or `Verified=$null`
+    → UNCONFIRMED when indeterminate.
+36. **acas "bumped" success = any pre≠post string inequality** (loop-38 Fable deep-dive, CONFIRMED, MED-HIGH)
+    — `:2076-2085`: raw string `-ne` (not `[version]`, not directional) → "bumped" → OK → VulnPatched Success.
+    A post-probe degrading to `'error'`/`'n/a'`/`'not installed'`, or a downgrade, counts as a confirmed fix.
+    Fix: require post to parse as `[version]` and be `> pre`, else UNCONFIRMED — WITHOUT regressing non-version
+    profiles (spec-exec returns COMPLIANT/VULNERABLE/DRIFT).
+37. **acas Log4j Verify scans only 2 hardcoded paths but claims a recursive clean** (loop-38 Fable deep-dive,
+    CONFIRMED, MED) — `:945-975`: Verify checks only HID + Adobe dirs, reports `Verified=$true` "recursive scan"
+    while the remediation Script recurses all of `C:\Program Files*`. Verify-only on a host with a vulnerable
+    `log4j-core` elsewhere reads OK/PATCHED. Fix: make Verify recurse like the Script.
+38. **acas null/empty worker/probe result defaults to 'OK (no output)'** (loop-38 Fable deep-dive, LOW/latent)
+    — `:2483-2484`/`:1956`/`:2034`/`:2130`: ambiguity resolves toward OK/exit-0, not UNCONFIRMED. No live
+    trigger (every worker returns a string) but the wrong direction for this tool. Harden toward UNCONFIRMED.
+39. **acas Chrome/Edge in-Script proof is direction-agnostic** (loop-38 Fable deep-dive, LOW) — `:280-282`/
+    `:353-356`: `$cur -ne $before` → "OK (updated X→Y)" even when Y<X (rollback/channel switch during the poll).
+    String compare, not `[version]`+greater-than. Same class as item36, in the profile Script.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -710,6 +736,22 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   the fail-close in a follow-up (`3b4597b`). Pester **1307→1315** green. Backlog
   now: the c2c cluster (22/23/24/26, a bucket-taxonomy redesign) + winupgrade #29 (AutoFix, needs a shim
   harness) — both deferred as non-trivial. SECRET parity: +winupgrade repair-verdict fail-close.
+- **Loop 38 (DONE 2026-07-21):** Fable-inline synthesis + one Fable deep-dive worker on **acas** (the
+  most-used remediation tool, 242KB, never loop-era-reviewed). Self-review of loop-37 → **GREEN**. Worker read
+  the full 3,696-line module; I re-verified every finding in-code. acas is largely fail-closed (thrown probe →
+  UNCONFIRMED, version-unchanged → UNCONFIRMED, self-classified FAIL/SKIP authoritative, DNS wrong-box abort,
+  KB-install exemplary, unreachable/cred-fail → FAIL, fan-out three-way `$isSkip`). **Closed F1 (item34):** the
+  in-card `reboot-selected` arm (`:3630`) booked a **VulnPatched Success audit at reboot-SCHEDULE time** —
+  scheduling an abortable `shutdown /r /t 300` (rc=1190 "already scheduled" also OK) is a TOUCH, not a
+  confirmed patch. loop28 (item19) fixed this exact false-compliance record on the `schedule-reboot` sibling
+  (`:3389`) but MISSED this by-key arm; `verify-post-reboot` (`:3644`) also audits TouchHost. **FIXED** (acas
+  **1.11.9→1.11.10**): `TouchHost`, matching both siblings; the row was already honest ('scheduled'). `Acas.
+  RebootAudit.Tests.ps1` extended — the reboot-selected sub-block isolated + pinned TouchHost/not-VulnPatched
+  (all 3 reboot arms now pinned so no sibling drifts again); exact pin → 1.11.10 (all other acas tests are
+  floors). acas reboot/verify/profile/KB set **69** green. Pester **1315→1318** green. **Ranked F2–F6 as items
+  35–39** (verify=mtime-recency HIGH, "bumped"=string-inequality MED-HIGH, Log4j partial-scan MED, null→OK
+  latent, direction-agnostic Script proof LOW) — each needs its own design pass (F2/F4 can't be one-liners
+  without regressing non-version profiles). SECRET parity: +acas reboot-selected TouchHost audit fix.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
