@@ -38,9 +38,9 @@ Describe 'Get-UprVerifyResult - the verify fails CLOSED, never reads empty-as-re
 }
 
 Describe 'upr - manifest exact version pin (newest bump = loop-64 generic-handler hardening)' {
-    It 'upr is at v1.2.4' {
+    It 'upr is at least v1.2.4 (floor; newest exact pin = loop74 hint Describe, v1.2.5)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.2.4'
+        ([version][string]$mani.version -ge [version]'1.2.4') | Should Be $true
     }
 }
 
@@ -74,5 +74,29 @@ Describe 'upr 1.2.4 - generic uninstall handlers: MSI injection-safe + no Store 
         ($mani.summary -match 'Store') | Should Be $false
         $ru = @($mani.actions | Where-Object { $_.id -eq 'report-uninstall' })[0]
         ($ru.description -match 'Store') | Should Be $false
+    }
+}
+
+# loop74 (informative-failures theme): the upr fan-out harvest now, on a host-level failure (unreachable
+# / worker error, $res.Error set, -not $ok), runs the raw error through Get-JanetTroubleshootHint and
+# attaches the hint to each emitted row (Hint field) + an err log (FIX:), raw error preserved. Static
+# analysis (the harvest runs inside the fan-out over a real RunspacePool).
+Describe 'upr 1.2.5 - fan-out attaches a troubleshooting hint to a failed host' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+
+    It 'manifest version is exactly 1.2.5 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.5'
+    }
+    It 'upr imports the shared troubleshoot engine' {
+        ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
+    }
+    It 'the harvest computes a hint only on a failure with a raw error and attaches it to the row' {
+        ($src -match '\$hint\s*=\s*if\s*\(\(-not \$ok\)\s*-and\s*\$res\.Error\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        ($src -match "\`$row\['Hint'\]\s*=\s*\`$hint")                                                             | Should Be $true
+    }
+    It 'the err log is gated on $hint and carries the FIX hint (raw error preserved)' {
+        ($src -match "if \(\`$hint\) \{ &\s*\`$Send @\{ type='log'; level='err'") | Should Be $true
+        ($src -match 'FIX: \$hint')                                              | Should Be $true
     }
 }

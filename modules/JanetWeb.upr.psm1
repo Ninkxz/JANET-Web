@@ -27,12 +27,15 @@
 # -----------------------------------------------------------------------------
 #  Manifest
 # -----------------------------------------------------------------------------
+# loop74: shared error->actionable-hint mapper (why a host failed + how to fix it).
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.4'
+        version  = '1.2.5'
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -1254,11 +1257,16 @@ function Invoke-UprFanOut {
                     if ($null -eq $res) { $res = @{ Host=$j.Host; Reachable=$false; Error='no result'; Candidates=@() } }
 
                     $emit = & $EmitRows $res $j.HostJob
+                    $ok = [bool]$emit.ok
+                    # loop74 (informative failures): on a host-level failure with a raw error (unreachable /
+                    # worker error), translate it into an actionable troubleshooting hint - attached to each
+                    # emitted row (Hint field) + an err log (FIX:); the raw error is preserved.
+                    $hint = if ((-not $ok) -and $res.Error) { Get-JanetTroubleshootHint -Message ([string]$res.Error) -Server ([string]$res.Host) } else { '' }
                     foreach ($row in @($emit.rows)) {
+                        if ($hint -and ($row -is [hashtable])) { $row['Hint'] = $hint }
                         [void]$rows.Add($row)
                         & $Send (@{ type='row' } + $row)
                     }
-                    $ok = [bool]$emit.ok
                     if ($ok) { $okCount++ } else { $failCount++ }
                     # Audit result/itemCount: honor an explicit honest result from the
                     # EmitRows callback (e.g. uninstall Success ONLY when >=1 removed)
@@ -1269,6 +1277,7 @@ function Invoke-UprFanOut {
                     # VulnPatched records emitted in EmitRows are the sole audit source there,
                     # so we don't also write a host-level record (which double-counted itemCount).
                     if ($EmitHostAudit) { & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$auditRes; itemCount=$auditCnt; detail=([string]$emit.detail) } }
+                    if ($hint) { & $Send @{ type='log'; level='err'; text="$($res.Host) : $([string]$res.Error) | FIX: $hint" } }
                     $done++
                     & $Send @{ type='progress'; done=$done; total=$jobs.Count }
                 }
