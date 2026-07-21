@@ -67,9 +67,9 @@ Failed Rule - Host Firewall",,,HOSTY.area52.afnoapps.usaf.mil,1
     }
 }
 
-Describe 'c2c - manifest exact version pin (newest bump = loop-29 import compliance count)' {
-    It 'c2c is at v1.15.3' {
+Describe 'c2c - manifest version floor (loop-29 import compliance count landed at 1.15.3)' {
+    It 'c2c version is >= 1.15.3 (floor; exact pin lives in the newest bump test)' {
         $man = & (Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru) { Get-JanetToolManifest }
-        [string]$man.version | Should Be '1.15.3'
+        ([version][string]$man.version -ge [version]'1.15.3') | Should Be $true
     }
 }
