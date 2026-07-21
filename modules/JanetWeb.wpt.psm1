@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.13'
+        version  = '6.8.14'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -4361,12 +4361,21 @@ $script:WptSoftwareUninstallBlock = {
                             Get-ItemProperty $rp -EA SilentlyContinue | Where-Object { $_.DisplayName -match 'Adobe Acrobat' } | ForEach-Object { if ($_.UninstallString -match '(\{[^\}]+\})') { $adobeGuids += $Matches[1] }; if ($_.PSChildName -match '^\{') { $adobeGuids += $_.PSChildName } }
                         }
                         $adobeGuids = @($adobeGuids | Select-Object -Unique)
-                        foreach ($guid in $adobeGuids) { $p = Start-Process msiexec -ArgumentList "/x $guid /qn /norestart" -Wait -PassThru -WindowStyle Hidden; if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $removed=$true } }
-                        $steps += "$($adobeGuids.Count) GUID(s)"
+                        $adobeOk = 0; $adobeFail = 0
+                        foreach ($guid in $adobeGuids) {
+                            $p = Start-Process msiexec -ArgumentList "/x $guid /qn /norestart" -Wait -PassThru -WindowStyle Hidden
+                            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $adobeOk++; $removed=$true } else { $adobeFail++; $steps += "GUID $guid FAILED (exit $($p.ExitCode))" }
+                        }
+                        $steps += "$adobeOk/$($adobeGuids.Count) GUID(s) removed$(if ($adobeFail) { ", $adobeFail FAILED" } else { '' })"
                     } finally {
                         if ($pplRestore) { try { New-ItemProperty -Path $lsaKey -Name 'RunAsPPL' -Value $pplVal -PropertyType DWord -Force -EA Stop | Out-Null; $steps += "RunAsPPL restored to $pplVal" } catch { $pplRestoreFailed = $true; $steps += 'WARNING: RunAsPPL restore FAILED' } }
                     }
-                    if ($removed) { $result='Removed'; $detail="Adobe removed via MSI | $($steps -join ' | ')" } else { $detail="Adobe: all methods attempted | $($steps -join ' | ')" }
+                    # loop52 (item46): 'Removed' requires EVERY Adobe product-code GUID to uninstall. If any GUID
+                    # FAILED while others succeeded, Adobe is still (partly) installed - that is 'Attention'
+                    # (a not-clean bucket), never a clean 'Removed'. All-failed stays the default 'Failed'.
+                    if ($adobeFail -gt 0 -and $adobeOk -gt 0) { $result='Attention'; $detail="Adobe PARTIALLY removed ($adobeOk of $($adobeGuids.Count) GUID(s); $adobeFail FAILED - still installed) | $($steps -join ' | ')" }
+                    elseif ($removed) { $result='Removed'; $detail="Adobe removed via MSI | $($steps -join ' | ')" }
+                    else { $detail="Adobe: all methods attempted | $($steps -join ' | ')" }
                     # A failed RunAsPPL restore left LSASS protection OFF - that must read
                     # as a FAILURE in the grid/audit, never a clean 'Removed'.
                     if ($pplRestoreFailed) { $result = 'Failed'; $detail = "CRITICAL: RunAsPPL (LSASS protection) NOT restored on this host - re-enable it. $detail" }

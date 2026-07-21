@@ -40,9 +40,9 @@ Describe 'wpt verify-and-clean - the uninstall key is removed only when files ar
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-51 verify-clean self-blinding fail-close)' {
-    It 'wpt is at v6.8.13' {
+Describe 'wpt - manifest version floor (verify-clean self-blinding fix shipped in 6.8.13; exact pin migrated)' {
+    It 'wpt is at or past v6.8.13' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.13'
+        ([version][string]$mani.version -ge [version]'6.8.13') | Should Be $true
     }
 }
