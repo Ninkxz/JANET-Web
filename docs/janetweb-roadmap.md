@@ -704,7 +704,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   never CLEAN, + an `[WARN] output not recognized - repair state UNKNOWN` report line. `Winupgrade.
   RepairVerdict.Tests.ps1` (NEW, 8) is the helper's FIRST coverage (fix case + 4 known outcomes + two-twin
   static assert + exact 0.5.6 pin; loop-36 StagingReboot exact pin → floor). winupgrade + RepairVerdict +
-  StagingReboot + Diagnose24h2 + Drive + FixVerify2/3 **101** green. Pester **1307→1315** green. Backlog
+  StagingReboot + Diagnose24h2 + Drive + FixVerify2/3 **101** green. **The authoritative run caught a
+  regression the scoped set missed** — `WinUpgrade.VersionAndRemediation.Tests.ps1` had PINNED the old
+  fail-open (its own note flagged it "a false-negative risk, not enshrined as correct"); updated to assert
+  the fail-close in a follow-up (`3b4597b`). Pester **1307→1315** green. Backlog
   now: the c2c cluster (22/23/24/26, a bucket-taxonomy redesign) + winupgrade #29 (AutoFix, needs a shim
   harness) — both deferred as non-trivial. SECRET parity: +winupgrade repair-verdict fail-close.
 
