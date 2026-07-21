@@ -42,3 +42,27 @@ Describe 'Get-JanetTroubleshootHint - maps remote error signatures to actionable
         $h | Should Match '0x80090351'
     }
 }
+
+# loop79: folded restart's Get-RrsShutdownErrorHint knowledge into the shared engine so restart can
+# delegate. These signatures are the ones the engine previously LACKED (privilege-not-held, RPC 1727,
+# ERROR_BAD_NETPATH) plus restart's extra auth/DNS phrasings (unknown-security-error, could-not-be-found).
+Describe 'Get-JanetTroubleshootHint - restart-folded signatures (loop79)' {
+    It 'privilege-not-held is DISTINCT from access-denied (authenticated but lacks a user right)' {
+        (Hint 'A required privilege is not held by the client') | Should Match 'Privilege not held|user right|SeRemoteShutdownPrivilege'
+        (Hint 'ERROR_PRIVILEGE_NOT_HELD')                       | Should Match 'Privilege not held|user right'
+        # must NOT be swallowed by the access-denied branch
+        (Hint 'SeRemoteShutdownPrivilege') | Should Match 'user right|secpol|SeRemoteShutdownPrivilege'
+    }
+    It 'RPC 1727 (no-more-endpoints) maps to the RPC-unavailable guidance' {
+        (Hint 'RPC_S_NO_MORE_ENDPOINTS') | Should Match '135|RPC|endpoint'
+    }
+    It 'ERROR_BAD_NETPATH text maps to the SMB / C$ guidance' {
+        (Hint 'The operation failed with ERROR_BAD_NETPATH') | Should Match '445|C\$|admin share|SMB'
+    }
+    It 'unknown-security-error maps to the Kerberos/auth guidance' {
+        (Hint 'An unknown security error occurred') | Should Match 'TrustedHosts|realm|CAC'
+    }
+    It 'could-not-be-found maps to name-resolution / unreachable guidance' {
+        (Hint 'The computer could not be found') | Should Match 'resolve|DNS|reached'
+    }
+}

@@ -36,11 +36,15 @@
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
 # =============================================================================
 
+# Shared troubleshooting-hint engine (loop 79): the shutdown-error mapper below delegates its
+# raw-detail text signatures here instead of duplicating them (informative-failures theme).
+Import-Module (Join-Path $PSScriptRoot 'JanetWeb.troubleshoot.psm1') -Force -ErrorAction SilentlyContinue
+
 function Get-JanetToolManifest {
     @{
         id       = 'restart'
         name     = 'Restart Scheduler'
-        version  = '1.5.0-beta8'
+        version  = '1.5.0-beta9'
         category = 'Lifecycle'
         summary  = 'Mass scheduled restart for Windows fleets - parallel shutdown.exe /r over WinRM with optional user consent, ping gate, abort, and reboot verification.'
         actions  = @(
@@ -1001,25 +1005,13 @@ function Invoke-RrsShutdownDirect {
 
 function Get-RrsShutdownErrorHint {
     param([int]$Code, [string]$Detail = '')
+    # Delegate the raw-detail text signatures to the shared troubleshoot engine (loop 79):
+    # these six branches used to be duplicated here, but the shared engine is a strict superset
+    # (it also folded in this mapper's 1314/1727/ERROR_BAD_NETPATH knowledge). Fall through to
+    # the numeric shutdown.exe return code below for the tool-specific / no-usable-detail cases.
     if ($Detail) {
-        if ($Detail -match '0x80090351|SEC_E_NO_AUTHENTICATING_AUTHORITY|no\s+authenticating\s+authority|unknown\s+security\s+error') {
-            return 'WinRM auth: 0x80090351 SEC_E_NO_AUTHENTICATING_AUTHORITY. Could not contact an authentication authority that can validate the credential against the target. Common causes: target outside the Kerberos realm/trust, target needs a WinRM TrustedHosts entry (cross-domain/workgroup), or the SPN is not registered. Clear the credential to fall back to the current CAC session and re-run.'
-        }
-        if ($Detail -match 'TrustedHosts') {
-            return 'Target not in the WinRM TrustedHosts. Run as admin: Set-Item WSMan:\localhost\Client\TrustedHosts -Value "<hostname-or-FQDN-or-*>" -Concatenate -Force. Workgroup/cross-forest targets always need this.'
-        }
-        if ($Detail -match 'The WinRM client cannot process the request') {
-            return 'WinRM client config rejected the request. Inspect: winrm get winrm/config/client. May need Enable-PSRemoting or a TrustedHosts entry.'
-        }
-        if ($Detail -match 'destination\s+unreachable|cannot\s+find\s+the\s+computer|could\s+not\s+be\s+resolved|not\s+be\s+found') {
-            return 'Target name not resolvable / not pingable. Check DNS, that the target is online, and that you have line-of-sight to it.'
-        }
-        if ($Detail -match 'access\s+(is\s+)?denied|0x80070005|ERROR_ACCESS_DENIED') {
-            return 'Access denied. The credential is not local-admin on the target, or UAC is filtering the token. Verify the account is in BUILTIN\Administrators on the target.'
-        }
-        if ($Detail -match 'logon\s+failure|0x8009030E|wrong\s+user\s+name\s+or\s+password|0xC000006D') {
-            return 'Logon failure - bad credential. Clear the credential to fall back to the current CAC session, or supply a different identity.'
-        }
+        $h = Get-JanetTroubleshootHint -Message $Detail
+        if ($h) { return $h }
     }
     switch ($Code) {
         0     { return 'OK - target accepted the restart command.' }
