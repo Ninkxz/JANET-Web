@@ -84,7 +84,7 @@
               if (r.Error) { result = 'Error'; } else { if (u) add.updates = u; if (a) add.installed = a; result = asBool(r.Reachable) ? 'Patched' : 'Unreachable'; detail = 'upd ' + u + ', app ' + a; }
               break;
             }
-            case 'kb-install': if (asBool(r.Success)) add.installed = 1; result = asBool(r.Success) ? 'Installed' : 'Failed'; break;
+            case 'kb-install': { var kr = String(r.Result || (asBool(r.Success) ? 'Installed' : 'Failed')); if (/^installed$/i.test(kr)) add.installed = 1; result = kr; break; }
             case 'software-uninstall': { var ok = /^(uninstalled|removed|success|ok)$/i.test(String(r.Result || '')); if (ok) add.uninstalled = 1; result = r.Result || (ok ? 'Uninstalled' : 'Failed'); detail = (r.App || '') + (detail ? ' - ' + detail : ''); break; }
             case 'unsupported-uninstall': { var ok2 = /^(uninstalled|removed|success|ok)$/i.test(String(r.Result || r.Status || '')); if (ok2) add.uninstalled = 1; result = r.Result || r.Status || ''; break; }
             case 'app-action': {

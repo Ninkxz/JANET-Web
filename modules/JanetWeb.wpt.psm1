@@ -40,7 +40,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.6'
+        version  = '6.8.7'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -2713,6 +2713,23 @@ function Test-WptKbNameMatch {
     if (-not $num) { return $false }
     if (([string]$ArticleId).Trim() -eq $num) { return $true }
     return ([string]$UpdateName -match ('KB' + [regex]::Escape($num) + '(?!\d)'))
+}
+
+# loop23 (item14): HONEST kb-install outcome label. kb-install applies KBs two ways:
+# an MECM InstallUpdates trigger (the CCM client only ACCEPTS the request - the async
+# download/install can fail minutes later) and an MSU/wusa install (exit 0/3010 is a real
+# local confirmation). Reporting a mere trigger as "Installed" (with a VulnPatched Success
+# audit) is a FALSE-CLEAN: the operator sees Installed and moves on while the box may never
+# finish. So: errors win; ANY MECM trigger reads "Triggered (verify)" (errs toward verify,
+# never over-claims - even alongside an MSU install, since part is unconfirmed); a confirmed
+# MSU install alone reads "Installed"; otherwise "No change". Pure - tested by
+# Wpt.KbInstallResult.Tests.ps1. The view surfaces this Result and counts only confirmed installs.
+function Get-WptKbInstallResult {
+    param([int]$ErrorCount, [int]$MecmTriggered, [int]$MsuInstalled)
+    if ($ErrorCount -gt 0)    { return 'Errors' }
+    if ($MecmTriggered -gt 0) { return 'Triggered (verify)' }
+    if ($MsuInstalled -gt 0)  { return 'Installed' }
+    return 'No change'
 }
 
 $script:WptKbInstallBlock = {
@@ -6015,7 +6032,7 @@ function Invoke-JanetToolAction {
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $kbList, $msuPath, $noReboot) } `
                 -OkOf { param($r) (@($r.Errors).Count -eq 0) } `
                 -AuditDetail { param($r) "MECM=$($r.MECMInstalled) MSU=$($r.MSUInstalled) Skip=$($r.Skipped) Err=$(@($r.Errors).Count)" } `
-                -RowOf { param($r) @{ Host=$r.Host; MECMFound=[int]$r.MECMFound; MECMInstalled=[int]$r.MECMInstalled; MSUInstalled=[int]$r.MSUInstalled; Skipped=[int]$r.Skipped; Result=$(if(@($r.Errors).Count -gt 0){'Errors'}elseif(($r.MECMInstalled + $r.MSUInstalled) -gt 0){'Installed'}else{'No change'}); Detail=$((@($r.Details) + @(@($r.Errors) | ForEach-Object { "ERR: $_" })) -join ' | ') } }
+                -RowOf { param($r) @{ Host=$r.Host; MECMFound=[int]$r.MECMFound; MECMInstalled=[int]$r.MECMInstalled; MSUInstalled=[int]$r.MSUInstalled; Skipped=[int]$r.Skipped; Result=(Get-WptKbInstallResult -ErrorCount (@($r.Errors).Count) -MecmTriggered ([int]$r.MECMInstalled) -MsuInstalled ([int]$r.MSUInstalled)); Detail=$((@($r.Details) + @(@($r.Errors) | ForEach-Object { "ERR: $_" })) -join ' | ') } }
         }
         'kb-scan' {
             # KB scan returns one row PER hotfix per host. The fan-out harvester

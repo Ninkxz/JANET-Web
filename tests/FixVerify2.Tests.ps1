@@ -37,7 +37,7 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
             function script:New-PSSession { param($ComputerName,$SessionOption,$ErrorAction,$Credential,$Authentication) [pscustomobject]@{ Id=1; Name='shim' } }
             function script:Remove-PSSession { [CmdletBinding()] param($Session) }
             function script:Get-WmiObject { [CmdletBinding()] param($Namespace,$Query,$Class,$Name,$ArgumentList) [pscustomobject]@{ Name='KB5031234 Security Update'; ArticleID='5031234' } }
-            function script:Invoke-WmiMethod { [CmdletBinding()] param($Class,$Name,$ArgumentList,$Namespace) [pscustomobject]@{ ReturnValue = $script:__rv } }
+            function script:Invoke-WmiMethod { [CmdletBinding()] param($Class,$Name,$ArgumentList,$Namespace) if ($script:__rv -eq -1) { [pscustomobject]@{} } else { [pscustomobject]@{ ReturnValue = $script:__rv } } }
             function script:Invoke-Command {
                 [CmdletBinding()] param($Session,$ComputerName,$ScriptBlock,$ArgumentList,$Credential,$Authentication,$SessionOption)
                 $t = if ($ScriptBlock) { $ScriptBlock.ToString() } else { '' }
@@ -62,7 +62,7 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
             function script:New-PSSession { param($ComputerName,$SessionOption,$ErrorAction,$Credential,$Authentication) [pscustomobject]@{ Id=1; Name='shim' } }
             function script:Remove-PSSession { [CmdletBinding()] param($Session) }
             function script:Get-WmiObject { [CmdletBinding()] param($Namespace,$Query,$Class,$Name,$ArgumentList) [pscustomobject]@{ Name='KB5031234 Security Update'; ArticleID='5031234' } }
-            function script:Invoke-WmiMethod { [CmdletBinding()] param($Class,$Name,$ArgumentList,$Namespace) [pscustomobject]@{ ReturnValue = $script:__rv } }
+            function script:Invoke-WmiMethod { [CmdletBinding()] param($Class,$Name,$ArgumentList,$Namespace) if ($script:__rv -eq -1) { [pscustomobject]@{} } else { [pscustomobject]@{ ReturnValue = $script:__rv } } }
             function script:Invoke-Command {
                 [CmdletBinding()] param($Session,$ComputerName,$ScriptBlock,$ArgumentList,$Credential,$Authentication,$SessionOption)
                 $t = if ($ScriptBlock) { $ScriptBlock.ToString() } else { '' }
@@ -91,6 +91,15 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
             $r.MECMFound     | Should Be 1
             $r.Errors        | Should Match 'rejected'
             $r.Errors        | Should Match 'ReturnValue=5'
+        }
+        It 'NULL ReturnValue => NOT counted as installed (loop22 fail-closed), reported as <null>' {
+            # -Rv -1 makes the shim return a method result WITHOUT a ReturnValue member,
+            # so .ReturnValue is $null - a method that returned nothing must not read as success.
+            $r = Invoke-WptKb -Rv -1
+            $r.MECMInstalled | Should Be 0
+            $r.MECMFound     | Should Be 1
+            $r.Errors        | Should Match 'rejected'
+            $r.Errors        | Should Match ([regex]::Escape('ReturnValue=<null>'))
         }
     }
 

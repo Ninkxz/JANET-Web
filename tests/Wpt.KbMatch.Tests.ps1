@@ -57,9 +57,9 @@ Describe 'Test-WptKbNameMatch - boundaries and normalization' {
     }
 }
 
-Describe 'wpt - manifest exact version pin (newest bump = loop-22 KB-match fix)' {
-    It 'wpt is at v6.8.6' {
+Describe 'wpt - manifest version floor (loop-22 KB-match fix landed at 6.8.6)' {
+    It 'wpt version is >= 6.8.6 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '6.8.6'
+        ([version][string]$mani.version -ge [version]'6.8.6') | Should Be $true
     }
 }
