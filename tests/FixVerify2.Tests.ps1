@@ -140,9 +140,9 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
     # a canned string; the read-back call (marker PINREAD) returns a canned policy state
     # so the worker's real verify+gate logic runs. Target = this box (reachable, fast).
     function Invoke-PinWorker {
-        param($ReadBack)
+        param($ReadBack, [bool]$Bypass = $false)
         & $m {
-            param($ReadBack)
+            param($ReadBack, $Bypass)
             $script:__rb = $ReadBack
             function script:Invoke-Command {
                 [CmdletBinding()] param($ComputerName,$ScriptBlock,$ArgumentList,$Authentication,$SessionOption,$Credential,$Session)
@@ -151,24 +151,25 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 return 'ProductVersion=Windows 11; TargetReleaseVersionInfo=24H2'
             }
             try {
+                # positional arg 17 = $Bypass (loop33 bypass read-back verify)
                 $argl = @(
                     $env:COMPUTERNAME,'Pin',$null,'Windows 11','24H2',
                     '','',$false,$false,$true,
                     $false,$false,16384,$null,$null,
-                    $false,$false,$false,$false,
+                    $false,$Bypass,$false,$false,
                     'x',4,64,'2.0','y',
                     $false,300,$script:WinUpgradePinBlock
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 [pscustomobject]@{ Status=[string]$row.Status; Ok=[bool]$row.Ok; Detail=[string]$row.Detail }
             } finally { Remove-Item function:script:Invoke-Command -EA SilentlyContinue }
-        } $ReadBack
+        } $ReadBack $Bypass
     }
 
     function Invoke-UnpinWorker {
-        param($ReadBack)
+        param($ReadBack, [bool]$RemoveBypass = $false)
         & $m {
-            param($ReadBack)
+            param($ReadBack, $RemoveBypass)
             $script:__rb = $ReadBack
             function script:Invoke-Command {
                 [CmdletBinding()] param($ComputerName,$ScriptBlock,$ArgumentList,$Authentication,$SessionOption,$Credential,$Session)
@@ -177,18 +178,19 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 return 'removal attempted; other policy values kept'
             }
             try {
+                # positional arg 19 = $RemoveBypass (loop33 bypass read-back verify)
                 $argl = @(
                     $env:COMPUTERNAME,'Unpin',$null,'Windows 11','24H2',
                     '','',$false,$false,$true,
                     $false,$false,16384,$null,$null,
-                    $false,$false,$false,$false,
+                    $false,$false,$false,$RemoveBypass,
                     'x',4,64,'2.0','y',
                     $false,300,$script:WinUpgradePinBlock
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 [pscustomobject]@{ Status=[string]$row.Status; Ok=[bool]$row.Ok; Detail=[string]$row.Detail }
             } finally { Remove-Item function:script:Invoke-Command -EA SilentlyContinue }
-        } $ReadBack
+        } $ReadBack $RemoveBypass
     }
 
     Context 'Pin' {
@@ -208,6 +210,17 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
             $r.Status | Should Be 'FAILED'
             $r.Ok     | Should Be $false
         }
+        It 'loop33: bypass requested + read-back confirms BYPASS SET => DONE' {
+            $r = Invoke-PinWorker -Bypass $true -ReadBack ([pscustomobject]@{ TargetReleaseVersion=1; ProductVersion='Windows 11'; TargetReleaseVersionInfo='24H2'; BypassPresent=$true })
+            $r.Status | Should Be 'DONE'
+            $r.Ok     | Should Be $true
+        }
+        It 'loop33: bypass requested but read-back shows it NOT set (ACL/GPO) => FAILED BYPASS NOT VERIFIED' {
+            $r = Invoke-PinWorker -Bypass $true -ReadBack ([pscustomobject]@{ TargetReleaseVersion=1; ProductVersion='Windows 11'; TargetReleaseVersionInfo='24H2'; BypassPresent=$false })
+            $r.Status | Should Be 'FAILED'
+            $r.Ok     | Should Be $false
+            $r.Detail | Should Match 'BYPASS NOT VERIFIED'
+        }
     }
 
     Context 'Unpin' {
@@ -222,6 +235,25 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
             $r.Ok     | Should Be $false
             $r.Detail | Should Match 'NOT REMOVED'
             $r.Detail | Should Match 'TargetReleaseVersion'
+        }
+        It 'loop33: bypass-removal requested + read-back confirms the bypass GONE => DONE' {
+            $r = Invoke-UnpinWorker -RemoveBypass $true -ReadBack ([pscustomobject]@{ HasTRV=$false; HasProduct=$false; HasInfo=$false; BypassPresent=$false })
+            $r.Status | Should Be 'DONE'
+            $r.Ok     | Should Be $true
+        }
+        It 'loop33: bypass-removal requested but read-back shows it STILL ARMED => FAILED (bypass not removed)' {
+            $r = Invoke-UnpinWorker -RemoveBypass $true -ReadBack ([pscustomobject]@{ HasTRV=$false; HasProduct=$false; HasInfo=$false; BypassPresent=$true })
+            $r.Status | Should Be 'FAILED'
+            $r.Ok     | Should Be $false
+            $r.Detail | Should Match 'NOT REMOVED'
+            $r.Detail | Should Match 'bypass'
+        }
+    }
+
+    Context 'version' {
+        It 'winupgrade is at v0.5.4 (loop33 bypass read-back verify)' {
+            $mani = & $m { Get-JanetToolManifest }
+            [string]$mani.version | Should Be '0.5.4'
         }
     }
 }

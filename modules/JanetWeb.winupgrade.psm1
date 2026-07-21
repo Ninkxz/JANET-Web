@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.3'
+        version  = '0.5.4'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -1077,6 +1077,11 @@ $script:WinUpgradeWorker = {
         $rp = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'   # marker:PINREAD
         $p  = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
         $names = if ($p) { @($p.PSObject.Properties.Name) } else { @() }
+        # loop33 (F3+F4): also read back the MoSetup CPU/TPM bypass value so Pin can verify it was
+        # actually SET and Unpin can verify it was actually REMOVED - it was ASSERTED ("BYPASS SET" /
+        # "bypass key removed") but never read-back-verified, so a restrictive MoSetup ACL left the
+        # claim unverified (Unpin: bypass still armed while the row said removed).
+        $bp = Get-ItemProperty -Path 'HKLM:\SYSTEM\Setup\MoSetup' -Name 'AllowUpgradesWithUnsupportedTPMOrCPU' -ErrorAction SilentlyContinue
         [pscustomobject]@{
             KeyPresent               = [bool]$p
             TargetReleaseVersion     = $(if ($names -contains 'TargetReleaseVersion') { $p.TargetReleaseVersion } else { $null })
@@ -1085,6 +1090,7 @@ $script:WinUpgradeWorker = {
             HasTRV                   = ($names -contains 'TargetReleaseVersion')
             HasProduct               = ($names -contains 'ProductVersion')
             HasInfo                  = ($names -contains 'TargetReleaseVersionInfo')
+            BypassPresent            = ([bool]$bp -and ([int]$bp.AllowUpgradesWithUnsupportedTPMOrCPU -eq 1))
         }
     }
 
@@ -1155,10 +1161,16 @@ $script:WinUpgradeWorker = {
                 $rb = $null
                 try { $rb = Invoke-Command @icv } catch { $rb = $null }
                 $pinOk = ($null -ne $rb -and [int]$rb.TargetReleaseVersion -eq 1 -and "$($rb.ProductVersion)" -eq "$Product" -and "$($rb.TargetReleaseVersionInfo)" -eq "$Version")
-                if (-not $pinOk) {
-                    $rbNote = if ($rb) { "read-back TRV=$($rb.TargetReleaseVersion) ProductVersion='$($rb.ProductVersion)' TargetReleaseVersionInfo='$($rb.TargetReleaseVersionInfo)'" } else { 'policy key not readable after write' }
+                # loop33 (F4): when the CPU/TPM bypass was requested, it must ALSO read back as SET -
+                # the write claimed "BYPASS SET" but never verified it (a restrictive MoSetup ACL /
+                # GPO re-overwrite would leave a supported-only host asserting BYPASS SET, and a later
+                # feature-update push then fails on hardware).
+                $bypassOk = ((-not $Bypass) -or ($null -ne $rb -and [bool]$rb.BypassPresent))
+                if (-not $pinOk -or -not $bypassOk) {
+                    $rbNote = if ($rb) { "read-back TRV=$($rb.TargetReleaseVersion) ProductVersion='$($rb.ProductVersion)' TargetReleaseVersionInfo='$($rb.TargetReleaseVersionInfo)' BypassPresent=$([bool]$rb.BypassPresent)" } else { 'policy key not readable after write' }
+                    $why = if (-not $pinOk) { "PIN NOT VERIFIED - policy did not read back as $Product $Version" } else { 'BYPASS NOT VERIFIED - the CPU/TPM bypass (MoSetup) did not read back as set' }
                     $r.Status = 'FAILED'; $r.Ok = $false
-                    $r.Detail = "Pinned: $out | PIN NOT VERIFIED - policy did not read back as $Product $Version ($rbNote); a GPO refresh may have re-overwritten it or the write was rejected."
+                    $r.Detail = "Pinned: $out | $why ($rbNote); a GPO refresh may have re-overwritten it or the write was rejected."
                     break
                 }
                 # "Then run Windows Update": optionally kick the WU agent so the pinned build
@@ -1276,11 +1288,16 @@ $script:WinUpgradeWorker = {
                 if ($rb.HasTRV)     { $stillSet += 'TargetReleaseVersion' }
                 if ($rb.HasProduct) { $stillSet += 'ProductVersion' }
                 if ($rb.HasInfo)    { $stillSet += 'TargetReleaseVersionInfo' }
+                # loop33 (F3): when the bypass removal was requested, the MoSetup value must ALSO read
+                # back as GONE - "bypass key removed" was asserted after a SilentlyContinue delete that
+                # can fail on a restrictive ACL, leaving the Microsoft-unsupported bypass STILL ARMED
+                # while the row reported it removed. A security-relevant false-clean.
+                if ($RemoveBypass -and [bool]$rb.BypassPresent) { $stillSet += 'MoSetup CPU/TPM bypass' }
                 if ($stillSet.Count -eq 0) {
                     $r.Status = 'DONE'; $r.Detail = "$out"; $r.Ok = $true
                 } else {
                     $r.Status = 'FAILED'; $r.Ok = $false
-                    $r.Detail = "$out | PIN NOT REMOVED - still present after removal: $([string]::Join(', ', $stillSet)) (the pin may still be active)."
+                    $r.Detail = "$out | NOT REMOVED - still present after removal: $([string]::Join(', ', $stillSet)) (the pin/bypass may still be active)."
                 }
             }
 

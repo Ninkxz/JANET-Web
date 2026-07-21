@@ -77,9 +77,9 @@ Describe 'winupgrade worker - the inline diagnose verdict mirrors the disk/RAM/S
     }
 }
 
-Describe 'winupgrade - manifest exact version pin (newest bump = loop-32 Diagnose disk gate)' {
-    It 'winupgrade is at v0.5.3' {
+Describe 'winupgrade - manifest version floor (loop-32 Diagnose disk gate landed at 0.5.3)' {
+    It 'winupgrade version is >= 0.5.3 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '0.5.3'
+        ([version][string]$mani.version -ge [version]'0.5.3') | Should Be $true
     }
 }
