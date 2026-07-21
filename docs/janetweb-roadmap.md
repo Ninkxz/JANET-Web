@@ -60,6 +60,30 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     `preflight-services`; restart `abort-scheduled`. A future self-guard sweep will
     re-flag them — this is the standing "by design" answer. Guarding them would remove
     legitimate dispatcher self-repair/self-abort.
+13. ~~wpt kb-install loose KB-match (substring wrong-update bind)~~ — **CLOSED loop 22** (`Test-WptKbNameMatch`,
+    wpt 6.8.6): anchored ArticleID-exact / bounded-Name-token match so a shorter requested KB
+    (KB5034) can't substring-match a longer article (KB5034123), install the wrong update, and
+    skip the MSU fallback. Also fail-closed on a null InstallUpdates ReturnValue.
+14. **wpt kb-install reports an unverified async MECM trigger as "Installed" + VulnPatched audit**
+    (loop-22 Fable deep-dive, CONFIRMED, HIGH) — `:5991` Result='Installed' when `MECMInstalled>0`,
+    but `MECMInstalled` = MECM `InstallUpdates` *trigger accepted*, not confirmed installed; the
+    async download/install can fail minutes later, yet the row says Installed and OkOf books a
+    `VulnPatched` Success audit (a false compliance record). Fix needs its own loop (Result label
+    "Triggered (verify)" for MECM vs confirmed "Installed" for MSU exit-0; likely a view change +
+    audit-action review). Highest-harm of the wpt verify false-cleans — pick next.
+15. **wpt M365 C2R "Verified" goes green on a FAILED update** (loop-22 Fable deep-dive, CONFIRMED) —
+    `:854` verifies by the ClickToRun\Configuration key LastWriteTime freshness (<7 days), but C2R
+    bumps that key's mtime on every update attempt INCLUDING failures (the code reads LastScenario
+    right there). A failed Force Update reads Verified=$true with the old vulnerable version. Fix:
+    verify by version delta (or fail when LastScenarioResult != Success), not key mtime.
+16. **wpt Chrome/Edge "Verified" = "registry touched in 14 days", not "current"** (loop-22 Fable
+    deep-dive, CONFIRMED, by-design-weak) — `New-WptUpdateClientVerify :875` has no target/baseline
+    version compare, so a browser updated 10 days ago reads Verified while a newer security build is
+    what ACAS flagged. Fix: accept an expected-min-version and compare, or relabel "Recently updated".
+17. **wpt verify-patch KB filter article-leg unanchored** (loop-22 Fable deep-dive, CONFIRMED, LOW) —
+    `:2468` `"KB$art" -match [regex]::Escape($f)` is an unanchored substring, so a KB filter can show
+    a different update's row as Installed in the filtered verify view (mitigated: the full update
+    Name is shown). Fix: anchor the article leg (exact) while keeping the free-text Name filter.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -410,9 +434,24 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   it. Behavior-identical → **NO version bump** (manifest version = behavioral-change signal; this is
   internal single-source-of-truth consolidation). `Reports.SlaBucket.Tests.ps1` (18) pins every edge:
   threshold transitions, deadline-day boundary, the 3-day floor beating 25% on short KEV windows, the
-  zero-deadline no-divide guard, + the severity-map/KEV override. Pester **1174→(close)** green. The
+  zero-deadline no-divide guard, + the severity-map/KEV override. Pester **1174→1192** green. The
   two SLA dashboards can no longer drift. No new ranked items. SECRET parity: +Get-ReportsSlaBucket
   consolidation.
+- **Loop 22 (DONE 2026-07-21):** Fable-inline + one parallel Fable worker. Self-review of loop-21 →
+  **GREEN** (SLA consolidation byte-identical). **Workstream: fresh deep-dive on wpt** (most-used
+  tool, 480KB, no prior loop-era review) — a bounded Fable worker on ONE question: can wpt report a
+  host PATCHED when it isn't (false-clean)? Verified each finding in-code. **Spine is fail-closed**
+  (kb-scan exact `-eq`, failed Get-HotFix → Missing, verify-patch timeout ≠ Installed). **4 CONFIRMED
+  false-cleans found**; fixed the crispest, ranked the rest (items 14-17, #14 highest). **FIXED**
+  (wpt **6.8.5→6.8.6**): kb-install matched requested KBs with `-like "*$kb*"` (`:2740`), so KB5034
+  bound an update named ...KB5034123..., installed the WRONG update, marked the real KB handled, and
+  skipped the MSU fallback; a null InstallUpdates ReturnValue was also counted as success. New
+  canonical `Test-WptKbNameMatch` (exact ArticleID or bounded Name token `KB<num>(?!\d)`); remote
+  scriptblock mirrors it inline; trigger now fail-closed (`$null -ne $rv -and [int]$rv -eq 0`). No
+  guard weakened (DNS wrong-box `:2726`, self-guard `:5983` untouched); all 117 wpt tests green.
+  `Wpt.KbMatch.Tests.ps1` (11) pins the rule (bug case + boundaries + normalization) + exact 6.8.6
+  pin (SelfGuardApply exact → floor). Pester **1192→(close)** green. No new destructive surface;
+  4 new ranked items (14-17). SECRET parity: +kb-install KB-match anchoring + null-rv fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
