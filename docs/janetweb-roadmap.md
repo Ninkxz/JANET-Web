@@ -112,10 +112,9 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     on re-read (the durability trio's loud NOT VERIFIED) rolls up as "nochange 3" — the trio's signal
     degraded to "nothing needed doing"; host-level NOT VERIFIED rows also fit no summary bucket
     (`:3135-3145`). Fix: dedicated skip/inprogress/notVerified buckets in both tallies.
-25. **c2c Patches SCAN missing-data default reads compliant** (loop-29 Fable deep-dive, CONFIRMED — F5)
-    — `:873-876`: an applicable-not-installed update with null Deadline AND null StartTime can never be
-    overdue → counted "pending within grace" → pillar PASS however old the missing patch is. Fix: no
-    usable timestamp → count overdue (fail-closed) or downgrade the check to ERROR/advisory.
+25. ~~c2c Patches SCAN missing-data default reads compliant~~ — **CLOSED loop 30** (`Test-C2cUpdateOverdue`,
+    c2c 1.15.4): a missing update with no usable timestamp now counts OVERDUE (fail-closed); the
+    non-datetime-Deadline deserialize glitch also now falls through to StartTime. c2c scan fully fail-closed.
 26. **c2c AntiMalware FIX: unknown signature age → "ALREADY PROTECTED"** (loop-29 Fable deep-dive,
     CONFIRMED — F6) — `:1885`/`:1960`: the sig heal gates on `($null -ne $ageHours) -and (...)`, so an
     unreadable age skips the heal and lands NOCHANGE/"ALREADY PROTECTED"; the SCAN treats the same
@@ -572,8 +571,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   counted only on explicit `^Compliant`; unknown states go to a new `other` bucket (surfaced in the log
   + summary). Read-only import path; full c2c set green. `C2c.ImportCompliance.Tests.ps1` (7) drives the
   real import (unknown row → other not Compliant; all-explicit → other=0) + exact 1.15.3 pin (C2c.Enable
-  1.15.2 exact → floor). Pester **1252→(close)** green. **5 new ranked items (22-26)** (F1/F2 high-harm
+  1.15.2 exact → floor). Pester **1252→1259** green. **5 new ranked items (22-26)** (F1/F2 high-harm
   next). SECRET parity: +c2c import compliant-count honesty.
+- **Loop 30 (DONE 2026-07-21):** Fable-inline. Self-review of loop-29 → **GREEN**. **Workstream: c2c
+  deep-dive item 25 (F5)** → **CLOSED** (chose the independent finding over the entangled fix-rollup
+  cluster 22/23/24). The Patches SCAN overdue predicate (`:873-876`) counted a MISSING update
+  (ComplianceState=0) with null Deadline AND null StartTime as within-grace → pillar **PASS** however old
+  (and a non-datetime Deadline dropped from the StartTime path too). **FIXED** (c2c **1.15.3→1.15.4**):
+  pure `Test-C2cUpdateOverdue` (`:622`) — datetime Deadline past→overdue, else datetime StartTime older
+  than grace→overdue, else (no usable timestamp on a missing update)→**overdue** (fail-closed); scan worker
+  mirrors it inline. Read-only scan path; full c2c set green. `C2c.PatchOverdue.Tests.ps1` (11) pins the
+  rule incl. the fail-closed cases + static mirror assert + exact 1.15.4 pin (ImportCompliance 1.15.3
+  exact → floor). Pester **1259→(close)** green. **c2c scan verdict now FULLY fail-closed.** Remaining
+  c2c items: 22/23/24 (entangled fix-rollup buckets), 26 (AntiMalware fix unknown-age). SECRET parity:
+  +c2c Patches overdue fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
