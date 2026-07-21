@@ -56,9 +56,9 @@ Describe 'Test-AcasKbNameMatch - boundaries and normalization' {
     }
 }
 
-Describe 'acas - manifest exact version pin (newest bump = loop-27 kb-install KB-match parity)' {
-    It 'acas is at v1.11.8' {
+Describe 'acas - manifest version floor (loop-27 kb-install KB-match parity landed at 1.11.8)' {
+    It 'acas version is >= 1.11.8 (floor; exact pin lives in the newest bump test)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '1.11.8'
+        ([version][string]$mani.version -ge [version]'1.11.8') | Should Be $true
     }
 }

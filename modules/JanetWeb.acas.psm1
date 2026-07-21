@@ -1097,7 +1097,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.8'
+        version  = '1.11.9'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -3380,8 +3380,13 @@ function Invoke-JanetToolAction {
             $okOf  = $script:AcasOkOf
             $detOf = $script:AcasDetOfPlain
 
+            # loop28 (item19): a SCHEDULED reboot (shutdown /r /t 300, 5 min out and abortable via
+            # shutdown /a; rc=1190 "already scheduled" also returns OK) is a TOUCH, not a confirmed
+            # patch. Booking VulnPatched at schedule time was a false compliance record. Audit
+            # TouchHost here; VulnPatched stays on the actual patch-install/update confirmations, and
+            # verify-post-reboot (which confirms the reboot happened) already audits TouchHost too.
             $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootWorker -Threads $threads `
-                       -RowOf $rowOf -OkOf $okOf -AuditAction 'VulnPatched' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
+                       -RowOf $rowOf -OkOf $okOf -AuditAction 'TouchHost' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
                        -RunAction 'Reboot' -RunScope $vulnDisplay -RunMode 'Reboot'
             & $send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
             return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
