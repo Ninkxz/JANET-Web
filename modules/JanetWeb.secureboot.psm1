@@ -25,7 +25,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.2'
+        version  = '1.6.3'
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -1085,6 +1085,21 @@ function Get-SbeBool {
     return (@('true','1','yes','on') -contains ([string]$Value).Trim().ToLowerInvariant())
 }
 
+# loop58 (item64): fail-CLOSED dry-run parse for the DESTRUCTIVE enable selector. Get-SbeBool
+# (shared by attemptOffline/allowEmptyPassword) resolves an unrecognized token to $false, which
+# for dry_run means a LIVE firmware write - so a typo ('ture', 'dry', 'y') silently goes live. A
+# destructive-mode selector must not fail open: the live path requires an ABSENT value (the
+# manifest's documented default=$false) or an EXPLICIT recognized false token. Any present-but-
+# unrecognized token stays DRY (safe). Not a change to Get-SbeBool - only this call site is destructive.
+function Get-SbeDryRunSafe {
+    param($Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return $false }             # absent -> documented default (live)
+    if ($Value -is [bool]) { return [bool]$Value }
+    $tok = ([string]$Value).Trim().ToLowerInvariant()
+    if (@('false','0','no','off') -contains $tok) { return $false }         # explicit LIVE
+    return $true                                                            # explicit dry OR unrecognized -> fail SAFE (dry)
+}
+
 function Invoke-JanetToolAction {
     param(
         [string]$ActionId,
@@ -1156,7 +1171,7 @@ function Invoke-JanetToolAction {
     }
 
     # Dry-run snapshot (atomic in the web action - cannot toggle mid-run).
-    $isDry = Get-SbeBool $Params['dry_run'] $false
+    $isDry = Get-SbeDryRunSafe $Params['dry_run']   # loop58: fail-closed - unrecognized token stays DRY, never silently live
 
     # BIOS password + forbidden-char enforcement (only meaningful for live runs).
     $biosPlain = [string]$Params['bios_password']

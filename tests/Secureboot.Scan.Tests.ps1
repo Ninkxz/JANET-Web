@@ -146,8 +146,8 @@ Describe 'secureboot 1.6.2 - enable result file is per-run unique (no stale-resu
     $man = & $script:SbeMod { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
 
-    It 'manifest version is exactly 1.6.2 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.6.2'
+    It 'manifest version is at least 1.6.2 (floor; newest exact pin lives in ConfirmWord, loop58 v1.6.3)' {
+        ([version][string]$man.version -ge [version]'1.6.2') | Should Be $true
     }
     It 'names the enable result JSON with the per-run-unique $taskName' {
         ($src -match '\$resultFile\s*=\s*"[^"]*\$\{taskName\}[^"]*\.json"') | Should Be $true

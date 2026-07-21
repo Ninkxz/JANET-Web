@@ -66,3 +66,30 @@ Describe 'secureboot view - live Enable requires typing ENABLE; dry run does not
         ($script:View -match "ctx\.run\('enable-secure-boot'") | Should Be $true
     }
 }
+
+# loop58 (item64): the dry_run selector on the DESTRUCTIVE enable must fail CLOSED - a live
+# firmware write only on an absent value (manifest default) or an explicit recognized false;
+# any present-but-unrecognized token (typo) stays DRY, never silently live.
+Describe 'secureboot 1.6.3 - dry_run parse fails closed (unrecognized token stays DRY)' {
+    $mani = & $m { Get-JanetToolManifest }
+    function DryOf { param($v) & $m { param($x) Get-SbeDryRunSafe $x } $v }
+
+    It 'manifest version is exactly 1.6.3 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.6.3'
+    }
+    It 'absent/empty -> live (the documented enable default)' {
+        (DryOf $null) | Should Be $false
+        (DryOf '')    | Should Be $false
+    }
+    It 'explicit recognized false tokens -> live' {
+        foreach ($t in 'false','0','no','off','False','OFF') { (DryOf $t) | Should Be $false }
+        (DryOf $false) | Should Be $false
+    }
+    It 'explicit recognized true tokens -> dry' {
+        foreach ($t in 'true','1','yes','on','TRUE') { (DryOf $t) | Should Be $true }
+        (DryOf $true) | Should Be $true
+    }
+    It 'a present-but-UNRECOGNIZED token stays DRY (the fix; Get-SbeBool would have gone live)' {
+        foreach ($t in 'ture','dry','y','preflight','maybe','2') { (DryOf $t) | Should Be $true }
+    }
+}
