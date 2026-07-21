@@ -1386,6 +1386,22 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   engine-consumer files (210) green. Pester **1528→1538** green. **The last ad-hoc mapper is gone - the engine is
   the single source of hint truth.** Next: c2c/certdeploy read-only CHECK ERROR rows; per-candidate upr failures.
   SECRET parity: +shared-engine enrichment + restart-fork delegation.
+- **Loop 80 (DONE 2026-07-21) — informative-failures FOLLOW-UP + loop-79 self-review fixes:** a Fable adversarial
+  subagent on loop-79's commit `ae6d11cf8` found **4 CONFIRMED regressions** (all reproduced + fixed): (1) bare-
+  numeric false positives - `1314\b` (right-boundary only) matched KB5031314, `1727` (unbounded) matched inside
+  172799 → wrong privilege/RPC hints; fixed to `\b1314\b`/`\b1727\b`/`\b1722\b` + added real HRESULT `0x80070522`;
+  (2) `could not be found` over-broad (swallowed "module/user name could not be found" → DNS hint); narrowed to
+  host-qualified `computer\b.{0,40}could not be found`; (3) restart rc **-1** (synthetic 'timed out after 30s')
+  was shadowed by the shared `timeout` signature → lost its precise numeric hint; guarded delegation with `-and
+  $Code -ne -1` (-3/-4 still delegate); (4) factual mislabel - 1727 is RPC_S_CALL_FAILED_DNE not
+  "RPC_S_NO_MORE_ENDPOINTS" (that's 1753); corrected engine + restart labels, dropped the fabricated token.
+  restart **beta9→beta10**. **Workstream:** wired the hint into the first READ-ONLY scan path - **secureboot**
+  `Invoke-SbeScanAction` on a host-level CHECK ERROR (`$verdict -eq 'CHECK ERROR' -and $hostStatus -ne 'OK'`) →
+  `Hint` row + `FIX:` err log (scoped to CHECK ERROR; OFFLINE/DNS MISMATCH already self-explain). secureboot
+  **1.6.5→1.6.6**. Tests: Troubleshoot.Hint +6, Restart.Guards +2, Secureboot.Scan +3. **loop-37 lesson:** engine
+  change shared, ran engine+restart+secureboot+all consumers (233) green. Pester **1538→1549** green. Next:
+  c2c/certdeploy read-only CHECK ERROR rows; per-candidate upr failures. SECRET parity: +engine corrections +
+  restart rc-1 guard + secureboot scan hint.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
