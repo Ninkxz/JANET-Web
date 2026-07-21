@@ -141,10 +141,10 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
 30. ~~winupgrade Diagnose verdict READY ignores disk/RAM/Secure Boot fails its own scan reported~~ —
     **CLOSED loop 32** (`Get-WinUpgradeDiagnoseVerdict`, winupgrade 0.5.3): a `[FAIL] Disk`/`RAM`/`Secure
     Boot` host now reads a distinct NOT READY (after NEEDS POLICY, before READY); summary names the reason.
-31. **winupgrade unparseable sfc output → 'no violations' → CLEAN** (loop-31 Fable deep-dive, CONFIRMED,
-    LOW) — `Get-WinUpgradeRepairVerdict :668` / inline mirror `:2606` final `else { 'no violations' }`;
-    localized/truncated sfc reads clean, ExitCode never consulted. Fix: no-match → 'unknown', exclude
-    from CLEAN.
+31. ~~**winupgrade unparseable sfc output → 'no violations' → CLEAN**~~ **CLOSED loop 37** (winupgrade
+    0.5.6): the no-match `else` in `Get-WinUpgradeRepairVerdict` (`:668`) and its inline mirror (`:2685`)
+    now default to `'unknown'` → PARTIAL (never CLEAN), + an `[WARN] output not recognized` report line.
+    `Winupgrade.RepairVerdict.Tests.ps1` (8) is the helper's first coverage.
 32. **upr verify skips registry keys with no DisplayName** (loop-35 Fable deep-dive, SPECULATIVE) —
     `upr :1127` `if (-not $it.DisplayName) { continue }` fires before the PSChildName/GUID compare, so a
     half-torn uninstall (key survives with DisplayName deleted, files on disk) could read as gone → OK
@@ -691,9 +691,22 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   rollback marker/age/setup process) and counts staged ONLY when not `Stale`. Coverage: classifier
   decision unit-tested (Diagnose24h2), reboot gate proven by Drive INVARIANT #4, + `WinUpgrade.StagingReboot.
   Tests.ps1` (8) pins the classifier reboot contract + a static assert the re-read classifies + exact
-  0.5.5 pin (FixVerify2 0.5.4 exact → floor). Full winupgrade + FixVerify2/3 green. Pester **1299→(close)**
+  0.5.5 pin (FixVerify2 0.5.4 exact → floor). Full winupgrade + FixVerify2/3 green. Pester **1299→1307**
   green. **Left ranked (27b):** the generic CBS/WU/PFRO pending-reboot can still read a non-feature-update
   pending as staged (nuanced — CBS can be a completed feature update). SECRET parity: +staging classifier.
+- **Loop 37 (DONE 2026-07-21):** Fable-inline. Self-review of loop-36 → **GREEN**. **Closed the last cheap
+  false-clean: winupgrade #31 (F7)** → the DISM+SFC repair verdict's no-match `else` defaulted an
+  UNPARSEABLE `sfc /scannow` (localized OS / truncated / unrecognized) to `'no violations'` → **CLEAN**, so
+  a verify path reported a healthy component store when the result was actually unknown. **FIXED**
+  (winupgrade **0.5.5→0.5.6**): unmatched sfc → `'unknown'` in both `Get-WinUpgradeRepairVerdict` (`:668`,
+  the pure tested twin) AND its inline mirror (`:2685`, the code that runs across the module-less runspace);
+  `'unknown'` joins **PARTIAL** (`:672`/`:2689`, an existing status — no consumer switch touched) and is
+  never CLEAN, + an `[WARN] output not recognized - repair state UNKNOWN` report line. `Winupgrade.
+  RepairVerdict.Tests.ps1` (NEW, 8) is the helper's FIRST coverage (fix case + 4 known outcomes + two-twin
+  static assert + exact 0.5.6 pin; loop-36 StagingReboot exact pin → floor). winupgrade + RepairVerdict +
+  StagingReboot + Diagnose24h2 + Drive + FixVerify2/3 **101** green. Pester **1307→1315** green. Backlog
+  now: the c2c cluster (22/23/24/26, a bucket-taxonomy redesign) + winupgrade #29 (AutoFix, needs a shim
+  harness) — both deferred as non-trivial. SECRET parity: +winupgrade repair-verdict fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
