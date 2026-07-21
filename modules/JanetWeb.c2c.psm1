@@ -52,7 +52,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.15.2'
+        version  = '1.15.3'
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
         actions  = @(
@@ -2496,11 +2496,16 @@ function Invoke-C2cImportAction {
     }
 
     $total             = $recs.Count
-    $nonCompliant      = @($recs | Where-Object { $_.Compliance -match '(?i)^Non-?Compliant' }).Count
-    $compliant         = $total - $nonCompliant
+    # loop29 (F4): a compliance tool must fail CLOSED - count Compliant ONLY on an explicit
+    # ^Compliant match, so an unknown state (Not Assessed / Error / Unknown / blank) is NOT folded
+    # into the Compliant count that gets quoted up-chain. It was `total - nonCompliant`, which
+    # counted every not-explicitly-Non-Compliant row as Compliant. Unknown states go to `other`.
+    $compliant         = @($recs | Where-Object { [string]$_.Compliance -match '(?i)^Compliant' }).Count
+    $nonCompliant      = @($recs | Where-Object { [string]$_.Compliance -match '(?i)^Non-?Compliant' }).Count
+    $other             = $total - $compliant - $nonCompliant
     $nonCompliantHosts = @($plan.NonCompliantHosts)
 
-    & $send @{ type='log'; level='ok'; text="Imported $total host(s): $compliant Compliant, $nonCompliant Non-Compliant." }
+    & $send @{ type='log'; level='ok'; text="Imported $total host(s): $compliant Compliant, $nonCompliant Non-Compliant$(if ($other -gt 0) { ", $other unknown/other" })." }
     $pillars = New-Object System.Collections.ArrayList
     foreach ($p in @($plan.PillarOrdered)) {
         $hosts = @($plan.PillarHosts[$p])
@@ -2521,7 +2526,7 @@ function Invoke-C2cImportAction {
     & $send @{ type='log'; level='info'; text=("Run-all plan: {0} host(s) with >=1 endpoint-fixable pillar ({1} from audit-only findings, proactive)." -f $runAllPlan.Count, $auditFixHostCount) }
 
     & $send @{ type='status'; text="Done. $total host(s) imported ($nonCompliant non-compliant)." }
-    return @{ rows=@($rows); summary=@{ total=$total; compliant=$compliant; nonCompliant=$nonCompliant; nonCompliantHosts=@($nonCompliantHosts); pillars=@($pillars); auditPillars=@($auditPillars); runAllPlan=@($runAllPlan) } }
+    return @{ rows=@($rows); summary=@{ total=$total; compliant=$compliant; nonCompliant=$nonCompliant; other=$other; nonCompliantHosts=@($nonCompliantHosts); pillars=@($pillars); auditPillars=@($auditPillars); runAllPlan=@($runAllPlan) } }
 }
 
 $script:C2cPillarByAction = @{
