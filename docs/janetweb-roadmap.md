@@ -197,9 +197,11 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     6.8.9): new pure `Get-WptVerifyOk` (mirrors `Get-AcasVerifyRowStatus`) — the OkOf now requires reachable
     AND `Verified -eq $true`; a reachable-but-not-verified host audits Skipped (checked, not current), not
     Failure. `Wpt.VerifyApp.Tests.ps1` (9).
-42. **wpt bulk-patch: null WMI ReturnValue = accepted + trigger booked VulnPatched** (HIGH) — `:1989`/`:2016`
-    null rv falls through to "triggered"; `:5356` books VulnPatched/Success. The loop22/23 kb-install null-rv
-    fail-close (`:2808`) was never swept to bulk-patch.
+42. ~~**wpt bulk-patch: null WMI ReturnValue = accepted**~~ **CLOSED loop 42** (wpt 6.8.10): swept ALL five
+    CCM-trigger sites (bulk-patch update `:2001` + app `:2027`, the SC App/Update trigger action `:3913`/`:3923`,
+    and `WptAppActionBlock` `:4671`) to accept a trigger ONLY on a non-null `[int] 0` via new pure
+    `Get-WptRvAccepted` + inline mirrors — matching kb-install's loop22 null fail-close. `Wpt.BulkPatchRv.Tests.ps1`
+    (8). _(The deeper "a merely-accepted async trigger books VulnPatched, not a confirmed install" → item51.)_
 43. **wpt Oracle Java SC Verify = JavaSoft key mtime <30d, no version target** (HIGH) — `:1312`; the jvm.dll
     version at `:1300` is displayed, never compared. item35 class, wpt side.
 44. **wpt clean-user-apps Status='Success' even when every deletion failed** (MED-HIGH) — `:3590`/`:3601`/
@@ -220,6 +222,12 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     $before` → "OK (updated X→Y)" on a pv downgrade during the poll. Raw string, not `[version]` forward. Same
     class as item39 (acas). (wpt's degraded-read path IS guarded — `$cur -and` + PENDING — so unlike acas item36
     it's only the downgrade sliver.)
+51. **wpt bulk-patch / SC-trigger book VulnPatched for a merely-ACCEPTED async trigger, not a confirmed install**
+    (loop-40 dive + loop-42 follow-on, HIGH) — a CCM InstallUpdates/Install rv=0 means the client ACCEPTED the
+    request, not that the patch installed; `:5356` (bulk-patch) audits VulnPatched/Success on acceptance. Same
+    trigger≠patched class as item40. kb-install's answer is honest — it books MECM triggers as "Triggered
+    (verify)", never Installed. Fix: audit accepted-but-unconfirmed triggers as a touch/pending, reserve
+    VulnPatched for a verified install (or add a post-trigger verify).
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -829,6 +837,19 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
   wiring; C2rVerify exact pin → floor. wpt set **78** green; all-tests symbol grep (incl. `app-update-verify`)
   clean. Pester **1339→1348** green. **Remaining wpt HIGH:** item40 (systemic OK-on-trigger), item42 (bulk-patch
   null-RV), item43 (Java SC mtime). SECRET parity: +wpt verify-tally honors the Verified verdict.
+- **Loop 42 (DONE 2026-07-21):** Fable-inline. Self-review of loop-41 → **GREEN**. **Closed wpt item42 (HIGH)** —
+  bulk-patch (and, the static assert revealed, three sibling CCM-trigger sites) counted a host triggered off a
+  NULL client-SDK ReturnValue, which then booked a VulnPatched/Success audit; a method that returned nothing did
+  NOT confirm acceptance (kb-install already fail-closes on null, loop22 `:2819`; these didn't). **FIXED** (wpt
+  **6.8.9→6.8.10**): swept ALL five sites (bulk-patch `:2001`/`:2027`, SC App/Update trigger `:3913`/`:3923`,
+  `WptAppActionBlock` `:4671`) to accept ONLY a non-null `[int] 0` via new pure `Get-WptRvAccepted` + inline
+  mirrors; rejected-rv messages now print `<null>` not a coerced 0. The regression test's module-wide static
+  assert is what surfaced the 3 extra sites — the honest scope of the class (loop-37 lesson generalized). Also
+  overrode one worker "GREEN" (WptAppActionBlock) on in-code evidence its null path → OK=true→VulnPatched.
+  `Wpt.BulkPatchRv.Tests.ps1` (NEW, 8); VerifyApp exact pin → floor. wpt set **59** + guards **24** green. Pester
+  **1348→1356** green. **NEW item51** (HIGH): the deeper trigger≠patched semantic — a merely-accepted async CCM
+  trigger books VulnPatched, not a confirmed install (same class as item40). SECRET parity: +wpt null-rv
+  fail-close across the CCM-trigger scriptblocks.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
