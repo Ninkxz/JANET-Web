@@ -21,11 +21,11 @@ $profiles = & $m { $script:AcasUpdateProfiles }
 $name     = 'Microsoft Edge - Update'
 $scName   = 'Microsoft Edge - Software Center'
 
-Describe 'ACAS 1.11.5 - manifest loads at the bumped version' {
+Describe 'ACAS - manifest loads at or above the Edge-profile version' {
     $manifest = & $m { Get-JanetToolManifest }
-    It 'manifest id is acas and version is 1.11.5' {
+    It 'manifest id is acas and version is >= 1.11.5 (floor; exact pin lives in the newest bump test)' {
         [string]$manifest.id      | Should Be 'acas'
-        [string]$manifest.version | Should Be '1.11.5'
+        ([version][string]$manifest.version -ge [version]'1.11.5') | Should Be $true
     }
 }
 

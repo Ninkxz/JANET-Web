@@ -1097,7 +1097,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.5'
+        version  = '1.11.6'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -2590,9 +2590,25 @@ function ConvertTo-AcasJobLines {
 #  UsoClient-trigger method. One job per host. Returns a marker-encoded result
 #  string (<<MECM=>> <<MSU=>> <<SKIP=>> <<KBS=>>) for the string fan-out.
 # -----------------------------------------------------------------------------
+# loop25: CANONICAL acas kb-install status (sibling of wpt Get-WptKbInstallResult). A MECM
+# InstallUpdates trigger and a UsoClient StartInstall are ACCEPTED requests, not confirmed
+# installs - the async download/install can fail later - so reporting them OK is a false-clean
+# (it books a VulnPatched Success audit and lights the PATCHED stat card). Only an MSU/wusa
+# exit 0/3010 is a confirmed local install. Errors win (a partial install never masks a real
+# failure). AcasOkOf treats FAIL*/UNCONFIRMED* as NOT ok, so UNCONFIRMED pulls a trigger row
+# out of the patched tally (acas renders it amber). The worker mirrors this inline (it runs in
+# a module-less runspace, can't call this fn); keep in lockstep. Pure - tested.
+function Get-AcasKbInstallStatus {
+    param([int]$ErrorCount, [int]$MecmTriggered, [int]$MsuInstalled, [int]$Skipped, [bool]$UsoTriggered)
+    if ($ErrorCount -gt 0) { return 'FAIL' }
+    if ($MecmTriggered -gt 0 -or $UsoTriggered) { return 'UNCONFIRMED' }
+    if ($MsuInstalled -gt 0) { return 'OK' }
+    return 'SKIP'
+}
+
 $script:AcasKbInstallBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string[]]$KBs, [string]$MsuPath, [bool]$NoReboot, [string]$Method)
-    $mecmInstalled = 0; $msuInstalled = 0; $skipped = 0
+    $mecmInstalled = 0; $msuInstalled = 0; $skipped = 0; $usoTriggered = $false
     $errors = New-Object System.Collections.ArrayList
     $details = New-Object System.Collections.ArrayList
     $kbList = ($KBs -join ',')
@@ -2620,7 +2636,8 @@ $script:AcasKbInstallBlock = {
                     Start-Sleep -Seconds 2
                     Start-Process -FilePath 'UsoClient.exe' -ArgumentList 'StartInstall' -WindowStyle Hidden -EA SilentlyContinue
                 }
-                [void]$details.Add("UsoClient StartScan + StartInstall triggered for $($KBs.Count) requested KB(s)")
+                $usoTriggered = $true
+                [void]$details.Add("UsoClient StartScan + StartInstall triggered for $($KBs.Count) requested KB(s) - UNCONFIRMED (fire-and-forget; verify separately)")
             } catch { [void]$errors.Add("UsoClient trigger failed: $($_.Exception.Message)") }
         } else {
             # MECM first: match each requested KB in CCM_SoftwareUpdate then InstallUpdates.
@@ -2657,10 +2674,17 @@ $script:AcasKbInstallBlock = {
             } elseif ($remaining.Count -gt 0) { foreach ($kb in $remaining) { $skipped++; [void]$details.Add("$kb not in MECM, no MSU path - skipped") } }
         }
     } finally { Remove-PSSession $sess -EA SilentlyContinue }
-    $installed = [int]$mecmInstalled + [int]$msuInstalled
     $detail = (@($details) -join '; ')
     if (@($errors).Count -gt 0) { $detail = (@($detail, (@($errors) -join '; ')) | Where-Object { $_ }) -join ' | ' }
-    $status = if (@($errors).Count -gt 0 -and $installed -eq 0 -and $skipped -eq 0) { 'FAIL' } elseif ($installed -eq 0 -and $skipped -gt 0) { 'SKIP' } else { 'OK' }
+    # loop25: MIRROR of Get-AcasKbInstallStatus (runspace has no module). A MECM trigger / UsoClient
+    # fire is an ACCEPTED request, NOT a confirmed install -> UNCONFIRMED (out of the OK/patched tally),
+    # never OK. Any error is FAIL (a partial install no longer masks a failed KB). Only a confirmed MSU
+    # exit-0 install is OK. Keep in lockstep with the helper.
+    $status =
+        if (@($errors).Count -gt 0) { 'FAIL' }
+        elseif ([int]$mecmInstalled -gt 0 -or $usoTriggered) { 'UNCONFIRMED' }
+        elseif ([int]$msuInstalled -gt 0) { 'OK' }
+        else { 'SKIP' }
     return "$status <<MECM=$mecmInstalled>> <<MSU=$msuInstalled>> <<SKIP=$skipped>> <<KBS=$kbList>> $detail"
 }
 

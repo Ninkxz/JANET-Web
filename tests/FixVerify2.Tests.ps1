@@ -104,10 +104,13 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
     }
 
     Context 'ACAS kb-install (AcasKbInstallBlock)' {
-        It 'ReturnValue 0 => <<MECM=1>> and OK (happy path unchanged)' {
+        It 'ReturnValue 0 => <<MECM=1>> and UNCONFIRMED (loop25: a trigger is not a confirmed install)' {
+            # loop25: an accepted MECM InstallUpdates trigger is NOT a confirmed install (the async
+            # install can fail later), so the honest status is UNCONFIRMED, not OK - it must stay out
+            # of the OK/patched tally. This assertion previously (wrongly) pinned '^OK'.
             $s = Invoke-AcasKb -Rv 0
             $s | Should Match '<<MECM=1>>'
-            $s | Should Match '^OK'
+            $s | Should Match '^UNCONFIRMED'
         }
         It 'NON-ZERO ReturnValue => <<MECM=0>>, FAIL, and the rejection is reported' {
             $s = Invoke-AcasKb -Rv 5
