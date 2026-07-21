@@ -127,12 +127,11 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     `Get-WinUpgradeStagingClass` existing. A rolled-back 24H2 attempt leaves ~BT → reports STAGED → with
     rebootWhenStaged REBOOTS the host (comes back on 23H2), weakening the "never reboot un-staged"
     invariant. Fix: apply the staging classifier + require a feature-update-specific signal.
-28. **winupgrade bypass (MoSetup) value asserted but never read-back-verified** (loop-31 Fable deep-dive,
-    CONFIRMED — F3+F4) — Pin bakes "CPU/TPM BYPASS SET" into the message (`:972-987`) but the read-back
-    (`:1131`) checks only the TRV trio; Unpin appends "bypass key removed" (`:1218-1227`) unconditionally
-    after a SilentlyContinue removal. Restrictive MoSetup ACL → DONE while the bypass is still armed / not
-    set. Fix: extend `$pinReadSb` to the MoSetup value on both paths. (F8 SPECULATIVE: ForceDiscovery /
-    AutoFix policy re-writes the TRV pin with no read-back — rides here.)
+28. ~~winupgrade bypass (MoSetup) value asserted but never read-back-verified~~ — **CLOSED loop 33**
+    (winupgrade 0.5.4): `$pinReadSb` now reads the MoSetup value (`BypassPresent`); Pin requires it set
+    when bypass requested ("BYPASS NOT VERIFIED"), Unpin requires it gone ("NOT REMOVED ... bypass"), so
+    a silently-failed ACL no longer reports the unsupported bypass set/removed. (F8 SPECULATIVE remains:
+    ForceDiscovery / AutoFix policy re-writes the TRV pin with no read-back.)
 29. **winupgrade AutoFix marks fixes applied before confirming + all-failed reads "NO CHANGES"**
     (loop-31 Fable deep-dive, CONFIRMED, HIGH — F5) — `'repair'` added to `$fixes` BEFORE DISM/SFC run
     (`:2804`); a DISM exception still → FIXED "Applied: repair"; a needed driver-removal that fails →
@@ -633,8 +632,20 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   mirrors it inline + the summary appends `disk LOW`/`RAM LOW`/`Secure Boot off`. Read-only verdict; 179
   winupgrade + FixVerify3 green. `Winupgrade.DiagnoseVerdict.Tests.ps1` (11) pins every verdict incl. the
   higher-precedence ones still winning + static mirror assert + exact 0.5.3 pin (Drive 0.5.2 exact →
-  floor). Pester **1271→(close)** green. Remaining winupgrade items: 27 (staging reboot, HIGH), 28
+  floor). Pester **1271→1282** green. Remaining winupgrade items: 27 (staging reboot, HIGH), 28
   (bypass read-back), 29 (AutoFix, HIGH), 31 (sfc, LOW). SECRET parity: +winupgrade Diagnose disk gate.
+- **Loop 33 (DONE 2026-07-21):** Fable-inline. Self-review of loop-32 → **GREEN**. **Workstream:
+  winupgrade item 28 (F3+F4)** → **CLOSED** (closing a confirmed backlog item vs a 5th deep-dive). The
+  Pin/Unpin TRV core read-back-verifies, but the CPU/TPM **bypass** (MoSetup) value was ASSERTED and
+  never verified: Pin baked "BYPASS SET" (`:984`) with `$pinOk` (`:1157`) checking only the TRV trio;
+  Unpin appended "bypass key removed" (`:1250`) after a SilentlyContinue delete, read-back checking only
+  the trio — so a restrictive ACL leaves the unsupported bypass STILL ARMED while the row says removed
+  (security-relevant). **FIXED** (winupgrade **0.5.3→0.5.4**): `$pinReadSb` now reads the MoSetup value
+  (`BypassPresent`); Pin requires it set when `$Bypass` (else "BYPASS NOT VERIFIED"); Unpin requires it
+  gone when `$RemoveBypass` (else "NOT REMOVED ... bypass"). Additive/fail-closed; 198 winupgrade +
+  FixVerify2/3 green. `FixVerify2` FIX-2 harness gains `-Bypass`/`-RemoveBypass` + 4 cases + exact 0.5.4
+  pin (DiagnoseVerdict 0.5.3 exact → floor). Pester **1282→(close)** green. Remaining winupgrade items:
+  27 (staging reboot, HIGH), 29 (AutoFix, HIGH), 31 (sfc, LOW). SECRET parity: +winupgrade bypass read-back.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
