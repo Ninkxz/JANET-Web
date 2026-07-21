@@ -206,8 +206,11 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     (8). _(The deeper "a merely-accepted async trigger books VulnPatched, not a confirmed install" → item51.)_
 43. **wpt Oracle Java SC Verify = JavaSoft key mtime <30d, no version target** (HIGH) — `:1312`; the jvm.dll
     version at `:1300` is displayed, never compared. item35 class, wpt side.
-44. **wpt clean-user-apps Status='Success' even when every deletion failed** (MED-HIGH) — `:3590`/`:3601`/
-    `:6341`; Chrome running in all profiles → 0 removed, Success tile + VulnPatched. Detail is honest.
+44. ~~**wpt clean-user-apps Status='Success' even when every deletion failed**~~ **CLOSED loop 50** (wpt
+    6.8.12): new pure `Get-WptCleanStatus(Found, Removed, DryRun)` + inline worker mirror — found>0/removed=0 →
+    **Failed**, partial → **Partial**, all-removed/nothing-found → Success. The action OkOf (Success/Dry Run OK
+    only) + fan-out Failure-audit drop Partial/Failed out of the clean bucket automatically. `Wpt.CleanStatus.
+    Tests.ps1` (8). (The sibling disk-cleanup worker's unconditional Success is different semantics, left as-is.)
 45. **wpt verify-and-clean deletes the Uninstall reg key even when FilesRemain** (MED, fleet-level) — `:4192`/
     `:4325`: row is 'Attention' (counted failure, good) but the key removal is unconditional, so every later
     registry-driven scan reads the host clean. Fix: only remove the key when files are actually gone.
@@ -974,6 +977,17 @@ _(items 58–59: loop-48 certdeploy Fable deep-dive — worker-CONFIRMED, re-ver
   loop-48 exact pin → floor. certdeploy set **73** green. Pester **1395→1401** green. **Both certdeploy real dive
   false-cleans (F1/F2) now closed** — remaining item59 (F3, LOW/advisory) + F4/F5 (speculative). SECRET parity:
   +certdeploy REJECTED token.
+- **Loop 50 (DONE 2026-07-21):** Fable-inline. Self-review of loop-49 → **GREEN**. **Closed wpt item44 (MED-HIGH)**
+  from the loop-40 dive (chose a still-open wpt item on the most-used tool over a fresh dive on a niche tool):
+  `WptCleanUserAppsBlock` set the row Status **unconditionally** to `'Success'` on a live run (`:3655`), so a
+  host where every app-binary deletion FAILED (locked app → `found>0, removed=0`) read Success + ok tile +
+  VulnPatched Success while nothing was removed. **FIXED** (wpt **6.8.11→6.8.12**): new pure `Get-WptCleanStatus`
+  (found>0/removed=0 → Failed; partial → Partial; all-removed/nothing-found → Success) + inline worker mirror;
+  the OkOf (Success/Dry Run OK only) + fan-out Failure-audit drop Partial/Failed automatically. `Wpt.CleanStatus.
+  Tests.ps1` (NEW, 8); M365Update exact pin → floor. The static assert surfaced a sibling (disk-cleanup `:3250`)
+  with the same line but DIFFERENT semantics (best-effort maintenance) — narrowed the assert, didn't widen the
+  fix. wpt set **40** green. Pester **1401→1409** green. **Remaining wpt:** item43 (Java SC mtime, HIGH), 45–47
+  (MED), 48–50 (LOW), 51 (trigger≠patched, HIGH). SECRET parity: +wpt clean-user-apps honest status.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
