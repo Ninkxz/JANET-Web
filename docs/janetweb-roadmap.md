@@ -144,6 +144,17 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
     LOW) — `Get-WinUpgradeRepairVerdict :668` / inline mirror `:2606` final `else { 'no violations' }`;
     localized/truncated sfc reads clean, ExitCode never consulted. Fix: no-match → 'unknown', exclude
     from CLEAN.
+32. **upr verify skips registry keys with no DisplayName** (loop-35 Fable deep-dive, SPECULATIVE) —
+    `upr :1127` `if (-not $it.DisplayName) { continue }` fires before the PSChildName/GUID compare, so a
+    half-torn uninstall (key survives with DisplayName deleted, files on disk) could read as gone → OK
+    while a file-based Tenable plugin still flags it. Couldn't demonstrate a product that does this. Fix:
+    match PSChildName/GUID even on DisplayName-less keys.
+33. **upr end-of-run status "N ok, M failed" counts reachable hosts, not removals** (loop-35 Fable
+    deep-dive, display-only) — `upr :1292`: on the uninstall path `emit.ok=$true` whenever the host was
+    enumerated even if every uninstall FAILED, and the honest host-level `auditResult='Failure'` is
+    discarded, so "5 ok, 0 failed" can print over a run that removed nothing. The rows, per-app Failure
+    audits, and `itemCount` stay honest (no product is ever COUNTED removed) — a wording hazard. Fix:
+    word the uninstall status as "N host(s) processed" / surface the removed count.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -658,8 +669,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   (CSPRNG-backed on Windows but implementation-dependent). New pure `New-JanetWebSecureToken`
   (`Server.ps1:95`) mints 256-bit hex from `RandomNumberGenerator`; rid uses it, launcher inlines a
   mirror. 76 server tests green. `Server.SecureToken.Tests.ps1` (6): helper format/distinctness + static
-  launcher/rid CSPRNG asserts. No version bump (server files). Pester **1287→(close)** green. SECRET
+  launcher/rid CSPRNG asserts. No version bump (server files). Pester **1287→1293** green. SECRET
   parity: +CSPRNG access-credential mint.
+- **Loop 35 (DONE 2026-07-21):** Fable-inline + one parallel Fable worker. Self-review of loop-34 →
+  **GREEN**. **Fresh deep-dive on upr** (Unsupported Product Remediator, 127KB, un-reviewed): **verdict
+  GREEN** — the removed decision is fail-closed and honest (exit-code gated AND a mandatory registry
+  re-verify after every OK that demotes to FAIL if still-present/unreadable; skips/rejects/unreachables
+  bucketed; audit books VulnPatched only when ≥1 really removed). **The one defensible hardening (SPEC
+  edge) → FIXED** (upr **1.2.2→1.2.3**): the verify fail-closed on a THROW (catch) but a non-throwing
+  EMPTY `$vout` hit `[bool]$null.Present`=$false="removed" (`:1133`). Pure `Get-UprVerifyResult` (`:119`)
+  — `$null` verify → "could NOT be verified", never OK; worker mirrors the null-check inline. 36 upr
+  tests green. `Upr.VerifyResult.Tests.ps1` (6) pins the fail-close + still-present/gone/reboot + exact
+  1.2.3 pin. Pester **1293→(close)** green. 2 new ranked items (32-33, both spec/display). SECRET
+  parity: +upr verify fail-close.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
