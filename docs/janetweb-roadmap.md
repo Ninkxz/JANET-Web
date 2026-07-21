@@ -97,6 +97,29 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
 21. ~~acas kb-install shares wpt's loop-22 bugs, unfixed~~ — **CLOSED loop 27** (`Test-AcasKbNameMatch`,
     acas 1.11.8): ported wpt's anchored KB-match (`KB<num>(?!\d)`) + inline `$kbMatch` mirror + the
     null-ReturnValue fail-close into AcasKbInstallBlock. acas↔wpt kb-install now at parity.
+22. **c2c fix host rollup masks a known-non-compliant SKIP pillar as FIXED** (loop-29 Fable deep-dive,
+    CONFIRMED, HIGH — F1) — `c2c :2333-2343`: SKIP only surfaces at host level when EVERY result is
+    SKIP, so Firewall FIXED + Encryption SKIP ("route desk-side", definitely non-compliant, untouched)
+    → host **FIXED**, `fixed++`, VulnPatched Success audit. Fix: any SKIP alongside successes → a mixed/
+    skip-aware host status + a skip-aware summary/audit.
+23. **c2c Patches fix reports a MECM trigger (KICKED) as fixed** (loop-29 Fable deep-dive, CONFIRMED,
+    HIGH — F2) — `:2063-2068` emits KICKED merely because the SUM scan/eval trigger was accepted; no
+    re-verify (async). Rolls up as FIXED (`:2333`/`:3060`) + fleet "FIXED: N" + VulnPatched Success. The
+    wpt/acas trigger!=done sibling. Fix: distinct TRIGGERED status excluded from the fixed count, or a
+    delayed CCM_SoftwareUpdate re-check.
+24. **c2c per-pillar fleet tally folds NOT VERIFIED / SKIP / IN PROGRESS into "nochange"** (loop-29
+    Fable deep-dive, CONFIRMED — F3) — `:3059-3061`: a PkiRoots push where every added cert vanished
+    on re-read (the durability trio's loud NOT VERIFIED) rolls up as "nochange 3" — the trio's signal
+    degraded to "nothing needed doing"; host-level NOT VERIFIED rows also fit no summary bucket
+    (`:3135-3145`). Fix: dedicated skip/inprogress/notVerified buckets in both tallies.
+25. **c2c Patches SCAN missing-data default reads compliant** (loop-29 Fable deep-dive, CONFIRMED — F5)
+    — `:873-876`: an applicable-not-installed update with null Deadline AND null StartTime can never be
+    overdue → counted "pending within grace" → pillar PASS however old the missing patch is. Fix: no
+    usable timestamp → count overdue (fail-closed) or downgrade the check to ERROR/advisory.
+26. **c2c AntiMalware FIX: unknown signature age → "ALREADY PROTECTED"** (loop-29 Fable deep-dive,
+    CONFIRMED — F6) — `:1885`/`:1960`: the sig heal gates on `($null -ne $ageHours) -and (...)`, so an
+    unreadable age skips the heal and lands NOCHANGE/"ALREADY PROTECTED"; the SCAN treats the same
+    unknown age as FAIL (`:802`). Fix: null age on the fix path → FAIL/UNVERIFIED, mirroring the scan.
 
 ## Loop ledger
 - **Loop 1 (DONE 2026-07-20):** roadmap created + Opus adversarial deep-dive on the
@@ -538,8 +561,19 @@ history (different series naming, loops 1–40): `docs/fable-review-2026-07-12-l
   stays on actual patch-install/update confirmations. One line, no guard weakened (self-guard, DNS
   wrong-box, admin gate intact); 194 acas + guards + gate green. `Acas.RebootAudit.Tests.ps1` (5) isolates
   the handler block: TouchHost not VulnPatched + verify-post-reboot stays TouchHost + exact 1.11.9 pin
-  (KbMatch 1.11.8 exact → floor). Pester **1247→(close)** green. **acas false-clean cluster COMPLETE**
+  (KbMatch 1.11.8 exact → floor). Pester **1247→1252** green. **acas false-clean cluster COMPLETE**
   (all confirmed items fixed; only spec item 20 remains). SECRET parity: +schedule-reboot TouchHost audit.
+- **Loop 29 (DONE 2026-07-21):** Fable-inline + one parallel Fable worker. Self-review of loop-28 →
+  **GREEN**. **Workstream: fresh deep-dive on c2c** (C2C Nemesis, compliance-readiness tool, never
+  loop-era reviewed) — worker read all 3,344 lines: **scan verdict fail-closed + durability trio
+  correct**, but **6 CONFIRMED false-compliants** on the fix roll-ups + import. **FIXED F4** (c2c
+  **1.15.2→1.15.3**): the import summary counted Compliant as `total - nonCompliant` (`:2500`), folding
+  "Not Assessed"/"Error"/"Unknown" rows into the **Compliant** count quoted up-chain. Now Compliant is
+  counted only on explicit `^Compliant`; unknown states go to a new `other` bucket (surfaced in the log
+  + summary). Read-only import path; full c2c set green. `C2c.ImportCompliance.Tests.ps1` (7) drives the
+  real import (unknown row → other not Compliant; all-explicit → other=0) + exact 1.15.3 pin (C2c.Enable
+  1.15.2 exact → floor). Pester **1252→(close)** green. **5 new ranked items (22-26)** (F1/F2 high-harm
+  next). SECRET parity: +c2c import compliant-count honesty.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
