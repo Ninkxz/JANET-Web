@@ -352,9 +352,10 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
     `Get-DhcpDryRunSafe` at both dryRun sites — the live path requires an absent value (manifest default) or an
     explicit recognized false; any present-but-unrecognized token stays DRY. `$asBool` left untouched (removeOption
     still uses it, where unrecognized→false is safe). +5 behavioral tests. _(loop-65 dive)_
-77. **dhcp non-numeric `optionId` silently retargets option 6 (DNS)** (P2) — an unparseable optionId warns + proceeds
-    with default 6 on a destructive action, so a typo live-replaces the scope's DNS-servers option. Fix: abort on
-    unparseable optionId for destructive actions. _(loop-65 dive)_
+77. ~~**dhcp non-numeric `optionId` silently retargets option 6 (DNS)**~~ **CLOSED loop 69** (dhcp 1.1.13): the shared
+    optionId parse now aborts (rejected, no DHCP session) when the value is present-but-unparseable AND the action is
+    destructive (`$isDestructive`, reused from the loop-66 gate); a read-only `load` still warns-and-defaults. +3
+    behavioral tests. _(loop-65 dive)_
 78. ~~**dhcp apply null-result → Changed/Success**~~ **CLOSED loop 68** (dhcp 1.1.12): a null remote apply result
     coerced `[bool]$null.Removed=$false` → `Status='Changed'`/Success for an unconfirmable change. Now a null
     `$applyCall.Result` books Failure (`Status='Error'`, `failed=1`, "change NOT confirmed"), mirroring the catch. +2
@@ -1279,6 +1280,15 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   floored). Ran all 3 dhcp-touching files = **61** green. The post-write-verify half split to **item 80** (the most
   valuable remaining dhcp hardening — its own loop). Remaining dhcp items 77/79/80. Pester **1481→1483** green.
   SECRET parity: +dhcp apply null-result → Failure guard.
+- **Loop 69 (DONE 2026-07-21):** self-review of loop-68 → GREEN. Workstream = close **item 77** (dhcp non-numeric
+  optionId retargets option 6/DNS): the shared optionId parse warned + defaulted to option 6 (DNS Servers) even on a
+  destructive write, so an operator who meant option 60/66 and typo'd would live-replace the scope's DNS servers on the
+  wrong option. **FIXED** (dhcp **1.1.12→1.1.13**): hoisted the gate's action set into `$isDestructive`; the optionId
+  parse's non-numeric branch now aborts (rejected, no DHCP session) on the destructive path while a read-only `load`
+  still warns-and-defaults. `Dhcp.IpValidation.Tests.ps1` +3 behavioral (apply + bulk non-numeric optionId → rejected;
+  exact pin moved here, null-result Describe floored). Ran all 3 dhcp-touching files = **64** green. Remaining dhcp
+  items 79 (P3 reconciliation) + 80 (P2 post-write verify, the last substantive hardening). Pester **1483→1486** green.
+  SECRET parity: +dhcp `$isDestructive` optionId abort.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
