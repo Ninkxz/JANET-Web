@@ -74,8 +74,8 @@ Describe 'secureboot 1.6.3 - dry_run parse fails closed (unrecognized token stay
     $mani = & $m { Get-JanetToolManifest }
     function DryOf { param($v) & $m { param($x) Get-SbeDryRunSafe $x } $v }
 
-    It 'manifest version is exactly 1.6.3 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.6.3'
+    It 'manifest version is at least 1.6.3 (floor; newest exact pin lives in Scan, loop59 v1.6.4)' {
+        ([version][string]$mani.version -ge [version]'1.6.3') | Should Be $true
     }
     It 'absent/empty -> live (the documented enable default)' {
         (DryOf $null) | Should Be $false

@@ -156,3 +156,24 @@ Describe 'secureboot 1.6.2 - enable result file is per-run unique (no stale-resu
         ($src -match '\$resultFile\s*=\s*"SecureBoot_\$\{comp\}\.json"') | Should Be $false
     }
 }
+
+# -----------------------------------------------------------------------------
+# loop59 (item62): 'AlreadyPending' (host already staged pending-reboot; this run wrote
+# nothing) resolved to 'Success', so a re-run booked a fresh VulnPatched/Success/itemCount=1
+# audit and counted into "N enabled". It must resolve to 'Skipped'. Static analysis (the
+# resolvedStatus mapping is inline in the module-less runspace worker scriptblock).
+Describe 'secureboot 1.6.4 - AlreadyPending resolves to Skipped, not Success (no re-run audit inflation)' {
+    $man = & $script:SbeMod { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
+
+    It 'manifest version is exactly 1.6.4 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.6.4'
+    }
+    It 'the resolvedStatus chain maps SetResult AlreadyPending to Skipped' {
+        ($src -match "elseif\s*\(\s*\`$result\.SetResult\s*-eq\s*'AlreadyPending'\s*\)\s*\{\s*'Skipped'\s*\}") | Should Be $true
+    }
+    It 'a non-Success (incl. Skipped) row books itemCount 0 - so a Skipped AlreadyPending is not a false patch' {
+        ($src -match '\$itemCount\s*=\s*if\s*\(\s*\$isOk\s*\)\s*\{\s*1\s*\}\s*else\s*\{\s*0\s*\}') | Should Be $true
+        ($src -match '\$isSkip\s*=\s*\(\s*\$status\s*-eq\s*''Skipped''\s*\)') | Should Be $true
+    }
+}

@@ -25,7 +25,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.3'
+        version  = '1.6.4'
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -719,10 +719,15 @@ $script:SbeLiveWorker = {
         }
         return [ordered]@{ Computer=$comp; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error='Payload ran but produced no result within 90 s.'; Skipped=$false }
     }
-    $resolvedStatus = if     ($result.Unknown -eq $true) { 'Unknown' }
-                      elseif ($result.Skipped -eq $true) { 'Skipped' }
-                      elseif ($result.Error)              { 'Error'   }
-                      else                                { 'Success' }
+    # loop59 (item62): 'AlreadyPending' means the host was ALREADY staged pending-reboot on a
+    # prior run and this run wrote NOTHING (the vendor branch returns before re-firing the set/
+    # save). It must resolve to 'Skipped' - not 'Success' - so a re-run doesn't book a fresh
+    # VulnPatched/Success/itemCount=1 audit + inflate the "N enabled" count for work it didn't do.
+    $resolvedStatus = if     ($result.Unknown -eq $true)             { 'Unknown' }
+                      elseif ($result.Skipped -eq $true)             { 'Skipped' }
+                      elseif ($result.SetResult -eq 'AlreadyPending'){ 'Skipped' }
+                      elseif ($result.Error)                         { 'Error'   }
+                      else                                           { 'Success' }
     return [ordered]@{
         Computer     = $comp
         Status       = $resolvedStatus
@@ -731,7 +736,7 @@ $script:SbeLiveWorker = {
         After        = $result.NewValue
         SetResult    = $result.SetResult
         Error        = $result.Error
-        Skipped      = [bool]($result.Skipped -eq $true)
+        Skipped      = [bool]($resolvedStatus -eq 'Skipped')   # align field to status (AlreadyPending now Skipped)
     }
 }
 
