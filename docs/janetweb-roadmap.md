@@ -193,10 +193,10 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
     `:1269`/`:1051`/`:1720` (`Invoke-CimMethod | Out-Null` discards `CCM_Application.Install` rv; sibling `:4643`
     checks it) all book VulnPatched/Success. The kb-install honest-outcome discipline (loop22/23) never swept
     across the app-update catalog. Fix: gate each profile's OK on the exit code / rv, else PENDING.
-41. **wpt app-update-verify marks Status='Verified' regardless of `$res.Verified`** (HIGH) — `:3421`
-    unconditional; `:6441` counts it ok, `:4776` audits Success. A Verified=No/n/a (stale, still-vulnerable)
-    host counts in "N ok". (acas honors Verified via `Get-AcasVerifyRowStatus`; wpt doesn't.) Fix: Ok only when
-    `$res.Verified -eq $true`.
+41. ~~**wpt app-update-verify marks Status='Verified' regardless of `$res.Verified`**~~ **CLOSED loop 41** (wpt
+    6.8.9): new pure `Get-WptVerifyOk` (mirrors `Get-AcasVerifyRowStatus`) — the OkOf now requires reachable
+    AND `Verified -eq $true`; a reachable-but-not-verified host audits Skipped (checked, not current), not
+    Failure. `Wpt.VerifyApp.Tests.ps1` (9).
 42. **wpt bulk-patch: null WMI ReturnValue = accepted + trigger booked VulnPatched** (HIGH) — `:1989`/`:2016`
     null rv falls through to "triggered"; `:5356` books VulnPatched/Success. The loop22/23 kb-install null-rv
     fail-close (`:2808`) was never swept to bulk-patch.
@@ -818,6 +818,17 @@ _(items 40–50: loop-40 wpt Fable deep-dive — worker-CONFIRMED, re-verify in-
   applied to kb-install (loop22/23) + C2R verify (loop24) was never swept across the app-update profile catalog
   (items 40/41/42 are HIGH). SECRET parity: +acas Office C2R scenario-success verify; wpt items are parity
   candidates once closed.
+- **Loop 41 (DONE 2026-07-21):** Fable-inline. Self-review of loop-40 → **GREEN**. **Closed wpt item41 (HIGH)**
+  from the loop-40 dive, completing the C2R-verify work: `WptAppUpdateBlock` set `Status='Verified'` for ANY
+  returned probe (`:3421`), and the `app-update-verify` OkOf keyed off that (`:6441`), so a reachable host that
+  read `Verified=No` (stale, still-vulnerable) counted in "N verified" and booked a TouchHost Success audit —
+  the row was honest, the tally/audit over-reported. **FIXED** (wpt **6.8.8→6.8.9**): new pure `Get-WptVerifyOk`
+  (mirrors `Get-AcasVerifyRowStatus`) → ok only when reachable AND `Verified -eq $true`; a reachable-but-not-
+  verified host now audits Skipped (checked, not current), not Failure (matching wpt's PENDING→Skipped). Helper
+  is controller-side (no inline mirror). `Wpt.VerifyApp.Tests.ps1` (NEW, 9) pins the predicate + the handler
+  wiring; C2rVerify exact pin → floor. wpt set **78** green; all-tests symbol grep (incl. `app-update-verify`)
+  clean. Pester **1339→1348** green. **Remaining wpt HIGH:** item40 (systemic OK-on-trigger), item42 (bulk-patch
+  null-RV), item43 (Java SC mtime). SECRET parity: +wpt verify-tally honors the Verified verdict.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
