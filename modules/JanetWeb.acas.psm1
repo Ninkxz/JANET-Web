@@ -132,6 +132,21 @@ function Get-AcasC2rVerified {
     return [bool]($sr -match '(?i)success')
 }
 
+# loop87 (item: mtime-only Chrome/Edge verify was a false-clean). Same shape as Get-AcasC2rVerified: the
+# Chrome/Edge updater Clients\{GUID} key can read mtime-FRESH with an OLD version (Omaha/EdgeUpdate writes it on
+# every check, and a failed update leaves the old pv), so mtime freshness ALONE falsely reads Verified. The
+# sibling ClientState\{GUID} carries LastInstallerResult (0 = the last install actually SUCCEEDED). Verified is
+# TRUE only when fresh AND the last install succeeded; $false when stale/failed; $null when no success signal is
+# present (indeterminate - never a false-clean OK). The two updater probes mirror this inline (module-less
+# runspace) - keep in lockstep. Tested by Acas.ClientVerify.Tests.ps1.
+function Get-AcasClientVerified {
+    param([bool]$HasTimestamp, [double]$AgeDays, $LastInstallerResult, [int]$WindowDays = 14)
+    if (-not $HasTimestamp) { return $null }
+    if ($AgeDays -ge $WindowDays) { return $false }
+    if ($null -eq $LastInstallerResult -or "$LastInstallerResult" -eq '') { return $null }
+    return [bool]([int]$LastInstallerResult -eq 0)
+}
+
 # Builder for the Office C2R version-probe Verify blocks (4 profiles ran identical
 # registry reads; only the Detail suffix differed). $Detail is literal text embedded
 # into the (double-quoted) Detail string, so a "$($p.LastScenario)" sub-expression in
@@ -171,18 +186,30 @@ function New-AcasClientVerify {
                 "__ROOTWOW__\$guid"
                 "__ROOT__\$guid"
             )
-            $ver = 'not installed'; $mod = $null
+            $ver = 'not installed'; $mod = $null; $lastResult = $null
             foreach ($p in $paths) {
                 if (Test-Path $p) {
                     $pp = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
                     if ($pp.pv) { $ver = "$($pp.pv)" }
                     $key = Get-Item -Path $p -ErrorAction SilentlyContinue
                     if ($key) { $mod = $key.LastWriteTime }
+                    # loop87: the sibling ClientState\{GUID} carries LastInstallerResult (0 = last install
+                    # SUCCEEDED). mtime freshness ALONE is a false-clean (Clients\{GUID} reads fresh with an OLD
+                    # version after a failed/no-op check); require the success signal. MIRROR of Get-AcasClientVerified.
+                    $csp = $p -replace '\\Clients\\', '\ClientState\'
+                    if (Test-Path $csp) {
+                        $cs = Get-ItemProperty -Path $csp -ErrorAction SilentlyContinue
+                        if ($null -ne $cs -and $null -ne $cs.LastInstallerResult) { $lastResult = [int]$cs.LastInstallerResult }
+                    }
                     break
                 }
             }
             $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
-            $verified = if ($mod) { ((Get-Date) - $mod).TotalDays -lt 14 } else { $null }
+            $verified =
+                if ($null -eq $mod) { $null }
+                elseif (((Get-Date) - $mod).TotalDays -ge 14) { $false }
+                elseif ($null -ne $lastResult) { [bool]($lastResult -eq 0) }
+                else { $null }
             return @{ Version = $ver; LastUpdated = $modStr; Verified = $verified; Detail = '__DETAIL__' }
 '@
     $body = $body.Replace('__GUID__', $Guid).Replace('__ROOTWOW__', $RootWow).Replace('__ROOT__', $Root).Replace('__DETAIL__', $Detail)
@@ -1130,7 +1157,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.15'
+        version  = '1.11.16'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(

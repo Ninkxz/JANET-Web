@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.15'
+        version  = '6.8.16'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -927,18 +927,30 @@ $script:M365C2RVerify = {
 function New-WptUpdateClientVerify {
     param([string]$P1, [string]$P2)
     $body = @'
-$ver = 'not installed'; $mod = $null
+$ver = 'not installed'; $mod = $null; $lastResult = $null
 foreach ($p in @('__P1__','__P2__')) {
     if (Test-Path $p) {
         $pp = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
         if ($pp.pv) { $ver = "$($pp.pv)" }
         $key = Get-Item -Path $p -ErrorAction SilentlyContinue
         if ($key) { $mod = $key.LastWriteTime }
+        # loop87: the sibling ClientState\{GUID} carries LastInstallerResult (0 = last install SUCCEEDED).
+        # mtime freshness ALONE is a false-clean (Clients\{GUID} reads fresh with an OLD version after a
+        # failed/no-op check); require the success signal. MIRROR of acas Get-AcasClientVerified.
+        $csp = $p -replace '\\Clients\\', '\ClientState\'
+        if (Test-Path $csp) {
+            $cs = Get-ItemProperty -Path $csp -ErrorAction SilentlyContinue
+            if ($null -ne $cs -and $null -ne $cs.LastInstallerResult) { $lastResult = [int]$cs.LastInstallerResult }
+        }
         break
     }
 }
 $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
-$verified = if ($mod) { ((Get-Date) - $mod).TotalDays -lt 14 } else { $null }
+$verified =
+    if ($null -eq $mod) { $null }
+    elseif (((Get-Date) - $mod).TotalDays -ge 14) { $false }
+    elseif ($null -ne $lastResult) { [bool]($lastResult -eq 0) }
+    else { $null }
 return @{ Version=$ver; LastUpdated=$modStr; Verified=$verified; Detail='' }
 '@
     [scriptblock]::Create($body.Replace('__P1__', $P1).Replace('__P2__', $P2))

@@ -95,7 +95,7 @@ Describe 'AcasKbInstallBlock wrong-box guard (loop86) - the destructive kb-insta
     It 'an empty probe (COMPUTERNAME unreadable) proceeds - does not regress into a false abort' {
         Test-KbWrongBoxAbort 'WS01.area.af.mil' '' | Should Be $false
     }
-    It 'acas manifest bumped to 1.11.15 (newest bump holds the exact pin)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.15'
+    It 'acas manifest is at or past 1.11.15 (kb-install guard; exact pin migrated to the newest bump)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'1.11.15') | Should Be $true
     }
 }

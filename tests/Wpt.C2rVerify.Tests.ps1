@@ -58,3 +58,27 @@ Describe 'wpt - manifest version floor (honest C2R verify shipped in 6.8.8; exac
         ([version][string]$mani.version -ge [version]'6.8.8') | Should Be $true
     }
 }
+
+# loop87: the Chrome/Edge updater verify (New-WptUpdateClientVerify) had the SAME mtime-only false-clean the
+# C2R verify above once had - a fresh Clients\{GUID} key read Verified=$true even with an OLD version after a
+# failed/no-op update. Now it also reads the sibling ClientState\{GUID}\LastInstallerResult (0 = last install
+# SUCCEEDED) and is fresh-AND-succeeded, byte-identical to acas Get-AcasClientVerified (proven behaviorally in
+# Acas.ClientVerify.Tests.ps1). Static assertion on the generated remote scriptblock body.
+Describe 'wpt Chrome/Edge verify scriptblock - gates on the install result, not just mtime (loop87)' {
+    $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+    It 'the generated verify reads the sibling ClientState + LastInstallerResult' {
+        ($moduleSrc -match "\`$csp = \`$p -replace '\\\\Clients\\\\', '\\ClientState\\'") | Should Be $true
+        ($moduleSrc -match '\$cs\.LastInstallerResult')                                   | Should Be $true
+    }
+    It 'the old mtime-only verdict is GONE from New-WptUpdateClientVerify' {
+        $fn = [regex]::Match($moduleSrc, '(?s)function New-WptUpdateClientVerify.*?\[scriptblock\]::Create').Value
+        ($fn -match '\$verified = if \(\$mod\) \{ \(\(Get-Date\) - \$mod\)\.TotalDays -lt 14 \}') | Should Be $false
+    }
+    It 'the fresh-AND-success gate is present' {
+        ($moduleSrc -match '\(\(Get-Date\) - \$mod\)\.TotalDays -ge 14') | Should Be $true
+        ($moduleSrc -match '\[bool\]\(\$lastResult -eq 0\)')            | Should Be $true
+    }
+    It 'wpt manifest is exactly 6.8.16 (newest bump holds the exact pin)' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.8.16'
+    }
+}

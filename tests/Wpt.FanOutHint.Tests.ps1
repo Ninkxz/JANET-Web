@@ -11,8 +11,8 @@ $script:Mod  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1'
 $script:Src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
 
 Describe 'wpt 6.8.15 - fan-out attaches a troubleshooting hint to a failed host' {
-    It 'manifest version is exactly 6.8.15 (newest bump holds the exact pin)' {
-        [string](& $script:Mod { Get-JanetToolManifest }).version | Should Be '6.8.15'
+    It 'manifest version is at or past 6.8.15 (fan-out hint; exact pin migrated to the newest bump)' {
+        ([version][string](& $script:Mod { Get-JanetToolManifest }).version -ge [version]'6.8.15') | Should Be $true
     }
     It 'wpt imports the shared troubleshoot engine' {
         ($script:Src -match "Import-Module.*JanetWeb\.troubleshoot\.psm1") | Should Be $true
