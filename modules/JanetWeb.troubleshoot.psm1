@@ -51,7 +51,7 @@ function Get-JanetTroubleshootHint {
     # Name resolution / host offline / unreachable (a specific "...cannot be resolved"
     # inside a generic WinRM wrapper is a DNS failure -> match it BEFORE the generic
     # WinRM-client-config signature below).
-    if ($m -match 'could\s+not\s+be\s+resolved|cannot\s+be\s+resolved|cannot\s+find\s+the\s+computer|computer\b.{0,80}?could\s+not\s+be\s+found|No\s+such\s+host\s+is\s+known|destination\s+unreachable|actively\s+refused|A\s+connection\s+attempt\s+failed') {
+    if ($m -match 'could\s+not\s+be\s+resolved|cannot\s+be\s+resolved|cannot\s+find\s+the\s+computer|computer\b(?!\s+(?:account|object)\b).{0,80}?could\s+not\s+be\s+found(?!\s+in\s+Active\s+Directory)|No\s+such\s+host\s+is\s+known|destination\s+unreachable|actively\s+refused|A\s+connection\s+attempt\s+failed') {
         return "The target$on could not be resolved or reached. Check DNS resolves the name, that the host is powered on and on the network, and that nothing between you and it is blocking the connection (firewall / VLAN / offline)."
     }
     # WinRM not enabled / 5985 blocked / cannot connect
