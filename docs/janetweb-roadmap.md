@@ -1486,6 +1486,20 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   + full suite. Pester **1567→~1579** green. **RECURRING LESSON recorded:** 3 loops running (82→83→84) shipped a
   "fix" whose green STATIC tests never executed the failing path; fan-out hint/emit wires now get a BEHAVIORAL test.
   SECRET parity: +upr `New-UprRowEvent` case-sensitive emit + acas F2 `PostRemovedOk` gate.
+- **Loop 86 (DONE 2026-07-22) — destructive-path safety: kb-install wrong-box guard:** the Fable self-review of loop
+  85 came back **CLEAN** - it EXECUTED both fixes (upr `New-UprRowEvent`, acas F2 inline mirror) at runtime and both
+  survive; the behavioral tests (loop-85's lesson) closed the recurring static-test blind spot. Two PLAUSIBLE latent
+  items → backlog (PSCustomObject-row silently dropped by New-UprRowEvent - not reachable, all sites pass `@{}`; a
+  canonical-vs-mirror divergence in the contract-excluded pre==post='not installed' region, fail-closed). **Workstream
+  (destructive hardening):** `AcasKbInstallBlock` (`:2729`) - a DESTRUCTIVE worker (MECM InstallUpdates / wusa MSU /
+  UsoClient install + reboot when NoReboot off) - was the ONLY destructive acas fan-out MISSING the wrong-box
+  (DNS-mismatch) guard its siblings carry (update `:2004`, reboot `:2174`/`:2201`). Added it verbatim: before any
+  install, compare the answering box's `$env:COMPUTERNAME` to the dialed shortname → HARD ABORT on mismatch; IPv4
+  literal skips, empty probe proceeds; the abort return runs the finally (session cleanup) with all-zero markers.
+  acas **1.11.14→1.11.15**. Tests: Acas.KbInstallStatus +6 (behavioral replica + static-presence, matching
+  PkginstallSecureboot.WrongBoxGuard convention); loop-85 1.11.14 pin floored. **loop-37:** full acas (199) + full
+  suite. Pester **1579→~1585** green. SECRET parity: +acas kb-install wrong-box guard. **Backlog: the mtime-only
+  verify (New-AcasClientVerify:185, wpt shares :941) - next candidate.**
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
