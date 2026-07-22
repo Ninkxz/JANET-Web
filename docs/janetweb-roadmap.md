@@ -1537,6 +1537,19 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   inert (same dead `Get-Item.LastWriteTime`). **(P3)** bool-coercion sweep incomplete (hardlock/rebootafter/noreboot
   raw `[bool]`); `Get-WptThreadCount` degrades garbage→1 thread (`:534`). **Also: the systemic `Get-Item registry
   .LastWriteTime` dead-read affects the C2R verifies (acas:161/wpt:911) + reboot-pending age (wpt:2343) - a sweep.**
+- **Loop 89 (DONE 2026-07-22) — the deferred sccm `type`/`Type` P1 (destructive-audit loss):** the Fable self-review
+  of loop 88 EXECUTED both probes against a sandbox HKCU key AND live-fired against this box's REAL EdgeUpdate
+  registry → **SHIP-WORTHY** (Verified=True/real-date; timezone/age math correct on UTC+1; acas≡wpt on 15 cases;
+  empty-guard + range-safe cast confirmed). 2 non-blocking findings → backlog (test-cleanup finally; hex-string
+  lockstep). **Workstream (the loop-88 top P1):** `sccm-available`/`sccm-install-available` (`wpt.psm1:5065/:5106`)
+  build a row carrying an app `Type` key and emitted `& $send (@{ type='row' } + $row)` - the case-INSENSITIVE
+  `type`/`Type` duplicate-key ArgumentException crashed every query at the first row, and on the install path AFTER
+  the destructive CCM trigger, losing the per-item VulnPatched audits (same class as upr P0 loop 85). **Fix:** added
+  `New-WptRowEvent` (case-SENSITIVE Hashtable, mirror of upr's New-UprRowEvent; ConvertTo-Json renders both keys) +
+  swapped the two sccm emit sites - **NO JS change** (the view already keys off r.Type). Only the 2 sccm rows carry
+  a Type key (other 35 emits safe). wpt **6.8.17→6.8.18**. Tests: Wpt.SccmRowEvent (NEW +8, EXECUTES the emit - old
+  merge throws, helper keeps both keys, JSON distinct); loop-88 6.8.17 pin floored. **loop-37:** ran wpt + full
+  suite. Pester **1604→~1612** green. SECRET parity: +New-WptRowEvent sccm emit fix (wpt fork).
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
