@@ -90,12 +90,34 @@ Describe 'Get-JanetTroubleshootHint - loop80 false-positive guards (bare-numeric
     It 'a quoted long AFNET FQDN in "computer ... could not be found" still routes (loop81 window widened 40->80)' {
         (Hint "The computer 'AREA52-1234ABC5.area52.afnoapps.usaf.mil' could not be found") | Should Match 'resolve|DNS|reached'
     }
-    It 'an AD-object error ("computer account/object ... could not be found (in Active Directory)") does NOT get the DNS hint (loop82 self-review)' {
+    It 'an AD-object error routes to a dedicated AD hint, NOT the DNS hint (loop82/83 self-review)' {
         # a deleted/missing AD computer account is NOT a name-resolution failure - the host may be reachable.
-        (Hint "The computer account for 'WS01`$' in domain 'AREA' could not be found in Active Directory.") | Should Be ''
-        (Hint 'The computer object associated with the cluster network name resource could not be found in Active Directory.') | Should Be ''
-        (Hint 'The computer account for this workstation could not be found.') | Should Be ''
-        (Hint "The computer 'WS01' could not be found in Active Directory.")   | Should Be ''
+        # loop82 made these return '' via a single-alternative lookahead; loop83 gives them a proper AD hint
+        # via a dedicated signature ABOVE name-resolution, which also closes the sibling-alternative leaks.
+        foreach ($msg in @(
+            "The computer account for 'WS01`$' in domain 'AREA' could not be found in Active Directory.",
+            'The computer object associated with the cluster network name resource could not be found in Active Directory.',
+            'The computer account for this workstation could not be found.',
+            "The computer 'WS01' could not be found in Active Directory.",
+            "Cannot find the computer account 'WS01`$' in Active Directory",                                 # loop82-review leak #1
+            'The computer account for WS01 could not be found in Active Directory; the SID could not be resolved', # leak #2
+            'The specified computer accounts could not be found in Active Directory'                          # plural
+        )) {
+            (Hint $msg) | Should Match 'Active Directory computer|AD identity|Reset the target'
+            (Hint $msg) | Should Not Match 'check DNS resolves'
+        }
+    }
+    It 'MSI / uninstaller exit-code failures route to their own hints (loop83 signature growth)' {
+        (Hint 'msiexec exit 1618')        | Should Match 'already running|serializes|in-flight'
+        (Hint 'uninstall exit 1605')      | Should Match 'not installed|already removed|orphaned'
+        (Hint 'FAIL (setup exit 1603)')   | Should Match '1603|fatal|verbose log'
+        (Hint 'rejected: executable not found: C:\App\uninst.exe') | Should Match 'uninstaller could not be launched|orphaned'
+        (Hint 'rejected: unparseable uninstall string (no .exe)')  | Should Match 'could not be safely parsed|vendor'
+    }
+    It 'a dotted VERSION string containing an MSI/RPC/priv code does NOT false-match (loop83 boundary hardening)' {
+        (Hint 'installed 16.0.1603 vs target 16.0.1700') | Should Be ''
+        (Hint 'build 16.0.1722.0 detected')              | Should Be ''
+        (Hint 'version 6.0.1314 is current')             | Should Be ''
     }
     It 'the real privilege HRESULT 0x80070522 (=win32 1314) routes to privilege-not-held' {
         (Hint 'Exception from HRESULT: 0x80070522') | Should Match 'Privilege not held|user right'

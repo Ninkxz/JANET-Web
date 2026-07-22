@@ -85,18 +85,39 @@ Describe 'upr 1.2.5 - fan-out attaches a troubleshooting hint to a failed host' 
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.5 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.5'
+    It 'manifest version is at or past 1.2.5 (host-level hint; exact pin migrated to newest bump)' {
+        ([version][string]$mani.version -ge [version]'1.2.5') | Should Be $true
     }
     It 'upr imports the shared troubleshoot engine' {
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
     }
-    It 'the harvest computes a hint only on a failure with a raw error and attaches it to the row' {
+    It 'the harvest computes a host-level hint only on a failure with a raw error and attaches it to the row' {
         ($src -match '\$hint\s*=\s*if\s*\(\(-not \$ok\)\s*-and\s*\$res\.Error\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
         ($src -match "\`$row\['Hint'\]\s*=\s*\`$hint")                                                             | Should Be $true
     }
-    It 'the err log is gated on $hint and carries the FIX hint (raw error preserved)' {
+    It 'the host-level err log is gated on $hint and carries the FIX hint (raw error preserved)' {
         ($src -match "if \(\`$hint\) \{ &\s*\`$Send @\{ type='log'; level='err'") | Should Be $true
         ($src -match 'FIX: \$hint')                                              | Should Be $true
+    }
+}
+
+# loop83 (informative-failures follow-up): the deferred loop-74 item - a PER-CANDIDATE uninstall FAILURE
+# (its own MSI/EXE exit code or plumbing error in $cand.Result, distinct from a host-level connection
+# failure) now gets a hint attached to THAT candidate's row + a FIX: err log, in New-UprEmitRows. Static
+# analysis (New-UprEmitRows returns a scriptblock run inside the fan-out over a real RunspacePool).
+Describe 'upr 1.2.6 - per-candidate uninstall failure attaches a troubleshooting hint' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+
+    It 'manifest version is exactly 1.2.6 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.6'
+    }
+    It 'the per-candidate hint is computed only for a Failure candidate and attached to its row' {
+        ($src -match "\`$candHint\s*=\s*if\s*\(\`$candResult\s*-eq\s*'Failure'\s*-and\s*\`$resultTxt\)\s*\{\s*Get-JanetTroubleshootHint") | Should Be $true
+        ($src -match "if \(\`$candHint\) \{ \`$row\['Hint'\] = \[string\]\`$candHint \}")                                                | Should Be $true
+    }
+    It 'the per-candidate err log is gated on $candHint and carries the FIX hint (raw Result preserved)' {
+        ($src -match "if \(\`$candHint\) \{ &\s*\`$Send @\{ type='log'; level='err'") | Should Be $true
+        ($src -match 'FIX: \$candHint')                                              | Should Be $true
     }
 }

@@ -45,8 +45,16 @@ function Get-JanetTroubleshootHint {
     # Privilege not held = authenticated (even local-admin) but missing a specific user right
     # (e.g. SeRemoteShutdownPrivilege). Distinct from access-denied - the account IS trusted,
     # it just lacks the one right this action needs. (folded from restart's numeric mapper, loop 79)
-    if ($m -match '\b1314\b|0x80070522|ERROR_PRIVILEGE_NOT_HELD|SeRemoteShutdownPrivilege|SeShutdownPrivilege|required\s+privilege\s+is\s+not\s+held|privilege\s+not\s+held') {
+    if ($m -match '(?<![\d.])1314(?![\d.])|0x80070522|ERROR_PRIVILEGE_NOT_HELD|SeRemoteShutdownPrivilege|SeShutdownPrivilege|required\s+privilege\s+is\s+not\s+held|privilege\s+not\s+held') {
         return "Privilege not held$on (ERROR_PRIVILEGE_NOT_HELD / 1314): the account authenticated and may even be a local admin, but lacks the specific user right this action needs (a remote restart needs SeRemoteShutdownPrivilege). Grant the right in the target's local security policy (secpol.msc -> User Rights Assignment) or by GPO, or use an account that already holds it."
+    }
+    # AD computer account/object not found - a domain/trust failure, NOT name resolution (the host itself
+    # may be perfectly reachable). Placed ABOVE the name-resolution branch so the many AD phrasings
+    # ("cannot find the computer account ... in Active Directory", "... the SID could not be resolved")
+    # match HERE and get the right fix, instead of leaking to the DNS hint through a sibling alternative
+    # (loop83 self-review: loop-82's single-alternative lookahead did not cover those phrasings).
+    if ($m -match 'computer\s+(?:account|object).{0,80}?(?:could\s+not\s+be\s+found|cannot\s+be\s+found|does\s+not\s+exist|was\s+not\s+found)|(?:could\s+not\s+be\s+found|cannot\s+find).{0,80}?in\s+Active\s+Directory') {
+        return "An Active Directory computer account/object was not found$on - this is NOT a name-resolution failure (the host itself may be reachable). Its AD identity is missing or the secure channel / domain trust is broken. Reset the target's computer account (or rejoin it to the domain), then retry."
     }
     # Name resolution / host offline / unreachable (a specific "...cannot be resolved"
     # inside a generic WinRM wrapper is a DNS failure -> match it BEFORE the generic
@@ -66,7 +74,7 @@ function Get-JanetTroubleshootHint {
     # boundaried so a coincidental substring (a PID/byte-count/KB) does not false-match (loop80). 1727
     # is RPC_S_CALL_FAILED_DNE (folded from restart, loop79 - corrected from the wrong "no-more-endpoints"
     # label, which is actually 1753 EPT_S_NOT_REGISTERED, matched here by its real "no more endpoints" text).
-    if ($m -match 'RPC\s+server\s+is\s+unavailable|\b1722\b|0x800706BA|\b1727\b|RPC_S_CALL_FAILED_DNE|no\s+more\s+endpoints') {
+    if ($m -match 'RPC\s+server\s+is\s+unavailable|(?<![\d.])1722(?![\d.])|0x800706BA|(?<![\d.])1727(?![\d.])|RPC_S_CALL_FAILED_DNE|no\s+more\s+endpoints') {
         return "RPC server unavailable$on (0x800706BA/1722, or a related RPC failure such as 1727 or the endpoint mapper reporting no free endpoints). The RPC endpoint mapper (TCP 135) or the dynamic RPC port range is firewall-blocked, the mapper is not serving requests, or the target's RPC service is down. This blocks CIM/DCOM/scheduled-task calls; a WinRM-only path may still work."
     }
     # SMB / admin-share path (copy-to-C$ failures)
@@ -88,6 +96,26 @@ function Get-JanetTroubleshootHint {
     # File in use / locked (uninstall, delete, replace)
     if ($m -match 'being\s+used\s+by\s+another\s+process|because\s+it\s+is\s+being\s+used|file\s+is\s+locked|cannot\s+access\s+the\s+file') {
         return "A file is locked by a running process$on. The app is likely still running (close it / stop its service), or another install is in progress. Retry after the process releases the file."
+    }
+    # --- MSI / uninstaller exit-code failures (install & uninstall paths: upr, wpt, pkginstall). Numerics
+    #     are word-boundaried so a version/byte-count substring does not false-match. 1618/1605 before the
+    #     1603 catch-all; file-locked above already claims a "file in use" 1603. (signatures added loop83) ---
+    if ($m -match '(?<![\d.])1618(?![\d.])|ERROR_INSTALL_ALREADY_RUNNING|another\s+install(?:ation)?\s+is\s+already\s+in\s+progress') {
+        return "Another Windows Installer operation is already running$on. Windows serializes MSI installs - wait for the in-flight install to finish (or clear a stuck/orphaned msiexec.exe), then retry."
+    }
+    if ($m -match '(?<![\d.])1605(?![\d.])|ERROR_UNKNOWN_PRODUCT') {
+        return "The product is not installed$on (MSI 1605) - already removed, or the registry uninstall entry is orphaned. There is nothing to uninstall; if a stale Programs-and-Features entry lingers, remove the orphaned Uninstall registry key."
+    }
+    if ($m -match '(?<![\d.])1603(?![\d.])|ERROR_INSTALL_FAILURE|fatal\s+error\s+during\s+installation') {
+        return "MSI fatal error 1603$on. Common causes: a file the (un)installer needs is locked (close the running app / stop its service), a reboot is pending (reboot then retry), or the account lacks rights. Capture the verbose log to pinpoint it: msiexec /x <ProductCode> /qn /l*v %TEMP%\uninst.log."
+    }
+    # Uninstaller binary missing / would not launch -> product files gone, registry entry lingers
+    if ($m -match 'executable\s+not\s+found|process\s+did\s+not\s+start') {
+        return "The uninstaller could not be launched$on - its executable is missing or would not start. The product's files were likely already removed, leaving an orphaned registry entry; delete the stale Uninstall key once the product is confirmed gone."
+    }
+    # Uninstall string could not be safely parsed (upr's fail-closed safe-uninstall guard)
+    if ($m -match 'unparseable\s+uninstall\s+string|empty\s+uninstall\s+string') {
+        return "The registry uninstall string could not be safely parsed$on, so it was NOT run (a guard against a malformed/injectable string). Uninstall via the vendor's own uninstaller or Programs and Features, or correct the registry UninstallString."
     }
 
     return ''
