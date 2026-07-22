@@ -1500,6 +1500,20 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   PkginstallSecureboot.WrongBoxGuard convention); loop-85 1.11.14 pin floored. **loop-37:** full acas (199) + full
   suite. Pester **1579→~1585** green. SECRET parity: +acas kb-install wrong-box guard. **Backlog: the mtime-only
   verify (New-AcasClientVerify:185, wpt shares :941) - next candidate.**
+- **Loop 87 (DONE 2026-07-22) — verify honesty: the mtime-only Chrome/Edge false-clean:** the Fable re-verify of
+  loop-86's kb-install wrong-box guard executed the actual worker at runtime (14/14 checks) → **SAFE** (aborts +
+  cleans up its session + clean FAIL row + doesn't break the matching-box flow). **Workstream:** `New-AcasClientVerify`
+  (`:185`) + its wpt twin `New-WptUpdateClientVerify` (`:941`) set `Verified` from the Chrome/Edge updater
+  `Clients\{GUID}` key mtime ALONE (< 14 days) - but Omaha/EdgeUpdate writes that key on every CHECK and a failed
+  update leaves the OLD pv, so a recently-touched host read Verified=OK with an OLD version (false-clean; a verify-only
+  run lit PATCHED). Same class loop 40 fixed for Office C2R. **Fix** (grounded in the live registry - the sibling
+  `ClientState\{GUID}` carries `LastInstallerResult`, 0 = last install succeeded): added canonical
+  `Get-AcasClientVerified` (fresh AND result==0; `$null` when no signal - never over-claims), both probes read the
+  ClientState sibling + mirror it inline. acas **1.11.15→1.11.16**, wpt **6.8.15→6.8.16**. Tests: Acas.ClientVerify
+  (NEW +10, behavioral canonical + probe static), Wpt.C2rVerify +4; loop-86 acas pin + wpt fan-out pin floored.
+  **loop-37:** touches acas+wpt, ran both + full suite. Pester **1585→~1599** green. SECRET parity: +client-verify
+  false-clean fix (acas + wpt forks). **Backlog: the Store-app EXPERIMENTAL mtime-only verify (acas:628,
+  Microsoft.WindowsApp) - same class, no Omaha ClientState analog, left as-is.**
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
