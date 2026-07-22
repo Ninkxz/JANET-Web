@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.18'
+        version  = '6.8.19'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -3064,6 +3064,18 @@ $script:WptCleanBlock = {
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Detail = "Session: $($_.Exception.Message)"; return $r }
     try {
+        # DNS-mismatch guard (HARD ABORT, loop90): this block DELETES temp files, caches, and stale user PROFILES;
+        # a stale DNS / a reused IP would delete on the WRONG machine. Verify the box that answered is the one we
+        # dialed BEFORE any deletion. An IPv4-literal target has no shortname to compare -> skip; an empty probe
+        # proceeds (don't regress). Mirrors WptPatchBlock (~:2060). The return runs the finally below (session cleanup).
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, nothing cleaned"
+                return $r
+            }
+        }
         # C: free-space snapshot (before) over the same WinRM session, so the row can
         # report a real before/after delta. CIM runs ON the target inside the session.
         try {
@@ -3640,6 +3652,18 @@ $script:WptCleanUserAppsBlock = {
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Detail = "Session: $($_.Exception.Message)"; return $r }
     try {
+        # DNS-mismatch guard (HARD ABORT, loop90): this block DELETES per-profile app binaries (takeown + remove);
+        # a stale DNS / a reused IP would delete on the WRONG machine. Verify the box that answered is the one we
+        # dialed BEFORE any deletion. An IPv4-literal target has no shortname to compare -> skip; an empty probe
+        # proceeds. Mirrors WptPatchBlock (~:2060). The return runs the finally below (session cleanup).
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            $targetShort = ($Computer -split '\.')[0]
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, nothing removed"
+                return $r
+            }
+        }
         $res = Invoke-Command -Session $sess -ArgumentList $AppsCsv, $DryRun, $Computer -EA Stop -ScriptBlock {
             param($appsCsv, $dry, $thisHost)
             $ev = New-Object System.Collections.Generic.List[hashtable]

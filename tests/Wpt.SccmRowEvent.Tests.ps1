@@ -57,7 +57,7 @@ Describe 'wpt SCCM dispatchers emit via New-WptRowEvent, not the colliding merge
         $availBlock = [regex]::Match($script:Src, "(?s)Type=\(& \`$g 'Type'\); Name=\(& \`$g 'Name'\); State.*?& \`$send \([^\r\n]*").Value
         ($availBlock -match 'New-WptRowEvent') | Should Be $true
     }
-    It 'wpt manifest is exactly 6.8.18 (newest bump holds the exact pin)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.8.18'
+    It 'wpt manifest is at or past 6.8.18 (sccm emit fix; exact pin migrated to the newest bump)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'6.8.18') | Should Be $true
     }
 }

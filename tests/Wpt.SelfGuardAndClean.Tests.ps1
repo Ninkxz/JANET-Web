@@ -168,3 +168,44 @@ Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)'
         [bool]$r.Result.Success | Should Be $false
     }
 }
+
+# loop90: WptCleanBlock (cleanup-disk - deletes temp files, caches, and stale user PROFILES) and
+# WptCleanUserAppsBlock (deletes per-profile app binaries) are DESTRUCTIVE workers that were the two wpt
+# destructive blocks MISSING the wrong-box (DNS-mismatch) guard every sibling carries. A stale DNS / reused IP
+# could delete on the WRONG machine. Both now verify the answering box's $env:COMPUTERNAME == the dialed
+# shortname before any deletion (IPv4-literal skips; empty probe proceeds), mirroring WptPatchBlock. The blocks
+# have a TCP pre-check + New-PSSession before the guard (unlike WptRebootBlock), so - matching the kb-install
+# guard convention (loop86) - the guard DECISION is tested via a verbatim replica + a static presence assertion.
+$script:WptSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+function Test-WptCleanWrongBoxAbort { param([string]$Computer,[string]$Answering)
+    $skip = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+    if ($skip) { return $false }
+    $targetShort = ($Computer -split '\.')[0]
+    [bool]($Answering -and ($Answering.Trim().ToUpper() -ne $targetShort.ToUpper()))
+}
+
+Describe 'WptCleanBlock + WptCleanUserAppsBlock wrong-box (DNS-mismatch) guard (loop90)' {
+    It 'a hostname whose box answers a DIFFERENT name aborts' {
+        Test-WptCleanWrongBoxAbort 'WS01.area.af.mil' 'WS02' | Should Be $true
+    }
+    It 'the matching box (same shortname, case-insensitive) does NOT abort' {
+        Test-WptCleanWrongBoxAbort 'WS01.area.af.mil' 'WS01' | Should Be $false
+        Test-WptCleanWrongBoxAbort 'WS01' 'ws01'             | Should Be $false
+    }
+    It 'an IPv4-literal target skips the compare (no shortname to match)' {
+        Test-WptCleanWrongBoxAbort '10.1.2.3' 'ANY-NAME' | Should Be $false
+    }
+    It 'an empty probe (COMPUTERNAME unreadable) proceeds - no false abort' {
+        Test-WptCleanWrongBoxAbort 'WS01.area.af.mil' '' | Should Be $false
+    }
+    It 'the guard is PRESENT in BOTH destructive clean blocks (COMPUTERNAME compare + hard-abort)' {
+        # WptCleanBlock aborts with "nothing cleaned"; WptCleanUserAppsBlock with "nothing removed"
+        ($script:WptSrc -match "DNS mismatch: dialed '\`$targetShort' but remote is.*ABORTED, nothing cleaned") | Should Be $true
+        ($script:WptSrc -match "DNS mismatch: dialed '\`$targetShort' but remote is.*ABORTED, nothing removed") | Should Be $true
+        # both are inside a block that opens a session then guards before Invoke-Command deletes
+        ([regex]::Matches($script:WptSrc, "\`$actualName = try \{ Invoke-Command -Session \`$sess -EA Stop -ScriptBlock \{ \`$env:COMPUTERNAME \} \} catch \{ '' \}").Count -ge 2) | Should Be $true
+    }
+    It 'wpt manifest is exactly 6.8.19 (newest bump holds the exact pin)' {
+        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.8.19'
+    }
+}
