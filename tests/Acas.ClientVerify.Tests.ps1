@@ -49,13 +49,15 @@ Describe 'Get-AcasClientVerified - fresh + last-install-succeeded is the ONLY gr
 
 Describe 'acas Chrome/Edge verify scriptblock - gates on the install result, not just mtime' {
     $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Raw
-    It 'the generated verify reads the sibling ClientState + LastInstallerResult' {
+    It 'the generated verify reads the sibling ClientState (LastCheckSuccess freshness + LastInstallerResult gate)' {
         ($moduleSrc -match "\`$csp = \`$p -replace '\\\\Clients\\\\', '\\ClientState\\'") | Should Be $true
+        ($moduleSrc -match '\$cs\.LastCheckSuccess')                                      | Should Be $true
         ($moduleSrc -match '\$cs\.LastInstallerResult')                                   | Should Be $true
     }
-    It 'the old mtime-only verdict is GONE from New-AcasClientVerify (the Store-app EXPERIMENTAL probe at ~:628 is a separate mtime-only case, out of scope - no Omaha ClientState analog)' {
+    It 'the DEAD Get-Item .LastWriteTime read is GONE from New-AcasClientVerify (loop88: a RegistryKey has no LastWriteTime -> $mod was always null -> the verify was INERT)' {
         $fn = [regex]::Match($moduleSrc, '(?s)function New-AcasClientVerify.*?return \[scriptblock\]::Create').Value
-        ($fn -match '\$verified = if \(\$mod\) \{ \(\(Get-Date\) - \$mod\)\.TotalDays -lt 14 \}') | Should Be $false
+        ($fn -match '\$mod = \$key\.LastWriteTime')                                                       | Should Be $false
+        ($fn -match '\$verified = if \(\$mod\) \{ \(\(Get-Date\) - \$mod\)\.TotalDays -lt 14 \}')          | Should Be $false
     }
     It 'the fresh-AND-success gate is present (ge 14 -> false; else result -eq 0)' {
         ($moduleSrc -match '\(\(Get-Date\) - \$mod\)\.TotalDays -ge 14') | Should Be $true
@@ -63,8 +65,58 @@ Describe 'acas Chrome/Edge verify scriptblock - gates on the install result, not
     }
 }
 
-Describe 'acas 1.11.16 - manifest exact pin (newest bump = loop87 client-verify false-clean fix)' {
-    It 'acas manifest is exactly 1.11.16' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.16'
+# loop88 (P1, the test the loop-87 self-review said was missing): EXECUTE the generated probe against a REAL
+# (sandbox HKCU) key. The loop-87 tests were static/canonical-only and never ran a probe, so they missed that
+# $mod (from Get-Item .LastWriteTime, which does not exist on a RegistryKey) was ALWAYS $null -> Verified always
+# $null / LastUpdated 'n/a'. This drives the acas AND wpt probes end-to-end.
+Describe 'client verify probe EXECUTED against a real registry key (loop88 - catches the inert-verify class)' {
+    $script:Base = 'HKCU:\Software\JanetWebTest_ClientVerify\Update'
+    $script:Guid = '{9E8A0C1D-TEST}'
+    $script:Wpt  = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
+    function Set-Sandbox { param([int64]$LcsAgeSec,$Lir,[bool]$WithClientState)
+        Remove-Item 'HKCU:\Software\JanetWebTest_ClientVerify' -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item "$script:Base\Clients\$script:Guid" -Force | Out-Null
+        New-ItemProperty "$script:Base\Clients\$script:Guid" -Name pv -Value '99.0.1' -PropertyType String -Force | Out-Null
+        if ($WithClientState) {
+            New-Item "$script:Base\ClientState\$script:Guid" -Force | Out-Null
+            $lcs = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) - $LcsAgeSec
+            New-ItemProperty "$script:Base\ClientState\$script:Guid" -Name LastCheckSuccess -Value $lcs -PropertyType QWord -Force | Out-Null
+            if ($null -ne $Lir) { New-ItemProperty "$script:Base\ClientState\$script:Guid" -Name LastInstallerResult -Value $Lir -PropertyType DWord -Force | Out-Null }
+        }
+    }
+    function Get-AcasProbeResult { $sb = & $script:Mod { param($b,$g) New-AcasClientVerify -Guid $g -RootWow "$b\Clients" -Root "$b\Clients" } $script:Base $script:Guid; (& $sb) }
+    function Get-WptProbeResult  { $sb = & $script:Wpt { param($b,$g) New-WptUpdateClientVerify -P1 "$b\Clients\$g" -P2 "$b\Clients\$g" } $script:Base $script:Guid; (& $sb) }
+
+    It 'fresh check + last install SUCCEEDED -> Verified $true, LastUpdated is a REAL date (not n/a) - the inert bug is fixed' {
+        Set-Sandbox -LcsAgeSec 3600 -Lir 0 -WithClientState $true
+        $a = Get-AcasProbeResult
+        $a.Verified   | Should Be $true
+        $a.LastUpdated | Should Not Be 'n/a'
+        $a.Version     | Should Be '99.0.1'
+        (Get-WptProbeResult).Verified | Should Be $true
+    }
+    It 'fresh check + last install FAILED (LastInstallerResult != 0) -> Verified $false (the false-clean is now actually enforced)' {
+        Set-Sandbox -LcsAgeSec 3600 -Lir 1 -WithClientState $true
+        (Get-AcasProbeResult).Verified | Should Be $false
+        (Get-WptProbeResult).Verified  | Should Be $false
+    }
+    It 'stale check (LastCheckSuccess > 14 days old) -> Verified $false' {
+        Set-Sandbox -LcsAgeSec (20*86400) -Lir 0 -WithClientState $true
+        (Get-AcasProbeResult).Verified | Should Be $false
+    }
+    It 'no ClientState key -> Verified $null (indeterminate, never a false-clean)' {
+        Set-Sandbox -LcsAgeSec 3600 -Lir 0 -WithClientState $false
+        (Get-AcasProbeResult).Verified | Should Be $null
+    }
+    It 'ClientState present but no LastInstallerResult -> Verified $null' {
+        Set-Sandbox -LcsAgeSec 3600 -Lir $null -WithClientState $true
+        (Get-AcasProbeResult).Verified | Should Be $null
+        Remove-Item 'HKCU:\Software\JanetWebTest_ClientVerify' -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Describe 'acas 1.11.17 - manifest exact pin (newest bump = loop88 inert-verify fix, real timestamp source)' {
+    It 'acas manifest is exactly 1.11.17' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.17'
     }
 }

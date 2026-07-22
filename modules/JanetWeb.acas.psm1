@@ -144,7 +144,8 @@ function Get-AcasClientVerified {
     if (-not $HasTimestamp) { return $null }
     if ($AgeDays -ge $WindowDays) { return $false }
     if ($null -eq $LastInstallerResult -or "$LastInstallerResult" -eq '') { return $null }
-    return [bool]([int]$LastInstallerResult -eq 0)
+    $n = $null; if (-not [int64]::TryParse("$LastInstallerResult", [ref]$n)) { return $null }   # range-safe: a UInt32 DWORD overflows [int]
+    return [bool]($n -eq 0)
 }
 
 # Builder for the Office C2R version-probe Verify blocks (4 profiles ran identical
@@ -191,15 +192,25 @@ function New-AcasClientVerify {
                 if (Test-Path $p) {
                     $pp = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
                     if ($pp.pv) { $ver = "$($pp.pv)" }
-                    $key = Get-Item -Path $p -ErrorAction SilentlyContinue
-                    if ($key) { $mod = $key.LastWriteTime }
-                    # loop87: the sibling ClientState\{GUID} carries LastInstallerResult (0 = last install
-                    # SUCCEEDED). mtime freshness ALONE is a false-clean (Clients\{GUID} reads fresh with an OLD
-                    # version after a failed/no-op check); require the success signal. MIRROR of Get-AcasClientVerified.
+                    # loop88: Get-Item on a registry KEY returns a RegistryKey with NO .LastWriteTime member, so
+                    # the old $key.LastWriteTime was ALWAYS $null and this verify was inert (Verified/LastUpdated
+                    # never populated). The sibling ClientState\{GUID} carries REAL values: LastCheckSuccess (unix
+                    # epoch of the last SUCCESSFUL update check = the freshness source) and LastInstallerResult
+                    # (0 = the last install SUCCEEDED = the success gate). Fresh AND succeeded, mirroring
+                    # Get-AcasClientVerified. Casts are empty-guarded + range-safe (a UInt32 DWORD overflows [int]).
                     $csp = $p -replace '\\Clients\\', '\ClientState\'
                     if (Test-Path $csp) {
                         $cs = Get-ItemProperty -Path $csp -ErrorAction SilentlyContinue
-                        if ($null -ne $cs -and $null -ne $cs.LastInstallerResult) { $lastResult = [int]$cs.LastInstallerResult }
+                        if ($cs) {
+                            $lcs = $cs.LastCheckSuccess
+                            if ($null -ne $lcs -and "$lcs" -ne '') {
+                                try { $mod = (New-Object DateTime 1970,1,1,0,0,0,([DateTimeKind]::Utc)).AddSeconds([double]$lcs).ToLocalTime() } catch { $mod = $null }
+                            }
+                            $lir = $cs.LastInstallerResult
+                            if ($null -ne $lir -and "$lir" -ne '') {
+                                try { $lastResult = [int64]$lir } catch { $lastResult = $null }
+                            }
+                        }
                     }
                     break
                 }
@@ -1157,7 +1168,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.16'
+        version  = '1.11.17'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(

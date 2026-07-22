@@ -66,19 +66,21 @@ Describe 'wpt - manifest version floor (honest C2R verify shipped in 6.8.8; exac
 # Acas.ClientVerify.Tests.ps1). Static assertion on the generated remote scriptblock body.
 Describe 'wpt Chrome/Edge verify scriptblock - gates on the install result, not just mtime (loop87)' {
     $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
-    It 'the generated verify reads the sibling ClientState + LastInstallerResult' {
+    It 'the generated verify reads the sibling ClientState (LastCheckSuccess freshness + LastInstallerResult gate)' {
         ($moduleSrc -match "\`$csp = \`$p -replace '\\\\Clients\\\\', '\\ClientState\\'") | Should Be $true
+        ($moduleSrc -match '\$cs\.LastCheckSuccess')                                      | Should Be $true
         ($moduleSrc -match '\$cs\.LastInstallerResult')                                   | Should Be $true
     }
-    It 'the old mtime-only verdict is GONE from New-WptUpdateClientVerify' {
+    It 'the DEAD Get-Item .LastWriteTime read is GONE from New-WptUpdateClientVerify (loop88 - it was always null -> inert)' {
         $fn = [regex]::Match($moduleSrc, '(?s)function New-WptUpdateClientVerify.*?\[scriptblock\]::Create').Value
-        ($fn -match '\$verified = if \(\$mod\) \{ \(\(Get-Date\) - \$mod\)\.TotalDays -lt 14 \}') | Should Be $false
+        ($fn -match '\$mod = \$key\.LastWriteTime')                                                       | Should Be $false
+        ($fn -match '\$verified = if \(\$mod\) \{ \(\(Get-Date\) - \$mod\)\.TotalDays -lt 14 \}')          | Should Be $false
     }
     It 'the fresh-AND-success gate is present' {
         ($moduleSrc -match '\(\(Get-Date\) - \$mod\)\.TotalDays -ge 14') | Should Be $true
         ($moduleSrc -match '\[bool\]\(\$lastResult -eq 0\)')            | Should Be $true
     }
-    It 'wpt manifest is exactly 6.8.16 (newest bump holds the exact pin)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.8.16'
+    It 'wpt manifest is exactly 6.8.17 (newest bump holds the exact pin)' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.8.17'
     }
 }

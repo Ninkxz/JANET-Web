@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.16'
+        version  = '6.8.17'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -932,15 +932,24 @@ foreach ($p in @('__P1__','__P2__')) {
     if (Test-Path $p) {
         $pp = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
         if ($pp.pv) { $ver = "$($pp.pv)" }
-        $key = Get-Item -Path $p -ErrorAction SilentlyContinue
-        if ($key) { $mod = $key.LastWriteTime }
-        # loop87: the sibling ClientState\{GUID} carries LastInstallerResult (0 = last install SUCCEEDED).
-        # mtime freshness ALONE is a false-clean (Clients\{GUID} reads fresh with an OLD version after a
-        # failed/no-op check); require the success signal. MIRROR of acas Get-AcasClientVerified.
+        # loop88: Get-Item on a registry KEY returns a RegistryKey with NO .LastWriteTime member, so the old
+        # $key.LastWriteTime was ALWAYS $null and this verify was inert. The sibling ClientState\{GUID} carries
+        # REAL values: LastCheckSuccess (unix epoch of the last SUCCESSFUL update check = freshness) and
+        # LastInstallerResult (0 = last install SUCCEEDED = success gate). Fresh AND succeeded, mirroring acas
+        # Get-AcasClientVerified. Casts empty-guarded + range-safe (a UInt32 DWORD overflows [int]).
         $csp = $p -replace '\\Clients\\', '\ClientState\'
         if (Test-Path $csp) {
             $cs = Get-ItemProperty -Path $csp -ErrorAction SilentlyContinue
-            if ($null -ne $cs -and $null -ne $cs.LastInstallerResult) { $lastResult = [int]$cs.LastInstallerResult }
+            if ($cs) {
+                $lcs = $cs.LastCheckSuccess
+                if ($null -ne $lcs -and "$lcs" -ne '') {
+                    try { $mod = (New-Object DateTime 1970,1,1,0,0,0,([DateTimeKind]::Utc)).AddSeconds([double]$lcs).ToLocalTime() } catch { $mod = $null }
+                }
+                $lir = $cs.LastInstallerResult
+                if ($null -ne $lir -and "$lir" -ne '') {
+                    try { $lastResult = [int64]$lir } catch { $lastResult = $null }
+                }
+            }
         }
         break
     }
