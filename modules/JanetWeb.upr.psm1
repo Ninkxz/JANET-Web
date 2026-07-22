@@ -35,7 +35,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.6'
+        version  = '1.2.7'
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -1263,7 +1263,25 @@ function Invoke-UprFanOut {
                     # emitted row (Hint field) + an err log (FIX:); the raw error is preserved.
                     $hint = if ((-not $ok) -and $res.Error) { Get-JanetTroubleshootHint -Message ([string]$res.Error) -Server ([string]$res.Host) } else { '' }
                     foreach ($row in @($emit.rows)) {
-                        if ($hint -and ($row -is [hashtable])) { $row['Hint'] = $hint }
+                        if ($row -is [hashtable]) {
+                            if ($hint) {
+                                $row['Hint'] = $hint
+                            }
+                            # loop84 (P1 fix): per-candidate uninstall-failure hint - computed HERE in module
+                            # scope (Get-JanetTroubleshootHint is not resolvable inside the .GetNewClosure()'d
+                            # New-UprEmitRows block). A reached host (no host-level $hint) with a Failure candidate
+                            # Result gets a hint from that Result + a FIX: err log; the raw Result is preserved.
+                            elseif ($row.ContainsKey('Result')) {
+                                $rt = [string]$row['Result']
+                                if ($rt -and ($rt -notlike 'OK*') -and ($rt -notlike 'Skipped*')) {
+                                    $ch = Get-JanetTroubleshootHint -Message $rt -Server ([string]$res.Host)
+                                    if ($ch) {
+                                        $row['Hint'] = [string]$ch
+                                        & $Send @{ type='log'; level='err'; text="$([string]$res.Host) \ $([string]$row['Product']) : $rt | FIX: $ch" }
+                                    }
+                                }
+                            }
+                        }
                         [void]$rows.Add($row)
                         & $Send (@{ type='row' } + $row)
                     }
@@ -1459,14 +1477,11 @@ function New-UprEmitRows {
                 # else->Failure) emitted once per host\app -- not just one per host.
                 $candResult = if ($resultTxt -like 'OK*') { 'Success' } elseif ($resultTxt -like 'Skipped*') { 'Skipped' } else { 'Failure' }
                 $candItems  = if ($candResult -eq 'Success') { 1 } else { 0 }
-                # informative-failures (loop83): a per-candidate uninstall FAILURE carries its OWN outcome
-                # detail (an MSI/EXE exit code, a rejected/unparseable uninstall string, a missing uninstaller),
-                # distinct from a host-level connection failure (hinted separately in Invoke-UprFanOut). Attach a
-                # hint from THIS candidate's Result to its row + a FIX: err log; the raw Result is preserved.
-                $candHint = if ($candResult -eq 'Failure' -and $resultTxt) { Get-JanetTroubleshootHint -Message $resultTxt -Server $hostName } else { '' }
-                if ($candHint) { $row['Hint'] = [string]$candHint }
+                # NOTE: the per-candidate troubleshooting hint is computed in Invoke-UprFanOut's harvest (module
+                # scope), NOT here - this emit block is .GetNewClosure()'d and loses the upr module scope where
+                # the shared hint engine lives (loop84 P1 fix; calling it here threw CommandNotFoundException
+                # and aborted the whole run). The row carries Result; the harvest hints off it.
                 & $Send @{ type='audit'; action='VulnPatched'; target="$hostName\$([string]$cand.Product)"; result=$candResult; itemCount=$candItems; detail=("UnsupportedProductUninstall: " + $resultTxt) }
-                if ($candHint) { & $Send @{ type='log'; level='err'; text="$hostName \ $([string]$cand.Product) : $resultTxt | FIX: $candHint" } }
             } else {
                 $row = @{
                     _rk="$hostName|$($cand.Product)|$($cand.Version)|$i"

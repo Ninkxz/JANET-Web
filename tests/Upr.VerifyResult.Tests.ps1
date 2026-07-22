@@ -101,23 +101,38 @@ Describe 'upr 1.2.5 - fan-out attaches a troubleshooting hint to a failed host' 
     }
 }
 
-# loop83 (informative-failures follow-up): the deferred loop-74 item - a PER-CANDIDATE uninstall FAILURE
-# (its own MSI/EXE exit code or plumbing error in $cand.Result, distinct from a host-level connection
-# failure) now gets a hint attached to THAT candidate's row + a FIX: err log, in New-UprEmitRows. Static
-# analysis (New-UprEmitRows returns a scriptblock run inside the fan-out over a real RunspacePool).
-Describe 'upr 1.2.6 - per-candidate uninstall failure attaches a troubleshooting hint' {
+# loop83/84 (informative-failures follow-up): the per-candidate uninstall-failure hint. loop 83 wired it
+# INSIDE New-UprEmitRows, but that block is .GetNewClosure()'d and loses the upr module scope where
+# Get-JanetTroubleshootHint lives -> the call threw CommandNotFoundException and aborted the whole run at
+# the first failing candidate (loop84 P1 - the loop-83 static test never executed the closure). Fixed by
+# moving the hint into Invoke-UprFanOut's harvest (module scope). These tests EXECUTE the closure (would
+# have caught P1) + pin the harvest wire.
+Describe 'upr 1.2.7 - per-candidate uninstall failure hint (P1: computed in module scope, not the closure)' {
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.6 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.6'
+    It 'manifest version is exactly 1.2.7 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.7'
     }
-    It 'the per-candidate hint is computed only for a Failure candidate and attached to its row' {
-        ($src -match "\`$candHint\s*=\s*if\s*\(\`$candResult\s*-eq\s*'Failure'\s*-and\s*\`$resultTxt\)\s*\{\s*Get-JanetTroubleshootHint") | Should Be $true
-        ($src -match "if \(\`$candHint\) \{ \`$row\['Hint'\] = \[string\]\`$candHint \}")                                                | Should Be $true
+    It 'the New-UprEmitRows closure does NOT throw when invoked with a Failure candidate (P1 regression guard)' {
+        # BEHAVIORAL: the closure must not call an unresolvable function (Get-JanetTroubleshootHint is not in
+        # the .GetNewClosure() scope). loop-83 shipped a call here that threw CommandNotFoundException.
+        $emit = & $script:Mod { New-UprEmitRows -DoUninstall $true -DryRun $false -Send {param($x)} }
+        $res = @{ Host='WS01'; Reachable=$true; Error=$null; Candidates=@(@{ Product='OldJava'; Version='8'; Decision='Uninstall'; Result='FAIL (setup exit 1603)'; Plugin=''; Publisher=''; Type='MSI'; PSChildName='{x}'; Label='y'; UninstallString='z' }) }
+        $threw = $false
+        try { $out = & $emit $res $null } catch { $threw = $true }
+        $threw | Should Be $false
+        ([string]$out.rows[0]['Result']) | Should Be 'FAIL (setup exit 1603)'
     }
-    It 'the per-candidate err log is gated on $candHint and carries the FIX hint (raw Result preserved)' {
-        ($src -match "if \(\`$candHint\) \{ &\s*\`$Send @\{ type='log'; level='err'") | Should Be $true
-        ($src -match 'FIX: \$candHint')                                              | Should Be $true
+    It 'the closure does NOT compute the hint (no Get-JanetTroubleshootHint call inside New-UprEmitRows)' {
+        # scope New-UprEmitRows body: from its header to the .GetNewClosure() that closes it
+        $fn = [regex]::Match($src, '(?s)function New-UprEmitRows.*?\}\.GetNewClosure\(\)').Value
+        ($fn -match 'Get-JanetTroubleshootHint') | Should Be $false
+    }
+    It 'the harvest (module scope) computes the per-candidate hint off the row Result + a FIX err log' {
+        ($src -match "elseif \(\`$row\.ContainsKey\('Result'\)\)")                                    | Should Be $true
+        ($src -match "\`$ch\s*=\s*Get-JanetTroubleshootHint\s*-Message\s*\`$rt")                       | Should Be $true
+        ($src -match "if \(\`$ch\) \{[^}]*\`$row\['Hint'\] = \[string\]\`$ch")                          | Should Be $true
+        ($src -match 'FIX: \$ch')                                                                     | Should Be $true
     }
 }
