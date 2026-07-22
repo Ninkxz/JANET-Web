@@ -101,7 +101,8 @@ Describe 'Get-JanetTroubleshootHint - loop80 false-positive guards (bare-numeric
             "The computer 'WS01' could not be found in Active Directory.",
             "Cannot find the computer account 'WS01`$' in Active Directory",                                 # loop82-review leak #1
             'The computer account for WS01 could not be found in Active Directory; the SID could not be resolved', # leak #2
-            'The specified computer accounts could not be found in Active Directory'                          # plural
+            'The specified computer accounts could not be found in Active Directory',                         # plural
+            'The trust relationship failed: the computer account SID could not be resolved in Active Directory.' # loop83-review: "resolved" phrasing leaked to DNS
         )) {
             (Hint $msg) | Should Match 'Active Directory computer|AD identity|Reset the target'
             (Hint $msg) | Should Not Match 'check DNS resolves'
@@ -118,6 +119,15 @@ Describe 'Get-JanetTroubleshootHint - loop80 false-positive guards (bare-numeric
         (Hint 'installed 16.0.1603 vs target 16.0.1700') | Should Be ''
         (Hint 'build 16.0.1722.0 detected')              | Should Be ''
         (Hint 'version 6.0.1314 is current')             | Should Be ''
+    }
+    It 'a SENTENCE-FINAL code (trailing period) still hints (loop84 P2: (?![\d.]) wrongly dropped "1603.")' {
+        (Hint 'The uninstaller failed with exit code 1603.') | Should Match '1603|fatal'
+        (Hint 'The operation failed: RPC error 1722.')       | Should Match '135|RPC'
+        (Hint 'uninstall returned 1605.')                    | Should Match 'not installed|already removed'
+    }
+    It 'a HEX code (0x-prefixed) does NOT false-match the decimal MSI/RPC signatures (loop84 P2: 0x1727 != 1727)' {
+        (Hint 'faulting module offset 0x1727') | Should Be ''
+        (Hint 'ntdll fault at 0x1603')         | Should Be ''
     }
     It 'the real privilege HRESULT 0x80070522 (=win32 1314) routes to privilege-not-held' {
         (Hint 'Exception from HRESULT: 0x80070522') | Should Match 'Privilege not held|user right'
