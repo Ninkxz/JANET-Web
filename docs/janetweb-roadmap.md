@@ -1430,6 +1430,24 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   **loop-37 lesson:** engine change shared + c2c slow, ran full c2c (288) + engine-consumers (239) green. Pester
   **1554→1559** green. Next: per-candidate upr failures; grow the signature set. SECRET parity: +AD-object
   exclusion + c2c read-only wires.
+- **Loop 83 (DONE 2026-07-21) — informative-failures FINAL follow-up + loop-82 self-review:** a Fable subagent on
+  loop-82 confirmed the c2c wires SAFE and no ReDoS, but found **2 leaks + 1 asymmetry** (all fixed): (1/2) loop-82's
+  AD-object fix guarded only ONE alternative - `Cannot find the computer account ... in Active Directory` and `... the
+  SID could not be resolved` leaked to the DNS hint via sibling alternatives; **fixed** with a dedicated **AD-object
+  signature ABOVE name-resolution** returning a proper AD hint (reset the computer account / rejoin) for all
+  phrasings; (3) version-check's no-TCP OFFLINE got a misleading timeout hint - **scoped to `$wasError`** (pre-collapse
+  ERROR), so genuine offline is silent like the scan wire. c2c **1.15.10→1.15.11**. **Workstream (LAST follow-up item):**
+  **per-candidate upr uninstall failures** - loop 74 wired host-level; this wires the deferred per-candidate FAIL
+  (`$cand.Result`, e.g. `exit 1603` / `rejected: ...`) in `New-UprEmitRows` on the existing `$candResult -eq 'Failure'`
+  classifier → `$row['Hint']` + FIX log. Required **growing the signature set**: the engine was inert on all 5 FAIL
+  shapes, so added **5 MSI/uninstaller signatures** (1618/1605/1603/exe-not-found/unparseable-string, general to
+  upr/wpt/pkginstall). **Boundary hardening (caught in-loop):** `\b1603\b` false-matches a dotted version `16.0.1603`
+  (`.`=boundary!) → replaced `\b` with `(?<![\d.])CODE(?![\d.])` on ALL SIX numeric codes; loop-80 KB/byte exclusions
+  still hold. upr **1.2.5→1.2.6**. Tests: Troubleshoot.Hint (AD updated +MSI +dotted-guard), Upr +3, C2c pin+predicate.
+  **loop-37 lesson:** ran engine+all consumers+upr (274) green + full suite. Pester **1559→1564** green. **The
+  informative-failures follow-up list is COMPLETE** (9 destructive + restart delegation + 3 read-only scans + upr
+  per-candidate). SECRET parity: +AD-object signature +dotted-version boundaries +5 MSI signatures + c2c `$wasError` +
+  upr per-candidate wire.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
