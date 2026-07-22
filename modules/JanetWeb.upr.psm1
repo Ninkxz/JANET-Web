@@ -35,7 +35,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.7'
+        version  = '1.2.8'
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -1196,6 +1196,21 @@ $UprWorkerBlock = {
 #  the EmitRows callback turns the result into grid rows + emits row/audit/log
 #  events; the harness handles progress and the operator-cancel bridge.
 # -----------------------------------------------------------------------------
+
+# Build a 'row' event message WITHOUT the case-insensitive 'type'/'Type' collision (loop85 P0 fix).
+# An uninstall/scan candidate row carries an app 'Type' key (MSI/EXE), and `@{ type='row' } + $row` THROWS on
+# PS 5.1 - a `@{}` literal is a case-INSENSITIVE Hashtable, so adding the event key 'type' when the row already
+# holds 'Type' is a duplicate-key ArgumentException that aborted every fan-out (report/manual scan+uninstall)
+# at the first candidate row. A case-SENSITIVE Hashtable holds both, and ConvertTo-Json (the server's emit
+# serializer, JanetWeb.Server.ps1:283) renders them as the distinct JSON keys the case-sensitive JS view expects.
+function New-UprRowEvent {
+    param($Row)
+    $m = New-Object System.Collections.Hashtable   # case-SENSITIVE
+    if ($Row) { foreach ($k in $Row.Keys) { $m[$k] = $Row[$k] } }
+    $m['type'] = 'row'
+    return $m
+}
+
 function Invoke-UprFanOut {
     param(
         [object[]]$HostJobs,
@@ -1283,7 +1298,7 @@ function Invoke-UprFanOut {
                             }
                         }
                         [void]$rows.Add($row)
-                        & $Send (@{ type='row' } + $row)
+                        & $Send (New-UprRowEvent $row)
                     }
                     if ($ok) { $okCount++ } else { $failCount++ }
                     # Audit result/itemCount: honor an explicit honest result from the
@@ -1310,7 +1325,7 @@ function Invoke-UprFanOut {
                         try { [void]$j.PS.BeginStop($null, $null) } catch {}
                         $j.PS = $null
                         $rowT = @{ _rk="$($j.Host)|timeout"; Host=$j.Host; Plugin=''; Product=''; Version=''; Decision='Abandoned'; Detail="per-host timeout (${PerHostTimeoutSeconds}s) - possible WMI/CIM hang"; Result="per-host timeout (${PerHostTimeoutSeconds}s)" }
-                        [void]$rows.Add($rowT); & $Send (@{ type='row' } + $rowT)
+                        [void]$rows.Add($rowT); & $Send (New-UprRowEvent $rowT)
                         & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${PerHostTimeoutSeconds}s)" }
                         & $Send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${PerHostTimeoutSeconds}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
                         $failCount++; $done++
@@ -1329,7 +1344,7 @@ function Invoke-UprFanOut {
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}
                             $j.PS = $null
                             $rowR = @{ _rk="$($j.Host)|abandoned"; Host=$j.Host; Plugin=''; Product=''; Version=''; Decision='Abandoned'; Detail=$reason; Result=$reason }
-                            [void]$rows.Add($rowR); & $Send (@{ type='row' } + $rowR)
+                            [void]$rows.Add($rowR); & $Send (New-UprRowEvent $rowR)
                             & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail=$reason }
                             $failCount++; $done++; $abandoned++
                         }
@@ -1664,7 +1679,7 @@ function Invoke-JanetToolAction {
         $profs = @($catalog.Profiles).Count
         $osn   = @($catalog.OperatingSystemPluginNames).Count
         $row = @{ Source=$src; Profiles=$profs; 'OS Plugin Patterns'=$osn }
-        & $send (@{ type='row' } + $row)
+        & $send (New-UprRowEvent $row)
         & $log "Catalog loaded from $src - $profs profile(s), $osn OS pattern(s)." 'ok'
         return @{ rows=@($row); summary=@{ total=$profs; source=$src } }
     }
@@ -1848,7 +1863,7 @@ function Invoke-JanetToolAction {
                 Decision   = $decision
             }
             [void]$rows.Add($row)
-            & $send (@{ type='row' } + $row)
+            & $send (New-UprRowEvent $row)
             # Audit honesty: report-findings is a parse-only operation that contacts
             # NO host -- do not emit a TouchHost audit (nothing was touched). The
             # parsed findings are surfaced as table rows + a status summary only.
@@ -1890,7 +1905,7 @@ function Invoke-JanetToolAction {
                     Exact      = $(if ([string]$f.HostAttribution -eq 'section-approximate') { 'section-approx' } else { 'exact' })
                 }
                 [void]$rows.Add($row)
-                & $send (@{ type='row' } + $row)
+                & $send (New-UprRowEvent $row)
                 $emitted++
             }
             # No per-finding audit: os-findings is a pure report parse that contacts

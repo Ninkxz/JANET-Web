@@ -111,8 +111,8 @@ Describe 'upr 1.2.7 - per-candidate uninstall failure hint (P1: computed in modu
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.7 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.7'
+    It 'manifest version is at or past 1.2.7 (P1 harvest-scope fix; exact pin migrated to newest bump)' {
+        ([version][string]$mani.version -ge [version]'1.2.7') | Should Be $true
     }
     It 'the New-UprEmitRows closure does NOT throw when invoked with a Failure candidate (P1 regression guard)' {
         # BEHAVIORAL: the closure must not call an unresolvable function (Get-JanetTroubleshootHint is not in
@@ -134,5 +134,40 @@ Describe 'upr 1.2.7 - per-candidate uninstall failure hint (P1: computed in modu
         ($src -match "\`$ch\s*=\s*Get-JanetTroubleshootHint\s*-Message\s*\`$rt")                       | Should Be $true
         ($src -match "if \(\`$ch\) \{[^}]*\`$row\['Hint'\] = \[string\]\`$ch")                          | Should Be $true
         ($src -match 'FIX: \$ch')                                                                     | Should Be $true
+    }
+}
+
+# loop85 (P0): a candidate row carries an app 'Type' key, and the row-event emit was `@{ type='row' } + $row`,
+# which THROWS on PS 5.1 (case-insensitive Hashtable: 'type' == 'Type' -> duplicate-key ArgumentException),
+# aborting EVERY fan-out that found a candidate - one statement AFTER loop-84's P1 fix, so loop 84's "run
+# un-broken" claim was false and the static tests never emitted a Type-bearing row. New-UprRowEvent builds the
+# message in a case-SENSITIVE Hashtable so both keys survive to JSON. This test EXECUTES the emit.
+Describe 'upr 1.2.8 - the row-event emit does NOT collide on a candidate Type key (P0)' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+
+    It 'manifest version is exactly 1.2.8 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.8'
+    }
+    It 'New-UprRowEvent does NOT throw on a Type-bearing row and keeps BOTH type + Type (case-sensitive)' {
+        $row = @{ Host='WS01'; Product='OldJava'; Type='MSI'; Result='FAIL (setup exit 1603)' }
+        $threw = $false; $msg = $null
+        try { $msg = & $script:Mod { param($r) New-UprRowEvent $r } $row } catch { $threw = $true }
+        $threw            | Should Be $false
+        [string]$msg['type'] | Should Be 'row'
+        [string]$msg['Type'] | Should Be 'MSI'
+    }
+    It 'the OLD colliding merge is GONE from the emit sites (no `@{ type=row } + $row`)' {
+        # the only surviving mention is the explanatory comment in New-UprRowEvent
+        ([regex]::Matches($src, "&\s*\`$[Ss]end\s*\(@\{ type='row' \} \+").Count) | Should Be 0
+        ([regex]::Matches($src, "New-UprRowEvent \`$row").Count -ge 4)            | Should Be $true
+    }
+    It 'the plain @{type=row}+@{Type=..} merge really does throw on 5.1 (guards the root cause)' {
+        $threw = $false
+        try { $null = @{ type='row' } + @{ Type='EXE' } } catch { $threw = $true }
+        $threw | Should Be $true
+    }
+    It 'New-UprRowEvent uses a case-SENSITIVE Hashtable (a plain @{} would re-introduce the collision)' {
+        ($src -match 'New-Object System\.Collections\.Hashtable') | Should Be $true
     }
 }
