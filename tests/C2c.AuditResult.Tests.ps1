@@ -73,8 +73,8 @@ Describe 'c2c 1.15.9 - fix harvest attaches a troubleshooting hint to a failed h
     $man = & $cm { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
 
-    It 'manifest version is exactly 1.15.9 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.15.9'
+    It 'manifest version is at or past 1.15.9 (Mass-Fix hint; exact pin migrated to newest bump)' {
+        ([version][string]$man.version -ge [version]'1.15.9') | Should Be $true
     }
     It 'c2c imports the shared troubleshoot engine' {
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
@@ -83,8 +83,34 @@ Describe 'c2c 1.15.9 - fix harvest attaches a troubleshooting hint to a failed h
         ($src -match '\$hint\s*=\s*if\s*\(\$auditResult\s*-eq\s*''Failure''\s*-and\s*\$res\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
         ($src -match 'Detail=\[string\]\$res\.Detail;\s*Hint=\[string\]\$hint') | Should Be $true
     }
-    It 'the err log carries the FIX hint when one exists' {
+    It 'the Mass-Fix err log carries the FIX hint when one exists' {
         ($src -match "if \(\`$hint\) \{ &\s*\`$send @\{ type='log'; level='err'") | Should Be $true
         ($src -match 'FIX: \$hint')                                             | Should Be $true
+    }
+}
+
+# loop82 (informative-failures follow-up): the two READ-ONLY c2c harvests - the readiness SCAN and the
+# VERSION-CHECK - now attach a hint to a failure host. Scan: on Status CHECK ERRORS (ERROR/DNS MISMATCH
+# collapse to it) the raw Detail runs through the engine. Version-check: scoped to $lvl -eq 'error' (OFFLINE +
+# unknown) so a version string in a healthy Detail cannot false-match a numeric signature. Both mutate
+# $row['Hint'] + a row-based FIX: err log. Static analysis (both harvests run inside a fan-out over a real pool).
+Describe 'c2c 1.15.10 - read-only scan + version-check harvests attach a hint to a failure host' {
+    $man = & $cm { Get-JanetToolManifest }
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
+
+    It 'manifest version is exactly 1.15.10 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.15.10'
+    }
+    It 'the scan harvest computes a hint only for a CHECK ERRORS host' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$row\.Status\s*-eq\s*''CHECK ERRORS''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+    }
+    It 'the version-check harvest scopes the hint to error-level statuses (not a version-number false match)' {
+        ($src -match '\$hint\s*=\s*if\s*\(\$lvl\s*-eq\s*''error''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+    }
+    It 'both read-only harvests mutate the row Hint and emit a row-based gated FIX err log' {
+        # the $row['Hint'] mutation form is unique to the read-only harvests (Mass-Fix uses a row literal) -> 2
+        ([regex]::Matches($src, "if \(\`$hint\) \{ \`$row\['Hint'\] = \[string\]\`$hint \}").Count) | Should Be 2
+        # the row-based err log ($row.Host, not Mass-Fix's $res.Host) -> exactly the two read-only paths
+        ([regex]::Matches($src, "level='err'; text=`"\`$\(\[string\]\`$row\.Host\).*FIX: \`$hint").Count) | Should Be 2
     }
 }
