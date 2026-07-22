@@ -94,18 +94,19 @@ Describe 'c2c 1.15.9 - fix harvest attaches a troubleshooting hint to a failed h
 # collapse to it) the raw Detail runs through the engine. Version-check: scoped to $lvl -eq 'error' (OFFLINE +
 # unknown) so a version string in a healthy Detail cannot false-match a numeric signature. Both mutate
 # $row['Hint'] + a row-based FIX: err log. Static analysis (both harvests run inside a fan-out over a real pool).
-Describe 'c2c 1.15.10 - read-only scan + version-check harvests attach a hint to a failure host' {
+Describe 'c2c 1.15.11 - read-only scan + version-check harvests attach a hint to a failure host' {
     $man = & $cm { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
 
-    It 'manifest version is exactly 1.15.10 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.15.10'
+    It 'manifest version is exactly 1.15.11 (newest bump holds the exact pin)' {
+        [string]$man.version | Should Be '1.15.11'
     }
     It 'the scan harvest computes a hint only for a CHECK ERRORS host' {
         ($src -match '\$hint\s*=\s*if\s*\(\$row\.Status\s*-eq\s*''CHECK ERRORS''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
     }
-    It 'the version-check harvest scopes the hint to error-level statuses (not a version-number false match)' {
-        ($src -match '\$hint\s*=\s*if\s*\(\$lvl\s*-eq\s*''error''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+    It 'the version-check harvest scopes the hint to the collapsed-ERROR case ($wasError), not self-explanatory offline (loop83)' {
+        ($src -match '\$wasError\s*=\s*\(\$row\.Status\s*-eq\s*''ERROR''\)') | Should Be $true
+        ($src -match '\$hint\s*=\s*if\s*\(\$wasError\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
     }
     It 'both read-only harvests mutate the row Hint and emit a row-based gated FIX err log' {
         # the $row['Hint'] mutation form is unique to the read-only harvests (Mass-Fix uses a row literal) -> 2
