@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.17'
+        version  = '6.8.18'
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -536,6 +536,22 @@ function Get-WptThreadCount {
     $threads = $Default
     if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
     return [Math]::Max(1, [Math]::Min(64, $threads))
+}
+
+# Build a 'row' event message WITHOUT the case-insensitive 'type'/'Type' collision (loop89 P1 fix). An sccm
+# deployment row carries an app 'Type' key, and `@{ type='row' } + $row` THROWS on PS 5.1 - a `@{}` literal is a
+# case-INSENSITIVE Hashtable, so adding the event key 'type' to a row already holding 'Type' is a duplicate-key
+# ArgumentException. It crashed sccm-available and sccm-install-available at the first result row (on the install
+# path AFTER the destructive CCM trigger already ran, losing the per-item VulnPatched audits). A case-SENSITIVE
+# Hashtable holds both, and ConvertTo-Json (the server's emit serializer) renders them as the distinct JSON keys
+# the case-sensitive JS view expects. (Mirror of upr's New-UprRowEvent, loop85.) ANY future Type-bearing wpt row
+# must emit via this rather than `@{ type='row' } + $row`.
+function New-WptRowEvent {
+    param($Row)
+    $m = New-Object System.Collections.Hashtable   # case-SENSITIVE
+    if ($Row) { foreach ($k in $Row.Keys) { $m[$k] = $Row[$k] } }
+    $m['type'] = 'row'
+    return $m
 }
 
 # Set of identities that resolve to THIS dispatcher host: shortname, FQDN, all
@@ -5063,7 +5079,7 @@ function Invoke-JanetToolAction {
             foreach ($a in (Expand-WptSingleHostResult $call.Result)) {
                 $g = { param($k) if ($a -is [hashtable]) { [string]$a[$k] } else { [string]$a.$k } }
                 $row = @{ _rk="$hostName|$(& $g 'Type')|$(& $g 'Id')|$(& $g 'Name')"; Host=$hostName; Type=(& $g 'Type'); Name=(& $g 'Name'); State=(& $g 'State'); Version=(& $g 'Version'); Id=(& $g 'Id'); Revision=(& $g 'Revision') }
-                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                [void]$rows.Add($row); & $send (New-WptRowEvent $row)   # loop89: the row carries 'Type' - a case-insensitive merge would throw
             }
             $detail = "$($rows.Count) available item(s)"
             & $send @{ type='status'; text="$hostName : $detail" }
@@ -5104,7 +5120,7 @@ function Invoke-JanetToolAction {
                 $isOk = ($rst -eq 'Triggered')
                 if ($isOk) { $okCount++ } elseif ($rst -eq 'Failed') { $failCount++ }
                 $row = @{ Host=$hostName; Type=(& $g 'Type'); Name=(& $g 'Name'); Result=$rst; Detail=(& $g 'Detail') }
-                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                [void]$rows.Add($row); & $send (New-WptRowEvent $row)   # loop89: the row carries 'Type' - a case-insensitive merge would throw (and it fired AFTER the destructive trigger, losing this audit)
                 & $send @{ type='audit'; action='VulnPatched'; target=$hostName; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($isOk){1}else{0}); detail="$($row.Type) $($row.Name): $rst - $($row.Detail)" }
             }
         } else {

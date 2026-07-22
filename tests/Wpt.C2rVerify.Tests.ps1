@@ -80,7 +80,7 @@ Describe 'wpt Chrome/Edge verify scriptblock - gates on the install result, not 
         ($moduleSrc -match '\(\(Get-Date\) - \$mod\)\.TotalDays -ge 14') | Should Be $true
         ($moduleSrc -match '\[bool\]\(\$lastResult -eq 0\)')            | Should Be $true
     }
-    It 'wpt manifest is exactly 6.8.17 (newest bump holds the exact pin)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.8.17'
+    It 'wpt manifest is at or past 6.8.17 (client-verify real-timestamp fix; exact pin migrated to newest bump)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'6.8.17') | Should Be $true
     }
 }
