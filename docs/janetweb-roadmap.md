@@ -1415,6 +1415,21 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   segment) - correct glob `CertDeploy*.Tests.ps1` (5 files, 97). **loop-37 lesson:** engine change shared, ran
   engine-consumers+certdeploy (234) green. Pester **1549→1554** green. Next: c2c scan/version harvests;
   per-candidate upr failures. SECRET parity: +engine window widening + certdeploy read-only wires.
+- **Loop 82 (DONE 2026-07-21) — informative-failures FOLLOW-UP + loop-81 self-review:** a Fable adversarial
+  subagent on loop-81 confirmed the certdeploy wire SAFE on every CHECK ERROR shape, the widened regex NOT a ReDoS
+  risk (165ms/500KB), and greedy-vs-lazy a correctness no-op (2000-iter fuzz, 0 diffs) - but found **1 confirmed
+  minor mislabel**: the loop-81 80-char widen newly routed long-gap **AD-object errors** (`The computer
+  account/object ... could not be found in Active Directory`) to the DNS hint (a deleted AD account is not a DNS
+  failure). **Fixed** with two negative lookaheads: `computer\b(?!\s+(?:account|object)\b).{0,80}?could not be
+  found(?!\s+in Active Directory)` - all 4 AD forms now return '', genuine short/long-FQDN host-not-found still
+  route. **Workstream:** wired the hint into **c2c's two remaining read-only harvests** - the **scan**
+  (`$row.Status -eq 'CHECK ERRORS'`, ERROR/DNS MISMATCH collapse to it) and **version-check** (scoped to `$lvl -eq
+  'error'` so a version string like `1722.0` in a healthy Detail can't false-match a numeric signature). Both
+  mutate `$row['Hint']` + a row-based `FIX:` err log. **c2c now fully wired across all 3 fan-outs** (Mass-Fix 77,
+  scan+version 82). c2c **1.15.9→1.15.10**. Tests: Troubleshoot.Hint +1 (AD-object exclusion), C2c.AuditResult +4.
+  **loop-37 lesson:** engine change shared + c2c slow, ran full c2c (288) + engine-consumers (239) green. Pester
+  **1554→1559** green. Next: per-candidate upr failures; grow the signature set. SECRET parity: +AD-object
+  exclusion + c2c read-only wires.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
