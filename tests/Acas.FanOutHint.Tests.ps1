@@ -10,8 +10,8 @@ $script:Root = Split-Path $PSScriptRoot -Parent
 $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Force -PassThru
 
 Describe 'acas 1.11.13 - fan-out attaches a troubleshooting hint to a failed host' {
-    It 'manifest version is exactly 1.11.13 (newest bump holds the exact pin)' {
-        [string](& $m { Get-JanetToolManifest }).version | Should Be '1.11.13'
+    It 'manifest version is at or past 1.11.13 (fan-out hint; exact pin migrated to the newest bump)' {
+        ([version][string](& $m { Get-JanetToolManifest }).version -ge [version]'1.11.13') | Should Be $true
     }
     It 'a failed worker result -> Hint row field + err-log FIX line; raw result preserved' {
         $events = New-Object System.Collections.ArrayList

@@ -497,6 +497,11 @@ $script:AcasUpdateProfiles = @{
         # JANET host from the wave BEFORE job build (a Java uninstall on self is forbidden).
         NeedsJavaFix = $true
         ForbidSelf   = $true
+        # PostRemovedOk (loop85 F2): this is a REMOVAL, so the Verify probe reading 'not installed' AFTER a
+        # successful uninstall is the CONFIRMATION the product is gone - not a degraded probe. Tells the bump
+        # verdict to book post='not installed' as a confirmed OK/VulnPatched Success (an UPDATE profile leaves this
+        # off, where 'not installed' means the probe could not read the new version - e.g. the Chrome guard).
+        PostRemovedOk = $true
         Script = {
             # The shared engine source is prepended by the worker, so Invoke-JanetJavaRemediation
             # is defined in THIS rehydrated scriptblock. Fail closed if it is somehow absent.
@@ -1125,7 +1130,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.13'
+        version  = '1.11.14'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1881,7 +1886,7 @@ $script:AcasUpdateWorker = {
     # NeedsJavaFix profiles (Oracle-Java REMOVE) ride the SHARED fix-java engine,
     # whose SOURCE the dispatcher injects as $JavaFixSrcIn (this bare pool runspace
     # has no module scope) - prepended to the profile Script text below.
-    $isPkgProfile = $false; $needsStaging = $false; $needsJavaFix = $false; $needsSpecFix = $false
+    $isPkgProfile = $false; $needsStaging = $false; $needsJavaFix = $false; $needsSpecFix = $false; $postRemovedOk = $false
     try {
         if ($prof -is [hashtable] -and $prof.ContainsKey('IsPackage')) { $isPkgProfile = [bool]$prof['IsPackage'] }
         elseif ($prof.PSObject -and $prof.PSObject.Properties['IsPackage']) { $isPkgProfile = [bool]$prof.IsPackage }
@@ -1891,6 +1896,9 @@ $script:AcasUpdateWorker = {
         elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsJavaFix']) { $needsJavaFix = [bool]$prof.NeedsJavaFix }
         if ($prof -is [hashtable] -and $prof.ContainsKey('NeedsSpecFix')) { $needsSpecFix = [bool]$prof['NeedsSpecFix'] }
         elseif ($prof.PSObject -and $prof.PSObject.Properties['NeedsSpecFix']) { $needsSpecFix = [bool]$prof.NeedsSpecFix }
+        # PostRemovedOk (loop85 F2): a REMOVAL profile - post='not installed' is a confirmed removal, not a degraded probe.
+        if ($prof -is [hashtable] -and $prof.ContainsKey('PostRemovedOk')) { $postRemovedOk = [bool]$prof['PostRemovedOk'] }
+        elseif ($prof.PSObject -and $prof.PSObject.Properties['PostRemovedOk']) { $postRemovedOk = [bool]$prof.PostRemovedOk }
     } catch {}
     if ($isPkgProfile -and -not $VerifyOnlyIn) {
         return "FAIL: package-deploy profile not supported in JANET Web host (no controller Packages\ staging tree)."
@@ -2115,14 +2123,20 @@ $script:AcasUpdateWorker = {
             # formerly ANY inequality read as "bumped" -> OK, so a Defender probe returning 'error' booked a
             # confirmed patch. 'none' (Log4j clean) and non-version state transitions (spec-exec -> COMPLIANT)
             # are NOT degraded and stay a confirmed bump. (loop39/item36)
+            # loop85 (F2): a REMOVAL profile ($postRemovedOk) whose Verify probe reads post='not installed' has
+            # CONFIRMED the product is gone - that is the success state, NOT a degraded probe. Mirror of
+            # Get-AcasBumpVerdict's PostRemovedOk gate. An UPDATE profile leaves the flag off, so 'not installed'
+            # stays degraded there (the Chrome false-clean guard is an UPDATE and is unaffected). Without this a
+            # real Oracle-Java removal (8.0.301 -> 'not installed') was booked UNCONFIRMED -> audited Failure.
+            $bumpRemovedOk = ($postRemovedOk -and ([string]$postV).ToLower() -eq 'not installed')
             $bumpDegraded = @('error','n/a','not installed')
             $bumpPreVer = $null; $bumpPostVer = $null
             $bumpPreOk  = [version]::TryParse([string]$preV,  [ref]$bumpPreVer)
             $bumpPostOk = [version]::TryParse([string]$postV, [ref]$bumpPostVer)
-            if (($bumpDegraded -contains ([string]$postV).ToLower()) -or ($bumpPreOk -and $bumpPostOk -and $bumpPostVer -le $bumpPreVer)) {
+            if ((-not $bumpRemovedOk) -and (($bumpDegraded -contains ([string]$postV).ToLower()) -or ($bumpPreOk -and $bumpPostOk -and $bumpPostVer -le $bumpPreVer))) {
                 return "UNCONFIRMED: post-update version not confirmed forward ($preV -> $postV; probe degraded or no forward change) | $updateStr $marker"
             }
-            $diff = "bumped: $preV -> $postV"
+            $diff = if ($bumpRemovedOk) { "removed: $preV -> not installed (confirmed gone)" } else { "bumped: $preV -> $postV" }
             return "$updateStr | $diff $marker"
         } catch {
             return "FAIL: $($_.Exception.Message)"
@@ -2411,7 +2425,12 @@ $script:AcasOkOf = { param($res) (-not ($res -like 'FAIL*')) -and (-not ($res -l
 # (it runs in a module-less fan-out runspace and can't call this fn); keep in lockstep. Tested by
 # Acas.BumpVerdict.Tests.ps1.
 function Get-AcasBumpVerdict {
-    param([string]$PreV, [string]$PostV)
+    param([string]$PreV, [string]$PostV, [switch]$PostRemovedOk)
+    # loop85 (F2): a REMOVAL profile's Verify probe reading 'not installed' post IS the confirmation the product
+    # is gone - NOT a degraded probe. Gated on PostRemovedOk (the Java-remove profile sets it); an UPDATE profile
+    # leaves it off, so 'not installed' stays degraded there (the Chrome false-clean guard is an UPDATE, unaffected).
+    # The AcasUpdateWorker mirrors this inline (module-less runspace) - keep in sync.
+    if ($PostRemovedOk -and ([string]$PostV).ToLower() -eq 'not installed') { return 'confirmed' }
     $degraded = @('error','n/a','not installed')
     if ($degraded -contains ([string]$PostV).ToLower()) { return 'unconfirmed' }
     $preVer = $null; $postVer = $null
