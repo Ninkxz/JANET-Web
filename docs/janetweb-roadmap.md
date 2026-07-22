@@ -1469,7 +1469,23 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   inline mirror / `:2413` canonical) lists as a degraded sentinel. Clean fix = a `PostRemovedOk` profile-intent flag
   gating the degrade (`$prof` is in worker scope at `:1876`), tested WITHOUT weakening the Chrome false-clean guard.
   (Also backlog from the deep-dive: a residual mtime-only verify in `New-AcasClientVerify:185` (wpt shares it at
-  `:941`); a kb-install wrong-box-guard parity gap at `AcasKbInstallBlock:2710`.)
+  `:941`); a kb-install wrong-box-guard parity gap at `AcasKbInstallBlock:2710`.) **[F2 done loop 85; the two extra
+  items remain backlog.]**
+- **Loop 85 (DONE 2026-07-22) — acas F2 fix + a CONFIRMED P0 the loop-84 self-review missed:** the Fable self-review
+  of loop 84 executed the *actual* upr run and found it **STILL aborts** - `& $Send (@{ type='row' } + $row)`
+  (`upr.psm1`) throws on every candidate row because the row carries an app `Type` key and a PS 5.1 `@{}` literal is
+  case-INSENSITIVE (`type` == `Type` → duplicate-key ArgumentException), one statement AFTER loop-84's P1 fix. So
+  loop-84's "run un-broken" claim was false; its static tests never emitted a Type-bearing row. **P0 fix:** a
+  case-SENSITIVE `System.Collections.Hashtable` holds both keys (ConvertTo-Json renders both) - added
+  `New-UprRowEvent` + swapped all 6 emits; the regression test EXECUTES the emit. upr **1.2.7→1.2.8**. **Workstream
+  F2** (deferred from loop 84): a successful Oracle-Java removal was audited VulnPatched **Failure** (post='not
+  installed' hit the degraded-sentinel list). Fixed with a `PostRemovedOk` profile flag gating `Get-AcasBumpVerdict`
+  (+ the worker inline mirror) so ONLY a declared removal books post='not installed' as confirmed - **the Chrome
+  false-clean guard is provably intact** (update/error/n-a/downgrade still unconfirmed). acas **1.11.13→1.11.14**.
+  Tests: Upr +5 (behavioral emit), Acas.BumpVerdict +7 (incl. Chrome-guard-intact). **loop-37:** ran full acas (193)
+  + full suite. Pester **1567→~1579** green. **RECURRING LESSON recorded:** 3 loops running (82→83→84) shipped a
+  "fix" whose green STATIC tests never executed the failing path; fan-out hint/emit wires now get a BEHAVIORAL test.
+  SECRET parity: +upr `New-UprRowEvent` case-sensitive emit + acas F2 `PostRemovedOk` gate.
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
