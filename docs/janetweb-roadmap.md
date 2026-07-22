@@ -1448,6 +1448,28 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   informative-failures follow-up list is COMPLETE** (9 destructive + restart delegation + 3 read-only scans + upr
   per-candidate). SECRET parity: +AD-object signature +dotted-version boundaries +5 MSI signatures + c2c `$wasError` +
   upr per-candidate wire.
+- **Loop 84 (DONE 2026-07-22) — REMEDIATE loop-83 regressions (self-review-driven):** a Fable self-review of loop-83's
+  large engine change found **1 CRITICAL + 3 regressions** the 274-green (static-only) run masked, all fixed: **P1
+  (CRITICAL)** - the upr per-candidate hint was inside `New-UprEmitRows`'s `.GetNewClosure()`'d block, which loses
+  module scope for the hint engine → `CommandNotFoundException` **aborted the whole uninstall run at the first failing
+  candidate**; moved the hint into `Invoke-UprFanOut`'s harvest (module scope) + added a BEHAVIORAL closure-no-throw
+  test (the static loop-83 test never executed the closure). **P2** - `(?![\d.])` dropped a sentence-final `1603.`;
+  fixed to trailing `(?!\.?\d)` + leading `(?<![\dxX.])` (also kills the `0x1727` hex false-positive loop-83
+  introduced), all 6 codes. **P2** - c2c version-check `$wasError` scoping dropped session/auth-failure hints (the
+  worker maps those to OFFLINE, not ERROR); fixed to error-level-except-`No TCP on*`. **P3** - the AD signature still
+  missed "could not be resolved in Active Directory" (loop-83's commit claim was false); added the verb to both AD
+  alternatives. c2c **1.15.11→1.15.12**, upr **1.2.6→1.2.7**. Parallel **acas deep-dive**: its headline F1 (`[int]''`
+  crash) **REFUTED** (verified `[int]''`→0 on 5.1); **F2** (a real Oracle-Java-remove misbooked VulnPatched Failure -
+  `Get-AcasBumpVerdict` treats post='not installed' as degraded) **DEFERRED** to its own loop. **loop-37 lesson:**
+  engine change shared, ran engine+all consumers+upr (200 fast subset) + full suite. Pester **1564→~1567** green.
+  SECRET parity: mirror the loop-84-CORRECTED forms (P1 harvest-scope move, `(?<![\dxX.])..(?!\.?\d)` boundaries, AD
+  "resolved", c2c no-TCP-exclusion), NOT the loop-83 forms.
+- **BACKLOG (ranked, not started) — acas F2:** a successful Oracle-Java removal (`fix-java`) is audited VulnPatched
+  **Failure** because its Verify probe reads post='not installed', which `Get-AcasBumpVerdict` (`acas.psm1:2118-2124`
+  inline mirror / `:2413` canonical) lists as a degraded sentinel. Clean fix = a `PostRemovedOk` profile-intent flag
+  gating the degrade (`$prof` is in worker scope at `:1876`), tested WITHOUT weakening the Chrome false-clean guard.
+  (Also backlog from the deep-dive: a residual mtime-only verify in `New-AcasClientVerify:185` (wpt shares it at
+  `:941`); a kb-install wrong-box-guard parity gap at `AcasKbInstallBlock:2710`.)
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
