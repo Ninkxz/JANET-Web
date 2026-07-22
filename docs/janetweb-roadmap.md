@@ -1514,6 +1514,29 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   **loop-37:** touches acas+wpt, ran both + full suite. Pester **1585→~1599** green. SECRET parity: +client-verify
   false-clean fix (acas + wpt forks). **Backlog: the Store-app EXPERIMENTAL mtime-only verify (acas:628,
   Microsoft.WindowsApp) - same class, no Omaha ClientState analog, left as-is.**
+- **Loop 88 (DONE 2026-07-22) — verify honesty: the loop-87 fix never fired (inert) + wpt deep-dive:** the Fable
+  self-review of loop 87 EXECUTED the generated probe and found a **P1**: `$mod = $key.LastWriteTime` where
+  `$key = Get-Item <registry-path>` is ALWAYS `$null` - a `RegistryKey` has NO `LastWriteTime` member - so every
+  Chrome/Edge verify short-circuited to `Verified=$null`/`LastUpdated='n/a'`, pre AND post loop 87 (my loop-87
+  ClientState logic was correct but UNREACHABLE; fail-SAFE - never a false green). **Fix (real timestamp source):**
+  both probes now derive `$mod` from the sibling `ClientState\{GUID}\LastCheckSuccess` (unix epoch of the last
+  successful check) instead of the dead key mtime, keep the `LastInstallerResult=0` gate, + folded in the self-
+  review's #2 (empty-string guard) and #3 (range-safe `[int64]`/TryParse). **Verified END-TO-END against a sandbox
+  HKCU key** - the executing test the loop-87 statics lacked (fresh+success→True w/ a REAL date, fresh+failure→False,
+  stale→False, no-signal→null; acas + wpt). acas **1.11.16→1.11.17**, wpt **6.8.16→6.8.17**. Tests: Acas.ClientVerify
+  +5 (executing probe), Wpt.C2rVerify updated. **loop-37:** ran acas+wpt+full suite. Pester **1599→~1604** green.
+  A parallel **wpt deep-dive** found a **P1 DEFERRED to loop 89** (top priority) + backlog. SECRET parity: +client-
+  verify real-timestamp fix (acas + wpt forks).
+- **BACKLOG (ranked, from the loop-88 wpt deep-dive):** **(P1, loop 89)** `sccm-available`/`sccm-install-available`
+  (`wpt.psm1:5056/:5097`) crash on `& $send (@{ type='row' } + $row)` - the case-insensitive `type`/`Type`
+  duplicate-key ArgumentException (same class as upr P0 loop 85); on the install path the crash lands AFTER the
+  destructive CCM trigger → per-item VulnPatched audits lost. software-scan already fixed it (`'Install Type'`,
+  `:5188`); these two were missed. Fix = case-sensitive emit merge (à la `New-UprRowEvent`, no JS change). **(P2)**
+  `cleanup-disk` + live `clean-user-apps` (profile-DELETING) have NO wrong-box DNS-mismatch guard (`:3017`/`:3593`).
+  **(P2/P3)** Oracle Java Software-Center verify is freshness-only (`:1374`, 30-day, no success signal) - likely ALSO
+  inert (same dead `Get-Item.LastWriteTime`). **(P3)** bool-coercion sweep incomplete (hardlock/rebootafter/noreboot
+  raw `[bool]`); `Get-WptThreadCount` degrades garbage→1 thread (`:534`). **Also: the systemic `Get-Item registry
+  .LastWriteTime` dead-read affects the C2R verifies (acas:161/wpt:911) + reboot-pending age (wpt:2343) - a sweep.**
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
