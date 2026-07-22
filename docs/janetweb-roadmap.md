@@ -1550,6 +1550,21 @@ _(items 60–61: loop-53 adto Fable deep-dive — worker-CONFIRMED, re-verify be
   a Type key (other 35 emits safe). wpt **6.8.17→6.8.18**. Tests: Wpt.SccmRowEvent (NEW +8, EXECUTES the emit - old
   merge throws, helper keeps both keys, JSON distinct); loop-88 6.8.17 pin floored. **loop-37:** ran wpt + full
   suite. Pester **1604→~1612** green. SECRET parity: +New-WptRowEvent sccm emit fix (wpt fork).
+- **Loop 90 (DONE 2026-07-22) — destructive-path hardening: the profile-deleting wrong-box guard:** the Fable
+  self-review of loop 89 EXECUTED the real sccm dispatchers (30/30, incl. reproducing the pre-fix crash on the parent
+  commit) → **SHIP-WORTHY** (New-WptRowEvent correct, the 3 per-item VulnPatched audits fire in-sequence, summary
+  right, stored rows are the originals; only the 2 sccm rows carry Type; JS view intact). 1 pre-existing note →
+  backlog (Skipped item audits Failure). **Workstream (the loop-88 P2, destructive hardening):** `WptCleanBlock`
+  (cleanup-disk - deletes temp/caches/stale user PROFILES) and `WptCleanUserAppsBlock` (deletes per-profile app
+  binaries) were the two wpt destructive workers MISSING the wrong-box DNS-mismatch guard every sibling carries -
+  stale DNS / reused IP → delete on the WRONG machine. **Fix:** added the guard (verbatim from WptPatchBlock ~:2060)
+  as the FIRST statement inside each block's try (before any deletion; IPv4 skips, empty probe proceeds; the return
+  runs the finally). wpt **6.8.18→6.8.19**. Tests: Wpt.SelfGuardAndClean +6 (replica behavioral + static-presence in
+  BOTH blocks, matching the loop-86 kb-install convention - the blocks have a TCP+session pre-check so aren't
+  behaviorally executable); loop-89 6.8.18 pin floored. **loop-37:** ran wpt guards + full suite. Pester
+  **1612→~1618** green. SECRET parity: +WptClean/CleanUserApps wrong-box guards (wpt fork). **Backlog: the
+  freshness-only Oracle-Java verify (likely inert); the dead-`Get-Item.LastWriteTime` sweep (C2R + reboot-pending);
+  the bool-coercion sweep.**
 
 ## Coverage status (after loop 13)
 Both destructive surfaces reviewed + test-pinned: WinRM fan-out (confirm + self-guard +
