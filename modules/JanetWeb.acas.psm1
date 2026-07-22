@@ -1130,7 +1130,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.14'
+        version  = '1.11.15'
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -2748,6 +2748,18 @@ $script:AcasKbInstallBlock = {
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$(if ($Auth) { $Auth } else { 'Negotiate' }) }
     $sess = $null; try { $sess = New-PSSession @splat } catch { return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Session failed: $($_.Exception.Message)" }
     try {
+        # DNS-mismatch guard (HARD ABORT, loop86): before ANY destructive install, verify the box that answered
+        # is the one we dialed - stale DNS / a reused IP could install KBs (and reboot, when NoReboot is off) on
+        # the WRONG machine. This worker was the only destructive acas fan-out MISSING this guard; mirrors the
+        # update (~2004) + reboot (~2174) workers. An IPv4-literal target has no shortname to compare, so skip;
+        # an empty probe -> proceed (don't regress). The return runs the finally below (session cleanup).
+        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            $targetShort = ($Computer -split '\.')[0]
+            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+                return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no KBs installed"
+            }
+        }
         if ($Method -eq 'usoclient') {
             # UsoClient: scan + install all approved WU updates (no per-KB targeting).
             try {

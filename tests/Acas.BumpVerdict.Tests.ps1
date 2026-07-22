@@ -91,8 +91,8 @@ Describe 'Get-AcasBumpVerdict - a REMOVAL profile books post=not-installed as co
         $prof = & $script:Mod { $script:AcasUpdateProfiles['Oracle Java - Remove (fix-java)'] }
         [bool]$prof['PostRemovedOk'] | Should Be $true
     }
-    It 'acas manifest bumped to 1.11.14 (newest bump holds the exact pin)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.14'
+    It 'acas manifest is at or past 1.11.14 (F2; exact pin migrated to the newest bump)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'1.11.14') | Should Be $true
     }
 }
 

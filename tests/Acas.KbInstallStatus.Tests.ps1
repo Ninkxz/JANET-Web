@@ -62,3 +62,40 @@ Describe 'acas - manifest version floor (loop-25 honest kb-install status landed
         ([version][string]$mani.version -ge [version]'1.11.6') | Should Be $true
     }
 }
+
+# loop86: AcasKbInstallBlock is a DESTRUCTIVE worker (MECM InstallUpdates + wusa MSU + UsoClient install, and a
+# reboot when NoReboot is off) that was the ONLY destructive acas fan-out MISSING the wrong-box (DNS-mismatch)
+# guard its siblings carry (update worker ~:2004, reboot workers ~:2174/:2201). Stale DNS / a reused IP could
+# install KBs on the WRONG machine. Now it verifies the answering box's $env:COMPUTERNAME == the dialed shortname
+# before any install (IPv4-literal target skips the compare; empty probe proceeds). Same shape as the shared
+# wrong-box guard in PkginstallSecureboot.WrongBoxGuard.Tests.ps1. Unit-scope: no host contact below.
+$script:Src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Raw
+function Get-KbExpectedName { param([string]$h) if ($h -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($h -split '\.')[0] } }
+function Test-KbWrongBoxAbort { param([string]$Target,[string]$Answering) $e = Get-KbExpectedName $Target; [bool]($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -and $Answering -and ($Answering.Trim().ToUpper() -ne $e.ToUpper())) }
+
+Describe 'AcasKbInstallBlock wrong-box guard (loop86) - the destructive kb-install worker aborts on DNS mismatch' {
+    It 'the guard is PRESENT in AcasKbInstallBlock before the install (COMPUTERNAME compare + hard-abort)' {
+        # scope the assertion to the kb-install block body
+        $blk = [regex]::Match($script:Src, '(?s)\$script:AcasKbInstallBlock\s*=\s*\{.*?\n\}').Value
+        ($blk -match "\`$Computer -notmatch '\^\\d\{1,3\}\(\\\.\\d\{1,3\}\)\{3\}\$'")                 | Should Be $true
+        ($blk -match '\$actualName\s*=\s*try \{ Invoke-Command -Session \$sess.*\$env:COMPUTERNAME')  | Should Be $true
+        ($blk -match "DNS mismatch: dialed '\`$targetShort' but remote is.*ABORTED, no KBs installed") | Should Be $true
+    }
+    It 'the abort predicate: an FQDN whose box answers with a DIFFERENT name aborts' {
+        Test-KbWrongBoxAbort 'WS01.area.af.mil' 'WS02' | Should Be $true
+    }
+    It 'the matching box (same shortname) does NOT abort' {
+        Test-KbWrongBoxAbort 'WS01.area.af.mil' 'WS01' | Should Be $false
+        Test-KbWrongBoxAbort 'WS01' 'ws01'             | Should Be $false   # case-insensitive
+    }
+    It 'an IPv4-literal target skips the compare (no shortname to match)' {
+        (Get-KbExpectedName '10.1.2.3')            | Should Be ''
+        Test-KbWrongBoxAbort '10.1.2.3' 'ANY-NAME' | Should Be $false
+    }
+    It 'an empty probe (COMPUTERNAME unreadable) proceeds - does not regress into a false abort' {
+        Test-KbWrongBoxAbort 'WS01.area.af.mil' '' | Should Be $false
+    }
+    It 'acas manifest bumped to 1.11.15 (newest bump holds the exact pin)' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.15'
+    }
+}
