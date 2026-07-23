@@ -172,10 +172,12 @@ Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)'
 # loop90: WptCleanBlock (cleanup-disk - deletes temp files, caches, and stale user PROFILES) and
 # WptCleanUserAppsBlock (deletes per-profile app binaries) are DESTRUCTIVE workers that were the two wpt
 # destructive blocks MISSING the wrong-box (DNS-mismatch) guard every sibling carries. A stale DNS / reused IP
-# could delete on the WRONG machine. Both now verify the answering box's $env:COMPUTERNAME == the dialed
-# shortname before any deletion (IPv4-literal skips; empty probe proceeds), mirroring WptPatchBlock. The blocks
-# have a TCP pre-check + New-PSSession before the guard (unlike WptRebootBlock), so - matching the kb-install
-# guard convention (loop86) - the guard DECISION is tested via a verbatim replica + a static presence assertion.
+# could delete on the WRONG machine. Both verify the answering box's $env:COMPUTERNAME == the dialed
+# shortname before any deletion (IPv4-literal skips; empty probe proceeds), mirroring WptPatchBlock.
+# Audit 2026-07-23 deferred pass: the dedicated probe round-trip is FOLDED into each block's first working
+# Invoke-Command (the WptRebootScheduleBlock pattern) - the remote scriptblock's FIRST statement does the
+# name compare and returns a DnsMismatch marker; the controller hard-aborts with the SAME abort strings.
+# The guard DECISION is tested via a verbatim replica + static presence assertions pinning the folded shape.
 $script:WptSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
 function Test-WptCleanWrongBoxAbort { param([string]$Computer,[string]$Answering)
     $skip = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
@@ -198,14 +200,63 @@ Describe 'WptCleanBlock + WptCleanUserAppsBlock wrong-box (DNS-mismatch) guard (
     It 'an empty probe (COMPUTERNAME unreadable) proceeds - no false abort' {
         Test-WptCleanWrongBoxAbort 'WS01.area.af.mil' '' | Should Be $false
     }
-    It 'the guard is PRESENT in BOTH destructive clean blocks (COMPUTERNAME compare + hard-abort)' {
+    It 'the guard is PRESENT in BOTH destructive clean blocks (folded first-statement COMPUTERNAME compare + hard-abort)' {
         # WptCleanBlock aborts with "nothing cleaned"; WptCleanUserAppsBlock with "nothing removed"
+        # (the abort strings are UNCHANGED by the audit 2026-07-23 deferred-pass fold).
         ($script:WptSrc -match "DNS mismatch: dialed '\`$targetShort' but remote is.*ABORTED, nothing cleaned") | Should Be $true
         ($script:WptSrc -match "DNS mismatch: dialed '\`$targetShort' but remote is.*ABORTED, nothing removed") | Should Be $true
-        # both are inside a block that opens a session then guards before Invoke-Command deletes
-        ([regex]::Matches($script:WptSrc, "\`$actualName = try \{ Invoke-Command -Session \`$sess -EA Stop -ScriptBlock \{ \`$env:COMPUTERNAME \} \} catch \{ '' \}").Count -ge 2) | Should Be $true
+        # The standalone probe round-trip is GONE: each block folds the name check into its first
+        # working Invoke-Command (first-statement-inside pattern). Extract each block's source up to
+        # its abort string and pin the folded guard inside it: the remote-side compare + the
+        # DnsMismatch marker return (IPv4-literal skips; unreadable name proceeds).
+        $cleanBlk = [regex]::Match($script:WptSrc, "(?s)\`$script:WptCleanBlock = \{.*?ABORTED, nothing cleaned").Value
+        $userBlk  = [regex]::Match($script:WptSrc, "(?s)\`$script:WptCleanUserAppsBlock = \{.*?ABORTED, nothing removed").Value
+        $cleanBlk | Should Not BeNullOrEmpty
+        $userBlk  | Should Not BeNullOrEmpty
+        foreach ($blk in @($cleanBlk, $userBlk)) {
+            ($blk -match [regex]::Escape('if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper()))')) | Should Be $true
+            ($blk -match [regex]::Escape('return @{ DnsMismatch = $env:COMPUTERNAME }')) | Should Be $true
+        }
+        # and the old dedicated clean-block probe idiom must NOT come back (fold holds)
+        ([regex]::Matches($script:WptSrc, "\`$actualName = try \{ Invoke-Command -Session \`$sess -EA Stop -ScriptBlock \{ \`$env:COMPUTERNAME \} \} catch \{ '' \}").Count) | Should Be 1
     }
-    It 'wpt manifest is exactly 6.8.19 (newest bump holds the exact pin)' {
-        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.8.19'
+    It 'wpt manifest is exactly 6.9.0 (newest bump holds the exact pin; audit 2026-07-23 deferred pass)' {
+        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.9.0'
+    }
+}
+
+# -----------------------------------------------------------------------------
+#  Audit 2026-07-23 deferred pass: the pool-runspace fan-out workers used to carry
+#  INLINE copies of the TCP reachability probe (~14 blocks) and the wrong-box
+#  DNS-name compare (~10 blocks) because bare worker runspaces can't see module
+#  functions. Invoke-WptFanOut (and Invoke-WptSingleHostCancelable) now INJECT
+#  Test-WptHostReachable + Test-WptRemoteNameMatch into the worker ISS instead.
+#  These pins replace the old inline-idiom assertions with equal strictness:
+#  the injection plumbing exists, the workers call the injected helpers, only the
+#  canonical probe copy remains, and the per-block abort strings are unchanged.
+# -----------------------------------------------------------------------------
+Describe 'Unified fan-out ISS helper injection (audit 2026-07-23 deferred pass)' {
+    It 'Invoke-WptFanOut takes -InjectFunctions and adds each as a SessionStateFunctionEntry' {
+        ($script:WptSrc -match '\[string\[\]\]\$InjectFunctions') | Should Be $true
+        ($script:WptSrc -match 'SessionStateFunctionEntry\(\[string\]\$fnName') | Should Be $true
+    }
+    It 'the ONLY TcpClient 5985/5986/445 sweep left is Test-WptHostReachable itself (inline copies removed)' {
+        ([regex]::Matches($script:WptSrc, 'foreach \(\$port in 5985').Count) | Should Be 1
+        # every worker block that used to carry the inline sweep now calls the injected probe
+        ([regex]::Matches($script:WptSrc, '\$reach = Test-WptHostReachable \$Computer').Count -ge 24) | Should Be $true
+    }
+    It 'Test-WptRemoteNameMatch exists with the canonical semantics (IPv4-literal + empty probe proceed)' {
+        (& $m { Test-WptRemoteNameMatch -Computer 'WS01.area.af.mil' -ActualName 'WS02' }) | Should Be $false
+        (& $m { Test-WptRemoteNameMatch -Computer 'WS01.area.af.mil' -ActualName 'ws01' }) | Should Be $true
+        (& $m { Test-WptRemoteNameMatch -Computer '10.1.2.3' -ActualName 'ANY-NAME' })     | Should Be $true
+        (& $m { Test-WptRemoteNameMatch -Computer 'WS01' -ActualName '' })                 | Should Be $true
+    }
+    It 'the standalone-guard workers call the injected DNS-name-check helper; abort strings unchanged' {
+        ([regex]::Matches($script:WptSrc, 'Test-WptRemoteNameMatch -Computer \$Computer -ActualName \$actualName').Count -ge 10) | Should Be $true
+        ($script:WptSrc -match "ABORTED, no reboot sent")     | Should Be $true
+        ($script:WptSrc -match "ABORTED, no KB installed")    | Should Be $true
+        ($script:WptSrc -match "ABORTED, no registry change") | Should Be $true
+        ($script:WptSrc -match "ABORTED, no action taken")    | Should Be $true
+        ($script:WptSrc -match "ABORTED, no patch triggered") | Should Be $true
     }
 }

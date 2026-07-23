@@ -141,12 +141,21 @@
     var csv = toCsv(colPairs.map(function (c) { return c[1]; }), rows, colPairs.map(function (c) { return c[0]; }));
     downloadBlob(String(nameBase) + '_' + fileStamp() + '.csv', 'text/csv', csv);
   }
+  // Build a lock toggle over a fixed control list: returns function(on) that sets
+  // .disabled on every (non-null) control. Pass a checkbox's ._cb element. Null /
+  // undefined entries are skipped so optional controls can sit in the list.
+  // Collapses the per-view lockInputs bodies that were purely "disable this list";
+  // a view with extra conditional lock logic wraps this and keeps its own lines.
+  // (audit 2026-07-23 deferred pass: S3 lockInputs consolidation)
+  function lockable(controls) {
+    return function (on) { controls.forEach(function (c) { if (c) c.disabled = !!on; }); };
+  }
   // MERGE (do not replace): component files (e.g. xlsx.js) may have already
   // attached helpers to Janet.util before shell.js loaded.
   Janet.util = Object.assign(Janet.util || {}, {
     el: el, qs: qs, sleep: sleep, esc: esc, fileStamp: fileStamp,
     clockStr: clockStr, parseHosts: parseHosts, resolveTargets: resolveTargets, targetModel: targetModel, downloadBlob: downloadBlob,
-    parseCsv: parseCsv, toCsv: toCsv, exportCsv: exportCsv
+    parseCsv: parseCsv, toCsv: toCsv, exportCsv: exportCsv, lockable: lockable
   });
   /* ========================================================================
      api  (the ONLY fetch in the app, besides RunController which calls it)

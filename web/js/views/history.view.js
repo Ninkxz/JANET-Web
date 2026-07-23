@@ -63,11 +63,14 @@
 
       // Generic streaming binder. cfg: { action, params, grid, statusEl, label,
       // runbar, onReset(), onRow(row), onFinal(summary), track:bool }.
+      var runUnsubs = {};   // action -> live unsub; a re-run must replace, not stack, its handler (audit 2026-07-23 deferred pass)
       function startRun(cfg) {
         cfg.grid.clear();
         if (cfg.onReset) cfg.onReset();
         setLine(cfg.statusEl, 'Working...', 'st-info');
         var run = ctx.run(cfg.action, cfg.params, { keyOf: function (ev) { return ev._rk; }, destructive: false });
+        var prev = runUnsubs[cfg.action];
+        if (prev) { var pi = subs.indexOf(prev); if (pi >= 0) subs.splice(pi, 1); prev(); }
         var unsub = run.subscribe({
           status: function (t) { setLine(cfg.statusEl, t, 'st-info'); },
           row: function (r) { cfg.grid.upsert(r); if (cfg.onRow) cfg.onRow(r); },
@@ -76,6 +79,7 @@
           active: function (a) { if (cfg.runbar) { cfg.runbar.setActive(a); cfg.runbar.cta.textContent = a ? 'WORKING...' : cfg.label; } if (cfg.onActive) cfg.onActive(a); },
           final: function (res) { if (cfg.onFinal) cfg.onFinal((res && res.summary) || {}); }
         });
+        runUnsubs[cfg.action] = unsub;
         track(unsub);
         return run;
       }

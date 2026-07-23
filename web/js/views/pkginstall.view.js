@@ -328,10 +328,11 @@
       btnMsi.onclick = function () { setMode('msi'); };
       refreshBtn.onclick = function () { loadPackages(); if (mode === 'msi') refreshMsiChecklist(); };
 
+      // audit 2026-07-23 deferred pass: S3 lockInputs consolidation (retryBtn keeps
+      // its has-failed condition as the one custom trailing line)
+      var lockCore = ctx.util.lockable([pkgSelect, refreshBtn, customInput, nameInput, threadsInput, btnPsadt, btnMsi, msiArgsInput, msiAll, msiNone]);
       function lockInputs(on) {
-        pkgSelect.disabled = on; refreshBtn.disabled = on; customInput.disabled = on; nameInput.disabled = on;
-        threadsInput.disabled = on; btnPsadt.disabled = on; btnMsi.disabled = on;
-        msiArgsInput.disabled = on; msiAll.disabled = on; msiNone.disabled = on;
+        lockCore(on);
         retryBtn.disabled = on || !hasFailed();
       }
       function hasFailed() { return grid.rows().some(function (r) { return String(r.Status) === 'Failed' || String(r.Status) === 'Rejected'; }); }

@@ -101,7 +101,7 @@
       // behaviour
       function setStatus(t, cls) { statusLine.textContent = t == null ? '' : String(t); statusLine.className = cls || 'muted'; }
       function isRunning() { return !!(run && run.state && run.state.active); }
-      function lockInputs(on) { [revMin, threads, confirmInput].forEach(function (x) { x.disabled = on; }); [checkBtn, enableBtn, revertBtn, clearBtn].forEach(function (b) { b.disabled = on; }); }
+      var lockInputs = ctx.util.lockable([revMin, threads, confirmInput, checkBtn, enableBtn, revertBtn, clearBtn]);   // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
       function validHosts() { var h = targets.hosts(); var bad = h.filter(function (x) { return !HOST_RE.test(x); }); return { hosts: h, bad: bad }; }
 
       clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); setStatus('Ready'); };

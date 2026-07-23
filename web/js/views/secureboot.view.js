@@ -220,7 +220,7 @@
 
       // ---------- behaviour ----------
       function setStatus(txt, cls) { statusLine.textContent = txt == null ? '' : String(txt); statusLine.className = cls || 'muted'; }
-      function lockInputs(on) { pwInput.disabled = on; jobsInput.disabled = on; dryCb._cb.disabled = on; showCb._cb.disabled = on; clearBtn.disabled = on; }
+      var lockInputs = ctx.util.lockable([pwInput, jobsInput, dryCb._cb, showCb._cb, clearBtn]);   // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
       clearBtn.onclick = function () { if (run && run.state && run.state.active) return; grid.clear(); prog.reset(); setStatus('Ready'); };
       exportBtn.onclick = function () {
         var rows = grid.rows();

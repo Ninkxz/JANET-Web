@@ -85,6 +85,7 @@
         results.appendChild(gh); right.appendChild(results);
         panel.appendChild(right);
 
+        var openUnsub = null;   // audit 2026-07-23 deferred pass: a re-click must replace, not stack, its handler
         function doOpen() {
           var name = String(compIn.value || '').trim();
           if (!name) { setLine(statusLine, 'Enter a computer name first.', 'st-warn'); compIn.focus(); return; }
@@ -92,7 +93,8 @@
           actlog.append({ text: '[' + ts() + '] Open C$ requested for ' + name, level: 'accent' });
           openBtn.disabled = true;
           var run = ctx.run('open-cshare', { computer: name }, { keyOf: function (ev) { return ev._rk; }, destructive: false });
-          track(run.subscribe({
+          if (openUnsub) { var pi = subs.indexOf(openUnsub); if (pi >= 0) subs.splice(pi, 1); openUnsub(); }
+          openUnsub = track(run.subscribe({
             status: function (t) { setLine(statusLine, t, 'st-info'); },
             row: function (r) { grid.upsert(r); },
             log: function (l) { actlog.append(l); },
@@ -204,9 +206,9 @@
         };
         clearBtn.onclick = function () { grid.clear(); stats.reset(); setLine(statusLine, 'Ready'); };
 
-        var curRun = null;
+        var curRun = null, scriptUnsub = null;
         var counters = { hosts: {}, ok: 0, fail: 0 };
-        function lockInputs(on) { threadsIn.disabled = on; timeoutIn.disabled = on; clearBtn.disabled = on; scriptTa.disabled = on; }
+        var lockInputs = ctx.util.lockable([threadsIn, timeoutIn, clearBtn, scriptTa]);   // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
 
         function doRun() {
           var hosts = targets.hosts();
@@ -228,7 +230,10 @@
             actlog.banner ? actlog.banner('Run Script on ' + hosts.length + ' host(s)') : actlog.append({ text: '[' + ts() + '] Run Script on ' + hosts.length + ' host(s).', level: 'accent' });
             lockInputs(true);
             curRun = ctx.run('run-script', { targets: hosts.join('\n'), script: scriptText, threads: threads, timeoutSeconds: timeoutSeconds }, { keyOf: function (ev) { return ev._rk; }, destructive: true });
-            track(curRun.subscribe({
+            // audit 2026-07-23 deferred pass: a re-run must replace, not stack, its
+            // handler - the stale copy shared the live `counters` and double-counted.
+            if (scriptUnsub) { var pi = subs.indexOf(scriptUnsub); if (pi >= 0) subs.splice(pi, 1); scriptUnsub(); }
+            scriptUnsub = track(curRun.subscribe({
               status: function (t) { setLine(statusLine, t, 'st-info'); },
               progress: function () {},
               row: function (r) {

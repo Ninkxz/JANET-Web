@@ -28,7 +28,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.6'
+        version  = '1.6.7'   # audit 2026-07-23 fix pass; Secureboot.Scan.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(

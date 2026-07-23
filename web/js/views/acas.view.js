@@ -1081,6 +1081,7 @@
         if (!backboneGrid) return;
         backboneGrid.clear();
         var h = ctx.run('list-profiles', {}, { keyOf: function (ev) { return ev.Profile != null ? String(ev.Profile) : null; } });
+        if (backboneUnsub) backboneUnsub();   // audit 2026-07-23 deferred pass: Reload re-click must replace, not stack, the handler
         backboneUnsub = h.subscribe({ row: function (r) { backboneGrid.upsert(r); }, log: function (l) { log.append(l); } });
       }
 

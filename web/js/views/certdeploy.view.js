@@ -69,6 +69,7 @@
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
       var run = null, unsub = null;
       var scanRun = null, scanUnsub = null;
+      var importUnsub = null;   // audit 2026-07-23 deferred pass: re-import must replace, not stack, its handler
       function ts() { return ctx.util.clockStr(); }
       var esc = ctx.util.esc;   // always the real escaper - no unescaping fallback (a trap)
 
@@ -262,10 +263,8 @@
       function isRunning() { return !!(run && run.state && run.state.active) || isScanRunning(); }
       function isScanRunning() { return !!(scanRun && scanRun.state && scanRun.state.active); }
       function threads() { var n = parseInt(threadsIn.value, 10); if (isNaN(n) || n < 1) n = 16; if (n > 32) n = 32; return n; }
-      function lockInputs(on) {
-        offlineCb._cb.disabled = on; threadsIn.disabled = on; clearBtn.disabled = on;
-        bundleInput.disabled = on; importBtn.disabled = on; includeExpiredCb._cb.disabled = on; pruneCb._cb.disabled = on; rdpCb._cb.disabled = on;
-      }
+      // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
+      var lockInputs = ctx.util.lockable([offlineCb._cb, threadsIn, clearBtn, bundleInput, importBtn, includeExpiredCb._cb, pruneCb._cb, rdpCb._cb]);
       clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); stats.reset(); expiredBadge.textContent = ''; setStatus('Ready'); };
       exportBtn.onclick = function () {
         var rows = grid.rows();
@@ -503,7 +502,8 @@
           actlog.append({ text: 'Uploaded to host: ' + p, level: 'dim' });
           importStatus.textContent = 'Parsing ' + f.name + ' ...'; importStatus.className = 'st-info';
           var irun = ctx.run('import-pki-hosts', { csvPath: p }, { destructive: false });
-          irun.subscribe({
+          if (importUnsub) importUnsub();
+          importUnsub = irun.subscribe({
             status: function (t) { importStatus.textContent = t; },
             row: function () {},   // rows drive the log; the loaded hosts come from the summary
             log: function (l) { actlog.append(l); },
@@ -537,7 +537,7 @@
 
       host.appendChild(root);
       this._root = root;
-      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (scanUnsub) scanUnsub(); } catch (e) {} };
+      this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (scanUnsub) scanUnsub(); } catch (e) {} try { if (importUnsub) importUnsub(); } catch (e) {} };
     }
   });
 })();

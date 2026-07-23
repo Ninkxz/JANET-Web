@@ -139,8 +139,10 @@ function Invoke-C2cEnable {
 
         try {
             # target = self so the wrong-box guard passes (answering box == dialed short name).
-            # v1.5.0 worker signature: Computer, Cred, Auth, AttemptOffline, Pillars[], DoEnable, TaniumService, TaniumInstalledSrc.
-            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Encryption') $DoEnable 'Tanium Client' $script:C2cTaniumInstalledSrc
+            # Worker signature: Computer, Cred, Auth, AttemptOffline, Pillars[], DoEnable, TaniumService, TaniumInstalledSrc,
+            # BundleJson, WinrmHeal, WinrmHealSrc, AddCertsSrc. The real $C2cAddCertsSrc is injected like production so the
+            # admin-side rollup labels via the shared Get-C2cPillarLabel (audit 2026-07-23 deferred pass: inline fallback retired).
+            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Encryption') $DoEnable 'Tanium Client' $script:C2cTaniumInstalledSrc $null $false $script:C2cWinrmHealSrc $script:C2cAddCertsSrc
             $pillars = @($res.Pillars)
             $enc = @($pillars | Where-Object { $_.Name -eq 'Encryption' })
             $blob = ''

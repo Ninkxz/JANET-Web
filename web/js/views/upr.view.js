@@ -236,10 +236,12 @@
       }
 
       // ---- Reload Catalog (parity with the desktop editable-catalog + Reload button) ----
+      var reloadUnsub = null;   // audit 2026-07-23 deferred pass: a re-click must replace, not stack, its handler (was also never released on unmount)
       function doReloadCatalog() {
         log.banner('Reload Catalog');
         var h = ctx.run('reload-catalog', {});
-        h.subscribe({
+        if (reloadUnsub) reloadUnsub();
+        reloadUnsub = h.subscribe({
           row: function (r) { log.append({ text: 'Catalog source: ' + r.Source + '  |  ' + r.Profiles + ' profile(s), ' + r['OS Plugin Patterns'] + ' OS pattern(s).', level: 'ok' }); },
           log: function (l) { log.append(l); },
           error: function (e) { log.append({ text: e.text, level: 'err' }); }
@@ -1148,6 +1150,7 @@
         if (findUnsub) try { findUnsub(); } catch (e) {}
         if (osUnsub) try { osUnsub(); } catch (e) {}
         if (manUnsub) try { manUnsub(); } catch (e) {}
+        if (reloadUnsub) try { reloadUnsub(); } catch (e) {}
       };
     }
   });

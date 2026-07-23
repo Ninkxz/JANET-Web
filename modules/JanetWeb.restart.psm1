@@ -44,7 +44,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'restart'
         name     = 'Restart Scheduler'
-        version  = '1.5.0-beta10'
+        version  = '1.5.0-beta11'   # audit 2026-07-23 fix pass; Restart.Guards.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Lifecycle'
         summary  = 'Mass scheduled restart for Windows fleets - parallel shutdown.exe /r over WinRM with optional user consent, ping gate, abort, and reboot verification.'
         actions  = @(

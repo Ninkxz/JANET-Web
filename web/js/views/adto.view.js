@@ -163,11 +163,11 @@
       // ---------- behaviour ----------
       function setStatus(txt, cls) { statusLine.textContent = txt == null ? '' : String(txt); statusLine.className = cls || 'muted'; }
       function isRunning() { return !!(run && run.state && run.state.active); }
-      function lockInputs(on) {
-        baseInput.disabled = on; catInput.disabled = on; onlyBad._cb.disabled = on; clearBtn.disabled = on;
-        fixConfirm.disabled = on; fixBtn.disabled = on; valBtn.disabled = on;
-        Object.keys(fixCbs).forEach(function (k) { fixCbs[k]._cb.disabled = on; });
-      }
+      // audit 2026-07-23 deferred pass: S3 lockInputs consolidation (fixCbs is fully
+      // populated above, so the flat control list is captured complete here)
+      var lockInputs = ctx.util.lockable(
+        [baseInput, catInput, onlyBad._cb, clearBtn, fixConfirm, fixBtn, valBtn]
+          .concat(Object.keys(fixCbs).map(function (k) { return fixCbs[k]._cb; })));
 
       function updateTiles() { tiles.setAll({ total: counts.total, bad: counts.bad, iao: counts.iao }); }
       function updateChips() {

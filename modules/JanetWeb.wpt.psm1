@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.8.19'
+        version  = '6.9.0'   # audit 2026-07-23 deferred pass: unified fan-out (9 bespoke harvest loops folded), ISS probe/name-check injection, DNS-probe folds
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -1911,18 +1911,11 @@ $script:WptScanBlock = {
             RebootOK=$false; RebootPending=$false; LastBoot=''; LoggedOnUser=''; UpdatesOK=$false; UpdateCount=0
             WuOK=$false; WuCount=0; AppsOK=$false; AppCount=0
             UpdateNames=@(); WuNames=@(); AppNames=@(); Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool/worker ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { return $r }
     $r.Online = $true
     $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -2011,8 +2004,10 @@ $script:WptScanBlock = {
         # describe the WRONG machine, so discard them. Session-based name compare
         # (AFNET reverse-DNS zones are unreliable, so never trust a PTR lookup here).
         $actualName = [string]$probe.RemoteName
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+        # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+        # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+        if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+            $targetShort = ($Computer -split '\.')[0]
             $r.DnsMismatch = $true
             $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - skipped (would report the wrong machine)"
             return $r
@@ -2036,18 +2031,11 @@ $script:WptScanBlock = {
 $script:WptPatchBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$Mode = 'noninvasive')
     $r = @{ Host=$Computer; Reachable=$false; UpdatesTriggered=0; AppsTriggered=0; Mode=$Mode; Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool/worker ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     $r.Reachable = $true
     $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -2059,23 +2047,25 @@ $script:WptPatchBlock = {
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Error = "Session: $($_.Exception.Message)"; return $r }
     try {
-        # DNS-mismatch guard (HARD ABORT): never trigger installs on a box that
-        # isn't the one we dialed. Session-based name compare (no PTR on AFNET).
-        # An IPv4-literal target has no shortname to compare -> skip (an IP dialed
-        # directly can't be a stale-DNS mismatch).
-        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no patch triggered"
-                return $r  # the finally below removes the session
-            }
-        }
+        # DNS-mismatch guard (HARD ABORT): never trigger installs on a box that isn't
+        # the one we dialed. Audit 2026-07-23 deferred pass: the dedicated probe
+        # round-trip is FOLDED into the first working Invoke-Command below (the
+        # WptRebootScheduleBlock pattern ~:2166) - the scriptblock runs ON the
+        # answering box, so its FIRST statement compares $env:COMPUTERNAME to the
+        # dialed shortname and returns a DnsMismatch marker before touching anything.
+        # An IPv4-literal target has no shortname to compare -> skip; an unreadable
+        # name proceeds (never a false abort). Session-based (no PTR on AFNET).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
         # Only count a host as triggered when the client-SDK method actually accepted
         # the request (ReturnValue 0/null). InstallUpdates / CCM_Application.Install can
         # reject WITHOUT throwing (not applicable, wrong target, agent busy); the old
         # code discarded the result and reported false success (audit#4).
-        $upResult = Invoke-Command -Session $sess -EA Stop -ScriptBlock {
+        $upResult = Invoke-Command -Session $sess -EA Stop -ArgumentList $targetShort, $isIPv4 -ScriptBlock {
+            param($expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
+            }
             $updates = Get-WmiObject -Namespace "ROOT\ccm\ClientSDK" -Query "SELECT * FROM CCM_SoftwareUpdate WHERE ComplianceState = '0'" -EA Stop
             if (-not $updates) { return @{ Count = 0; Rejected = 0 } }
             $rv = $null
@@ -2085,6 +2075,11 @@ $script:WptPatchBlock = {
             # Formerly a null fell through to counted-as-triggered (audit#5 false-clean).
             if ($null -ne $rv -and [int]$rv -eq 0) { return @{ Count = @($updates).Count; Rejected = 0 } }
             return @{ Count = 0; Rejected = @($updates).Count; ReturnValue = $(if ($null -eq $rv) { '<null>' } else { [int]$rv }) }
+        }
+        # audit 2026-07-23: the wrong-box marker wins before any result is interpreted (hard abort).
+        if ($upResult.DnsMismatch) {
+            $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$upResult.DnsMismatch).Trim())' - ABORTED, no patch triggered"
+            return $r  # the finally below removes the session
         }
         $r.UpdatesTriggered = [int]$upResult.Count
         if ($upResult.Rejected -gt 0) { $r.Error = "Update trigger rejected by client (ReturnValue=$($upResult.ReturnValue)); $($upResult.Rejected) update(s) NOT installed" }
@@ -2141,8 +2136,10 @@ $script:WptRebootBlock = {
             $icSplat = @{ ComputerName=$Computer; ErrorAction='Stop' }
             if ($Cred) { $icSplat['Credential']=$Cred; if ($Auth) { $icSplat['Authentication']=$Auth } }
             $actualName = try { Invoke-Command @icSplat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+            # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+            if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+                $targetShort = ($Computer -split '\.')[0]
                 $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent"
                 return $r
             }
@@ -2249,17 +2246,10 @@ $script:WptRebootAbortBlock = {
 # --- Ping Sweep (inline TcpClient.BeginConnect:12360) ---
 $script:WptPingBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
-    return @{ Host=$Computer; Reachable=$reachable; UseSsl=$useSsl }
+    # audit 2026-07-23 deferred pass: inline probe removed - the shared injected
+    # Test-WptHostReachable IS the ping (same 5985/5986/445 sweep; 1500ms/port).
+    $reach = Test-WptHostReachable $Computer
+    return @{ Host=$Computer; Reachable=[bool]$reach.Reachable; UseSsl=[bool]$reach.UseSsl }
 }
 
 # --- WinRM Bootstrap over DCOM (WinRMBootstrapBlock:5663) ---
@@ -2334,18 +2324,11 @@ $script:WptHealthScanBlock = {
     $r = @{ Host=$Computer; Online=$false; MecmState='Unknown'; ClientVer=''; SwCenter='Missing'
             WmiState='Unknown'; WuState='Unknown'; RebootState='Unknown'; RebootAge=''
             LastCheckIn=''; Overall='Unknown'; Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool/worker ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1200, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Overall='Offline'; $r.Error='Unreachable'; return $r }
     $r.Online = $true
     $soP = @{ OpenTimeout=15000; OperationTimeout=30000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -2545,19 +2528,11 @@ $script:WptVerifyPatchBlock = {
     $r = @{ Host=$Computer; Updates=@(); Error=''; NoSccm=$false }
     if ($MaxPolls -lt 1) { $MaxPolls = 1 }
     if ($IntervalSeconds -lt 1) { $IntervalSeconds = 1 }
-    # TCP reachability (bare worker runspace -> inline, never ICMP): WinRM HTTP
-    # 5985, then WinRM HTTPS 5986, then SMB 445 (liveness). $useSsl set when ONLY
-    # 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS - never ICMP).
+    # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     $soP = @{ OperationTimeout=120000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
     if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
@@ -2827,18 +2802,11 @@ $script:WptRdpRebindBlock = {
 $script:WptKbScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
     $r = @{ Host=$Computer; KBs=@(); Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
     if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
@@ -2896,14 +2864,11 @@ function Get-WptKbInstallResult {
 $script:WptKbInstallBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string[]]$KBs, [string]$MsuPath, [bool]$NoReboot)
     $r = @{ Host=$Computer; MECMFound=0; MECMInstalled=0; MSUInstalled=0; Skipped=0; Errors=@(); Details=@() }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc=$null
-        try { $tc=New-Object System.Net.Sockets.TcpClient; $iar=$tc.BeginConnect($Computer,$port,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(1500,$false) -and $tc.Connected) { $reachable=$true; if ($port -eq 5986) { $useSsl=$true } } } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Errors += 'Offline'; return $r }
     $soP = @{ OperationTimeout=1800000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
     if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
@@ -2918,8 +2883,10 @@ $script:WptKbInstallBlock = {
         # An IPv4-literal target has no shortname to compare -> skip.
         if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
             $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+            # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+            if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+                $targetShort = ($Computer -split '\.')[0]
                 $r.Errors += "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no KB installed"
                 return $r  # the finally below removes the session
             }
@@ -3088,18 +3055,11 @@ $script:WptMessageBlock = {
 $script:WptCleanBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [bool]$DoTemp, [bool]$DoProfiles, [int]$DaysThreshold, [bool]$DryRun, [bool]$DoCache)
     $r = @{ Host=$Computer; TempMB=0; TempFiles=0; CacheMB=0; ProfilesFound=0; ProfilesRemoved=0; Skipped=0; ProfileNames=@(); FreeBeforeGB=$null; FreeAfterGB=$null; FreedMB=0; Events=@(); Status='Failed'; Detail='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Detail = 'Offline'; return $r }
     $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
     if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
@@ -3111,23 +3071,32 @@ $script:WptCleanBlock = {
     try { $sess = New-PSSession @splat } catch { $r.Detail = "Session: $($_.Exception.Message)"; return $r }
     try {
         # DNS-mismatch guard (HARD ABORT, loop90): this block DELETES temp files, caches, and stale user PROFILES;
-        # a stale DNS / a reused IP would delete on the WRONG machine. Verify the box that answered is the one we
-        # dialed BEFORE any deletion. An IPv4-literal target has no shortname to compare -> skip; an empty probe
-        # proceeds (don't regress). Mirrors WptPatchBlock (~:2060). The return runs the finally below (session cleanup).
-        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, nothing cleaned"
-                return $r
-            }
-        }
+        # a stale DNS / a reused IP would delete on the WRONG machine. Audit 2026-07-23 deferred pass: the dedicated
+        # probe round-trip is FOLDED into the first working Invoke-Command below (the WptRebootScheduleBlock pattern
+        # ~:2166) - the scriptblock runs ON the answering box, so its FIRST statement compares $env:COMPUTERNAME to
+        # the dialed shortname and returns a DnsMismatch marker BEFORE any deletion. An IPv4-literal target has no
+        # shortname to compare -> skip; an unreadable name proceeds (don't regress). The return runs the finally
+        # below (session cleanup).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
         # C: free-space snapshot (before) over the same WinRM session, so the row can
         # report a real before/after delta. CIM runs ON the target inside the session.
+        $fb = $null
         try {
-            $fb = Invoke-Command -Session $sess -EA Stop -ScriptBlock { $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -EA Stop; [Math]::Round($d.FreeSpace/1GB,2) }
-            $r.FreeBeforeGB = [double]$fb
+            $fb = Invoke-Command -Session $sess -EA Stop -ArgumentList $targetShort, $isIPv4 -ScriptBlock {
+                param($expected, $isIPv4)
+                if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                    return @{ DnsMismatch = $env:COMPUTERNAME }
+                }
+                try { $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -EA Stop; [Math]::Round($d.FreeSpace/1GB,2) } catch { $null }
+            }
         } catch {}
+        # audit 2026-07-23: the wrong-box marker wins before any deletion (hard abort).
+        if ($fb -and $fb.DnsMismatch) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$fb.DnsMismatch).Trim())' - ABORTED, nothing cleaned"
+            return $r
+        }
+        if ($null -ne $fb) { try { $r.FreeBeforeGB = [double]$fb } catch {} }
         if ($DoTemp) {
             $r.Events = @($r.Events) + @(@{ Level='ACTION'; Msg="[$Computer] Phase: Temp file cleanup starting" })
             $tempResult = Invoke-Command -Session $sess -ArgumentList $DryRun, $Computer -EA Stop -ScriptBlock {
@@ -3372,18 +3341,11 @@ $script:WptCleanBlock = {
 $script:WptRegScanBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$RegPath, [object[]]$Defs)
     $r = @{ Host=$Computer; Reachable=$false; RegValues=@{}; Status='Unreachable'; Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     try {
         $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -3424,18 +3386,11 @@ $script:WptRegScanBlock = {
 $script:WptRegApplyBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$RegPath, [object[]]$Defs, [bool]$DoReboot, [string]$Cve)
     $r = @{ Host=$Computer; Reachable=$false; Success=$false; PostValues=@{}; RebootScheduled=$false; Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     try {
         $soP = @{ OperationTimeout=30000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -3449,8 +3404,10 @@ $script:WptRegApplyBlock = {
         # An IPv4-literal target has no shortname to compare -> skip.
         if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
             $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+            # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+            if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+                $targetShort = ($Computer -split '\.')[0]
                 $r.Reachable = $true
                 $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no registry change"
                 return $r
@@ -3547,18 +3504,11 @@ $script:WptRegApplyBlock = {
 $script:WptAppUpdateBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [scriptblock]$Remote, [string]$Method, [string]$Arg, [bool]$IsVerify)
     $r = @{ Host=$Computer; Reachable=$false; Version=''; LastUpdated=''; Verified=$null; Status=''; Detail='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Status = 'Unreachable (TCP 5985/5986/445)'; $r.Detail = 'Offline'; return $r }
     $r.Reachable = $true
     $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -3573,8 +3523,10 @@ $script:WptAppUpdateBlock = {
         # WinRM round-trip; name compare (no PTR on AFNET). If the probe can't run
         # (empty), proceed as before so we don't regress reachable hosts.
         $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+        # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+        # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+        if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+            $targetShort = ($Computer -split '\.')[0]
             $r.Status = 'DNS Mismatch'; $r.Detail = "dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"
             return $r
         }
@@ -3614,6 +3566,22 @@ function Test-WptHostReachable {
     return @{ Reachable=$false; UseSsl=$false }
 }
 
+# Controller-side wrong-box (DNS-mismatch) VERDICT shared by the destructive worker
+# blocks (audit 2026-07-23 deferred pass): the caller probes the answering box's
+# $env:COMPUTERNAME and passes it here with the dialed target. $true = PROCEED
+# (shortnames match, an IPv4-literal target has no shortname to compare, or the
+# probe couldn't run - never a false abort); $false = the answering box is NOT the
+# host we dialed (stale DNS / reused IP) -> the caller HARD-ABORTS with its own
+# block-specific abort string. Injected into pool/worker runspaces alongside
+# Test-WptHostReachable (bare runspaces can't see module functions).
+function Test-WptRemoteNameMatch {
+    param([string]$Computer, [string]$ActualName)
+    if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { return $true }
+    if ([string]::IsNullOrWhiteSpace($ActualName)) { return $true }
+    $targetShort = ($Computer -split '\.')[0]
+    return ($ActualName.Trim().ToUpper() -eq $targetShort.Trim().ToUpper())
+}
+
 # Cancel-aware wrapper for the single-host blocks (software-scan / scan-detail /
 # software-uninstall / app-list), modeled on Invoke-JanetOnDhcpCancelable: run
 # the block on a [powershell] handle in a 1-slot pool, poll the operator-cancel
@@ -3632,6 +3600,10 @@ function Invoke-WptSingleHostCancelable {
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $fn  = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
     $iss.Commands.Add($fn)
+    # audit 2026-07-23 deferred pass: the DNS-name-check helper too, so single-host
+    # blocks (software-uninstall / sccm-install) can call it instead of an inline copy.
+    $fn2 = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptRemoteNameMatch', ${function:Test-WptRemoteNameMatch}.ToString())
+    $iss.Commands.Add($fn2)
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 1, $iss, $Host)
     $pool.Open()
     $ps = [powershell]::Create(); $ps.RunspacePool = $pool
@@ -3690,18 +3662,11 @@ function Expand-WptSingleHostResult {
 $script:WptCleanUserAppsBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$AppsCsv, [bool]$DryRun)
     $r = @{ Host=$Computer; AppsRemoved=0; Bytes=0; FreedMB=0; Events=@(); Status='Failed'; Detail='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Detail = 'Offline'; return $r }
     $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
     if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
@@ -3713,19 +3678,19 @@ $script:WptCleanUserAppsBlock = {
     try { $sess = New-PSSession @splat } catch { $r.Detail = "Session: $($_.Exception.Message)"; return $r }
     try {
         # DNS-mismatch guard (HARD ABORT, loop90): this block DELETES per-profile app binaries (takeown + remove);
-        # a stale DNS / a reused IP would delete on the WRONG machine. Verify the box that answered is the one we
-        # dialed BEFORE any deletion. An IPv4-literal target has no shortname to compare -> skip; an empty probe
-        # proceeds. Mirrors WptPatchBlock (~:2060). The return runs the finally below (session cleanup).
-        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, nothing removed"
-                return $r
+        # a stale DNS / a reused IP would delete on the WRONG machine. Audit 2026-07-23 deferred pass: the dedicated
+        # probe round-trip is FOLDED into the first (only) working Invoke-Command below (the WptRebootScheduleBlock
+        # pattern ~:2166) - the scriptblock runs ON the answering box, so its FIRST statement compares
+        # $env:COMPUTERNAME to the dialed shortname and returns a DnsMismatch marker BEFORE any deletion. An
+        # IPv4-literal target has no shortname to compare -> skip; an unreadable name proceeds. The return runs
+        # the finally below (session cleanup).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
+        $res = Invoke-Command -Session $sess -ArgumentList $AppsCsv, $DryRun, $Computer, $targetShort, $isIPv4 -EA Stop -ScriptBlock {
+            param($appsCsv, $dry, $thisHost, $expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
             }
-        }
-        $res = Invoke-Command -Session $sess -ArgumentList $AppsCsv, $DryRun, $Computer -EA Stop -ScriptBlock {
-            param($appsCsv, $dry, $thisHost)
             $ev = New-Object System.Collections.Generic.List[hashtable]
             $add = { param($l, $m) [void]$ev.Add(@{ Level=$l; Msg=$m }) }
             $sel = @($appsCsv -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
@@ -3770,6 +3735,11 @@ $script:WptCleanUserAppsBlock = {
                 }
             }
             return @{ Bytes=$totalBytes; Removed=$removed; Found=$found; Events=$ev.ToArray() }
+        }
+        # audit 2026-07-23: the wrong-box marker wins before any result is interpreted (hard abort).
+        if ($res.DnsMismatch) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$res.DnsMismatch).Trim())' - ABORTED, nothing removed"
+            return $r
         }
         $r.Bytes = $res.Bytes; $r.FreedMB = [Math]::Round($res.Bytes / 1MB, 1)
         $r.AppsRemoved = if ($DryRun) { [int]$res.Found } else { [int]$res.Removed }
@@ -4068,8 +4038,10 @@ $script:WptSccmInstallBlock = {
         # An IPv4-literal target has no shortname to compare -> skip.
         if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
             $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+            # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+            if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+                $targetShort = ($Computer -split '\.')[0]
                 return ,@(@{ Type=''; Name=$Computer; Result='Failed'; Detail="DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken" })
             }
         }
@@ -4369,8 +4341,10 @@ $script:WptSoftwareUninstallBlock = {
     # An IPv4-literal target has no shortname to compare -> skip.
     if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
         $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+        # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+        # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+        if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+            $targetShort = ($Computer -split '\.')[0]
             return ,@(@{ App=$Computer; Type=''; Result='Failed'; Detail="DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken" })
         }
     }
@@ -4648,8 +4622,10 @@ $script:WptFixJavaBlock = {
     # shortname to compare -> skip. If the probe can't run, proceed.
     if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
         $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+        # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+        # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+        if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+            $targetShort = ($Computer -split '\.')[0]
             $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"; return $r
         }
     }
@@ -4727,8 +4703,10 @@ $script:WptSpecExecEnableBlock = {
     # target has no shortname to compare -> skip. If the probe can't run, proceed.
     if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
         $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+        # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+        # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+        if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+            $targetShort = ($Computer -split '\.')[0]
             $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"; return $r
         }
     }
@@ -4780,18 +4758,11 @@ $script:WptAppListBlock = {
 $script:WptAppActionBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [string]$AppId, [string]$Revision, $IsMachineTarget, [string]$Method, [string]$AppName)
     $r = @{ Host=$Computer; App=$AppName; Method=$Method; Result='Failed'; Detail='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Detail = 'Offline'; return $r }
     $soP = @{ OperationTimeout=1800000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
     if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
@@ -4806,8 +4777,10 @@ $script:WptAppActionBlock = {
         # IPv4-literal target has no shortname to compare -> skip.
         if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
             $actualName = try { Invoke-Command @splat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            $targetShort = ($Computer -split '\.')[0]
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            # audit 2026-07-23 deferred pass: inline name-compare replaced by the shared
+            # injected Test-WptRemoteNameMatch (same semantics; empty/IPv4-literal proceeds).
+            if (-not (Test-WptRemoteNameMatch -Computer $Computer -ActualName $actualName)) {
+                $targetShort = ($Computer -split '\.')[0]
                 $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"
                 return $r
             }
@@ -4883,18 +4856,11 @@ $script:WptAppActionBlock = {
 $script:WptLog4jBlock = {
     param([string]$Computer, $Cred, [string]$Auth)
     $r = @{ Host=$Computer; Online=$false; ScanOK=$false; Jars=@(); Error='' }
-    # TCP reachability: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445 (liveness).
+    # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
+    # copy removed; Test-WptHostReachable is injected into the pool ISS).
     # $useSsl set when ONLY 5986 answered -> session below auto-switches to -UseSSL.
-    $reachable = $false; $useSsl = $false
-    foreach ($port in 5985,5986,445) {
-        $tc = $null
-        try {
-            $tc = New-Object System.Net.Sockets.TcpClient
-            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; if ($port -eq 5986) { $useSsl = $true } }
-        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
-        if ($reachable) { break }
-    }
+    $reach = Test-WptHostReachable $Computer
+    $reachable = [bool]$reach.Reachable; $useSsl = [bool]$reach.UseSsl
     if (-not $reachable) { $r.Error = 'Offline'; return $r }
     $r.Online = $true
     $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
@@ -4950,20 +4916,45 @@ function Get-WptLog4jVulnState {
 # -----------------------------------------------------------------------------
 function Invoke-WptFanOut {
     param(
-        [string[]]$Targets, [int]$Threads, [scriptblock]$Work, [scriptblock]$ArgFactory,
+        [object[]]$Targets, [int]$Threads, [scriptblock]$Work, [scriptblock]$ArgFactory,
         [scriptblock]$RowOf, [scriptblock]$OkOf, [scriptblock]$AuditDetail,
         [scriptblock]$AuditResultOf,   # optional: maps (result, ok) -> audit result string when Success/Failure is too binary (e.g. app-update PENDING audits as Skipped: excluded from OK but not booked a failure)
         [scriptblock]$LogOf,   # optional: returns @{level;text} per host -> emits a per-host activity-log line (opt-in; other actions stay quiet)
         [string]$AuditAction, [scriptblock]$Send, [string]$ActionId,
         [scriptblock]$CancelCheck,   # returns $true when the operator pressed Cancel
         [int]$DeadlineSeconds = 3600, # wall-clock backstop so wedged hosts can't hang the batch forever
-        [int]$PerHostTimeoutSeconds = 0 # per-host limit; >0 abandons ONLY a host overrunning its OWN run clock (0 = off). Mirrors Invoke-AcasFanOut. Leave 0 for long actions (patch/reboot/install); set it for read-only scans where a long run means a WMI/CIM hang.
+        [int]$PerHostTimeoutSeconds = 0, # per-host limit; >0 abandons ONLY a host overrunning its OWN run clock (0 = off). Mirrors Invoke-AcasFanOut. Leave 0 for long actions (patch/reboot/install); set it for read-only scans where a long run means a WMI/CIM hang.
+        # ---- audit 2026-07-23 deferred pass: unified-harvester hooks. The nine formerly-
+        # bespoke harvest loops (app-action, unsupported-scan, unsupported-uninstall,
+        # fix-java, spec-exec-scan, spec-exec-enable, kb-scan, verify-patch, log4j-scanner)
+        # run through these instead of re-implementing pool/harvest/watchdog/cancel/teardown.
+        [scriptblock]$OnResult,        # param($res, $job, $emit, $err): full custom per-host completion handling
+                                       # for multi-row actions (& $emit $row streams a row). $res is the RAW
+                                       # EndInvoke output ($null when the worker threw; $err carries the message).
+                                       # Return truthy = host counted ok, falsy = failed. When present it REPLACES
+                                       # the RowOf/OkOf/AuditDetail/hint emission path for completed jobs.
+        [scriptblock]$OnAbandon,       # param($job, $kind, $reason): custom row/audit emission for an abandoned job
+                                       # ($kind 'perhost' = watchdog, 'run' = cancel/deadline sweep). Counters, the
+                                       # per-host warn log and progress stay in the harvester so watchdog/cancel
+                                       # semantics are identical everywhere.
+        [scriptblock]$RunAbandonLogOf, # param($reason, $count) -> warn text emitted once after a cancel/deadline sweep
+        [string[]]$InjectFunctions,    # module function names injected into the pool ISS so bare worker runspaces
+                                       # can call them (Test-WptHostReachable / Test-WptRemoteNameMatch)
+        [string]$TimeoutReasonText,    # bespoke deadline reason text (default: "timed out after Ns")
+        [int]$PollMilliseconds = 120,  # harvest poll interval (verify-patch polls at 200)
+        [switch]$NoStartStatus,        # call site already emitted its own starting status line
+        [switch]$NoDoneStatus          # call site emits its own final status + custom summary
     )
     # Default to the dispatcher's cancel bridge so every fan-out honors Cancel
     # without each call site passing it (one action per worker runspace -> safe).
     if (-not $CancelCheck) { $CancelCheck = $script:WptCancelCheck }
-    & $Send @{ type='status'; text="Starting '$ActionId' on $($Targets.Count) host(s) with $Threads thread(s)..." }
+    if (-not $NoStartStatus) { & $Send @{ type='status'; text="Starting '$ActionId' on $($Targets.Count) host(s) with $Threads thread(s)..." } }
     $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($fnName in @($InjectFunctions)) {
+        if ([string]::IsNullOrWhiteSpace([string]$fnName)) { continue }
+        $fnEntry = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry([string]$fnName, (Get-Item "function:$fnName").ScriptBlock.ToString())
+        $iss.Commands.Add($fnEntry)
+    }
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $Threads, $iss, $Host)
     $pool.Open()
     $jobs = New-Object System.Collections.ArrayList
@@ -4971,9 +4962,18 @@ function Invoke-WptFanOut {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($Work)
         foreach ($a in (& $ArgFactory $h)) { [void]$ps.AddArgument($a) }
-        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
+        # A target may be a plain host string or a unit object carrying a Host plus
+        # extra identity (app-action fans out one job per host x app). The unit rides
+        # on the job so OnResult/OnAbandon handlers can reach the extra fields.
+        $jobHost = if ($h -is [string]) { $h } else { [string]$h.Host }
+        [void]$jobs.Add([pscustomobject]@{ Host=$jobHost; Unit=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
     $rows = New-Object System.Collections.ArrayList
+    # Row streamer handed to OnResult handlers: $rows.Add($row); & $Send (New-WptRowEvent $row)
+    # (named $emitRow, NOT $emit: the dispatcher's $send resolves its $Emit parameter
+    # DYNAMICALLY up the call stack, and a local named $emit here would shadow it ->
+    # infinite $send<->$emit recursion / call depth overflow.)
+    $emitRow = { param($row) [void]$rows.Add($row); & $Send (New-WptRowEvent $row) }
     $done = 0; $okCount = 0; $failCount = 0
     $deadline = (Get-Date).AddSeconds([Math]::Max(60, $DeadlineSeconds))
     $cancelled = $false; $timedOut = $false
@@ -4985,6 +4985,22 @@ function Invoke-WptFanOut {
                 # a saturated pool reports State='Running' at once, which would false-time-out the backlog.
                 if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
+                    if ($OnResult) {
+                        # Deferred-pass hook: the handler owns ALL row/audit/log emission for the
+                        # completed job (raw EndInvoke output, so multi-item results stay intact);
+                        # the harvester keeps counters + progress so pacing is identical.
+                        $resRaw = $null; $errRaw = $null
+                        try { $resRaw = $j.PS.EndInvoke($j.Async) } catch { $errRaw = $_.Exception.Message }
+                        try { $j.PS.Dispose() } catch {}
+                        $j.PS = $null
+                        # The LAST output item is the ok verdict, so a $Send sink that echoes
+                        # events back can't corrupt the handler's ok/fail counting.
+                        $onOut = @(& $OnResult $resRaw $j $emitRow $errRaw)
+                        if ($onOut.Count -gt 0 -and [bool]$onOut[$onOut.Count - 1]) { $okCount++ } else { $failCount++ }
+                        $done++
+                        & $Send @{ type='progress'; done=$done; total=$jobs.Count }
+                        continue
+                    }
                     $res = $null
                     # Surface a worker-runspace failure as an explicit log event too: for actions
                     # whose columns don't include an 'Error' field the message would otherwise be
@@ -5023,9 +5039,13 @@ function Invoke-WptFanOut {
                     if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $PerHostTimeoutSeconds) {
                         try { [void]$j.PS.BeginStop($null, $null) } catch {}
                         $j.PS = $null
-                        $rowT = & $RowOf @{ Host=$j.Host; Error="per-host timeout (${PerHostTimeoutSeconds}s) - possible WMI/CIM hang" }
-                        [void]$rows.Add($rowT); & $Send (New-WptRowEvent $rowT)
-                        & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${PerHostTimeoutSeconds}s)" }
+                        if ($OnAbandon) {
+                            & $OnAbandon $j 'perhost' "per-host timeout (${PerHostTimeoutSeconds}s)"
+                        } else {
+                            $rowT = & $RowOf @{ Host=$j.Host; Error="per-host timeout (${PerHostTimeoutSeconds}s) - possible WMI/CIM hang" }
+                            [void]$rows.Add($rowT); & $Send (New-WptRowEvent $rowT)
+                            & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${PerHostTimeoutSeconds}s)" }
+                        }
                         & $Send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${PerHostTimeoutSeconds}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
                         $failCount++; $done++
                         & $Send @{ type='progress'; done=$done; total=$jobs.Count }
@@ -5039,7 +5059,7 @@ function Invoke-WptFanOut {
                 if     ($CancelCheck -and (& $CancelCheck)) { $cancelled = $true }
                 elseif ((Get-Date) -gt $deadline)           { $timedOut  = $true }
                 if ($cancelled -or $timedOut) {
-                    $reason = if ($cancelled) { 'cancelled by operator' } else { "timed out after $([int]$DeadlineSeconds)s" }
+                    $reason = if ($cancelled) { 'cancelled by operator' } elseif (-not [string]::IsNullOrEmpty($TimeoutReasonText)) { $TimeoutReasonText } else { "timed out after $([int]$DeadlineSeconds)s" }
                     $abandoned = 0
                     foreach ($j in $jobs) {
                         if ($j.PS) {
@@ -5049,22 +5069,27 @@ function Invoke-WptFanOut {
                             # rows/audits below have been emitted.
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}
                             $j.PS = $null
-                            $rowR = & $RowOf @{ Host=$j.Host; Error=$reason }
-                            [void]$rows.Add($rowR); & $Send (New-WptRowEvent $rowR)
-                            & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail=$reason }
+                            if ($OnAbandon) {
+                                & $OnAbandon $j 'run' $reason
+                            } else {
+                                $rowR = & $RowOf @{ Host=$j.Host; Error=$reason }
+                                [void]$rows.Add($rowR); & $Send (New-WptRowEvent $rowR)
+                                & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail=$reason }
+                            }
                             $failCount++; $done++; $abandoned++
                         }
                     }
-                    & $Send @{ type='log'; level='warn'; text="Run $reason; $abandoned host(s) abandoned mid-flight (in-flight WinRM calls are being stopped)." }
+                    $abandonText = if ($RunAbandonLogOf) { [string](& $RunAbandonLogOf $reason $abandoned) } else { "Run $reason; $abandoned host(s) abandoned mid-flight (in-flight WinRM calls are being stopped)." }
+                    & $Send @{ type='log'; level='warn'; text=$abandonText }
                     break
                 }
-                Start-Sleep -Milliseconds 120
+                Start-Sleep -Milliseconds $PollMilliseconds
             }
         }
     } finally {
         try { $pool.Close(); $pool.Dispose() } catch {}
     }
-    & $Send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($jobs.Count)." }
+    if (-not $NoDoneStatus) { & $Send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($jobs.Count)." } }
     return @{ rows = @($rows); summary = @{ total=$jobs.Count; ok=$okCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
 }
 
@@ -5520,6 +5545,7 @@ function Invoke-JanetToolAction {
             $threads = Get-WptThreadCount $Params 32
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptPingBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $null, 'Default') } `
                 -OkOf { param($r) [bool]$r.Reachable } `
                 -AuditDetail { param($r) if ($r.Reachable) { 'reachable' } else { 'no TCP reply on 5985/5986/445' } } `
@@ -5530,6 +5556,7 @@ function Invoke-JanetToolAction {
             $saveSnap = ConvertTo-WptBool $Params['saveSnapshot']
             $scanResult = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send -PerHostTimeoutSeconds 300 `
                 -Work $script:WptScanBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
                 -OkOf { param($r)
                     # audit 2026-07-23: Online alone is NOT a good scan. WptScanBlock pre-sets
@@ -5596,6 +5623,7 @@ function Invoke-JanetToolAction {
             }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptPatchBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $patchMode) } `
                 -OkOf { param($r) [bool]$r.Reachable -and [string]::IsNullOrEmpty([string]$r.Error) } `
                 -AuditDetail { param($r) if ($r.Error) { $r.Error } else { "mode=$($r.Mode) updates=$($r.UpdatesTriggered) apps=$($r.AppsTriggered)" } } `
@@ -5622,6 +5650,7 @@ function Invoke-JanetToolAction {
             }
             return Invoke-WptFanOut -Targets $rebootTargets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptRebootBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
                 -OkOf { param($r) [bool]$r.Success } `
                 -AuditDetail { param($r) $r.Detail } `
@@ -5669,6 +5698,7 @@ function Invoke-JanetToolAction {
             $threads = Get-WptThreadCount $Params 24
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send -PerHostTimeoutSeconds 300 `
                 -Work $script:WptHealthScanBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
                 -OkOf { param($r) ($r.Overall -ne 'Offline' -and $r.Overall -ne 'Broken' -and [string]::IsNullOrEmpty([string]$r.Error)) } `
                 -AuditDetail { param($r) "Overall=$($r.Overall) MECM=$($r.MecmState) WU=$($r.WuState)" } `
@@ -5762,177 +5792,91 @@ function Invoke-JanetToolAction {
             $revision = ([string]$Params['revision']).Trim()
             $isMachine = $true
             if ($Params.ContainsKey('ismachinetarget') -and $null -ne $Params['ismachinetarget']) { $isMachine = [bool]$Params['ismachinetarget'] }
-            # One operation per (host x app); emit a row per operation. Bespoke harvest
-            # because the shared fan-out is one-row-per-host (mirrors kb-scan's expansion).
+            # One operation per (host x app); emit a row per operation via the unified
+            # harvester's unit targets + -OnResult hook (audit 2026-07-23 deferred pass:
+            # the bespoke ~70-line RunspacePool harvest loop folded into Invoke-WptFanOut).
             $units = New-Object System.Collections.ArrayList
             foreach ($h in $targets) { foreach ($id in $appIds) { [void]$units.Add(@{ Host=$h; Id=$id }) } }
             & $send @{ type='status'; text="$method on $($appIds.Count) app(s) across $($targets.Count) host(s) = $($units.Count) operation(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($u in $units) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptAppActionBlock).AddArgument($u.Host).AddArgument($Credential).AddArgument($auth).AddArgument($u.Id).AddArgument($revision).AddArgument($isMachine).AddArgument($method).AddArgument($u.Id)
-                [void]$jobs.Add([pscustomobject]@{ Host=$u.Host; Id=$u.Id; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0
-            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
             $perHostTimeout = 300   # per-host watchdog: abandon a single (host x app) trigger wedged on a WMI/CIM call so it can't pin a worker thread for the whole batch
-            try {
-                while ($done -lt $jobs.Count) {
-                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
-                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
-                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail="worker error: $($_.Exception.Message)" } }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($null -eq $res) { $res = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail='no result' } }
-                            $ok = ($res.Result -eq 'Triggered')
-                            if ($ok) { $okCount++ } else { $failCount++ }
-                            $row = @{ Host=[string]$res.Host; App=[string]$res.App; Method=[string]$res.Method; Result=[string]$res.Result; Detail=[string]$res.Detail }
-                            [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                            & $send @{ type='audit'; action='VulnPatched'; target=$res.Host; result=$(if($ok){'Success'}else{'Failure'}); itemCount=$(if($ok){1}else{0}); detail="$($res.Method) $($res.App): $($res.Detail)" }
-                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                        }
-                    }
-                    if ($perHostTimeout -gt 0 -and $done -lt $jobs.Count) {
-                        $nowPh = Get-Date
-                        foreach ($j in $jobs) {
-                            if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                                try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                                $detPh = "per-host timeout (${perHostTimeout}s) - possible WMI/CIM hang"
-                                $row = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail=$detPh }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$detPh }
-                                & $send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${perHostTimeout}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
-                                $failCount++; $done++
-                                & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                            }
-                        }
-                    }
-                    if ($done -lt $jobs.Count) {
-                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
-                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
-                        if ($cancelled -or $timedOut) {
-                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
-                            foreach ($j in $jobs) {
-                                if ($j.PS) {
-                                    try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                                    $row = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail=$reason }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$reason }
-                                    $failCount++; $done++
-                                }
-                            }
-                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining operations abandoned." }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 120
-                    }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($jobs.Count)." }
-            return @{ rows=@($rows); summary=@{ total=$jobs.Count; ok=$okCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
+            return Invoke-WptFanOut -Targets @($units) -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptAppActionBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
+                -NoStartStatus -TimeoutReasonText 'timed out' -PerHostTimeoutSeconds $perHostTimeout `
+                -ArgFactory { param($u) ,@($u.Host, $Credential, $auth, $u.Id, $revision, $isMachine, $method, $u.Id) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $res = @{ Host=$job.Host; App=$job.Unit.Id; Method=$method; Result='Failed'; Detail="worker error: $err" } }
+                    else { $res = $res | Select-Object -First 1 }
+                    if ($null -eq $res) { $res = @{ Host=$job.Host; App=$job.Unit.Id; Method=$method; Result='Failed'; Detail='no result' } }
+                    $ok = ($res.Result -eq 'Triggered')
+                    $row = @{ Host=[string]$res.Host; App=[string]$res.App; Method=[string]$res.Method; Result=[string]$res.Result; Detail=[string]$res.Detail }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='VulnPatched'; target=$res.Host; result=$(if($ok){'Success'}else{'Failure'}); itemCount=$(if($ok){1}else{0}); detail="$($res.Method) $($res.App): $($res.Detail)" }
+                    return $ok
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    $det = if ($kind -eq 'perhost') { "$reason - possible WMI/CIM hang" } else { $reason }
+                    $row = @{ Host=$job.Host; App=$job.Unit.Id; Method=$method; Result='Failed'; Detail=$det }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail=$det }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "Run $reason; remaining operations abandoned." }
         }
         'unsupported-scan' {
             # Bulk software scan + local cross-reference against the unsupported/SEoL
-            # catalog. Bespoke harvest (one job per host runs WptSoftwareScanBlock; the
-            # match is computed server-side) so it can emit MANY rows per host (one per
-            # matched product) - the shared fan-out is one-row-per-host.
+            # catalog. One job per host runs WptSoftwareScanBlock; the match is computed
+            # server-side in -OnResult, which emits MANY rows per host (one per matched
+            # product). Audit 2026-07-23 deferred pass: bespoke harvest folded into
+            # Invoke-WptFanOut (probe injected via -InjectFunctions).
             $threads = Get-WptThreadCount $Params 12
             $catalog = Get-WptUnsupportedCatalog
             & $send @{ type='status'; text="Scanning $($targets.Count) host(s) for unsupported/SEoL software with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
-            $iss.Commands.Add($fn)
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $targets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptSoftwareScanBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $hostsOk = 0; $hostsFail = 0; $matchCount = 0
-            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
             $perHostTimeout = 300   # per-host watchdog: abandon a single host wedged on the HKLM/HKU uninstall enumeration so it can't pin a worker thread for the whole batch
-            try {
-                while ($done -lt $jobs.Count) {
-                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
-                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
-                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null; $err = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) } catch { $err = "worker error: $($_.Exception.Message)" }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($err) {
-                                $hostsFail++
-                                & $send @{ type='log'; level='err'; text="$($j.Host) : $err" }
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
-                            } else {
-                                $apps = Expand-WptSingleHostResult $res
-                                $hostMatches = 0
-                                foreach ($a in @($apps)) {
-                                    $name = if ($a -is [hashtable]) { [string]$a['Name'] } else { [string]$a.Name }
-                                    $ver  = if ($a -is [hashtable]) { [string]$a['Version'] } else { [string]$a.Version }
-                                    if ([string]::IsNullOrWhiteSpace($name)) { continue }
-                                    foreach ($prof in $catalog) {
-                                        if (Test-WptUnsupportedMatch -AppName $name -AppVersion $ver -Prof $prof) {
-                                            # SAFE effective action: a bare family-name match is Review, not auto-Uninstall.
-                                            $effAction = Get-WptUnsupportedAction -Prof $prof -AppVersion $ver
-                                            $row = @{
-                                                _rk="$($j.Host)|$name|$ver"
-                                                Host=$j.Host; Product=$prof.Label; InstalledName=$name; Version=$ver
-                                                Category=$prof.Category; Action=$effAction; Notes=$prof.Notes
-                                            }
-                                            [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                            $matchCount++; $hostMatches++
-                                            break   # one row per app (first matching profile)
-                                        }
-                                    }
+            $fanCtx = @{ matchCount = 0 }
+            $fr = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptSoftwareScanBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
+                -NoStartStatus -NoDoneStatus -TimeoutReasonText 'timed out' -PerHostTimeoutSeconds $perHostTimeout `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) {
+                        $err = "worker error: $err"
+                        & $send @{ type='log'; level='err'; text="$($job.Host) : $err" }
+                        & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=$err }
+                        return $false
+                    }
+                    $apps = Expand-WptSingleHostResult $res
+                    $hostMatches = 0
+                    foreach ($a in @($apps)) {
+                        $name = if ($a -is [hashtable]) { [string]$a['Name'] } else { [string]$a.Name }
+                        $ver  = if ($a -is [hashtable]) { [string]$a['Version'] } else { [string]$a.Version }
+                        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                        foreach ($prof in $catalog) {
+                            if (Test-WptUnsupportedMatch -AppName $name -AppVersion $ver -Prof $prof) {
+                                # SAFE effective action: a bare family-name match is Review, not auto-Uninstall.
+                                $effAction = Get-WptUnsupportedAction -Prof $prof -AppVersion $ver
+                                $row = @{
+                                    _rk="$($job.Host)|$name|$ver"
+                                    Host=$job.Host; Product=$prof.Label; InstalledName=$name; Version=$ver
+                                    Category=$prof.Category; Action=$effAction; Notes=$prof.Notes
                                 }
-                                $hostsOk++
-                                & $send @{ type='log'; level=$(if($hostMatches -gt 0){'warn'}else{'ok'}); text="$($j.Host): $hostMatches unsupported/SEoL product(s) found." }
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Success'; itemCount=$hostMatches; detail="$hostMatches unsupported match(es)" }
-                            }
-                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                        }
-                    }
-                    if ($perHostTimeout -gt 0 -and $done -lt $jobs.Count) {
-                        $nowPh = Get-Date
-                        foreach ($j in $jobs) {
-                            if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                                try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                $hostsFail++; $done++
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${perHostTimeout}s)" }
-                                & $send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${perHostTimeout}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
-                                & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                                & $emitRow $row
+                                $fanCtx.matchCount++; $hostMatches++
+                                break   # one row per app (first matching profile)
                             }
                         }
                     }
-                    if ($done -lt $jobs.Count) {
-                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
-                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
-                        if ($cancelled -or $timedOut) {
-                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
-                            foreach ($j in $jobs) { if ($j.PS) { try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null; $hostsFail++; $done++; & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" } } }
-                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned." }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 120
-                    }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $matchCount unsupported match(es) across $hostsOk scanned host(s); $hostsFail failed." }
-            return @{ rows=@($rows); summary=@{ matches=$matchCount; hostsScanned=$hostsOk; hostsFailed=$hostsFail; cancelled=$cancelled; timedOut=$timedOut } }
+                    & $send @{ type='log'; level=$(if($hostMatches -gt 0){'warn'}else{'ok'}); text="$($job.Host): $hostMatches unsupported/SEoL product(s) found." }
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Success'; itemCount=$hostMatches; detail="$hostMatches unsupported match(es)" }
+                    return $true
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    $det = if ($kind -eq 'perhost') { $reason } else { "abandoned: $reason" }
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=$det }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "Run $reason; remaining hosts abandoned." }
+            & $send @{ type='status'; text="Done. $($fanCtx.matchCount) unsupported match(es) across $($fr.summary.ok) scanned host(s); $($fr.summary.failed) failed." }
+            return @{ rows=@($fr.rows); summary=@{ matches=$fanCtx.matchCount; hostsScanned=$fr.summary.ok; hostsFailed=$fr.summary.failed; cancelled=$fr.summary.cancelled; timedOut=$fr.summary.timedOut } }
         }
         'unsupported-uninstall' {
             # Uninstall the checked unsupported products, grouped per host. 'pairs' is a
@@ -5962,74 +5906,49 @@ function Invoke-JanetToolAction {
             }
             $totalUnits = [int](($hostList | ForEach-Object { $byHost[$_].Count } | Measure-Object -Sum).Sum)
             & $send @{ type='status'; text="Uninstalling $totalUnits unsupported product(s) across $($hostList.Count) host(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
-            $iss.Commands.Add($fn)
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $hostList) {
-                $names = @($byHost[$h])
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptSoftwareUninstallBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($names)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; Names=$names; PS=$ps; Async=$ps.BeginInvoke() })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0
-            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
-            try {
-                while ($done -lt $jobs.Count) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null; $err = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) } catch { $err = "worker error: $($_.Exception.Message)" }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($err) {
-                                foreach ($n in $j.Names) {
-                                    $row = @{ _rk="$($j.Host)|$n"; Host=$j.Host; App=$n; 'Install Type'=''; Result='Failed'; Detail=$err }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                }
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
-                            } else {
-                                foreach ($u in (Expand-WptSingleHostResult $res)) {
-                                    $app = if ($u -is [hashtable]) { [string]$u['App'] } else { [string]$u.App }
-                                    $typ = if ($u -is [hashtable]) { [string]$u['Type'] } else { [string]$u.Type }
-                                    $rst = if ($u -is [hashtable]) { [string]$u['Result'] } else { [string]$u.Result }
-                                    $det = if ($u -is [hashtable]) { [string]$u['Detail'] } else { [string]$u.Detail }
-                                    $isOk = ($rst -eq 'Removed')
-                                    if ($isOk) { $okCount++ } else { $failCount++ }
-                                    $row = @{ _rk="$($j.Host)|$app"; Host=$j.Host; App=$app; 'Install Type'=$typ; Result=$rst; Detail=$det }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($isOk){1}else{0}); detail="$app : $rst - $det" }
-                                }
-                            }
-                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+            # Audit 2026-07-23 deferred pass: bespoke harvest folded into Invoke-WptFanOut.
+            # One job per host (its app names resolved from $byHost), one result row per
+            # (host x product); ok/fail are counted per PRODUCT in $fanCtx, so the fan-out's
+            # per-host summary is replaced with the per-unit one below.
+            $fanCtx = @{ ok = 0; fail = 0 }
+            $fr = Invoke-WptFanOut -Targets $hostList -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptSoftwareUninstallBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
+                -NoStartStatus -NoDoneStatus -TimeoutReasonText 'timed out' `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, @($byHost[$h])) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) {
+                        $err = "worker error: $err"
+                        foreach ($n in @($byHost[$job.Host])) {
+                            $row = @{ _rk="$($job.Host)|$n"; Host=$job.Host; App=$n; 'Install Type'=''; Result='Failed'; Detail=$err }
+                            & $emitRow $row; $fanCtx.fail++
                         }
+                        & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail=$err }
+                        return $false
                     }
-                    if ($done -lt $jobs.Count) {
-                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
-                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
-                        if ($cancelled -or $timedOut) {
-                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
-                            foreach ($j in $jobs) {
-                                if ($j.PS) {
-                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                    foreach ($n in $j.Names) {
-                                        $row = @{ _rk="$($j.Host)|$n"; Host=$j.Host; App=$n; 'Install Type'=''; Result='Failed'; Detail=$reason }
-                                        [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                    }
-                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
-                                }
-                            }
-                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining uninstalls abandoned (already-dispatched removals may proceed on the host)." }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 120
+                    foreach ($u in (Expand-WptSingleHostResult $res)) {
+                        $app = if ($u -is [hashtable]) { [string]$u['App'] } else { [string]$u.App }
+                        $typ = if ($u -is [hashtable]) { [string]$u['Type'] } else { [string]$u.Type }
+                        $rst = if ($u -is [hashtable]) { [string]$u['Result'] } else { [string]$u.Result }
+                        $det = if ($u -is [hashtable]) { [string]$u['Detail'] } else { [string]$u.Detail }
+                        $isOk = ($rst -eq 'Removed')
+                        if ($isOk) { $fanCtx.ok++ } else { $fanCtx.fail++ }
+                        $row = @{ _rk="$($job.Host)|$app"; Host=$job.Host; App=$app; 'Install Type'=$typ; Result=$rst; Detail=$det }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($isOk){1}else{0}); detail="$app : $rst - $det" }
                     }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount removed, $failCount failed of $totalUnits." }
-            return @{ rows=@($rows); summary=@{ total=$totalUnits; ok=$okCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
+                    return $true
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    foreach ($n in @($byHost[$job.Host])) {
+                        $row = @{ _rk="$($job.Host)|$n"; Host=$job.Host; App=$n; 'Install Type'=''; Result='Failed'; Detail=$reason }
+                        & $emitRow $row; $fanCtx.fail++
+                    }
+                    & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "Run $reason; remaining uninstalls abandoned (already-dispatched removals may proceed on the host)." }
+            & $send @{ type='status'; text="Done. $($fanCtx.ok) removed, $($fanCtx.fail) failed of $totalUnits." }
+            return @{ rows=@($fr.rows); summary=@{ total=$totalUnits; ok=$fanCtx.ok; failed=$fanCtx.fail; cancelled=$fr.summary.cancelled; timedOut=$fr.summary.timedOut } }
         }
         'fix-java' {
             $threads = Get-WptThreadCount $Params 12
@@ -6047,73 +5966,47 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
             }
             & $send @{ type='status'; text="Fixing Java (Oracle/Sun older than 8u491) on $($javaTargets.Count) host(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
-            $iss.Commands.Add($fn)
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $javaTargets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptFixJavaBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($script:JavaFixSrc)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0
-            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
-            try {
-                while ($done -lt $jobs.Count) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null; $err = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $err = "worker error: $($_.Exception.Message)" }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($err -or $null -eq $res) {
-                                if (-not $err) { $err = 'no result' }
-                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail=$err }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
-                            } elseif ($res.Error) {
-                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
-                            } else {
-                                # The shared engine returns a single rollup 'Java' row per host.
-                                $jrow = @($res.Rows)[0]
-                                $rslt = if ($jrow) { [string]$jrow.Result } else { 'NOCHANGE' }
-                                $det  = if ($jrow) { [string]$jrow.Detail } else { 'no result row' }
-                                $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
-                                if ($isOk) { $okCount++ } else { $failCount++ }
-                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
-                            }
-                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                        }
+            # Audit 2026-07-23 deferred pass: bespoke harvest folded into Invoke-WptFanOut
+            # (probe injected via -InjectFunctions; -OnResult keeps the err / res.Error /
+            # engine-rollup triage verbatim).
+            $fr = Invoke-WptFanOut -Targets $javaTargets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptFixJavaBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
+                -NoStartStatus -NoDoneStatus -TimeoutReasonText 'timed out' `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, $script:JavaFixSrc) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $err = "worker error: $err" } else { $res = $res | Select-Object -First 1 }
+                    if ($err -or $null -eq $res) {
+                        if (-not $err) { $err = 'no result' }
+                        $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=$false; Result='FAIL'; Detail=$err }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail=$err }
+                        return $false
                     }
-                    if ($done -lt $jobs.Count) {
-                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
-                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
-                        if ($cancelled -or $timedOut) {
-                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
-                            foreach ($j in $jobs) {
-                                if ($j.PS) {
-                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                    $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
-                                    $done++
-                                }
-                            }
-                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned (already-dispatched removals may proceed on the host)." }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 120
+                    if ($res.Error) {
+                        $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
+                        return $false
                     }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($javaTargets.Count) host(s)." }
-            return @{ rows=@($rows); summary=@{ total=$javaTargets.Count; ok=$okCount; failed=$failCount; selfSkipped=$guarded.SkippedCount; cancelled=$cancelled; timedOut=$timedOut } }
+                    # The shared engine returns a single rollup 'Java' row per host.
+                    $jrow = @($res.Rows)[0]
+                    $rslt = if ($jrow) { [string]$jrow.Result } else { 'NOCHANGE' }
+                    $det  = if ($jrow) { [string]$jrow.Detail } else { 'no result row' }
+                    $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
+                    $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
+                    return $isOk
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "Run $reason; remaining hosts abandoned (already-dispatched removals may proceed on the host)." }
+            & $send @{ type='status'; text="Done. $($fr.summary.ok) ok, $($fr.summary.failed) failed of $($javaTargets.Count) host(s)." }
+            return @{ rows=@($fr.rows); summary=@{ total=$javaTargets.Count; ok=$fr.summary.ok; failed=$fr.summary.failed; selfSkipped=$guarded.SkippedCount; cancelled=$fr.summary.cancelled; timedOut=$fr.summary.timedOut } }
         }
         'spec-exec-scan' {
             # Read-only Spectre/BHI mitigation state, one job per host over the pool.
@@ -6125,71 +6018,45 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
             }
             & $send @{ type='status'; text="Checking Spectre/BHI mitigation state on $($targets.Count) host(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
-            $iss.Commands.Add($fn)
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $targets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptSpecExecScanBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($script:SpecFixSrc)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0; $needCount = 0
-            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
-            try {
-                while ($done -lt $jobs.Count) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null; $err = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $err = "worker error: $($_.Exception.Message)" }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($err -or $null -eq $res) {
-                                if (-not $err) { $err = 'no result' }
-                                $row = @{ _rk=$j.Host; Host=$j.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=$err }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
-                            } elseif ($res.Error) {
-                                $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=[string]$res.Error }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
-                            } else {
-                                $verdict = [string]$res.Verdict
-                                $rec = if ($verdict -eq 'COMPLIANT') { 'COMPLIANT -> ok' } else { "$verdict -> enable" }
-                                if ($verdict -ne 'COMPLIANT') { $needCount++ }
-                                $okCount++
-                                $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=$verdict; FeatureSettingsOverride=[string]$res.Fso; Mask=[string]$res.Mask; Recommendation=$rec; Error='' }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Success'; itemCount=0; detail="Verdict=$verdict; $rec" }
-                            }
-                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                        }
+            # Audit 2026-07-23 deferred pass: bespoke harvest folded into Invoke-WptFanOut
+            # (probe injected via -InjectFunctions; needs-enabling tally rides in $fanCtx).
+            $fanCtx = @{ needCount = 0 }
+            $fr = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptSpecExecScanBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
+                -NoStartStatus -NoDoneStatus -TimeoutReasonText 'timed out' `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, $script:SpecFixSrc) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $err = "worker error: $err" } else { $res = $res | Select-Object -First 1 }
+                    if ($err -or $null -eq $res) {
+                        if (-not $err) { $err = 'no result' }
+                        $row = @{ _rk=$job.Host; Host=$job.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=$err }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=$err }
+                        return $false
                     }
-                    if ($done -lt $jobs.Count) {
-                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
-                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
-                        if ($cancelled -or $timedOut) {
-                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
-                            foreach ($j in $jobs) {
-                                if ($j.PS) {
-                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                    $row = @{ _rk=$j.Host; Host=$j.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error="abandoned: $reason" }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                    & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
-                                    $done++
-                                }
-                            }
-                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned." }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 120
+                    if ($res.Error) {
+                        $row = @{ _rk=$job.Host; Host=$job.Host; CPU=[string]$res.Cpu; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=[string]$res.Error }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
+                        return $false
                     }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount scanned ($needCount need enabling), $failCount failed of $($targets.Count) host(s)." }
-            return @{ rows=@($rows); summary=@{ total=$targets.Count; ok=$okCount; needEnable=$needCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
+                    $verdict = [string]$res.Verdict
+                    $rec = if ($verdict -eq 'COMPLIANT') { 'COMPLIANT -> ok' } else { "$verdict -> enable" }
+                    if ($verdict -ne 'COMPLIANT') { $fanCtx.needCount++ }
+                    $row = @{ _rk=$job.Host; Host=$job.Host; CPU=[string]$res.Cpu; Verdict=$verdict; FeatureSettingsOverride=[string]$res.Fso; Mask=[string]$res.Mask; Recommendation=$rec; Error='' }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Success'; itemCount=0; detail="Verdict=$verdict; $rec" }
+                    return $true
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    $row = @{ _rk=$job.Host; Host=$job.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error="abandoned: $reason" }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "Run $reason; remaining hosts abandoned." }
+            & $send @{ type='status'; text="Done. $($fr.summary.ok) scanned ($($fanCtx.needCount) need enabling), $($fr.summary.failed) failed of $($targets.Count) host(s)." }
+            return @{ rows=@($fr.rows); summary=@{ total=$targets.Count; ok=$fr.summary.ok; needEnable=$fanCtx.needCount; failed=$fr.summary.failed; cancelled=$fr.summary.cancelled; timedOut=$fr.summary.timedOut } }
         }
         'spec-exec-enable' {
             $threads = Get-WptThreadCount $Params 12
@@ -6208,73 +6075,47 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0; error='engine unavailable' } }
             }
             & $send @{ type='status'; text="Enabling Spectre/BHI mitigation (OR the BHI bit 0x800000 into FeatureSettingsOverride, Mask=3) on $($specTargets.Count) host(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $fn   = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry('Test-WptHostReachable', ${function:Test-WptHostReachable}.ToString())
-            $iss.Commands.Add($fn)
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $specTargets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptSpecExecEnableBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($script:SpecFixSrc)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0
-            $deadline = (Get-Date).AddSeconds(3600); $cancelled = $false; $timedOut = $false
-            try {
-                while ($done -lt $jobs.Count) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null; $err = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $err = "worker error: $($_.Exception.Message)" }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($err -or $null -eq $res) {
-                                if (-not $err) { $err = 'no result' }
-                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail=$err }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
-                            } elseif ($res.Error) {
-                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
-                            } else {
-                                # The shared engine returns a single rollup 'SpecExec' row per host.
-                                $srow = @($res.Rows)[0]
-                                $rslt = if ($srow) { [string]$srow.Result } else { 'FAIL' }
-                                $det  = if ($srow) { [string]$srow.Detail } else { 'no result row' }
-                                $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
-                                if ($isOk) { $okCount++ } else { $failCount++ }
-                                $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                                & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
-                            }
-                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                        }
+            # Audit 2026-07-23 deferred pass: bespoke harvest folded into Invoke-WptFanOut
+            # (probe injected via -InjectFunctions; -OnResult keeps the err / res.Error /
+            # engine-rollup triage verbatim).
+            $fr = Invoke-WptFanOut -Targets $specTargets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptSpecExecEnableBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
+                -NoStartStatus -NoDoneStatus -TimeoutReasonText 'timed out' `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, $script:SpecFixSrc) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $err = "worker error: $err" } else { $res = $res | Select-Object -First 1 }
+                    if ($err -or $null -eq $res) {
+                        if (-not $err) { $err = 'no result' }
+                        $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=$false; Result='FAIL'; Detail=$err }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail=$err }
+                        return $false
                     }
-                    if ($done -lt $jobs.Count) {
-                        if     ($script:WptCancelCheck -and (& $script:WptCancelCheck)) { $cancelled = $true }
-                        elseif ((Get-Date) -gt $deadline) { $timedOut = $true }
-                        if ($cancelled -or $timedOut) {
-                            $reason = if ($cancelled) { 'cancelled by operator' } else { 'timed out' }
-                            foreach ($j in $jobs) {
-                                if ($j.PS) {
-                                    try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                    $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
-                                    & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
-                                    $done++
-                                }
-                            }
-                            & $send @{ type='log'; level='warn'; text="Run $reason; remaining hosts abandoned." }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 120
+                    if ($res.Error) {
+                        $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
+                        & $emitRow $row
+                        & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
+                        return $false
                     }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($specTargets.Count) host(s). Reboot required to apply." }
-            return @{ rows=@($rows); summary=@{ total=$specTargets.Count; ok=$okCount; failed=$failCount; selfSkipped=$guarded.SkippedCount; cancelled=$cancelled; timedOut=$timedOut } }
+                    # The shared engine returns a single rollup 'SpecExec' row per host.
+                    $srow = @($res.Rows)[0]
+                    $rslt = if ($srow) { [string]$srow.Result } else { 'FAIL' }
+                    $det  = if ($srow) { [string]$srow.Detail } else { 'no result row' }
+                    $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
+                    $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
+                    return $isOk
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
+                    & $emitRow $row
+                    & $send @{ type='audit'; action='VulnPatched'; target=$job.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "Run $reason; remaining hosts abandoned." }
+            & $send @{ type='status'; text="Done. $($fr.summary.ok) ok, $($fr.summary.failed) failed of $($specTargets.Count) host(s). Reboot required to apply." }
+            return @{ rows=@($fr.rows); summary=@{ total=$specTargets.Count; ok=$fr.summary.ok; failed=$fr.summary.failed; selfSkipped=$guarded.SkippedCount; cancelled=$fr.summary.cancelled; timedOut=$fr.summary.timedOut } }
         }
         'kb-install' {
             $threads = Get-WptThreadCount $Params 16
@@ -6293,6 +6134,7 @@ function Invoke-JanetToolAction {
             & $send @{ type='status'; text="Installing $($kbList.Count) KB(s) on $($targets.Count) host(s)$(if($msuPath){' (MSU fallback armed)'} )..." }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptKbInstallBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $kbList, $msuPath, $noReboot) } `
                 -OkOf { param($r) (@($r.Errors).Count -eq 0) } `
                 -AuditDetail { param($r) "MECM=$($r.MECMInstalled) MSU=$($r.MSUInstalled) Skip=$($r.Skipped) Err=$(@($r.Errors).Count)" } `
@@ -6310,105 +6152,70 @@ function Invoke-JanetToolAction {
                 $kbTarget = ([string]$Params['kb']).Trim().ToUpper()
                 if ($kbTarget -and $kbTarget -notmatch '^KB') { $kbTarget = 'KB' + ($kbTarget -replace '[^0-9]','') }
             }
-            $kbPresent = 0; $kbMissing = 0
+            $fanCtx = @{ kbPresent = 0; kbMissing = 0 }
             & $send @{ type='status'; text="Starting 'kb-scan'$(if($kbTarget){" for $kbTarget"}) on $($targets.Count) host(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $targets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptKbScanBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0
-            $deadline = (Get-Date).AddSeconds(900)   # wall-clock backstop so a wedged host can't hang the job forever
+            # Audit 2026-07-23 deferred pass: bespoke harvest folded into Invoke-WptFanOut
+            # (probe injected via -InjectFunctions; -OnResult keeps the targeted-verdict /
+            # full-dump row expansion verbatim, present/missing tallies ride in $fanCtx).
             $perHostTimeout = 300   # per-host watchdog: abandon a single host wedged on a WMI/CIM call so it can't pin a worker thread for the whole batch
-            try {
-                while ($done -lt $jobs.Count) {
-                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
-                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
-                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; KBs=@(); Error="worker error: $($_.Exception.Message)" } }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($null -eq $res) { $res = @{ Host=$j.Host; KBs=@(); Error='no result' } }
-                            $kbArr = @($res.KBs); $hostOk = [string]::IsNullOrWhiteSpace([string]$res.Error)
-                            if ($hostOk) { $okCount++ } else { $failCount++ }
-                            if ($hostOk -and $kbTarget) {
-                                # Targeted verdict: one row per host, Present/Missing for the KB.
-                                $hit = $null
-                                foreach ($kb in $kbArr) {
-                                    $kbID = if ($kb -is [hashtable]) { [string]$kb['HotFixID'] } else { [string]$kb.HotFixID }
-                                    if ($kbID -and ($kbID.Trim().ToUpper() -eq $kbTarget)) { $hit = $kb; break }
-                                }
-                                if ($hit) {
-                                    $kbOn = if ($hit -is [hashtable]) { [string]$hit['InstalledOn'] } else { [string]$hit.InstalledOn }
-                                    $kbBy = if ($hit -is [hashtable]) { [string]$hit['InstalledBy'] } else { [string]$hit.InstalledBy }
-                                    $row = @{ _rk="$($res.Host)|$kbTarget"; Host=$res.Host; HotFixID=$kbTarget; Description='Present'; InstalledOn=$kbOn; InstalledBy=$kbBy }
-                                    $kbPresent++
-                                } else {
-                                    $row = @{ _rk="$($res.Host)|$kbTarget"; Host=$res.Host; HotFixID=$kbTarget; Description='Missing'; InstalledOn=''; InstalledBy='' }
-                                    $kbMissing++
-                                }
-                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
-                            } elseif ($hostOk) {
-                                foreach ($kb in $kbArr) {
-                                    $kbID  = if ($kb -is [hashtable]) { [string]$kb['HotFixID'] } else { [string]$kb.HotFixID }
-                                    $kbDes = if ($kb -is [hashtable]) { [string]$kb['Description'] } else { [string]$kb.Description }
-                                    $kbOn  = if ($kb -is [hashtable]) { [string]$kb['InstalledOn'] } else { [string]$kb.InstalledOn }
-                                    $kbBy  = if ($kb -is [hashtable]) { [string]$kb['InstalledBy'] } else { [string]$kb.InstalledBy }
-                                    $row = @{ _rk="$($res.Host)|$kbID"; Host=$res.Host; HotFixID=$kbID; Description=$kbDes; InstalledOn=$kbOn; InstalledBy=$kbBy }
-                                    [void]$rows.Add($row)
-                                    & $send (New-WptRowEvent $row)
-                                }
-                            } else {
-                                & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" }
-                            }
-                            & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$kbArr.Count; detail=$(if($hostOk){"$($kbArr.Count) KB(s)"}else{[string]$res.Error}) }
-                            $done++
-                            & $send @{ type='progress'; done=$done; total=$jobs.Count }
+            $fr = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptKbScanBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
+                -NoStartStatus -NoDoneStatus -DeadlineSeconds 900 -TimeoutReasonText 'timed out (deadline)' `
+                -PerHostTimeoutSeconds $perHostTimeout `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $res = @{ Host=$job.Host; KBs=@(); Error="worker error: $err" } }
+                    else { $res = $res | Select-Object -First 1 }
+                    if ($null -eq $res) { $res = @{ Host=$job.Host; KBs=@(); Error='no result' } }
+                    $kbArr = @($res.KBs); $hostOk = [string]::IsNullOrWhiteSpace([string]$res.Error)
+                    if ($hostOk -and $kbTarget) {
+                        # Targeted verdict: one row per host, Present/Missing for the KB.
+                        $hit = $null
+                        foreach ($kb in $kbArr) {
+                            $kbID = if ($kb -is [hashtable]) { [string]$kb['HotFixID'] } else { [string]$kb.HotFixID }
+                            if ($kbID -and ($kbID.Trim().ToUpper() -eq $kbTarget)) { $hit = $kb; break }
                         }
-                    }
-                    if ($perHostTimeout -gt 0 -and $done -lt $jobs.Count) {
-                        $nowPh = Get-Date
-                        foreach ($j in $jobs) {
-                            if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                                try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                $failCount++; $done++
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${perHostTimeout}s)" }
-                                & $send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${perHostTimeout}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
-                                & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                            }
+                        if ($hit) {
+                            $kbOn = if ($hit -is [hashtable]) { [string]$hit['InstalledOn'] } else { [string]$hit.InstalledOn }
+                            $kbBy = if ($hit -is [hashtable]) { [string]$hit['InstalledBy'] } else { [string]$hit.InstalledBy }
+                            $row = @{ _rk="$($res.Host)|$kbTarget"; Host=$res.Host; HotFixID=$kbTarget; Description='Present'; InstalledOn=$kbOn; InstalledBy=$kbBy }
+                            $fanCtx.kbPresent++
+                        } else {
+                            $row = @{ _rk="$($res.Host)|$kbTarget"; Host=$res.Host; HotFixID=$kbTarget; Description='Missing'; InstalledOn=''; InstalledBy='' }
+                            $fanCtx.kbMissing++
                         }
-                    }
-                    if ($done -lt $jobs.Count) {
-                        $cancel = ($script:WptCancelCheck -and (& $script:WptCancelCheck))
-                        $expired = ((Get-Date) -gt $deadline)
-                        if ($cancel -or $expired) {
-                            $reason = if ($cancel) { 'cancelled by operator' } else { 'timed out (deadline)' }
-                            # BeginStop + null only (no Dispose - it blocks ~11s/host); the pool teardown in the finally reclaims the children.
-                            foreach ($j in $jobs) { if ($j.PS) { try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null; $failCount++; $done++; & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$reason } } }
-                            & $send @{ type='log'; level='warn'; text="kb-scan $reason; remaining host(s) abandoned (in-flight calls stopped)." }; break
+                        & $emitRow $row
+                    } elseif ($hostOk) {
+                        foreach ($kb in $kbArr) {
+                            $kbID  = if ($kb -is [hashtable]) { [string]$kb['HotFixID'] } else { [string]$kb.HotFixID }
+                            $kbDes = if ($kb -is [hashtable]) { [string]$kb['Description'] } else { [string]$kb.Description }
+                            $kbOn  = if ($kb -is [hashtable]) { [string]$kb['InstalledOn'] } else { [string]$kb.InstalledOn }
+                            $kbBy  = if ($kb -is [hashtable]) { [string]$kb['InstalledBy'] } else { [string]$kb.InstalledBy }
+                            $row = @{ _rk="$($res.Host)|$kbID"; Host=$res.Host; HotFixID=$kbID; Description=$kbDes; InstalledOn=$kbOn; InstalledBy=$kbBy }
+                            & $emitRow $row
                         }
-                        Start-Sleep -Milliseconds 120
+                    } else {
+                        & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" }
                     }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+                    & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$kbArr.Count; detail=$(if($hostOk){"$($kbArr.Count) KB(s)"}else{[string]$res.Error}) }
+                    return $hostOk
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=$reason }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "kb-scan $reason; remaining host(s) abandoned (in-flight calls stopped)." }
             if ($kbTarget) {
+                $kbPresent = [int]$fanCtx.kbPresent; $kbMissing = [int]$fanCtx.kbMissing
                 $reach = $kbPresent + $kbMissing
                 $pct  = if ($targets.Count -gt 0) { [math]::Round(($kbPresent / $targets.Count) * 100, 1) } else { 0 }
                 $pctM = if ($reach -gt 0) { [math]::Round(($kbPresent / $reach) * 100, 1) } else { 0 }
-                & $send @{ type='log'; level='ok'; text="$kbTarget presence - Fleet: $pct% ($kbPresent/$($targets.Count)) | Measured: $pctM% ($kbPresent/$reach reachable). Missing: $kbMissing, unreachable: $failCount." }
-                & $send @{ type='status'; text="Done. $kbTarget present on $kbPresent, missing on $kbMissing, $failCount unreachable of $($targets.Count)." }
-                return @{ rows=@($rows); summary=@{ total=$jobs.Count; ok=$okCount; failed=$failCount; kbTarget=$kbTarget; present=$kbPresent; missing=$kbMissing; fleetPct=$pct; measuredPct=$pctM } }
+                & $send @{ type='log'; level='ok'; text="$kbTarget presence - Fleet: $pct% ($kbPresent/$($targets.Count)) | Measured: $pctM% ($kbPresent/$reach reachable). Missing: $kbMissing, unreachable: $($fr.summary.failed)." }
+                & $send @{ type='status'; text="Done. $kbTarget present on $kbPresent, missing on $kbMissing, $($fr.summary.failed) unreachable of $($targets.Count)." }
+                return @{ rows=@($fr.rows); summary=@{ total=$fr.summary.total; ok=$fr.summary.ok; failed=$fr.summary.failed; kbTarget=$kbTarget; present=$kbPresent; missing=$kbMissing; fleetPct=$pct; measuredPct=$pctM } }
             }
-            & $send @{ type='status'; text="Done. $okCount host(s) scanned, $failCount failed; $($rows.Count) KB row(s)." }
-            return @{ rows=@($rows); summary=@{ total=$jobs.Count; ok=$okCount; failed=$failCount; kbRows=$rows.Count } }
+            & $send @{ type='status'; text="Done. $($fr.summary.ok) host(s) scanned, $($fr.summary.failed) failed; $(@($fr.rows).Count) KB row(s)." }
+            return @{ rows=@($fr.rows); summary=@{ total=$fr.summary.total; ok=$fr.summary.ok; failed=$fr.summary.failed; kbRows=@($fr.rows).Count } }
         }
         'kb-trigger-mecm' {
             $threads = Get-WptThreadCount $Params 24
@@ -6443,63 +6250,46 @@ function Invoke-JanetToolAction {
             if ($interval -lt 1) { $interval = 1 }
             if ($interval -gt 600) { $interval = 600 }   # ceiling: max 10 min between polls
             & $send @{ type='status'; text="Starting 'verify-patch' on $($targets.Count) host(s) with $threads thread(s) (up to $maxPolls poll(s) every ${interval}s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $targets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptVerifyPatchBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth).AddArgument($kbFilter).AddArgument($maxPolls).AddArgument($interval)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0; $updRows = 0
-            $deadline = (Get-Date).AddSeconds(($maxPolls * $interval) + 600)   # wall-clock backstop > the longest host poll budget
-            try {
-                while ($done -lt $jobs.Count) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; Updates=@(); Error="worker error: $($_.Exception.Message)" } }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($null -eq $res) { $res = @{ Host=$j.Host; Updates=@(); Error='no result' } }
-                            $hostOk = [string]::IsNullOrWhiteSpace([string]$res.Error)
-                            if ($hostOk) { $okCount++ } else { $failCount++ }
-                            $ups = @($res.Updates)
-                            if ($hostOk -and $ups.Count -gt 0) {
-                                foreach ($u in $ups) {
-                                    $un  = if ($u -is [hashtable]) { [string]$u['Update'] } else { [string]$u.Update }
-                                    $ust = if ($u -is [hashtable]) { [string]$u['State'] }  else { [string]$u.State }
-                                    $uss = if ($u -is [hashtable]) { [string]$u['Status'] } else { [string]$u.Status }
-                                    $row = @{ _rk="$($res.Host)|$un"; Host=$res.Host; Update=$un; State=$ust; Status=$uss }
-                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $updRows++
-                                }
-                            } elseif ($hostOk) {
-                                $msg = if ($res.NoSccm) { 'no SCCM client (root\ccm absent)' } else { 'no matching updates' }
-                                & $send @{ type='log'; level='info'; text="$($res.Host) : $msg" }
-                            } else {
-                                & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" }
-                            }
-                            $aDetail = if ($hostOk) { if ($res.NoSccm) { 'no SCCM client' } else { "$($ups.Count) update(s)" } } else { [string]$res.Error }
-                            & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$ups.Count; detail=$aDetail }
-                            $done++
-                            & $send @{ type='progress'; done=$done; total=$jobs.Count }
+            # Audit 2026-07-23 deferred pass: bespoke harvest folded into Invoke-WptFanOut
+            # (probe injected via -InjectFunctions; per-update row expansion in -OnResult,
+            # update-row tally rides in $fanCtx; 200ms poll preserved via -PollMilliseconds).
+            $fanCtx = @{ updRows = 0 }
+            $fr = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptVerifyPatchBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
+                -NoStartStatus -NoDoneStatus -PollMilliseconds 200 `
+                -DeadlineSeconds (($maxPolls * $interval) + 600) -TimeoutReasonText 'timed out (deadline)' `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, $kbFilter, $maxPolls, $interval) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $res = @{ Host=$job.Host; Updates=@(); Error="worker error: $err" } }
+                    else { $res = $res | Select-Object -First 1 }
+                    if ($null -eq $res) { $res = @{ Host=$job.Host; Updates=@(); Error='no result' } }
+                    $hostOk = [string]::IsNullOrWhiteSpace([string]$res.Error)
+                    $ups = @($res.Updates)
+                    if ($hostOk -and $ups.Count -gt 0) {
+                        foreach ($u in $ups) {
+                            $un  = if ($u -is [hashtable]) { [string]$u['Update'] } else { [string]$u.Update }
+                            $ust = if ($u -is [hashtable]) { [string]$u['State'] }  else { [string]$u.State }
+                            $uss = if ($u -is [hashtable]) { [string]$u['Status'] } else { [string]$u.Status }
+                            $row = @{ _rk="$($res.Host)|$un"; Host=$res.Host; Update=$un; State=$ust; Status=$uss }
+                            & $emitRow $row; $fanCtx.updRows++
                         }
+                    } elseif ($hostOk) {
+                        $msg = if ($res.NoSccm) { 'no SCCM client (root\ccm absent)' } else { 'no matching updates' }
+                        & $send @{ type='log'; level='info'; text="$($res.Host) : $msg" }
+                    } else {
+                        & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" }
                     }
-                    if ($done -lt $jobs.Count) {
-                        $cancel = ($script:WptCancelCheck -and (& $script:WptCancelCheck))
-                        $expired = ((Get-Date) -gt $deadline)
-                        if ($cancel -or $expired) {
-                            $reason = if ($cancel) { 'cancelled by operator' } else { 'timed out (deadline)' }
-                            foreach ($j in $jobs) { if ($j.PS) { try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null; $failCount++; $done++; & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$reason } } }
-                            & $send @{ type='log'; level='warn'; text="verify-patch $reason; remaining host(s) abandoned (in-flight calls stopped)." }; break
-                        }
-                        Start-Sleep -Milliseconds 200
-                    }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount host(s) verified, $failCount failed; $updRows update row(s)." }
-            return @{ rows=@($rows); summary=@{ total=$jobs.Count; ok=$okCount; failed=$failCount; updateRows=$updRows } }
+                    $aDetail = if ($hostOk) { if ($res.NoSccm) { 'no SCCM client' } else { "$($ups.Count) update(s)" } } else { [string]$res.Error }
+                    & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$ups.Count; detail=$aDetail }
+                    return $hostOk
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=$reason }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "verify-patch $reason; remaining host(s) abandoned (in-flight calls stopped)." }
+            & $send @{ type='status'; text="Done. $($fr.summary.ok) host(s) verified, $($fr.summary.failed) failed; $($fanCtx.updRows) update row(s)." }
+            return @{ rows=@($fr.rows); summary=@{ total=$fr.summary.total; ok=$fr.summary.ok; failed=$fr.summary.failed; updateRows=$fanCtx.updRows } }
         }
         'remote-message' {
             $threads = Get-WptThreadCount $Params 16
@@ -6530,6 +6320,7 @@ function Invoke-JanetToolAction {
             $auditAct = if ($dry) { 'TouchHost' } else { 'VulnPatched' }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptCleanBlock -AuditAction $auditAct `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $doTemp, $doProf, $days, $dry, $doCache) } `
                 -OkOf { param($r) ($r.Status -eq 'Success' -or $r.Status -eq 'Dry Run OK') } `
                 -AuditDetail { param($r) $r.Detail } `
@@ -6578,6 +6369,7 @@ function Invoke-JanetToolAction {
             }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send -PerHostTimeoutSeconds 300 `
                 -Work $script:WptCleanUserAppsBlock -AuditAction $auditAct `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $appsCsv, $dry) } `
                 -OkOf { param($r) ($r.Status -eq 'Success' -or $r.Status -eq 'Dry Run OK') } `
                 -AuditDetail { param($r) $r.Detail } `
@@ -6629,6 +6421,7 @@ function Invoke-JanetToolAction {
             $expectedStr = (($defs | ForEach-Object { if ($null -ne $_.OrBits) { "$($_.Name)|0x$('{0:X}' -f [int]$_.OrBits)" } else { "$($_.Name)=$($_.Expected)" } }) -join '; ')
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptRegScanBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $regPath, $defs) } `
                 -OkOf { param($r) ($r.Reachable -and $r.Status -ne 'Error') } `
                 -AuditDetail { param($r) if ($r.Error) { $r.Error } else { $r.Status } } `
@@ -6659,6 +6452,7 @@ function Invoke-JanetToolAction {
             }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptRegApplyBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $regPath, $defs, $rebootAfter, $cveLabel) } `
                 -OkOf { param($r) [bool]$r.Success } `
                 -AuditDetail { param($r) if ($r.Error) { $r.Error } elseif ($r.RebootScheduled) { 'applied; reboot scheduled (1h)' } else { 'applied' } } `
@@ -6678,6 +6472,7 @@ function Invoke-JanetToolAction {
             $method = [string]$Params['method']; $arg = [string]$Params['arg']
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptAppUpdateBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $true) } `
                 -OkOf { param($r) (Get-WptVerifyOk $r.Reachable $r.Verified) } `
                 -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ($r.Reachable -and "$($r.Status)" -eq 'Verified') { 'Skipped' } else { 'Failure' } } `
@@ -6746,6 +6541,7 @@ function Invoke-JanetToolAction {
             $method = [string]$Params['method']; $arg = [string]$Params['arg']
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptAppUpdateBlock -AuditAction 'VulnPatched' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $false) } `
                 -OkOf { param($r) ($r.Status -eq 'OK') } `
                 -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ("$($r.Status)" -eq 'Pending' -or "$($r.Status)" -eq 'Skipped') { 'Skipped' } else { 'Failure' } } `
@@ -6753,80 +6549,44 @@ function Invoke-JanetToolAction {
                 -RowOf { param($r) @{ Host=$r.Host; Status=[string]$r.Status; Detail=[string]$r.Detail } }
         }
         'log4j-scanner' {
-            # One row per discovered jar; success counted per host.
+            # One row per discovered jar; success counted per host. Audit 2026-07-23
+            # deferred pass: bespoke harvest folded into Invoke-WptFanOut (probe injected
+            # via -InjectFunctions; per-jar row expansion in -OnResult, vulnerable tally
+            # rides in $fanCtx; the start status keeps the harvester's generic format).
             $threads = Get-WptThreadCount $Params 12
-            & $send @{ type='status'; text="Starting 'log4j-scanner' on $($targets.Count) host(s) with $threads thread(s)..." }
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
-            $pool.Open()
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($h in $targets) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                [void]$ps.AddScript($script:WptLog4jBlock).AddArgument($h).AddArgument($Credential).AddArgument($auth)
-                [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
-            }
-            $rows = New-Object System.Collections.ArrayList
-            $done = 0; $okCount = 0; $failCount = 0; $vulnTotal = 0
-            $deadline = (Get-Date).AddSeconds(1800)   # log4j recursive scan is slower; 30-min backstop per job
+            $fanCtx = @{ vulnTotal = 0 }
             $perHostTimeout = 300   # per-host watchdog: abandon a single host wedged on the Program Files/Users/Java jar tree walk so it can't pin a worker thread for the whole batch
-            try {
-                while ($done -lt $jobs.Count) {
-                    # Cap the per-host clock to the pool's real concurrency, in queue order: a queued PS
-                    # reports State='Running' at once, which would false-time-out the backlog past ~threads*timeout.
-                    $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-                    foreach ($j in $jobs) {
-                        if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                        if ($j.PS -and $j.Async.IsCompleted) {
-                            $res = $null
-                            try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; ScanOK=$false; Jars=@(); Error="worker error: $($_.Exception.Message)" } }
-                            try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                            if ($null -eq $res) { $res = @{ Host=$j.Host; ScanOK=$false; Jars=@(); Error='no result' } }
-                            $hostOk = [bool]$res.ScanOK
-                            if ($hostOk) { $okCount++ } else { $failCount++ }
-                            $jars = @($res.Jars); $hostVuln = 0
-                            foreach ($jar in $jars) {
-                                $path = if ($jar -is [hashtable]) { [string]$jar['Path'] } else { [string]$jar.Path }
-                                $fn   = if ($jar -is [hashtable]) { [string]$jar['Filename'] } else { [string]$jar.Filename }
-                                $ver  = if ($jar -is [hashtable]) { [string]$jar['Version'] } else { [string]$jar.Version }
-                                $state = Get-WptLog4jVulnState $ver
-                                if ($state -eq 'Vulnerable') { $hostVuln++; $vulnTotal++ }
-                                $row = @{ _rk="$($res.Host)|$path"; Host=$res.Host; JARPath=$path; Filename=$fn; VulnerableVersion=$(if($state -eq 'Patched'){"$ver (patched)"}elseif($state -eq 'Unknown'){"$ver (unknown)"}else{$ver}) }
-                                [void]$rows.Add($row)
-                                & $send (New-WptRowEvent $row)
-                            }
-                            if (-not $hostOk -and $res.Error) { & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" } }
-                            & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$jars.Count; detail=$(if($hostOk){"$($jars.Count) jar(s), $hostVuln vulnerable"}else{[string]$res.Error}) }
-                            $done++
-                            & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                        }
+            $fr = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
+                -Work $script:WptLog4jBlock -AuditAction 'TouchHost' `
+                -InjectFunctions 'Test-WptHostReachable' `
+                -NoDoneStatus -DeadlineSeconds 1800 -TimeoutReasonText 'timed out (deadline)' `
+                -PerHostTimeoutSeconds $perHostTimeout `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
+                -OnResult { param($res, $job, $emitRow, $err)
+                    if ($err) { $res = @{ Host=$job.Host; ScanOK=$false; Jars=@(); Error="worker error: $err" } }
+                    else { $res = $res | Select-Object -First 1 }
+                    if ($null -eq $res) { $res = @{ Host=$job.Host; ScanOK=$false; Jars=@(); Error='no result' } }
+                    $hostOk = [bool]$res.ScanOK
+                    $jars = @($res.Jars); $hostVuln = 0
+                    foreach ($jar in $jars) {
+                        $path = if ($jar -is [hashtable]) { [string]$jar['Path'] } else { [string]$jar.Path }
+                        $fn   = if ($jar -is [hashtable]) { [string]$jar['Filename'] } else { [string]$jar.Filename }
+                        $ver  = if ($jar -is [hashtable]) { [string]$jar['Version'] } else { [string]$jar.Version }
+                        $state = Get-WptLog4jVulnState $ver
+                        if ($state -eq 'Vulnerable') { $hostVuln++; $fanCtx.vulnTotal++ }
+                        $row = @{ _rk="$($res.Host)|$path"; Host=$res.Host; JARPath=$path; Filename=$fn; VulnerableVersion=$(if($state -eq 'Patched'){"$ver (patched)"}elseif($state -eq 'Unknown'){"$ver (unknown)"}else{$ver}) }
+                        & $emitRow $row
                     }
-                    if ($perHostTimeout -gt 0 -and $done -lt $jobs.Count) {
-                        $nowPh = Get-Date
-                        foreach ($j in $jobs) {
-                            if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                                try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
-                                $failCount++; $done++
-                                & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${perHostTimeout}s)" }
-                                & $send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${perHostTimeout}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
-                                & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                            }
-                        }
-                    }
-                    if ($done -lt $jobs.Count) {
-                        $cancel = ($script:WptCancelCheck -and (& $script:WptCancelCheck))
-                        $expired = ((Get-Date) -gt $deadline)
-                        if ($cancel -or $expired) {
-                            $reason = if ($cancel) { 'cancelled by operator' } else { 'timed out (deadline)' }
-                            # BeginStop + null only (no Dispose - it blocks ~11s/host); the pool teardown in the finally reclaims the children.
-                            foreach ($j in $jobs) { if ($j.PS) { try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null; $failCount++; $done++; & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$reason } } }
-                            & $send @{ type='log'; level='warn'; text="log4j-scanner $reason; remaining host(s) abandoned (in-flight calls stopped)." }; break
-                        }
-                        Start-Sleep -Milliseconds 120
-                    }
-                }
-            } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
-            & $send @{ type='status'; text="Done. $okCount host(s) scanned, $failCount failed; $($rows.Count) jar(s), $vulnTotal vulnerable." }
-            return @{ rows=@($rows); summary=@{ total=$jobs.Count; ok=$okCount; failed=$failCount; jars=$rows.Count; vulnerable=$vulnTotal } }
+                    if (-not $hostOk -and $res.Error) { & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" } }
+                    & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$jars.Count; detail=$(if($hostOk){"$($jars.Count) jar(s), $hostVuln vulnerable"}else{[string]$res.Error}) }
+                    return $hostOk
+                } `
+                -OnAbandon { param($job, $kind, $reason)
+                    & $send @{ type='audit'; action='TouchHost'; target=$job.Host; result='Failure'; itemCount=0; detail=$reason }
+                } `
+                -RunAbandonLogOf { param($reason, $count) "log4j-scanner $reason; remaining host(s) abandoned (in-flight calls stopped)." }
+            & $send @{ type='status'; text="Done. $($fr.summary.ok) host(s) scanned, $($fr.summary.failed) failed; $(@($fr.rows).Count) jar(s), $($fanCtx.vulnTotal) vulnerable." }
+            return @{ rows=@($fr.rows); summary=@{ total=$fr.summary.total; ok=$fr.summary.ok; failed=$fr.summary.failed; jars=@($fr.rows).Count; vulnerable=$fanCtx.vulnTotal } }
         }
         default {
             & $send @{ type='error'; text="Unknown action '$ActionId'." }

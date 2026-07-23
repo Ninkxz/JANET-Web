@@ -40,6 +40,29 @@
       // -- per-view bookkeeping: every run unsubscribe so unmount() cleans up --
       var unsubs = [];                  // list of unsubscribe fns
       function track(unsub) { if (typeof unsub === 'function') unsubs.push(unsub); return unsub; }
+      // audit 2026-07-23 deferred pass: RunController keys runs by toolId/actionId
+      // and KEEPS every subscribed handler on that key, so a re-clicked one-shot
+      // that bare-subscribes stacks one live handler per click - and any other
+      // button sharing the actionId (e.g. Reg Keys "Verify Selected" vs its main
+      // SCAN, or the two app-update-apply bars) feeds them all. resub() releases
+      // the key's previous handler first (the kbUnsubs/healerUnsubs idiom, made
+      // per-key). Optional onReplace lets a superseded site unfreeze its own
+      // controls, since its released handler never sees the active:false that
+      // normally re-enables them.
+      var keyUnsubs = {};   // run key (actionId) -> { unsub, onReplace }
+      function resub(actionId, run, handlers, onReplace) {
+        var prev = keyUnsubs[actionId];
+        if (prev) {
+          var i = unsubs.indexOf(prev.unsub); if (i >= 0) unsubs.splice(i, 1);
+          prev.unsub();
+          if (prev.onReplace) { try { prev.onReplace(); } catch (e) {} }
+        }
+        // release BEFORE subscribing: subscribe() replays the fresh run's state
+        // (incl. active:true) into the new handler, so the previous entry's
+        // onReplace must not fire after that and un-arm the just-armed controls.
+        keyUnsubs[actionId] = { unsub: track(run.subscribe(handlers)), onReplace: onReplace };
+        return keyUnsubs[actionId].unsub;
+      }
       var rebootMonitorFn = null;       // set by the Reboot Countdown tab; called by Bulk "Reboot Selected" to monitor a host subset
 
       // ----------------------------------------------------------------------
@@ -227,7 +250,7 @@
       //  }
       // ----------------------------------------------------------------------
       function makeRunTab(panel, spec) {
-        var run = null, unsub = null;
+        var run = null;
         var counters = {};
 
         var lay = el('div'); lay.style.cssText = 'display:flex;flex-direction:column;gap:12px;height:100%;min-height:0;padding:12px;box-sizing:border-box';
@@ -317,8 +340,9 @@
           var opts = {};
           if (spec.keyOf) opts.keyOf = spec.keyOf;
           run = ctx.run(spec.actionId, params, opts);
-          if (unsub) { var i = unsubs.indexOf(unsub); if (i >= 0) unsubs.splice(i, 1); unsub(); }
-          unsub = track(run.subscribe({
+          // per-key resub: a re-run (or another button sharing this actionId)
+          // replaces this handler; onReplace un-morphs the runbar in that case.
+          resub(spec.actionId, run, {
             status: function (t) { prog.setPhase(t); },
             progress: function (p) { prog.setProgress(p.done, p.total); },
             row: function (r) { grid.upsert(r); if (spec.onRow) spec.onRow(r, log, counters); },
@@ -326,7 +350,7 @@
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) { if (spec.onFinal) spec.onFinal(log, grid, counters, res); else log.banner(spec.runLabel + ' complete - ' + grid.rows().length + ' row(s)'); },
             active: function (a) { runbar.setActive(a); }
-          }));
+          }, function () { runbar.setActive(false); });
         }
 
         return api;
@@ -486,12 +510,13 @@
           var comps = [], done = false;
           function finish() { if (done) return; done = true; adBtn.disabled = false; adBtn.textContent = orig; showOuPicker(comps); }
           var run = ctx.run('ad-computers', { workstationsonly: true });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('ad-computers', run, {
             row: function (r) { comps.push(r); },
             error: function (e) { adNote.textContent = e.text || 'AD query error'; adNote.className = 'st-warn'; },
             final: function () { finish(); },
             active: function (a) { if (!a) finish(); }
-          }));
+          });
         };
         function showOuPicker(comps) {
           if (!comps.length) { notice('No computers', 'Active Directory returned no computer objects (or the query failed / was cancelled).'); return; }
@@ -649,7 +674,7 @@
         // the SAME activity log. Results land in a transient modal-less popout grid
         // would be overkill; we stream into the log + flip per-host scan rows where
         // we can (patch/reboot annotate the matching Host row's NOTES).
-        var sideRun = null, sideUnsub = null;
+        var sideRun = null;
         async function followOnFleet(actionId, hosts, label) {
           if (!hosts || !hosts.length) { notice('Nothing Selected', 'Check at least one host in the grid first.'); return; }
           var act = findManifestAction(actionId);
@@ -674,8 +699,9 @@
           var runParams = { targets: hosts.join('\n') };
           if (patchMode) runParams.mode = patchMode;
           sideRun = ctx.run(actionId, runParams);
-          if (sideUnsub) { var i = unsubs.indexOf(sideUnsub); if (i >= 0) unsubs.splice(i, 1); sideUnsub(); }
-          sideUnsub = track(sideRun.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (ping-sweep is shared
+          // with the Reboot Countdown monitor); onReplace unfreezes the action bar.
+          resub(actionId, sideRun, {
             status: function (t) { api.prog.setPhase(t); },
             progress: function (p) { api.prog.setProgress(p.done, p.total); },
             row: function (r) { annotateBulkRow(actionId, r); },
@@ -696,7 +722,7 @@
               }
             },
             active: function (a) { if (!a) [patchBtn, patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { b.disabled = false; }); }
-          }));
+          }, function () { [patchBtn, patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { b.disabled = false; }); });
         }
 
         function annotateBulkRow(actionId, r) {
@@ -849,23 +875,25 @@
           var h = curHost(); if (!h) return;
           swGrid.clear(); log.banner('Software scan - ' + h);
           var run = ctx.run('software-scan', { host: h, filter: filterInput.value || '' }, { keyOf: function (ev) { return ev._rk || (ev.Host + '|' + ev.Name); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('software-scan', run, {
             row: function (r) { swGrid.upsert(r); },
             log: function (l) { log.append(l); },
             status: function (t) { log.append({ text: t, level: 'dim' }); },
             final: function () { log.append({ text: h + ': ' + swGrid.rows().length + ' app(s) listed.', level: 'ok' }); }
-          }));
+          });
         };
         detailBtn.onclick = function () {
           var h = curHost(); if (!h) return;
           dtGrid.clear(); log.banner('Scan detail - ' + h);
           var run = ctx.run('scan-detail', { host: h }, { keyOf: function (ev) { return ev._rk || (ev.Host + '|' + ev.Channel + '|' + ev.Name); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('scan-detail', run, {
             row: function (r) { dtGrid.upsert(r); },
             log: function (l) { log.append(l); },
             status: function (t) { log.append({ text: t, level: 'dim' }); },
             final: function () { log.append({ text: h + ': ' + dtGrid.rows().length + ' pending item(s).', level: 'ok' }); }
-          }));
+          });
         };
         uninstallBtn.onclick = async function () {
           var h = curHost(); if (!h) return;
@@ -883,7 +911,8 @@
           log.banner('Uninstall on ' + h + ' - ' + names.length + ' app(s)');
           // software-uninstall emits _rk = host|app -> key by _rk
           var run = ctx.run('software-uninstall', { host: h, apps: names.join('\n') }, { keyOf: function (ev) { return ev._rk || (ev.Host + '|' + ev.App); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('software-uninstall', run, {
             row: function (r) {
               var okR = /^(uninstalled|success|removed|ok)$/i.test(String(r.Result || ''));
               log.append({ text: '[' + r.Host + '] ' + r.App + ' (' + (r['Install Type'] || '?') + '): ' + (r.Result || '') + (r.Detail ? ' - ' + r.Detail : ''), level: okR ? 'ok' : 'err' });
@@ -891,7 +920,7 @@
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { log.banner('Uninstall complete on ' + h); }
-          }));
+          });
         };
       }
 
@@ -963,12 +992,13 @@
           var h = picker.host(); if (!h) { notice('Host required', 'Pick or type a host first.'); return; }
           appGrid.clear(); log.banner('Query Software Center apps - ' + h);
           var run = ctx.run('app-list', { host: h }, { keyOf: function (ev) { return ev.Id != null ? String(ev.Id) : (ev.Host + '|' + ev.Name); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('app-list', run, {
             row: function (r) { appGrid.upsert(r); },
             log: function (l) { log.append(l); },
             status: function (t) { log.append({ text: t, level: 'dim' }); },
             final: function () { log.append({ text: h + ': ' + appGrid.rows().length + ' app(s).', level: 'ok' }); }
-          }));
+          });
         };
 
         async function doAppAction(method) {
@@ -990,7 +1020,8 @@
           log.banner(method + ' - ' + ids.length + ' app(s) x ' + nTargets + ' host(s)');
           // app-action emits _rk = host|name|ver (or host|app on failure) -> key by _rk
           var run = ctx.run('app-action', { targets: targets, appids: ids.join('\n'), method: method }, { keyOf: function (ev) { return ev._rk || (ev.Host + '|' + ev.App); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('app-action', run, {
             row: function (r) {
               var okR = /^(triggered|success|ok|installed|uninstalled|repaired)$/i.test(String(r.Result || ''));
               log.append({ text: '[' + r.Host + '] ' + (r.App || '') + ' ' + (r.Method || method) + ': ' + (r.Result || '') + (r.Detail ? ' - ' + r.Detail : ''), level: okR ? 'ok' : 'err' });
@@ -999,7 +1030,7 @@
             status: function (t) { log.append({ text: t, level: 'dim' }); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { log.banner(method + ' complete'); }
-          }));
+          });
         }
         installBtn.onclick = function () { doAppAction('Install'); };
         uninstallBtn.onclick = function () { doAppAction('Uninstall'); };
@@ -1240,7 +1271,9 @@
           tab.log.banner('Apply ' + prof + ' - ' + count + ' ' + noun + ' host(s)');
           applyBtn.disabled = applySelBtn.disabled = true;
           var run = ctx.run('app-update-apply', { targets: targetsRaw, profile: prof, customcommand: customCmd.value });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers;
+          // key shared with the Beta tab's apply) - onReplace unfreezes the buttons.
+          resub('app-update-apply', run, {
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
             row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : (/pending/i.test(String(r.Status)) ? 'warn' : 'ok') }); },
@@ -1248,7 +1281,7 @@
             error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
             final: function () { tab.log.banner('Apply complete'); },
             active: function (a) { if (!a) { applyBtn.disabled = false; applySelBtn.disabled = false; } }
-          }));
+          }, function () { applyBtn.disabled = false; applySelBtn.disabled = false; });
         }
         applyBtn.onclick = function () { applyProfile(ctx.targets.raw, ctx.targets.count(), 'target'); };
         applySelBtn.onclick = function () { var ch = tab.grid.getChecked().map(function (r) { return r.Host; }).filter(Boolean); applyProfile(ch.join('\n'), ch.length, 'selected'); };
@@ -1361,7 +1394,9 @@
           tab.log.banner('Apply ' + bp.profile + ' [' + methodLabel + '] - ' + count + ' ' + noun + ' host(s)');
           applyBtn.disabled = applySelBtn.disabled = true;
           var run = ctx.run('app-update-apply', { targets: targetsRaw, profile: bp.profile, method: bp.method, arg: bp.arg });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers;
+          // key shared with the App Updater apply) - onReplace unfreezes the buttons.
+          resub('app-update-apply', run, {
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
             row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : (/pending/i.test(String(r.Status)) ? 'warn' : 'ok') }); },
@@ -1369,7 +1404,7 @@
             error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
             final: function () { tab.log.banner('Beta apply complete'); },
             active: function (a) { if (!a) { applyBtn.disabled = false; applySelBtn.disabled = false; } }
-          }));
+          }, function () { applyBtn.disabled = false; applySelBtn.disabled = false; });
         }
         applyBtn.onclick = function () { applyProfile(ctx.targets.raw, ctx.targets.count(), 'target'); };
         applySelBtn.onclick = function () { var ch = tab.grid.getChecked().map(function (r) { return r.Host; }).filter(Boolean); applyProfile(ch.join('\n'), ch.length, 'selected'); };
@@ -1462,14 +1497,17 @@
               var fix = fixSel.value;
               tab.log.banner('Verify ' + fix + ' - re-scan ' + hosts.length + ' host(s)');
               var vrun = ctx.run('registry-key-scan', { targets: hosts.join('\n'), cvekey: fix, threads: getThreads() });
-              track(vrun.subscribe({
+              // audit 2026-07-23 deferred pass: per-key resub - this shares the
+              // 'wpt/registry-key-scan' key with the tab's main SCAN, so re-running
+              // either must replace (not stack) the other's handler.
+              resub('registry-key-scan', vrun, {
                 status: function (t) { tab.prog.setPhase(t); },
                 progress: function (p) { tab.prog.setProgress(p.done, p.total); },
                 row: function (r) { getGrid().upsert(r); tab.log.append({ text: '[' + r.Host + '] ' + (asBool(r.Compliant) ? 'compliant' : 'NON-COMPLIANT') + (r.Status ? ' - ' + r.Status : ''), level: asBool(r.Compliant) ? 'ok' : 'warn' }); },
                 log: function (l) { tab.log.append(l); },
                 error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
                 final: function () { var nc = getGrid().rows().filter(function (r) { return !asBool(r.Compliant); }).length; tab.log.banner('Verify complete: ' + nc + ' still non-compliant'); }
-              }));
+              });
             };
             return [selVuln, verifyBtn];
           }
@@ -1583,7 +1621,8 @@
           uBtn.disabled = true;
           // unsupported-uninstall emits _rk = host|app -> key by _rk
           var run = ctx.run('unsupported-uninstall', { targets: Object.keys(hostsSet).join('\n'), pairs: pairs.join('\n') }, { keyOf: function (ev) { return ev._rk || (ev.Host + '|' + ev.App); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('unsupported-uninstall', run, {
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
             row: function (r) {
@@ -1594,7 +1633,7 @@
             error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
             final: function () { tab.log.banner('Uninstall Matched complete'); },
             active: function (a) { if (!a) uBtn.disabled = false; }
-          }));
+          });
         };
       }
 
@@ -1824,7 +1863,9 @@
           // (the operator may have edited the shared host box mid-countdown).
           var targetsRaw = (state.armedHosts != null) ? state.armedHosts : ctx.targets.raw;
           var run = ctx.run('remote-message', { targets: targetsRaw, title: titleInput.value, body: warnBody(remainSec), timeout: 0, threads: 16 });
-          track(run.subscribe({ final: function () { log.append({ text: 'Warning popup sent (' + mmss(remainSec) + ' left).', level: 'info' }); } }));
+          // audit 2026-07-23 deferred pass: per-key resub - warnings repeat every N
+          // minutes and the key is shared with the Remote Message tab's SEND.
+          resub('remote-message', run, { final: function () { log.append({ text: 'Warning popup sent (' + mmss(remainSec) + ' left).', level: 'info' }); } });
         }
         function startCountdown(totalSec) {
           state.endAt = Date.now() + totalSec * 1000;
@@ -1862,7 +1903,10 @@
           function poll() {
             if (Date.now() - startedAt >= MONITOR_CAP_MS) { expireMonitor(); return; }
             var run = ctx.run('ping-sweep', { targets: hosts.join('\n') });
-            track(run.subscribe({
+            // audit 2026-07-23 deferred pass: per-key resub - this polls every 6s,
+            // so a bare subscribe stacked one live handler per poll (O(n^2) fan-out
+            // over a 30-min monitor); the key is also shared with Bulk's Ping Sweep.
+            resub('ping-sweep', run, {
               row: function (r) {
                 var h = r.Host, s = st[h]; if (!s || s.back) return; s.pings++;
                 if (!asBool(r.Reachable)) { s.seenOffline = true; grid.upsert({ Host: h, Phase: 'Offline (rebooting)', Pings: s.pings, Detail: 'down - waiting for return' }); }
@@ -1874,7 +1918,7 @@
                 prog.setProgress(back, hosts.length);
                 if (back >= hosts.length) { clearTimers(); log.banner('All ' + hosts.length + ' host(s) back online!'); cdLabel.textContent = 'All hosts back online.'; setArmedUi(false); }
               }
-            }));
+            });
           }
           clearTimers(); poll(); state.monitor = setInterval(poll, 6000);
         }
@@ -1909,14 +1953,15 @@
           log.banner((auto ? 'Arming scheduled reboot' : 'Starting warnings') + ' - ' + armedHostsArr.length + ' host(s), ' + totalMin.value + ' min, warn every ' + warnMin.value + ' min');
           if (auto) {
             var run = ctx.run('reboot-schedule', { targets: state.armedHosts, seconds: totalSec, message: bodyInput.value, threads: 16 }, {});
-            track(run.subscribe({
+            // audit 2026-07-23 deferred pass: per-key resub (re-arm stacked handlers)
+            resub('reboot-schedule', run, {
               status: function (t) { prog.setPhase(t); },
               progress: function (p) { prog.setProgress(p.done, p.total); },
               row: function (r) { grid.upsert({ Host: r.Host, Phase: asBool(r.Success) ? 'Armed' : 'Failed', RebootAt: r.RebootAt, Detail: r.Detail }); },
               log: function (l) { log.append(l); },
               error: function (e) { log.append({ text: e.text, level: 'err' }); },
               final: function () { var armed = grid.rows().filter(function (x) { return /armed/i.test(String(x.Phase)); }).length; log.banner('Scheduled on ' + armed + '/' + armedHostsArr.length + ' host(s).'); }
-            }));
+            });
           } else {
             armedHostsArr.forEach(function (h) { grid.upsert({ Host: h, Phase: 'Warning', Detail: 'warnings only' }); });
             sendWarning(totalSec);
@@ -1941,12 +1986,13 @@
           if (state.mode === 'auto') {
             log.banner('Cancelling scheduled reboot (shutdown /a) - ' + armedHostsArr.length + ' host(s)');
             var run = ctx.run('reboot-abort', { targets: state.armedHosts, threads: 16 }, {});
-            track(run.subscribe({
+            // audit 2026-07-23 deferred pass: per-key resub (re-cancel stacked handlers)
+            resub('reboot-abort', run, {
               row: function (r) { grid.upsert({ Host: r.Host, Phase: asBool(r.Success) ? 'Cancelled' : 'Failed', RebootAt: '', Detail: r.Detail }); },
               log: function (l) { log.append(l); },
               error: function (e) { log.append({ text: e.text, level: 'err' }); },
               final: function () { log.banner('Cancel complete.'); }
-            }));
+            });
           } else { log.append({ text: 'Warnings stopped.', level: 'warn' }); }
           cdLabel.textContent = 'Countdown cancelled.'; setArmedUi(false);
         };
@@ -2022,7 +2068,9 @@
           grid.clear(); prog.reset();
           log.banner('Send - ' + ctx.targets.count() + ' target(s)');
           sendRun = ctx.run('remote-message', { targets: ctx.targets.raw, title: titleInput.value, body: bodyInput.value, timeout: parseInt(timeoutInput.value, 10) || 0, threads: threads() });
-          track(sendRun.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-send stacked handlers;
+          // key shared with the Reboot Countdown warnings) - onReplace un-morphs the runbar.
+          resub('remote-message', sendRun, {
             status: function (t) { prog.setPhase(t); },
             progress: function (p) { prog.setProgress(p.done, p.total); },
             row: function (r) { grid.upsert(r); var okR = /deliver|sent|ok|success/i.test(String(r.Status)); log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.Detail ? ' - ' + r.Detail : ''), level: okR ? 'ok' : 'err' }); },
@@ -2030,7 +2078,7 @@
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { log.banner('Send complete'); },
             active: function (a) { runbar.setActive(a); }
-          }));
+          }, function () { runbar.setActive(false); });
         }
       }
 
@@ -2304,14 +2352,15 @@
           grid.clear(); prog.reset();
           log.banner('Host Info - ' + hn);
           run = ctx.run('host-info', { host: hn }, { keyOf: function (r) { return r._rk || (r.Host + '|' + r.Property); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('host-info', run, {
             status: function (t) { prog.setPhase(t); },
             row: function (r) { grid.upsert(r); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { log.banner('Host Info complete - ' + grid.rows().length + ' field(s)'); },
             active: function (a) { goBtn.disabled = a; }
-          }));
+          });
         };
         expBtn.onclick = function () { exportGridCsv(grid, 'WPT_HostInfo_' + (picker.host() || 'host')); };
       }
@@ -2368,14 +2417,15 @@
           log.banner('Event Log scan - ' + hn);
           run = ctx.run('eventlog-scan', { host: hn, application: appCb._cb.checked, system: sysCb._cb.checked, security: secCb._cb.checked, hours: hoursInput.value },
             { keyOf: function (r) { return r._rk || (r.Host + '|' + r.Log + '|' + r.TimeCreated + '|' + r.EventId); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('eventlog-scan', run, {
             status: function (t) { prog.setPhase(t); },
             row: function (r) { grid.upsert(r); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { log.banner('Event Log scan complete - ' + grid.rows().length + ' row(s)'); },
             active: function (a) { goBtn.disabled = a; }
-          }));
+          });
         };
         expBtn.onclick = function () { exportGridCsv(grid, 'WPT_EventLog_' + (picker.host() || 'host')); };
       }
@@ -2455,14 +2505,15 @@
           var hn = picker.host(); if (!hn) { notice('No host', 'Pick or type a host first.'); return; }
           grid.clear(); prog.reset(); log.banner('Query Available - ' + hn);
           run = ctx.run('sccm-available', { host: hn }, { keyOf: function (r) { return r._rk || (r.Type + '|' + r.Id + '|' + r.Name); } });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('sccm-available', run, {
             status: function (t) { prog.setPhase(t); },
             row: function (r) { grid.upsert(r); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { grid.selectWhere(function (r) { return r.Type && r.Type !== '(info)' && !/installed/i.test(String(r.State || '')); }); log.banner('Query complete - ' + grid.rows().length + ' available; non-installed pre-checked'); },
             active: function (a) { queryBtn.disabled = a; }
-          }));
+          });
         };
         installBtn.onclick = async function () {
           var hn = picker.host(); if (!hn) { notice('No host', 'Pick or type a host first.'); return; }
@@ -2476,14 +2527,15 @@
           prog.reset();
           installBtn.disabled = true;
           var run2 = ctx.run('sccm-install-available', { host: hn, items: items }, { keyOf: function (r) { return (r.Host || '') + '|' + (r.Type || '') + '|' + (r.Name || ''); } });
-          track(run2.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('sccm-install-available', run2, {
             status: function (t) { prog.setPhase(t); },
             row: function (r) { log.append({ text: '[' + (r.Type || '') + '] ' + (r.Name || '') + ' - ' + (r.Result || '') + (r.Detail ? ' (' + r.Detail + ')' : ''), level: /fail/i.test(String(r.Result)) ? 'err' : (/skip/i.test(String(r.Result)) ? 'warn' : 'ok') }); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function () { log.banner('Install Checked complete'); },
             active: function (a) { if (!a) installBtn.disabled = false; }
-          }));
+          });
         };
         expBtn.onclick = function () { exportGridCsv(grid, 'WPT_Available_' + (picker.host() || 'host')); };
       }
@@ -2544,7 +2596,8 @@
           tab.log.banner('Maintenance Unlock - ' + ctx.targets.count() + ' host(s)');
           unlockBtn.disabled = true;
           var run = ctx.run('maintenance-unlock', { targets: ctx.targets.raw });
-          track(run.subscribe({
+          // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers)
+          resub('maintenance-unlock', run, {
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
             row: function (r) { tab.grid.upsert({ Host: r.Host, Success: r.Success, Mode: 'Unlock', Detail: r.Detail }); tab.log.append({ text: '[' + r.Host + '] ' + (asBool(r.Success) ? 'unlocked' : 'FAILED') + (r.Detail ? ' - ' + r.Detail : ''), level: asBool(r.Success) ? 'ok' : 'err' }); },
@@ -2552,7 +2605,7 @@
             error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
             final: function () { tab.log.banner('Maintenance Unlock complete'); },
             active: function (a) { if (!a) unlockBtn.disabled = false; }
-          }));
+          });
         };
       }
 

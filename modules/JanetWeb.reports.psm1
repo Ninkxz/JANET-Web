@@ -21,7 +21,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.14.24'
+        version  = '2.15.0'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -966,10 +966,30 @@ function Get-ReportsSlaDefaults {
 
 function Get-ReportsSlaBaselinePath { Join-Path $PSScriptRoot '..\JanetLocal\sla-baseline.json' }
 
+# audit 2026-07-23 deferred pass (E2): SLA read memo for ONE posture-digest run.
+# posture-digest re-invokes sla-aging (and siblings) as recursive Invoke-JanetToolAction
+# calls, and every Get-ReportsSlaBaseline / Get-ReportsSlaLedger call is a fresh disk
+# read+parse. The files cannot meaningfully change mid-snapshot, so posture-digest
+# opens this script-scope memo (a hashtable) around its sub-action calls and clears it
+# in a finally - it can NEVER leak into normal operation, where $null here means every
+# call still reads fresh from disk. Consumers inside a digest run are read-only
+# (nothing writes the baseline or ledger), so serving the same parsed object back is
+# byte-identical to re-reading it.
+$script:SlaDigestMemo = $null
+
 # Read the editable JanetLocal SLA baseline fresh; returns @{ Config=@{...}; Source='...' }.
 # Only positive integer overrides are adopted (a zero/negative/non-numeric window is
 # ignored in favor of the default so a typo cannot make everything instantly overdue).
+# Get-ReportsSlaBaseline is the memo-aware front door; the disk read body is unchanged.
 function Get-ReportsSlaBaseline {
+    if ($null -ne $script:SlaDigestMemo) {
+        if (-not $script:SlaDigestMemo.ContainsKey('Baseline')) { $script:SlaDigestMemo['Baseline'] = Read-ReportsSlaBaselineFromDisk }
+        return $script:SlaDigestMemo['Baseline']
+    }
+    Read-ReportsSlaBaselineFromDisk
+}
+
+function Read-ReportsSlaBaselineFromDisk {
     $cfg = Get-ReportsSlaDefaults
     try {
         $p = Get-ReportsSlaBaselinePath
@@ -1040,7 +1060,18 @@ function Get-ReportsSlaLedgerPath { Join-Path $PSScriptRoot '..\JanetLocal\sla-l
 
 # Read the ledger fresh. Returns @{ Map=@{ key -> @{firstSeen;severity;kev;lastSeen} }; Source='...'; Ok=$bool }.
 # A read/parse error yields an empty map with Ok=$false so the caller can warn (never throws).
+# Get-ReportsSlaLedger is the memo-aware front door (see $script:SlaDigestMemo above);
+# the disk read body is unchanged. Update-ReportsSlaLedger (the only writer) never runs
+# inside a digest, so a memoized map can never be served stale.
 function Get-ReportsSlaLedger {
+    if ($null -ne $script:SlaDigestMemo) {
+        if (-not $script:SlaDigestMemo.ContainsKey('Ledger')) { $script:SlaDigestMemo['Ledger'] = Read-ReportsSlaLedgerFromDisk }
+        return $script:SlaDigestMemo['Ledger']
+    }
+    Read-ReportsSlaLedgerFromDisk
+}
+
+function Read-ReportsSlaLedgerFromDisk {
     $map = @{}
     try {
         $p = Get-ReportsSlaLedgerPath
@@ -7328,10 +7359,27 @@ function Invoke-JanetToolAction {
 
             $cora = Build-CoraSummary
             $noop = { param($e) }
-            $slaResult  = Invoke-JanetToolAction -ActionId 'sla-aging'          -Params @{} -Credential $Credential -Emit $noop
-            $kbResult   = Invoke-JanetToolAction -ActionId 'kb-needed'          -Params @{} -Credential $Credential -Emit $noop
-            $tpResult   = Invoke-JanetToolAction -ActionId 'thirdparty-catalog' -Params @{} -Credential $Credential -Emit $noop
-            $iavmResult = Invoke-JanetToolAction -ActionId 'iavm-board'         -Params @{} -Credential $Credential -Emit $noop
+            # audit 2026-07-23 deferred pass (E2): open the SLA read memo for the span of
+            # the recursive sub-action calls, so the SLA baseline + ledger are read+parsed
+            # from disk AT MOST ONCE per digest run no matter how many sub-actions consult
+            # them (sla-aging is the reader today; any future sibling joins the same single
+            # read). try/finally so the memo can never leak past this digest - outside it,
+            # every Get-ReportsSlaBaseline/Get-ReportsSlaLedger call reads fresh as before.
+            # NOTE (E2b, deliberate): the four sub-actions each keep their own pass over
+            # $script:AcasFindings - their filters/aggregations differ (kb-needed and
+            # thirdparty-catalog even re-run Get-ReportsKbsFromText over the same text,
+            # from opposite sides of the KB/non-KB split), and no existing helper exposes
+            # that intermediate to share without restructuring the recursive-action design,
+            # so those per-action passes stay as-is.
+            $script:SlaDigestMemo = @{}
+            try {
+                $slaResult  = Invoke-JanetToolAction -ActionId 'sla-aging'          -Params @{} -Credential $Credential -Emit $noop
+                $kbResult   = Invoke-JanetToolAction -ActionId 'kb-needed'          -Params @{} -Credential $Credential -Emit $noop
+                $tpResult   = Invoke-JanetToolAction -ActionId 'thirdparty-catalog' -Params @{} -Credential $Credential -Emit $noop
+                $iavmResult = Invoke-JanetToolAction -ActionId 'iavm-board'         -Params @{} -Credential $Credential -Emit $noop
+            } finally {
+                $script:SlaDigestMemo = $null
+            }
 
             # KEV posture, grouped per host (open + actionable, same filter as
             # command-brief's KEV section) for the "top exposure" list.

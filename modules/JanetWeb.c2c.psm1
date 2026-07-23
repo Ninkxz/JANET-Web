@@ -2432,35 +2432,19 @@ $script:C2cFixBlock = {
     # only what streams to the row Detail + the per-check report. SKIP/FAIL/IN PROGRESS
     # pass through unchanged (default arm).
     #
-    # The label map itself lives in the shared cert/label source ($AddCertsSrc) as
-    # Get-C2cPillarLabel so the worker AND the unit tests key labels off ONE definition.
-    # Dot-source it here (admin-side, pool runspace) and delegate; when no AddCertsSrc was
-    # supplied (older 8-arg test callers) fall back to the identical inline switch so
-    # labels are never lost.
+    # The label map itself lives ONLY in the shared cert/label source ($AddCertsSrc) as
+    # Get-C2cPillarLabel, so the worker AND the unit tests key labels off ONE definition.
+    # Dot-source it here (admin-side, pool runspace) and delegate. Every caller injects
+    # the source (production at the AddArgument site, and the test drivers pass
+    # $script:C2cAddCertsSrc the same way); the ~20-line duplicate inline switch that
+    # backstopped older 8-arg test callers was retired in the audit 2026-07-23 deferred
+    # pass. If injection ever fails the raw token passes through unchanged (fail-soft:
+    # an unlabeled row, never a crashed rollup).
     if ($AddCertsSrc) { try { . ([scriptblock]::Create($AddCertsSrc)) } catch {} }
     $labelOf = {
         param($n, $res)
         if (Get-Command Get-C2cPillarLabel -ErrorAction SilentlyContinue) { return (Get-C2cPillarLabel $n $res) }
-        switch ("$n|$res") {
-            'Monitoring|FIXED'     { 'MONITORED' }
-            'Monitoring|NOCHANGE'  { 'ALREADY MONITORED' }
-            'Firewall|FIXED'       { 'FIREWALL ENABLED' }
-            'Firewall|NOCHANGE'    { 'ALREADY ENABLED' }
-            'AntiMalware|FIXED'    { 'PROTECTED' }
-            'AntiMalware|NOCHANGE' { 'ALREADY PROTECTED' }
-            'Patches|KICKED'       { 'PATCH CYCLE KICKED' }
-            'Encryption|STARTED'   { 'ENCRYPTION STARTED' }
-            'Encryption|FIXED'     { 'PROTECTION RESUMED' }
-            'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
-            'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
-            'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
-            'PkiExpired|FIXED'     { 'EXPIRED PRUNED' }
-            'PkiRdp|FIXED'         { 'RDP CERT REBOUND' }
-            'MdeOnboard|FIXED'     { 'MDE ONBOARDED' }
-            'Java|FIXED'           { 'JAVA CLEANED' }
-            'Java|NOCHANGE'        { 'NO OLD JAVA' }
-            default                { [string]$res }
-        }
+        [string]$res
     }
 
     $r.Detail = (@($pillarResults | ForEach-Object { "$($_.Name): $(& $labelOf $_.Name $_.Result)" }) -join '; ')

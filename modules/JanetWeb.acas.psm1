@@ -1168,7 +1168,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.17'   # audit 2026-07-23 changes shipped under this version: Acas.ClientVerify.Tests.ps1 pins it EXACTLY and tests are out of scope for this pass - bump both together next loop
+        version  = '1.11.18'   # audit 2026-07-23 fix pass; Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(

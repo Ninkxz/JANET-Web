@@ -82,9 +82,9 @@ Describe 'Build-RemediationPlan host-key fold - one physical host as short+FQDN 
     }
 }
 
-Describe 'reports - manifest exact version pin (newest bump = loop-20 remediation-plan host-key fold)' {
-    It 'reports is at v2.14.24' {
+Describe 'reports - manifest exact version pin (newest bump = audit 2026-07-23 deferred pass: posture-digest SLA read memo)' {
+    It 'reports is at v2.15.0' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '2.14.24'
+        [string]$mani.version | Should Be '2.15.0'
     }
 }

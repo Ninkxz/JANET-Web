@@ -210,8 +210,8 @@ Describe 'secureboot 1.6.6 - scan harvest attaches a troubleshooting hint to a C
     $man = & $script:SbeMod { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
 
-    It 'manifest version is exactly 1.6.6 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.6.6'
+    It 'manifest version is exactly 1.6.7 (newest bump = audit 2026-07-23 fix pass; exact pin lives here)' {
+        [string]$man.version | Should Be '1.6.7'
     }
     It 'the scan harvest computes a hint only for a host-level CHECK ERROR and attaches it to the row' {
         ($src -match '\$hint\s*=\s*if\s*\(\$verdict\s*-eq\s*''CHECK ERROR''\s*-and\s*\$hostStatus\s*-ne\s*''OK''\s*-and\s*\$detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true

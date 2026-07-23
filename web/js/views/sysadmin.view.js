@@ -51,11 +51,14 @@
 
       // Generic streaming binder. cfg: { action, params, grid, statusEl, label,
       // runbar, onReset, onRow, onFinal }.
+      var runUnsubs = {};   // action -> live unsub; a re-run must replace, not stack, its handler (audit 2026-07-23 deferred pass)
       function startRun(cfg) {
         cfg.grid.clear();
         if (cfg.onReset) cfg.onReset();
         setLine(cfg.statusEl, 'Working...', 'st-info');
         var run = ctx.run(cfg.action, cfg.params, { keyOf: function (ev) { return ev._rk; }, destructive: false });
+        var prev = runUnsubs[cfg.action];
+        if (prev) { var pi = subs.indexOf(prev); if (pi >= 0) subs.splice(pi, 1); prev(); }
         var unsub = run.subscribe({
           status: function (t) { setLine(cfg.statusEl, t, 'st-info'); },
           progress: function (p) { if (cfg.onProgress) cfg.onProgress(p); },
@@ -65,6 +68,7 @@
           active: function (a) { if (cfg.runbar) cfg.runbar.setActive(a); if (cfg.onActive) cfg.onActive(a); },
           final: function (res) { if (cfg.onFinal) cfg.onFinal((res && res.summary) || {}); }
         });
+        runUnsubs[cfg.action] = unsub;
         track(unsub);
         return run;
       }
@@ -180,10 +184,9 @@
               }
             });
           }
-          function lockInputs(on) {
-            offlineCb._cb.disabled = on; threadsIn.disabled = on; clearBtn.disabled = on;
-            if (daysIn) daysIn.disabled = on;
-          }
+          // audit 2026-07-23 deferred pass: S3 lockInputs consolidation (lockable
+          // skips the null daysIn on tabs without a days input)
+          var lockInputs = ctx.util.lockable([offlineCb._cb, threadsIn, clearBtn, daysIn]);
         };
       }
 

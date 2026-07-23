@@ -128,7 +128,7 @@
 
       // ---------- behaviour ----------
       function setStatus(txt, cls) { statusLine.textContent = txt == null ? '' : String(txt); statusLine.className = cls || 'muted'; }
-      function lockInputs(on) { jobsInput.disabled = on; clearBtn.disabled = on; baselineBtn.disabled = on; }
+      var lockInputs = ctx.util.lockable([jobsInput, clearBtn, baselineBtn]);   // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
       clearBtn.onclick = function () { if (run && run.state && run.state.active) return; grid.clear(); prog.reset(); setStatus('Ready'); };
       exportBtn.onclick = function () {
         var rows = grid.rows();

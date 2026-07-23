@@ -142,7 +142,9 @@ function Invoke-C2cMonitoring {
         function script:Start-Service { param($Name, $ErrorAction) }
         try {
             # target = self so the wrong-box guard passes; Pillars = Monitoring only.
-            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Monitoring') $false 'Tanium Client' $script:C2cTaniumInstalledSrc
+            # Real $C2cAddCertsSrc injected like production so the admin-side rollup labels via the
+            # shared Get-C2cPillarLabel (audit 2026-07-23 deferred pass: inline fallback retired).
+            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Monitoring') $false 'Tanium Client' $script:C2cTaniumInstalledSrc $null $false $script:C2cWinrmHealSrc $script:C2cAddCertsSrc
             $mon = @(@($res.Pillars) | Where-Object { $_.Name -eq 'Monitoring' })[0]
             [pscustomobject]@{
                 Status    = [string]$res.Status

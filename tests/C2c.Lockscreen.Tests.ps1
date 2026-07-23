@@ -54,7 +54,9 @@ function Invoke-C2cFixLockscreen {
         }
         function script:Get-ChildItem { param($LiteralPath, $Path, $Filter, $ErrorAction) @() }
         try {
-            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Lockscreen') $false 'Tanium Client' $script:C2cTaniumInstalledSrc
+            # Real $C2cAddCertsSrc injected like production so the admin-side rollup labels via the
+            # shared Get-C2cPillarLabel (audit 2026-07-23 deferred pass: inline fallback retired).
+            $res = & $script:C2cFixBlock $env:COMPUTERNAME $null 'Default' $true @('Lockscreen') $false 'Tanium Client' $script:C2cTaniumInstalledSrc $null $false $script:C2cWinrmHealSrc $script:C2cAddCertsSrc
             $ls = @(@($res.Pillars) | Where-Object { $_.Name -eq 'Lockscreen' })[0]
             [pscustomobject]@{
                 HostStatus = [string]$res.Status
