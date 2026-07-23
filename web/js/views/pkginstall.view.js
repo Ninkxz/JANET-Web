@@ -356,10 +356,14 @@
         if (mode === 'msi') bodyHtml += '<br>MSIs: <b>' + msis.length + '</b>  |  args: <b>' + esc(msiArgsInput.value) + '</b>';
         bodyHtml += '<br><br>This installs software on remote machines. First few targets:';
 
-        ctx.confirm({
-          title: 'Confirm Deployment', danger: true,
+        // loop62 server gate requires confirm='DEPLOY'; the ArmingDialog's typed
+        // word IS that gate's UI (certdeploy pattern) - this view had neither,
+        // so every web deploy was refused ("type DEPLOY to arm").
+        ctx.arm({
+          title: 'Arm Deployment',
+          banner: 'DESTRUCTIVE - INSTALLS SOFTWARE ON EVERY TARGET',
           body: bodyHtml, list: hosts.slice(0, 5),
-          okText: 'Deploy', cancelText: 'Cancel'
+          confirmWord: 'DEPLOY', okText: 'Deploy', cancelText: 'Cancel'
         }).then(function (ok) {
           if (!ok) { log.append({ text: 'Deploy cancelled by operator.', level: 'warn' }); return; }
 
@@ -379,7 +383,8 @@
             packagePath: pkgPath,
             packagePathManual: '',     // pkgPath already resolves custom override
             packageName: pkgName,
-            threads: threads
+            threads: threads,
+            confirm: 'DEPLOY'          // operator typed it in the ArmingDialog above
           };
           if (mode === 'msi') { params.msiList = msis.join('\n'); params.msiArgs = msiArgsInput.value; }
 
@@ -445,7 +450,7 @@
       renderMsiList();
       loadPackages();
       log.append({ text: 'Remote Package Installer ready. Add targets, pick a package, Set Credentials (top-right), then Deploy.', level: 'accent' });
-      log.append({ text: 'PSADT mode runs Deploy-Application.ps1; MSI mode runs msiexec /i per checked .msi.', level: 'dim' });
+      log.append({ text: 'PSADT mode runs Deploy-Application.ps1 (v3) or Invoke-AppDeployToolkit.ps1 (v4); MSI mode runs msiexec /i per checked .msi.', level: 'dim' });
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); };

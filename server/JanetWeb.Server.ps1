@@ -755,7 +755,10 @@ function Start-JanetWebServer {
                     if ($pkgRootOk -and (Test-Path -LiteralPath $packagesDir)) {
                         foreach ($d in (Get-ChildItem -LiteralPath $packagesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
                             $hasPsadt = $false; $msiCount = 0
-                            try { $hasPsadt = [bool](Get-ChildItem -LiteralPath $d.FullName -Filter 'Deploy-Application.ps1' -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Select-Object -First 1) } catch {}
+                            # PSADT v3 entry = Deploy-Application.ps1; v4 renamed it Invoke-AppDeployToolkit.ps1
+                            foreach ($psadtName in @('Deploy-Application.ps1','Invoke-AppDeployToolkit.ps1')) {
+                                try { if (Get-ChildItem -LiteralPath $d.FullName -Filter $psadtName -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Select-Object -First 1) { $hasPsadt = $true; break } } catch {}
+                            }
                             # Only the MSI dropdown needs the (more expensive) *.msi scan; and
                             # a PSADT bundle is never an MSI candidate, so skip it once found.
                             if ($kind -eq 'msi' -and -not $hasPsadt) {

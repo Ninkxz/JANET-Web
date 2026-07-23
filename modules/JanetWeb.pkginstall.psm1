@@ -38,7 +38,7 @@ function Get-JanetToolManifest {
                 columns      = @('Host','Status','Detail','ExitCode','Time')
                 inputs       = @(
                     @{ name='targets';     label='Targets (one host per line)';            type='hostlist'; required=$true },
-                    @{ name='packagePath'; label='Package'; type='select'; optionsFrom='pkginstall-packages'; optionsArg='psadt'; required=$false; help='Pick a package (each is a folder with a Deploy-Application.ps1 dropped in the Packages folder shown below). Click the refresh button after adding new ones.' },
+                    @{ name='packagePath'; label='Package'; type='select'; optionsFrom='pkginstall-packages'; optionsArg='psadt'; required=$false; help='Pick a package (each is a folder with a Deploy-Application.ps1 (PSADT v3) or Invoke-AppDeployToolkit.ps1 (v4) dropped in the Packages folder shown below). Click the refresh button after adding new ones.' },
                     @{ name='packagePathManual'; label='...or a custom package path (UNC/local)'; type='text'; required=$false },
                     @{ name='packageName'; label='Package name (audit/display; blank = folder name)'; type='text'; required=$false },
                     @{ name='threads';     label='Parallel hosts';                          type='int';      required=$false; default=8 },
@@ -444,7 +444,7 @@ $script:RpiDeployHostScript = {
                 & $pushStep 'Deploying' 'Running every bundle MSI via msiexec'
             }
         } else {
-            & $pushStep 'Deploying' 'Running Deploy-Application.ps1'
+            & $pushStep 'Deploying' 'Running the PSADT deploy script'
         }
         ## -UseSSL only when the probe found the host reachable ONLY on 5986
         ## (WSManOptSsl carries SkipCACheck/SkipCNCheck for the common
@@ -615,9 +615,13 @@ $script:RpiDeployHostScript = {
                 }
                 try {
                     Get-ChildItem -Path $destPath -Filter *.ps1 -Recurse -EA SilentlyContinue | Unblock-File
-                    $deploy = Get-ChildItem -Path $destPath -Filter 'Deploy-Application.ps1' -Recurse -File -EA SilentlyContinue | Select-Object -First 1
+                    # PSADT v3 entry = Deploy-Application.ps1; v4 renamed it Invoke-AppDeployToolkit.ps1
+                    # (-DeployMode NonInteractive is valid on both). v3 name first so a mixed tree
+                    # keeps its historical entry point.
+                    $deploy = Get-ChildItem -Path $destPath -Include 'Deploy-Application.ps1','Invoke-AppDeployToolkit.ps1' -Recurse -File -EA SilentlyContinue |
+                              Sort-Object { $_.Name -ne 'Deploy-Application.ps1' } | Select-Object -First 1
                     if (-not $deploy) {
-                        $res.Reason = 'Deploy-Application.ps1 not found in package'
+                        $res.Reason = 'Deploy-Application.ps1 / Invoke-AppDeployToolkit.ps1 (PSADT v3/v4 entry script) not found in package'
                         return $res
                     }
                     Set-Location $deploy.DirectoryName
@@ -644,7 +648,7 @@ $script:RpiDeployHostScript = {
                         # called exit / Exit-Script). We cannot confirm it installed anything, so it is Failed -
                         # never a false Success/VulnPatched. (A terminating error is caught below instead.)
                         $res.Status = 'Failed'
-                        $res.Reason = 'Deploy-Application.ps1 returned no exit code (never called exit / Exit-Script) - cannot confirm the install ran; treated as Failed'
+                        $res.Reason = "$($deploy.Name) returned no exit code (never called exit / Exit-Script) - cannot confirm the install ran; treated as Failed"
                     } elseif ($successExits -contains $exitCode) {
                         $baseReason = switch ($exitCode) {
                             3010 { 'Success (reboot required)' }
