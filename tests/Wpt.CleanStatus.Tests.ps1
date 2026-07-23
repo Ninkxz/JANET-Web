@@ -47,8 +47,9 @@ Describe 'wpt clean-user-apps - the honest statuses drop out of the ok/audit buc
         ($script:Src -match "OkOf \{ param\(\`$r\) \(\`$r\.Status -eq 'Success' -or \`$r\.Status -eq 'Dry Run OK'\) \}") | Should Be $true
     }
     It 'the clean-user-apps worker gates Success on actual removals (removed >= found), not an unconditional Success' {
-        # (the sibling disk-cleanup/maintenance worker keeps its own unconditional Success - different
-        # semantics: a best-effort locked-profile skip is still a successful maintenance run.)
+        # (audit 2026-07-23: the sibling disk-cleanup worker was ALSO given the found/removed
+        # status contract - a stale-profile run where every delete fails now books Failed, not
+        # Success. Both workers derive status from counts; neither is unconditional any more.)
         ($script:Src -match "elseif \(\[int\]\`$res\.Removed -ge \[int\]\`$res\.Found\)\s*\{ 'Success' \}") | Should Be $true
     }
 }
