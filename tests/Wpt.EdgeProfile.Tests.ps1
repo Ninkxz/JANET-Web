@@ -20,6 +20,7 @@ $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -
 
 $profiles = & $m { Get-WptAppUpdateProfiles }
 $name = 'Microsoft Edge - Update'
+$msiName = 'Microsoft Edge - Update (Vendor MSI - Microsoft)'   # v6.10.0 vendor-direct push
 
 Describe 'WPT - manifest loads at or above the Edge-port version' {
     $mani = & $m { Get-JanetToolManifest }
@@ -87,5 +88,39 @@ Describe 'WPT 6.8.1 - honest Edge Script (static analysis)' {
     }
     It 'routes every hard blocker to Software Center / MECM in its FAIL text' {
         ($net -match 'Software Center / MECM') | Should Be $true
+    }
+}
+
+Describe 'Vendor MSI (Microsoft direct push) profile - v6.10.0' {
+    It 'the profile exists with Script + Verify scriptblocks' {
+        $profiles.ContainsKey($msiName) | Should Be $true
+        ($profiles[$msiName].Script -is [scriptblock]) | Should Be $true
+        ($profiles[$msiName].Verify -is [scriptblock]) | Should Be $true
+    }
+    $msi = "$($profiles[$msiName].Script)"
+    It 'queries the official Microsoft Edge enterprise update API' {
+        ($msi -match [regex]::Escape('edgeupdates.microsoft.com/api/products')) | Should Be $true
+        ($msi -match 'Invoke-RestMethod') | Should Be $true
+    }
+    It 'selects the newest Stable x64 MSI artifact' {
+        ($msi -match "'Stable'") | Should Be $true
+        ($msi -match "'x64'") | Should Be $true
+        ($msi -match "ArtifactName") | Should Be $true
+    }
+    It 'force-installs via msiexec /i /qn from Microsoft''s CDN download' {
+        ($msi -match 'Invoke-WebRequest') | Should Be $true
+        ($msi -match 'msiexec') | Should Be $true
+        ($msi -match '/qn') | Should Be $true
+    }
+    It 'verifies the vendor-published SHA256 before installing' {
+        ($msi -match 'Get-FileHash') | Should Be $true
+        ($msi -match 'SHA256 mismatch') | Should Be $true
+    }
+    It 'rejects a non-MSI (proxy page) via the OLE2 magic bytes' {
+        ($msi -match '208,207,17,224') | Should Be $true
+    }
+    It 'SKIPs a host without Edge (upgrade-only intent) and Verify reads the Edge GUID' {
+        ($msi -match 'SKIP: Edge \(machine-level\) not installed') | Should Be $true
+        ("$($profiles[$msiName].Verify)" -match '56EB18F8-B008-4CBD-B6D2-8C97FE7E9062') | Should Be $true
     }
 }

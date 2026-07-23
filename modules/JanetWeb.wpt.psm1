@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.9.0'   # audit 2026-07-23 deferred pass: unified fan-out (9 bespoke harvest loops folded), ISS probe/name-check injection, DNS-probe folds
+        version  = '6.10.0'  # vendor-direct browser push: 'Google Chrome - Update (Vendor MSI - Google)' + 'Microsoft Edge - Update (Vendor MSI - Microsoft)' force-install the vendor's own Enterprise MSI (not just the MECM/on-box-updater nudge)
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -487,7 +487,7 @@ function Get-JanetToolManifest {
                 columns=@('Host','Version','LastUpdated','Verified','Detail')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update (Software Center)','Google Chrome - Update (Internet - Google Update)','Microsoft Edge - Update','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)') },
+                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update (Software Center)','Google Chrome - Update (Internet - Google Update)','Google Chrome - Update (Vendor MSI - Google)','Microsoft Edge - Update','Microsoft Edge - Update (Vendor MSI - Microsoft)','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)') },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
             },
@@ -498,7 +498,7 @@ function Get-JanetToolManifest {
                 columns=@('Host','Status','Detail')
                 inputs=@(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
-                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update (Software Center)','Google Chrome - Update (Internet - Google Update)','Microsoft Edge - Update','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)','Custom Command') },
+                    @{ name='profile'; label='Profile'; type='select'; required=$true; default='Microsoft 365 - Force Update'; options=@('Microsoft 365 - Force Update','Windows Defender - Update Definitions','Trellix / McAfee - Update Definitions','Google Chrome - Update (Software Center)','Google Chrome - Update (Internet - Google Update)','Google Chrome - Update (Vendor MSI - Google)','Microsoft Edge - Update','Microsoft Edge - Update (Vendor MSI - Microsoft)','Microsoft 365 - Update (User Visible)','Oracle Java - Software Center','Windows Unquoted Service Path - Remediate','MSXML 4.0 - Uninstall','Apache Log4j - Replace Vulnerable Jars','Office VBA Project Access - Disable (AccessVBOM)','Custom Command') },
                     @{ name='customcommand'; label='Custom command (only for Custom Command)'; type='textarea'; required=$false },
                     @{ name='threads'; label='Parallel hosts'; type='int'; required=$false; default=16 }
                 )
@@ -1232,6 +1232,76 @@ function Get-WptAppUpdateProfiles {
                 'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}' `
                 'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
         }
+        'Google Chrome - Update (Vendor MSI - Google)' = @{
+            # v6.10.0: manual push of Google's OWN Enterprise installer. The two
+            # profiles above only NUDGE an updater - the MECM/Software Center app,
+            # or the on-box Google updater task - and bail when it is missing,
+            # disabled, or policy-blocked. This one FORCE-INSTALLS the current
+            # Chrome Enterprise MSI pulled straight from Google's official stable
+            # vanity URL, so the update lands even when the on-box updater is dead:
+            # the true "manual push from the vendor" the operator asked for.
+            # Runs on the target, so the target needs a path to dl.google.com (same
+            # internet precondition as the Internet - Google Update profile). msiexec
+            # /i does an in-place upgrade; a host WITHOUT Chrome is SKIPped (the intent
+            # is to patch an existing install, not add a browser to a box lacking one).
+            Script = {
+                try {
+                    $ckeys = @(
+                        'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}',
+                        'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+                    )
+                    $getPv = {
+                        foreach ($k in $ckeys) {
+                            if (Test-Path $k) {
+                                $pp = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+                                if ($pp -and $pp.pv) { return "$($pp.pv)" }
+                            }
+                        }
+                        return $null
+                    }
+                    $before = & $getPv
+                    if (-not $before) { return 'SKIP: Chrome (machine-level) not installed - the vendor MSI push upgrades an existing install only' }
+
+                    # Google's official, always-current stable Enterprise MSI (64-bit).
+                    $url = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
+                    $dst = Join-Path $env:TEMP ('chrome_ent_' + [guid]::NewGuid().ToString('N') + '.msi')
+                    # PS 5.1 may negotiate only TLS1.0 by default; force TLS1.2 or the
+                    # handshake against the modern vendor endpoint fails.
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+                    try {
+                        Invoke-WebRequest -Uri $url -OutFile $dst -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+                    } catch {
+                        return "FAIL: could not download the Chrome Enterprise MSI from Google ($($_.Exception.Message)) - the target has no path to dl.google.com; use the Software Center profile or stage the MSI via Remote Package Installer"
+                    }
+                    $code = $null
+                    try {
+                        # Integrity: reject a proxy/captive-portal HTML page masquerading
+                        # as the MSI. A real MSI is an OLE2 compound file (magic bytes
+                        # D0 CF 11 E0 = 208,207,17,224).
+                        $fi = Get-Item -LiteralPath $dst -ErrorAction Stop
+                        $magic = try { $fs = [System.IO.File]::OpenRead($dst); $b = New-Object byte[] 8; [void]$fs.Read($b, 0, 8); $fs.Close(); (($b[0..3] -join ',') -eq '208,207,17,224') } catch { $false }
+                        if ($fi.Length -lt 1MB -or -not $magic) {
+                            return "FAIL: the downloaded file is not a valid MSI ($($fi.Length) B, magicOk=$magic) - likely a proxy/captive-portal page, not Google's installer"
+                        }
+                        $log = Join-Path $env:TEMP ($fi.BaseName + '.log')
+                        $p = Start-Process msiexec.exe -ArgumentList "/i `"$dst`" /qn /norestart REBOOT=ReallySuppress /L*v `"$log`"" -Wait -PassThru
+                        $code = $p.ExitCode
+                        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+                    } finally {
+                        Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue
+                    }
+                    $ok = @(0, 1641, 3010)
+                    if ($ok -notcontains $code) { return "FAIL: msiexec returned $code installing the Chrome Enterprise MSI (see the MSI verbose log on the target)" }
+                    $after = & $getPv
+                    if ($after -and $after -ne $before) { return "OK (Chrome force-updated $before -> $after via the Google Enterprise MSI)" }
+                    if ($code -eq 3010 -or $code -eq 1641) { return "OK (Chrome Enterprise MSI applied; reboot required to finalize; was v$before)" }
+                    return "OK (Chrome Enterprise MSI installed exit 0; version reads $after - already at the vendor's current build)"
+                } catch { return "FAIL: $($_.Exception.Message)" }
+            }
+            Verify = New-WptUpdateClientVerify `
+                'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}' `
+                'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'
+        }
         'Microsoft Edge - Update' = @{
             # Honest Edge trigger (same treatment the Chrome profiles got in 6.5.33;
             # this one lagged at "OK on any launch"). Pre-checks the EdgeUpdate
@@ -1301,6 +1371,99 @@ function Get-WptAppUpdateProfiles {
                         }
                     }
                     return "PENDING (update triggered via $trigger; version still $before after 90s - internet/proxy reachability or a slow download; re-run Verify in a few minutes, and if it never moves deploy via Software Center / MECM)"
+                } catch { return "FAIL: $($_.Exception.Message)" }
+            }
+            Verify = New-WptUpdateClientVerify `
+                'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' `
+                'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+        }
+        'Microsoft Edge - Update (Vendor MSI - Microsoft)' = @{
+            # v6.10.0: the Edge twin of the Chrome vendor-MSI push. The 'Microsoft
+            # Edge - Update' profile above only nudges the on-box EdgeUpdate and
+            # bails to Software Center when it is disabled/blocked. This one queries
+            # Microsoft's OFFICIAL Edge enterprise update API for the current Stable
+            # x64 MSI, downloads it from Microsoft's CDN, and force-installs it - so
+            # the update lands even when the on-box updater is dead. Target-side, so
+            # the target needs a path to edgeupdates.microsoft.com + the Edge CDN
+            # (same internet precondition as the vendor-direct profiles). Upgrades an
+            # existing install only (SKIP if Edge is absent).
+            Script = {
+                try {
+                    $ckeys = @(
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}',
+                        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
+                    )
+                    $getPv = {
+                        foreach ($k in $ckeys) {
+                            if (Test-Path $k) {
+                                $pp = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+                                if ($pp -and $pp.pv) { return "$($pp.pv)" }
+                            }
+                        }
+                        return $null
+                    }
+                    $before = & $getPv
+                    if (-not $before) { return 'SKIP: Edge (machine-level) not installed - the vendor MSI push upgrades an existing install only' }
+
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+                    # Microsoft's official Edge enterprise update API: current MSI URLs per channel.
+                    $api = 'https://edgeupdates.microsoft.com/api/products?view=enterprise'
+                    try {
+                        $products = Invoke-RestMethod -Uri $api -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                    } catch {
+                        return "FAIL: could not reach the Microsoft Edge update API ($($_.Exception.Message)) - the target has no path to edgeupdates.microsoft.com; use the Software Center / MECM profile or stage the MSI via Remote Package Installer"
+                    }
+                    $stable = @($products | Where-Object { "$($_.Product)" -eq 'Stable' })
+                    if ($stable.Count -eq 0) { return 'FAIL: the Edge update API returned no Stable channel entry' }
+                    # Newest Stable release that ships a Windows x64 MSI artifact.
+                    $art = $null; $relVer = $null
+                    foreach ($rel in @($stable[0].Releases |
+                            Where-Object { "$($_.Platform)" -eq 'Windows' -and "$($_.Architecture)" -eq 'x64' } |
+                            Sort-Object { try { [version]$_.ProductVersion } catch { [version]'0.0' } } -Descending)) {
+                        $a = @($rel.Artifacts | Where-Object { "$($_.ArtifactName)" -eq 'msi' })
+                        if ($a.Count -gt 0) { $art = $a[0]; $relVer = "$($rel.ProductVersion)"; break }
+                    }
+                    if (-not $art -or -not $art.Location) { return 'FAIL: the Edge update API returned no x64 MSI artifact for the Stable channel' }
+                    $dst = Join-Path $env:TEMP ('edge_ent_' + [guid]::NewGuid().ToString('N') + '.msi')
+                    try {
+                        Invoke-WebRequest -Uri $art.Location -OutFile $dst -UseBasicParsing -TimeoutSec 600 -ErrorAction Stop
+                    } catch {
+                        return "FAIL: could not download the Edge Enterprise MSI from Microsoft ($($_.Exception.Message))"
+                    }
+                    $code = $null
+                    try {
+                        # Integrity: OLE2 magic (D0 CF 11 E0 = 208,207,17,224) rejects a proxy page.
+                        $fi = Get-Item -LiteralPath $dst -ErrorAction Stop
+                        $magic = try { $fs = [System.IO.File]::OpenRead($dst); $b = New-Object byte[] 8; [void]$fs.Read($b, 0, 8); $fs.Close(); (($b[0..3] -join ',') -eq '208,207,17,224') } catch { $false }
+                        if ($fi.Length -lt 1MB -or -not $magic) {
+                            return "FAIL: the downloaded file is not a valid MSI ($($fi.Length) B, magicOk=$magic) - likely a proxy/captive-portal page, not Microsoft's installer"
+                        }
+                        # The API publishes each artifact's SHA256 - verify it before running
+                        # the installer (defence-in-depth beyond TLS to the official CDN).
+                        $want = $null
+                        foreach ($hp in @('HashSha256', 'Sha256', 'HashSHA256')) { if ($art.PSObject.Properties[$hp] -and $art.$hp) { $want = "$($art.$hp)"; break } }
+                        if ($want) {
+                            $want = ($want -replace '[^0-9A-Fa-f]', '').ToUpper()
+                            if ($want.Length -eq 64) {
+                                $got = (Get-FileHash -LiteralPath $dst -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpper()
+                                if ($got -ne $want) {
+                                    return "FAIL: Edge MSI SHA256 mismatch vs the vendor API manifest (got $($got.Substring(0,12))..., want $($want.Substring(0,12))...) - refusing to install"
+                                }
+                            }
+                        }
+                        $log = Join-Path $env:TEMP ($fi.BaseName + '.log')
+                        $p = Start-Process msiexec.exe -ArgumentList "/i `"$dst`" /qn /norestart REBOOT=ReallySuppress /L*v `"$log`"" -Wait -PassThru
+                        $code = $p.ExitCode
+                        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+                    } finally {
+                        Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue
+                    }
+                    $ok = @(0, 1641, 3010)
+                    if ($ok -notcontains $code) { return "FAIL: msiexec returned $code installing the Edge Enterprise MSI (see the MSI verbose log on the target)" }
+                    $after = & $getPv
+                    if ($after -and $after -ne $before) { return "OK (Edge force-updated $before -> $after via the Microsoft Enterprise MSI v$relVer)" }
+                    if ($code -eq 3010 -or $code -eq 1641) { return "OK (Edge Enterprise MSI v$relVer applied; reboot required to finalize; was v$before)" }
+                    return "OK (Edge Enterprise MSI v$relVer installed exit 0; version reads $after - already at the vendor's current build)"
                 } catch { return "FAIL: $($_.Exception.Message)" }
             }
             Verify = New-WptUpdateClientVerify `

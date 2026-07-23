@@ -220,8 +220,8 @@ Describe 'WptCleanBlock + WptCleanUserAppsBlock wrong-box (DNS-mismatch) guard (
         # and the old dedicated clean-block probe idiom must NOT come back (fold holds)
         ([regex]::Matches($script:WptSrc, "\`$actualName = try \{ Invoke-Command -Session \`$sess -EA Stop -ScriptBlock \{ \`$env:COMPUTERNAME \} \} catch \{ '' \}").Count) | Should Be 1
     }
-    It 'wpt manifest is exactly 6.9.0 (newest bump holds the exact pin; audit 2026-07-23 deferred pass)' {
-        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.9.0'
+    It 'wpt manifest is exactly 6.10.0 (newest bump holds the exact pin; vendor-MSI browser push)' {
+        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.10.0'
     }
 }
 

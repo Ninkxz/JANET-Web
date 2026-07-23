@@ -26,6 +26,7 @@ $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -
 $profiles = & $m { Get-WptAppUpdateProfiles }
 $scName   = 'Google Chrome - Update (Software Center)'
 $netName  = 'Google Chrome - Update (Internet - Google Update)'
+$msiName  = 'Google Chrome - Update (Vendor MSI - Google)'   # v6.10.0 vendor-direct push
 
 Describe 'Chrome App Updater profile split (registry shape)' {
     It 'contains the Software Center profile' {
@@ -102,21 +103,55 @@ Describe 'Internet (Google Update) profile script (static analysis)' {
     }
 }
 
+Describe 'Vendor MSI (Google direct push) profile - v6.10.0' {
+    It 'the profile exists with Script + Verify scriptblocks' {
+        $profiles.ContainsKey($msiName) | Should Be $true
+        ($profiles[$msiName].Script -is [scriptblock]) | Should Be $true
+        ($profiles[$msiName].Verify -is [scriptblock]) | Should Be $true
+    }
+    $msi = "$($profiles[$msiName].Script)"
+    It 'downloads the official Google Enterprise MSI vanity URL' {
+        ($msi -match [regex]::Escape('dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi')) | Should Be $true
+        ($msi -match 'Invoke-WebRequest') | Should Be $true
+    }
+    It 'force-installs via msiexec /i /qn (not just an updater nudge)' {
+        ($msi -match 'msiexec') | Should Be $true
+        ($msi -match '/qn') | Should Be $true
+    }
+    It 'forces TLS 1.2 for the vendor pull' {
+        ($msi -match 'Tls12') | Should Be $true
+    }
+    It 'rejects a non-MSI (proxy/captive-portal page) via the OLE2 magic bytes' {
+        ($msi -match '208,207,17,224') | Should Be $true
+    }
+    It 'treats 0/1641/3010 as install success and gates FAIL on other exit codes' {
+        ($msi -match '1641') | Should Be $true
+        ($msi -match '3010') | Should Be $true
+        ($msi -match 'msiexec returned') | Should Be $true
+    }
+    It 'SKIPs a host without Chrome (upgrade-only intent) and Verify reads the Chrome GUID' {
+        ($msi -match 'SKIP: Chrome \(machine-level\) not installed') | Should Be $true
+        ("$($profiles[$msiName].Verify)" -match '8A69D345-D564-463c-AFF1-A69D9E530F96') | Should Be $true
+    }
+}
+
 Describe 'Manifest + view dropdown wiring' {
     $mani = & $m { Get-JanetToolManifest }
     foreach ($aid in @('app-update-verify', 'app-update-apply')) {
-        It "manifest $aid profile options list both new names and not the old one" {
+        It "manifest $aid profile options list the SC/Internet/Vendor-MSI names and not the old one" {
             $act = @($mani.actions | Where-Object { $_.id -eq $aid })[0]
             $opts = @(@($act.inputs | Where-Object { $_.name -eq 'profile' })[0].options)
             ($opts -contains $scName)  | Should Be $true
             ($opts -contains $netName) | Should Be $true
+            ($opts -contains $msiName) | Should Be $true
             ($opts -contains 'Google Chrome - Update') | Should Be $false
         }
     }
-    It 'wpt.view.js PROFILES lists both new names and not the old exact name' {
+    It 'wpt.view.js PROFILES lists the SC/Internet/Vendor-MSI names and not the old exact name' {
         $view = Get-Content (Join-Path $script:Root 'web\js\views\wpt.view.js') -Raw
         $view.Contains("'" + $scName + "'")  | Should Be $true
         $view.Contains("'" + $netName + "'") | Should Be $true
+        $view.Contains("'" + $msiName + "'") | Should Be $true
         $view.Contains("'Google Chrome - Update'") | Should Be $false
     }
 }
