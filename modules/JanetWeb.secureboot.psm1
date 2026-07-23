@@ -1186,6 +1186,17 @@ function Invoke-JanetToolAction {
     # Dry-run snapshot (atomic in the web action - cannot toggle mid-run).
     $isDry = Get-SbeDryRunSafe $Params['dry_run']   # loop58: fail-closed - unrecognized token stays DRY, never silently live
 
+    # audit 2026-07-23: server-side typed confirm-word gate on the LIVE path (mirrors the
+    # pkginstall loop62 DEPLOY gate). The loop-15 ENABLE barrier was manifest-string +
+    # view-dialog only, so a direct API call could arm a fleet firmware write with no typed
+    # word at all; loop62 retrofitted dhcp (APPLY) and pkginstall (DEPLOY) server-side but
+    # secureboot was never retrofitted. Fail-closed: refuse unless the operator typed
+    # ENABLE (exactly). Dry run stays ungated (harmless preflight - the loop-15 design).
+    if ((-not $isDry) -and ([string]$Params['confirm'] -ne 'ENABLE')) {
+        & $send @{ type='log'; level='err'; text='Refused: type ENABLE (exactly) in Confirm to arm the live enable.' }
+        return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+    }
+
     # BIOS password + forbidden-char enforcement (only meaningful for live runs).
     $biosPlain = [string]$Params['bios_password']
     if (-not $isDry) {
@@ -1210,6 +1221,13 @@ function Invoke-JanetToolAction {
     $threads = 5
     if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
     $threads = [Math]::Max(1, [Math]::Min(10, $threads))
+
+    # audit 2026-07-23: per-host wall-clock watchdog budget for the harvest loop below,
+    # mirroring this module's own scan watchdog ($perHostTimeout in Invoke-SbeScanAction).
+    # The live worker's C$ SMB steps (payload drop / icacls lock / result read-back /
+    # cleanup) are otherwise unbounded, so one hung SMB call parked the whole run.
+    # Budget: session open 15s + 60s ops + the worker's own 90s result poll + SMB margin.
+    $perHostTimeout = 300
 
     $modeLabel = if ($isDry) { 'DRY RUN (preflight only)' } else { 'LIVE firmware write' }
     & $send @{ type='status'; text="Starting Secure Boot enable [$modeLabel] on $($targets.Count) host(s) with $threads thread(s)..." }
@@ -1238,14 +1256,20 @@ function Invoke-JanetToolAction {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($work)
         foreach ($a in (& $argFactory $h)) { [void]$ps.AddArgument($a) }
-        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
     $rows = New-Object System.Collections.ArrayList
     $done = 0; $okCount = 0; $skipCount = 0; $failCount = 0
     try {
         while ($done -lt $jobs.Count) {
+            # Stamp the per-host clock only up to the pool's real concurrency, in queue
+            # order (the scan watchdog's discipline): a PS queued in a saturated
+            # RunspacePool reports State='Running' at once, so stamping at ENQUEUE would
+            # false-time-out the backlog (~threads*timeout in). audit 2026-07-23.
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
             foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
@@ -1311,6 +1335,30 @@ function Invoke-JanetToolAction {
 
                     $done++
                     & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                }
+            }
+            # audit 2026-07-23: per-host watchdog (mirrors the scan's) - reap a host that
+            # overran its wall clock (hung C$ SMB / WinRM step). BeginStop the local
+            # pipeline and null the handle; the worker's finally still runs to completion
+            # under BeginStop on PS 5.1, so the SYSTEM task cleanup is not orphaned.
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}
+                        $j.PS = $null
+                        $row = @{ Host=$j.Host; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error="per-host timeout (${perHostTimeout}s) - hung WinRM/SMB step reaped"; Hint='' }
+                        [void]$rows.Add($row)
+                        & $send (@{ type='row' } + $row)
+                        & $send @{ type='log'; level='err'; text=("{0}: Timeout - per-host timeout ({1}s), in-flight call stopped" -f $j.Host, $perHostTimeout) }
+                        # Honest audit (the cancel path's discipline): on a live run the
+                        # SYSTEM task may already have started and could still finish the
+                        # write, so the outcome is unknown - never record Failure. Skipped
+                        # with itemCount 0 reflects "nothing confirmed done".
+                        & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Skipped'; itemCount=0; detail="per-host timeout (${perHostTimeout}s); SYSTEM task may have already started (outcome unknown)" }
+                        $failCount++; $done++
+                        & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                    }
                 }
             }
             if ($done -lt $jobs.Count) {

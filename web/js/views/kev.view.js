@@ -165,8 +165,7 @@
           var rows = grid.rows();
           if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a cross-reference first.', okText: 'OK', cancelText: null }); return; }
           var cols = [['CVE', 'CVE'], ['Year', 'Year'], ['Severity', 'Severity'], ['Score', 'Score'], ['InKEV', 'On KEV']];
-          var csv = ctx.util.toCsv(cols.map(function (c) { return c[1]; }), rows, cols.map(function (c) { return c[0]; }));
-          ctx.util.downloadBlob('KEV_CrossRef_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          ctx.util.exportCsv('KEV_CrossRef', cols, rows);
         };
 
         var xrefActive = false, xrefRun = null, xrefUnsub = null, liveTotal = 0, liveKev = 0;
@@ -251,7 +250,7 @@
         right.appendChild(results);
         panel.appendChild(right);
 
-        var catUnsub = null;
+        var catUnsub = null, addUnsub = null;
         function loadCatalog() {
           grid.clear(); countLine.textContent = 'Loading KEV catalog...';
           var lr = ctx.run('list-kev', {}, { keyOf: function (ev) { return ev._rk; } });
@@ -278,7 +277,8 @@
           if (!ok) return;
           addStatus.textContent = 'Saving...'; addStatus.className = 'st-info'; addBtn.disabled = true;
           var ar = ctx.run('add-kev', { cves: raw }, { keyOf: function (ev) { return ev._rk; } });
-          track(ar.subscribe({
+          if (addUnsub) addUnsub();   // replace, don't stack, on repeated adds
+          addUnsub = ar.subscribe({
             log: function (l) { actlog.append(l); },
             error: function (e) { addStatus.textContent = e.text || 'Save error'; addStatus.className = 'st-bad'; },
             active: function (a) { addBtn.disabled = a; },
@@ -289,7 +289,8 @@
               addStatus.className = (s.added > 0) ? 'st-ok' : 'st-warn';
               if (s.added > 0) { addInput.value = ''; loadCatalog(); }
             }
-          }));
+          });
+          track(addUnsub);
         };
 
         loadCatalog();
@@ -315,7 +316,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { subs.forEach(function (u) { try { u(); } catch (e) {} }); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

@@ -782,6 +782,18 @@
         ctx.confirm({ title: 'Affected hosts - ' + (c.plugin || ''), body: body, okText: 'Close', cancelText: null });
       }
 
+      // audit 2026-07-23 (confirm parity): auto-patch / run-vulnerability /
+      // run-all-sequential / run-all-parallel / schedule-reboot / preflight-services
+      // now DECLARE a manifest `confirm` string like kb-install always has. The acas
+      // pattern is manifest-string + view-dialog (no server-side typed-word gate, no
+      // confirm param on ctx.run - unlike pkginstall's DEPLOY gate), so the blocking
+      // danger ctx.confirm dialogs below (doPatchOne / doRebootOne / doPatchSelected /
+      // doRunAll / doAutoPatch / doPreflight) ARE the enforcement half of that
+      // declaration. Verify-only dry runs stay ungated (danger:false, read-only).
+      // If a server-side confirm gate is ever added, each of those ctx.run calls must
+      // start sending the confirm param or every run will be refused (the exact
+      // wiring gap that once bricked pkginstall - see pkginstall.view.js:359).
+
       // ---- per-card Run / Verify (single card) -> run-vulnerability against the EXPLICIT host list ----
       function doPatchOne(c, verifyOnly) {
         if (runActive()) { ctx.confirm({ title: 'Run in progress', body: 'A run is already in progress. Wait for it to finish or Cancel it.', okText: 'OK', cancelText: null }); return; }

@@ -403,8 +403,19 @@ $script:DhcpLoadScript = {
 # full ordered array (atomic whole-option replace). [ipaddress] cast + empty
 # guard reproduce the 1.1.2/1.1.3 fixes.
 $script:DhcpApplyScript = {
-    param($scopeId, $optId, $values)
+    param($scopeId, $optId, $values, $expectedServer)
     Import-Module DhcpServer -ErrorAction Stop
+    # Wrong-box abort (secureboot P2-6b idiom; audit 2026-07-23): the box answering
+    # this WSMan session may not be the DHCP server we dialed (stale DNS / reused
+    # IP) - abort BEFORE any option write. IP-literal targets have no DNS
+    # indirection (the box answering at that IP IS the box), so skip the compare.
+    # $expectedServer absent (legacy/positional callers) => guard inert.
+    if ($expectedServer -and ($expectedServer -notmatch '^\d{1,3}(\.\d{1,3}){3}$')) {
+        $expShort = ((([string]$expectedServer) -split '\.')[0]).Trim()
+        if ($expShort -and ($env:COMPUTERNAME.Trim().ToUpper() -ne $expShort.ToUpper())) {
+            throw "wrong box: dialed '$expShort', answered '$env:COMPUTERNAME' - ABORTED, no DHCP option written"
+        }
+    }
     if ([string]::IsNullOrWhiteSpace($scopeId)) { throw "ScopeId arrived empty over WSMan." }
     $sid = [ipaddress]$scopeId
     $vals = @($values)
@@ -422,8 +433,39 @@ $script:DhcpApplyScript = {
 # $dryRun (web addition) computes the same Before/After diff but reports
 # WouldChange/WouldRemove without calling Set/Remove.
 $script:DhcpBulkScript = {
-    param($scopeIds, $optId, $ips, $mode, $dryRun)
+    param($scopeIds, $optId, $ips, $mode, $dryRun, $expectedServer)
     Import-Module DhcpServer -ErrorAction Stop
+    # Wrong-box abort (secureboot P2-6b idiom; audit 2026-07-23): abort BEFORE any
+    # scope is touched if the answering box is not the DHCP server we dialed
+    # (stale DNS / reused IP). IP-literal targets skip the compare (no DNS
+    # indirection). $expectedServer absent (legacy/positional callers) => inert.
+    if ($expectedServer -and ($expectedServer -notmatch '^\d{1,3}(\.\d{1,3}){3}$')) {
+        $expShort = ((([string]$expectedServer) -split '\.')[0]).Trim()
+        if ($expShort -and ($env:COMPUTERNAME.Trim().ToUpper() -ne $expShort.ToUpper())) {
+            throw "wrong box: dialed '$expShort', answered '$env:COMPUTERNAME' - ABORTED, no DHCP option written"
+        }
+    }
+    # audit 2026-07-23: ONE fail-closed option reader (the not-present detection was
+    # copy-pasted for the initial read and the pre-write re-read). Only the genuine
+    # "option not configured" family reads as empty; any other failure returns
+    # Ok=$false so the callers refuse to write off an errored read that merely
+    # LOOKS empty (Append would wipe the live list; Remove would short-circuit).
+    $readOptionValues = {
+        param($ropSid, $ropOptId)
+        try {
+            $rov = Get-DhcpServerv4OptionValue -ScopeId $ropSid -OptionId $ropOptId -ErrorAction Stop
+            $rvals = @()
+            if ($rov -and $rov.Value) { $rvals = @($rov.Value | ForEach-Object { [string]$_ }) }
+            return [pscustomobject]@{ Ok = $true; Values = $rvals; Err = $null }
+        } catch {
+            $rmsg = [string]$_.Exception.Message
+            $rfid = [string]$_.FullyQualifiedErrorId
+            if ($rmsg -match '(?i)does not exist' -or $rmsg -match '(?i)not\s+configured' -or $rmsg -match '(?i)no\s+option\s+value' -or $rfid -match '(?i)NotFound|DoesNotExist|20000') {
+                return [pscustomobject]@{ Ok = $true; Values = @(); Err = $null }
+            }
+            return [pscustomobject]@{ Ok = $false; Values = @(); Err = $rmsg }
+        }
+    }
     $out = New-Object System.Collections.ArrayList
     foreach ($sidStr in $scopeIds) {
         $rec = [pscustomobject]@{
@@ -431,25 +473,14 @@ $script:DhcpBulkScript = {
         }
         try {
             $sid = [ipaddress]$sidStr
-            $existing = @()
             # FAIL-CLOSED read: a read error must NOT collapse to "empty" (that would
             # make Append write ONLY the new IPs -- deleting the live list -- and let a
             # Remove short-circuit wipe config). Only a genuine "option not configured"
             # is treated as empty; any other read failure flags this scope ReadError and
-            # SKIPS the write entirely.
-            $readOk = $true; $readErrMsg = $null
-            try {
-                $ov = Get-DhcpServerv4OptionValue -ScopeId $sid -OptionId $optId -ErrorAction Stop
-                if ($ov -and $ov.Value) { $existing = @($ov.Value | ForEach-Object { [string]$_ }) }
-            } catch {
-                $rmsg = [string]$_.Exception.Message
-                $rfid = [string]$_.FullyQualifiedErrorId
-                if ($rmsg -match '(?i)does not exist' -or $rmsg -match '(?i)not\s+configured' -or $rmsg -match '(?i)no\s+option\s+value' -or $rfid -match '(?i)NotFound|DoesNotExist|20000') {
-                    $existing = @()
-                } else {
-                    $readOk = $false; $readErrMsg = $rmsg
-                }
-            }
+            # SKIPS the write entirely. (Shared $readOptionValues; audit 2026-07-23.)
+            $read = & $readOptionValues $sid $optId
+            $readOk = [bool]$read.Ok; $readErrMsg = $read.Err
+            $existing = @($read.Values)
             if (-not $readOk) {
                 $rec.Status = 'ReadError'
                 $rec.Error  = ("refused (fail-closed): could not read current option value, no write attempted: $readErrMsg")
@@ -481,23 +512,13 @@ $script:DhcpBulkScript = {
                 # scope and flag 'Stale' rather than clobber their change with our
                 # stale-computed replace. The re-read is a local DhcpServer query
                 # inside this same remote session -- no extra WSMan round-trip.
-                $current = @()
                 # FAIL-CLOSED re-read: if the pre-write re-read errors, we cannot prove
                 # the server state is unchanged, so REFUSE the write (never remove/replace
                 # off an errored read that looks like "empty").
-                $reReadOk = $true; $reErrMsg = $null
-                try {
-                    $cv = Get-DhcpServerv4OptionValue -ScopeId $sid -OptionId $optId -ErrorAction Stop
-                    if ($cv -and $cv.Value) { $current = @($cv.Value | ForEach-Object { [string]$_ }) }
-                } catch {
-                    $cmsg = [string]$_.Exception.Message
-                    $cfid = [string]$_.FullyQualifiedErrorId
-                    if ($cmsg -match '(?i)does not exist' -or $cmsg -match '(?i)not\s+configured' -or $cmsg -match '(?i)no\s+option\s+value' -or $cfid -match '(?i)NotFound|DoesNotExist|20000') {
-                        $current = @()
-                    } else {
-                        $reReadOk = $false; $reErrMsg = $cmsg
-                    }
-                }
+                # (Shared $readOptionValues; audit 2026-07-23.)
+                $reRead = & $readOptionValues $sid $optId
+                $reReadOk = [bool]$reRead.Ok; $reErrMsg = $reRead.Err
+                $current = @($reRead.Values)
                 if (-not $reReadOk) {
                     $rec.Status = 'ReadError'
                     $rec.After  = $existing
@@ -825,7 +846,7 @@ function Invoke-JanetDhcpApply {
             throw "Internal: ScopeId is empty -- supply a scope and try again."
         }
         $applyCall = Invoke-JanetOnDhcpCancelable -Server $Server -Script $script:DhcpApplyScript `
-                      -Arguments @($ScopeId, $OptionId, $new) -Credential $Credential -CancelCheck $CancelCheck -UseSsl $useSsl
+                      -Arguments @($ScopeId, $OptionId, $new, $Server) -Credential $Credential -CancelCheck $CancelCheck -UseSsl $useSsl
         if ($applyCall.Cancelled) {
             # Cancelled mid-flight: the WinRM child was BeginStop'd. We cannot know
             # whether the remote Set/Remove completed, so audit the scope as
@@ -976,7 +997,7 @@ function Invoke-JanetDhcpBulk {
         # tool's discipline -- avoids WSMan queue saturation). We get the full
         # result set back, then stream a row per scope.
         $bulkCall = Invoke-JanetOnDhcpCancelable -Server $Server -Script $script:DhcpBulkScript `
-                     -Arguments @($scopeIdList, $OptionId, $ipList, $Mode, $DryRun) -Credential $Credential -CancelCheck $CancelCheck -UseSsl $useSsl
+                     -Arguments @($scopeIdList, $OptionId, $ipList, $Mode, $DryRun, $Server) -Credential $Credential -CancelCheck $CancelCheck -UseSsl $useSsl
         if ($bulkCall.Cancelled) {
             # Cancelled mid-flight: the WinRM child was BeginStop'd before results
             # came back, so we have no per-scope record -- abandon every scope.

@@ -39,7 +39,20 @@ Describe 'ACAS reboot DNS-mismatch hard-abort (AcasRebootWorker)' {
             $script:__destr = $false
             function script:Invoke-Command {
                 param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $Session, $SessionOption)
-                if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }
+                if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }   # ambient-path standalone probe (still in the module)
+                # audit 2026-07-23: harness updated for the folded guard - the credentialed
+                # path now runs the compare INSIDE the shutdown scriptblock and answers with
+                # a JANET_DNS_MISMATCH:<name> sentinel. The real block's tail is a hard-coded
+                # local shutdown.exe (cannot execute it here), so the shim plays the REMOTE
+                # box instead: answer as a machine named $ProbeName against the $expectShort
+                # the worker wired into -ArgumentList (arg 1), per the block's sentinel
+                # contract - assertions unchanged.
+                if ($ScriptBlock -and ($ScriptBlock.ToString() -match 'JANET_DNS_MISMATCH')) {
+                    $expectShort = [string]$ArgumentList[1]
+                    if ($expectShort -and (([string]$ProbeName).Trim().ToUpper() -ne $expectShort.Trim().ToUpper())) {
+                        return "JANET_DNS_MISMATCH:$ProbeName"
+                    }
+                }
                 $script:__destr = $true
                 return 0   # shutdown scriptblock returns $LASTEXITCODE == 0 (accepted)
             }
@@ -87,13 +100,23 @@ Describe 'ACAS update DNS-mismatch hard-abort (AcasUpdateWorker)' {
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
                 param($Session, $ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
-                if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }
-                $script:__destr = $true
-                return @{ Update = 'OK'; Pre = $null; Post = $null }
+                # audit 2026-07-23: harness updated for the folded guard - the standalone
+                # probe is gone; the combined scriptblock (identified by its JANET_PROBE_ERR
+                # sentinel text) runs the compare as its FIRST statement and returns
+                # @{Abort=...} on a wrong box. EXECUTE the real block with $env:COMPUTERNAME
+                # faked to the probe answer, so the module's own in-block compare and Abort
+                # contract are exercised; the fake profile Script below sets the destructive
+                # recorder flag only when the update text actually runs. Assertions unchanged.
+                if ($ScriptBlock -and ($ScriptBlock.ToString() -match 'JANET_PROBE_ERR')) {
+                    $__oldName = $env:COMPUTERNAME
+                    try { $env:COMPUTERNAME = $ProbeName; return (& $ScriptBlock @ArgumentList) }
+                    finally { $env:COMPUTERNAME = $__oldName }
+                }
+                return $null
             }
             try {
                 $cred = New-Object System.Management.Automation.PSCredential('tester', (ConvertTo-SecureString 'x' -AsPlainText -Force))
-                $profiles = @{ 'FakeProf' = @{ Script = { 'did-update' }; Verify = $null } }
+                $profiles = @{ 'FakeProf' = @{ Script = { $script:__destr = $true; 'did-update' }; Verify = $null } }
                 $out = & $script:AcasUpdateWorker -TargetIn $Target -ProfileIn 'FakeProf' -UpdateProfilesTable $profiles -VerifyOnlyIn $false -CredIn $cred -StageSource ''
                 [pscustomobject]@{ Result = [string]$out; Destr = [bool]$script:__destr }
             } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -ErrorAction SilentlyContinue }
@@ -134,11 +157,14 @@ Describe 'UPR uninstall DNS-mismatch hard-abort (UprWorkerBlock)' {
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
                 param($Session, $ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
-                if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }
                 if ($ScriptBlock -and ($ScriptBlock.ToString() -match 'UprVerifyPresent')) { return ([pscustomobject]@{ Present = $false }) }   # post-uninstall re-enum: product genuinely gone
                 if ($ArgumentList) { $script:__destr = $true; return 'OK (shim removed)' }   # the uninstall call
-                # otherwise: the installed-software enumeration -> hand back one removable app
-                return @( @{ Name = 'FakeVulnApp'; Version = '1.0'; Publisher = 'x'; Type = 'EXE'; UninstallString = 'C:\x.exe'; QuietUninstall = ''; PSChildName = 'FakeVulnApp' } )
+                # otherwise: the installed-software enumeration -> hand back one removable app.
+                # audit 2026-07-23: harness updated for the folded guard - the standalone probe
+                # is gone; the enumeration now ALSO returns the answering box's ComputerName
+                # (simulated as $ProbeName) and the worker compares it admin-side. Apps carries
+                # what the old shim returned. Assertions unchanged.
+                return @{ ComputerName = $ProbeName; Apps = @( @{ Name = 'FakeVulnApp'; Version = '1.0'; Publisher = 'x'; Type = 'EXE'; UninstallString = 'C:\x.exe'; QuietUninstall = ''; PSChildName = 'FakeVulnApp' } ) }
             }
             try {
                 $prof = @{ DisplayNameRegex = 'FakeVulnApp'; VersionMaxExclusive = ''; Proven = $true; PluginNameMatch = 'P'; Notes = 'n' }
@@ -184,7 +210,19 @@ Describe 'WPT maintenance-lock DNS-mismatch hard-abort (WptMaintLockBlock)' {
             $script:__destr = $false
             function script:Invoke-Command {
                 param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
-                if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }
+                # audit 2026-07-23: harness updated for the folded guard - the standalone
+                # probe is gone; the compare is now the FIRST statement of the block's single
+                # working Invoke-Command (-ArgumentList: Caption, Message, HardLock,
+                # targetShort, isIPv4) and answers @{DnsMismatch=<name>} on a wrong box. The
+                # real block writes the logon banner + a secedit hard-lock (cannot execute it
+                # here), so the shim plays the REMOTE box instead: answer as a machine named
+                # $ProbeName per the block's DnsMismatch contract. Assertions unchanged.
+                if ($ScriptBlock -and ($ScriptBlock.ToString() -match 'DnsMismatch')) {
+                    $expected = [string]$ArgumentList[3]; $isIPv4 = [bool]$ArgumentList[4]
+                    if (-not $isIPv4 -and $expected -and (([string]$ProbeName).Trim().ToUpper() -ne $expected.Trim().ToUpper())) {
+                        return @{ DnsMismatch = $ProbeName }
+                    }
+                }
                 $script:__destr = $true
                 return @{ Banner = $true; HardLock = $true; Err = '' }
             }

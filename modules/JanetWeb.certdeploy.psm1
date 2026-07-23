@@ -251,44 +251,52 @@ function Resolve-CertDeployBundleFolder {
     return @{ Folder = ''; Source = '' }
 }
 
+# audit 2026-07-23 (finding: check/deploy want-set skew): the SINGLE expiry filter both
+# serializers below run their store groups through, so the deploy push-set and the check
+# want-set can never disagree again. Keeps within-validity certs; keeps expired certs
+# ONLY when allowlisted (LegacyIntermediates) or -IncludeExpired. Runs admin-side in
+# module scope (never injected into a pool runspace), so calling module helpers is safe.
+function Select-CertDeployPushableCerts {
+    param($Items, [bool]$IncludeExpired = $false)
+    $now = Get-Date
+    $legacySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($k in $script:CertDeployLegacyIntermediates.Keys) { [void]$legacySet.Add([string]$k) }
+    return @(@($Items) | Where-Object { $_ } | Where-Object {
+        if ($IncludeExpired) { return $true }
+        $na = $null
+        try { if ($_.NotAfter) { $na = [datetime]$_.NotAfter } } catch { $na = $null }
+        if ((-not $na) -or ($na -ge $now)) { return $true }         # within validity -> keep
+        $tp = (([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
+        return $legacySet.Contains($tp)                              # expired -> keep ONLY if allowlisted
+    })
+}
+
 # Serialize a bundle to the compact JSON the DEPLOY worker consumes (thumbprint +
 # b64 per store). @()-wrapped so ConvertFrom-Json single-element arrays round-trip.
 # SHARED CONTRACT: when -IncludeExpired is $false (default) expired certs (NotAfter
 # in the past) are EXCLUDED from the pushed set; $true includes them (dead anchors).
 function Convert-CertDeployBundleToJson {
     param($Bundle, [bool]$IncludeExpired = $false)
-    $now = Get-Date
-    # Capture the allowlist as a LOCAL set so the GetNewClosure() closure below never depends
-    # on module-function resolution (a closure may not see Test-CertDeployLegacyAllowed).
-    $legacySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($k in $script:CertDeployLegacyIntermediates.Keys) { [void]$legacySet.Add([string]$k) }
-    $sel = {
-        param($items)
-        @(@($items) | Where-Object { $_ } | Where-Object {
-            if ($IncludeExpired) { return $true }
-            $na = $null
-            try { if ($_.NotAfter) { $na = [datetime]$_.NotAfter } } catch { $na = $null }
-            if ((-not $na) -or ($na -ge $now)) { return $true }         # within validity -> keep
-            $tp = (([string]$_.Thumbprint) -replace '[^0-9A-Fa-f]','').ToUpperInvariant()
-            return $legacySet.Contains($tp)                              # expired -> keep ONLY if allowlisted
-        } | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
-    }.GetNewClosure()
     $payload = @{
-        Root       = @(& $sel $Bundle.Root)
-        CA         = @(& $sel $Bundle.CA)
-        Disallowed = @(& $sel $Bundle.Disallowed)
+        Root       = @(Select-CertDeployPushableCerts $Bundle.Root       $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        CA         = @(Select-CertDeployPushableCerts $Bundle.CA         $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        Disallowed = @(Select-CertDeployPushableCerts $Bundle.Disallowed $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
     }
     return ($payload | ConvertTo-Json -Depth 5 -Compress)
 }
 
 # Serialize ONLY the thumbprints per store (the read-only CHECK worker needs no
 # base64 - it only asks "is this thumbprint already present?").
+# audit 2026-07-23 (finding: check/deploy want-set skew): the want-set now runs through
+# the SAME expiry filter as the deploy set. Previously it took ALL bundle thumbprints,
+# so a dead (expired, non-allowlisted) anchor in the bundle showed every host MISSING
+# forever - unfixable via Deploy, which rightly refuses to push it.
 function Convert-CertDeployBundleToThumbJson {
-    param($Bundle)
+    param($Bundle, [bool]$IncludeExpired = $false)
     $payload = @{
-        Root       = @(@($Bundle.Root)       | ForEach-Object { [string]$_.Thumbprint })
-        CA         = @(@($Bundle.CA)         | ForEach-Object { [string]$_.Thumbprint })
-        Disallowed = @(@($Bundle.Disallowed) | ForEach-Object { [string]$_.Thumbprint })
+        Root       = @(Select-CertDeployPushableCerts $Bundle.Root       $IncludeExpired | ForEach-Object { [string]$_.Thumbprint })
+        CA         = @(Select-CertDeployPushableCerts $Bundle.CA         $IncludeExpired | ForEach-Object { [string]$_.Thumbprint })
+        Disallowed = @(Select-CertDeployPushableCerts $Bundle.Disallowed $IncludeExpired | ForEach-Object { [string]$_.Thumbprint })
     }
     return ($payload | ConvertTo-Json -Depth 5 -Compress)
 }
@@ -462,18 +470,18 @@ function Invoke-CertDeployCompanions {
     #     does NOT mean deletable (roots, timestamping and machine-identity certs are
     #     often expired-but-required), so deletion is gated on an ALLOWLIST: subject
     #     must match the retired DoD intermediate pattern AND the store is CA ONLY
-    #     (never My/Root/TrustedPublisher/Disallowed). The four LegacyIntermediates
-    #     thumbprints are EXCLUDED - deploy intentionally pushes those despite expiry
-    #     (guard copy of $script:CertDeployLegacyIntermediates; keep the lists in sync).
+    #     (never My/Root/TrustedPublisher/Disallowed). The LegacyIntermediates
+    #     thumbprints are EXCLUDED - deploy intentionally pushes those despite expiry.
+    #     $legacyKeep is INJECTED at module load from the single
+    #     $script:CertDeployLegacyIntermediates hashtable (audit 2026-07-23) - it is
+    #     no longer a hand-maintained copy that could drift.
     if ($DoPrune) {
     try {
+        # $allowSubject is the SUBJECT-pattern prune gate (which retired-DoD-intermediate
+        # subjects MAY be deleted); it is independent of the thumbprint keep-list above
+        # and deliberately stays a literal regex here.
         $allowSubject = '^CN=DOD (EMAIL|ID|SW|DERILITY) CA-\d+, OU=PKI, OU=DoD'
-        $legacyKeep = @(
-            '53FDE0F40638BD1A68A68D1E91089009B33BAE5E'  # DOD EMAIL CA-59
-            '1907FC2B223EE0301B45745BDB59AAD90FE7C5D7'  # DOD ID CA-59
-            '5DFFDAB658915FA6B0DB4E0BCF70D5BB1B8425FC'  # DOD SW CA-60
-            '5F555AB8A87DD146314171621245CF720BF53B8A'  # DOD SW CA-61
-        )
+        $legacyKeep = @(__LEGACY_KEEP__)
         $nowPk = Get-Date
         $prunable = @(Get-ChildItem 'Cert:\LocalMachine\CA' -ErrorAction SilentlyContinue | Where-Object {
             $_.NotAfter -lt $nowPk -and $_.Subject -match $allowSubject -and
@@ -535,6 +543,15 @@ function Invoke-CertDeployCompanions {
     return @($notes.ToArray())
 }
 '@
+# audit 2026-07-23 (finding: allowlist literalized 3x): render the $legacyKeep array in the
+# companions source FROM the single $script:CertDeployLegacyIntermediates hashtable at module
+# load. Previously $legacyKeep was a third hand-maintained literal copy - a 5th cert added only
+# to the hashtable would be PUSHED by deploy and then DELETED by the prunePki companion in the
+# same round-trip. One edit to the hashtable now updates deploy, check, and the prune guard
+# together (the Companions test pins exact set-equality between the rendered source and the
+# hashtable, which now proves the injection renders rather than that two copies happen to agree).
+$script:CertDeployCompanionsSrc = $script:CertDeployCompanionsSrc.Replace('__LEGACY_KEEP__',
+    (@($script:CertDeployLegacyIntermediates.Keys | ForEach-Object { "'{0}'" -f $_ }) -join ', '))
 # NOT dot-sourced in module scope: Invoke-CertDeployCompanions touches live machine
 # state (cert stores + the RDP listener) with no read-only path, so it must exist
 # ONLY on the remote target. Unit tests inspect the source string instead.
@@ -737,6 +754,79 @@ function Get-CertDeployBool {
 }
 
 # =============================================================================
+#  audit 2026-07-23 (extract): shared harvest loop for the three per-host fan-outs
+#  (check / deploy / scan-cert-management), mirroring Invoke-RrsFanOut in
+#  JanetWeb.restart.psm1. The three ~45-line loops were behavior-identical except
+#  for the result SHAPE used on worker-error / timeout / cancel and the cancel-log
+#  wording - those come in as scriptblock/string parameters. Reaps completed jobs
+#  as they finish, stamps StartedAt only up to the pool's real concurrency (the
+#  saturated-pool false-timeout fix, preserved verbatim), enforces the per-host
+#  watchdog, and honors operator cancel. $EmitResult / $Send run in THEIR defining
+#  scope, so callers accumulate into reference types (their $rows ArrayList).
+#  Closes/disposes $Pool in its finally.
+# =============================================================================
+function Invoke-CertDeployFanOut {
+    param(
+        $Jobs,                          # ArrayList of @{ Host; PS; Async; StartedAt }
+        $Pool,                          # the opened RunspacePool (closed/disposed here)
+        [scriptblock]$EmitResult,       # param($res) - caller's row+log+audit emitter
+        [scriptblock]$Send,             # event emitter (progress / cancel log)
+        [scriptblock]$CancelCheck,      # operator-cancel probe
+        [int]$PerHostTimeoutSeconds,
+        [scriptblock]$MakeErrorResult,  # param($jobHost, $detail) -> worker-error/timeout result shape
+        [scriptblock]$MakeCancelResult, # param($jobHost) -> operator-cancel result shape
+        [string]$TimeoutDetail,         # e.g. 'possible remote read hang'
+        [string]$CancelLogText          # e.g. 'Run cancelled by operator; in-flight checks stopped.'
+    )
+    $done = 0
+    try {
+        while ($done -lt $Jobs.Count) {
+            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
+            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so an
+            # InvocationStateInfo check would stamp StartedAt at ENQUEUE for every job and the
+            # watchdog would falsely time out the whole backlog at once (~threads*timeout hosts in).
+            $activeCount = @($Jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
+            foreach ($j in $Jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $Pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = & $MakeErrorResult $j.Host "worker error: $($_.Exception.Message)" }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = & $MakeErrorResult $j.Host 'worker returned no result' }
+                    & $EmitResult $res
+                    $done++; & $Send @{ type='progress'; done=$done; total=$Jobs.Count }
+                }
+            }
+            if ($done -lt $Jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $Jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $PerHostTimeoutSeconds) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $EmitResult (& $MakeErrorResult $j.Host "per-host timeout (${PerHostTimeoutSeconds}s) - $TimeoutDetail")
+                        $done++; & $Send @{ type='progress'; done=$done; total=$Jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $Jobs.Count) {
+                if ($CancelCheck -and (& $CancelCheck)) {
+                    foreach ($j in $Jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $EmitResult (& $MakeCancelResult $j.Host)
+                            $done++
+                        }
+                    }
+                    & $Send @{ type='log'; level='warn'; text=$CancelLogText }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $Pool.Close(); $Pool.Dispose() } catch {} }
+}
+
+# =============================================================================
 #  import-pki-hosts: parse the Tanium "C2C Compliance Status" CSV (PKI detection)
 #  Reuses the c2c parse APPROACH (Import-Csv handles the multiline quoted Compliance
 #  cell; split it into lines; strip the "Failed/Audit Rule[ N] - " prefix). A host is
@@ -904,26 +994,24 @@ $script:CertDeployCheckBlock = {
     # Wrong-box SOFT-skip (read-only path never writes anyway): if the answering box's
     # name does not match the dialed short name, flag CHECK ERROR and do not report its
     # (wrong) store contents. IP-literal targets have no DNS indirection.
-    try {
-        $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-        if ($expectedShort) {
-            $answering = Invoke-Command -Session $sess -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop
-            if (([string]$answering).Trim().ToUpper() -ne $expectedShort.Trim().ToUpper()) {
-                Remove-PSSession $sess -ErrorAction SilentlyContinue
-                $r.Status = 'CHECK ERROR'; $r.Detail = "DNS MISMATCH: dialed '$expectedShort' but remote is '$answering' - soft-skipped, nothing read"
-                return $r
+    # audit 2026-07-23 (finding: standalone guard round-trip): the guard is FOLDED into
+    # the consolidated probe below - it compares $env:COMPUTERNAME to the dialed short
+    # name FIRST and returns the Err sentinel before any store is read, so the check is
+    # one WinRM round-trip instead of two.
+    $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+
+    # The consolidated READ-ONLY probe: wrong-box compare, then dot-source the injectable
+    # store reader, parse the wanted thumbprints, and open each store ReadOnly to report
+    # present/missing. Get-CertDeployStoreMissing opens with OpenFlags::ReadOnly - never
+    # writes a store.
+    $checkSb = {
+        param([string]$ThumbJson, [string]$StoreReadSrc, [string]$ExpectedShort)
+        if ($ExpectedShort) {
+            $actual = ([string]$env:COMPUTERNAME).Trim()
+            if ($actual.ToUpper() -ne $ExpectedShort.Trim().ToUpper()) {
+                return [pscustomobject]@{ MissRoot=@(); MissCA=@(); MissDis=@(); PresRoot=0; PresCA=0; PresDis=0; Err="DNS MISMATCH: dialed '$ExpectedShort' but remote is '$actual' - soft-skipped, nothing read" }
             }
         }
-    } catch {
-        Remove-PSSession $sess -ErrorAction SilentlyContinue
-        $r.Status = 'CHECK ERROR'; $r.Detail = "wrong-box guard probe failed: $($_.Exception.Message)"; return $r
-    }
-
-    # The consolidated READ-ONLY probe: dot-source the injectable store reader, parse
-    # the wanted thumbprints, and open each store ReadOnly to report present/missing.
-    # Get-CertDeployStoreMissing opens with OpenFlags::ReadOnly - never writes a store.
-    $checkSb = {
-        param([string]$ThumbJson, [string]$StoreReadSrc)
         if ($StoreReadSrc) { try { . ([scriptblock]::Create($StoreReadSrc)) } catch {} }
         $want = $null; try { $want = $ThumbJson | ConvertFrom-Json } catch { $want = $null }
         if (-not (Get-Command Get-CertDeployStoreMissing -ErrorAction SilentlyContinue)) {
@@ -933,7 +1021,7 @@ $script:CertDeployCheckBlock = {
     }
 
     $raw = $null
-    try { $raw = Invoke-Command -Session $sess -ScriptBlock $checkSb -ArgumentList $ThumbJson, $StoreReadSrc -ErrorAction Stop }
+    try { $raw = Invoke-Command -Session $sess -ScriptBlock $checkSb -ArgumentList $ThumbJson, $StoreReadSrc, $expectedShort -ErrorAction Stop }
     catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
     finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
 
@@ -1025,9 +1113,13 @@ function Invoke-CertDeployCheckAction {
 
     $rows = New-Object System.Collections.ArrayList
 
+    # audit 2026-07-23: the want-set excludes expired non-allowlisted certs (dead anchors),
+    # so the "all N present" count is the FILTERED size (ExpiredCount already excludes the
+    # allowlisted legacy intermediates, which stay wanted), not the raw bundle count.
+    $wantCertCount = [int]$bundle.CertCount - [int]$bundle.ExpiredCount
     $emitResult = {
         param($res)
-        $row = Get-CertDeployCheckRow -Res $res -BundleCertCount ([int]$bundle.CertCount) -SubjectMap $subjectMap -LegacyInBundleCa $legacyInBundleCa
+        $row = Get-CertDeployCheckRow -Res $res -BundleCertCount $wantCertCount -SubjectMap $subjectMap -LegacyInBundleCa $legacyInBundleCa
         $status = [string]$row.Status
         # informative-failures (loop81): a CHECK ERROR carries the raw probe/session/DNS error in Detail on
         # this read-only path; turn it into a why+how-to-fix hint. ALL PRESENT/MISSING/OFFLINE self-explain.
@@ -1044,52 +1136,12 @@ function Invoke-CertDeployCheckAction {
         if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$row.Host) : $status - $([string]$row.Detail) | FIX: $hint" } }
     }
 
-    $done = 0
-    try {
-        while ($done -lt $jobs.Count) {
-            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
-            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so the
-            # old InvocationStateInfo check stamped StartedAt at ENQUEUE for every job and the
-            # watchdog then falsely timed out the whole backlog at once (~threads*timeout hosts in).
-            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-            foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                if ($j.PS -and $j.Async.IsCompleted) {
-                    $res = $null
-                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
-                    catch { $res = @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail="worker error: $($_.Exception.Message)"; Ok=$false } }
-                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail='worker returned no result'; Ok=$false } }
-                    & $emitResult $res
-                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                }
-            }
-            if ($done -lt $jobs.Count) {
-                $nowPh = Get-Date
-                foreach ($j in $jobs) {
-                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                        & $emitResult @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang"; Ok=$false }
-                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                    }
-                }
-            }
-            if ($done -lt $jobs.Count) {
-                if ($cancelCheck -and (& $cancelCheck)) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS) {
-                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                            & $emitResult @{ Host=$j.Host; Ping=''; Status='Cancelled'; Detail='cancelled by operator'; Ok=$false }
-                            $done++
-                        }
-                    }
-                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight checks stopped.' }
-                    break
-                }
-                Start-Sleep -Milliseconds 150
-            }
-        }
-    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+    # audit 2026-07-23: harvest loop extracted to Invoke-CertDeployFanOut (shared with deploy/scan).
+    Invoke-CertDeployFanOut -Jobs $jobs -Pool $pool -EmitResult $emitResult -Send $send -CancelCheck $cancelCheck `
+        -PerHostTimeoutSeconds $perHostTimeout -TimeoutDetail 'possible remote read hang' `
+        -MakeErrorResult { param($jobHost, $detail) @{ Host=$jobHost; Ping=''; Status='CHECK ERROR'; Detail=$detail; Ok=$false } } `
+        -MakeCancelResult { param($jobHost) @{ Host=$jobHost; Ping=''; Status='Cancelled'; Detail='cancelled by operator'; Ok=$false } } `
+        -CancelLogText 'Run cancelled by operator; in-flight checks stopped.'
 
     $allPresent = @($rows | Where-Object { $_.Status -eq 'ALL PRESENT' }).Count
     $missing    = @($rows | Where-Object { [string]$_.Status -like 'MISSING*' }).Count
@@ -1142,25 +1194,24 @@ $script:CertDeployDeployBlock = {
 
     # Wrong-box guard (HARD ABORT, before any change): compare the answering box's
     # name to the dialed short name. IP-literal targets have no DNS indirection.
-    try {
-        $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-        if ($expectedShort) {
-            $answering = Invoke-Command -Session $sess -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop
-            if (([string]$answering).Trim().ToUpper() -ne $expectedShort.Trim().ToUpper()) {
-                Remove-PSSession $sess -ErrorAction SilentlyContinue
-                $r.Status = 'SKIPPED'; $r.Detail = "DNS MISMATCH: dialed '$expectedShort' but remote is '$answering' - ABORTED, nothing changed"
-                return $r
-            }
-        }
-    } catch {
-        Remove-PSSession $sess -ErrorAction SilentlyContinue
-        $r.Status = 'FAILED'; $r.Detail = "wrong-box guard probe failed: $($_.Exception.Message)"; return $r
-    }
+    # audit 2026-07-23 (finding: standalone guard round-trip): the guard is FOLDED into
+    # installSb - the compare-and-abort runs INSIDE the install scriptblock before any
+    # store write, so the deploy is one WinRM round-trip instead of two AND the compare
+    # and the write are atomically the same remote call (no window for the session to
+    # be re-routed between a separate probe and the install).
+    $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
 
     # ADDITIVE install: deliver base64 certs grouped by store as JSON; the remote side
-    # dot-sources Add-CertDeployBundleToStores and adds only-missing (NEVER removes).
+    # first runs the wrong-box compare (Token='WRONGBOX' aborts before ANY store write),
+    # then dot-sources Add-CertDeployBundleToStores and adds only-missing (NEVER removes).
     $installSb = {
-        param([string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc)
+        param([string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc, [string]$ExpectedShort)
+        if ($ExpectedShort) {
+            $actual = ([string]$env:COMPUTERNAME).Trim()
+            if ($actual.ToUpper() -ne $ExpectedShort.Trim().ToUpper()) {
+                return [pscustomobject]@{ Token='WRONGBOX'; Answering=$actual; Added=0; Already=0; Total=0; PerStore=@(); FailDetail=''; Companions=@() }
+            }
+        }
         $RunCompanions = ($DoPrune -or $DoRdp)
         $bundle = $null
         if ($BundleJson) { try { $bundle = $BundleJson | ConvertFrom-Json } catch { $bundle = $null } }
@@ -1185,11 +1236,18 @@ $script:CertDeployDeployBlock = {
     }
 
     $ir = $null
-    try { $ir = Invoke-Command -Session $sess -ScriptBlock $installSb -ArgumentList $BundleJson, $AddCertsSrc, $DoPrune, $DoRdp, $CompanionsSrc -ErrorAction Stop }
+    try { $ir = Invoke-Command -Session $sess -ScriptBlock $installSb -ArgumentList $BundleJson, $AddCertsSrc, $DoPrune, $DoRdp, $CompanionsSrc, $expectedShort -ErrorAction Stop }
     catch { $r.Status = 'FAILED'; $r.Detail = "Deploy: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
     finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
 
     if ($null -eq $ir) { $r.Status = 'FAILED'; $r.Detail = 'installer returned no result'; return $r }
+    # Wrong-box abort (folded guard, audit 2026-07-23): the remote compare refused BEFORE
+    # any store write - same SKIPPED row + detail wording as the old standalone guard.
+    if ([string]$ir.Token -eq 'WRONGBOX') {
+        $r.Status = 'SKIPPED'
+        $r.Detail = "DNS MISMATCH: dialed '$expectedShort' but remote is '$([string]$ir.Answering)' - ABORTED, nothing changed"
+        return $r
+    }
     $storeTxt = (@($ir.PerStore) -join ', ')
     $r.Added = [int]$ir.Added; $r.Total = [int]$ir.Total
     switch ([string]$ir.Token) {
@@ -1365,52 +1423,12 @@ function Invoke-CertDeployDeployAction {
         if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$res.Host) : $([string]$res.Status) - $([string]$res.Detail) | FIX: $hint" } }
     }
 
-    $done = 0
-    try {
-        while ($done -lt $jobs.Count) {
-            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
-            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so the
-            # old InvocationStateInfo check stamped StartedAt at ENQUEUE for every job and the
-            # watchdog then falsely timed out the whole backlog at once (~threads*timeout hosts in).
-            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-            foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                if ($j.PS -and $j.Async.IsCompleted) {
-                    $res = $null
-                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
-                    catch { $res = @{ Host=$j.Host; Ping=''; Status='FAILED'; Detail="worker error: $($_.Exception.Message)"; Added=0 } }
-                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Status='FAILED'; Detail='worker returned no result'; Added=0 } }
-                    & $emitResult $res
-                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                }
-            }
-            if ($done -lt $jobs.Count) {
-                $nowPh = Get-Date
-                foreach ($j in $jobs) {
-                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                        & $emitResult @{ Host=$j.Host; Ping=''; Status='FAILED'; Detail="per-host timeout (${perHostTimeout}s) - possible remote hang"; Added=0 }
-                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                    }
-                }
-            }
-            if ($done -lt $jobs.Count) {
-                if ($cancelCheck -and (& $cancelCheck)) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS) {
-                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                            & $emitResult @{ Host=$j.Host; Ping=''; Status='SKIPPED'; Detail='cancelled by operator'; Added=0 }
-                            $done++
-                        }
-                    }
-                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight deploys stopped.' }
-                    break
-                }
-                Start-Sleep -Milliseconds 150
-            }
-        }
-    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+    # audit 2026-07-23: harvest loop extracted to Invoke-CertDeployFanOut (shared with check/scan).
+    Invoke-CertDeployFanOut -Jobs $jobs -Pool $pool -EmitResult $emitResult -Send $send -CancelCheck $cancelCheck `
+        -PerHostTimeoutSeconds $perHostTimeout -TimeoutDetail 'possible remote hang' `
+        -MakeErrorResult { param($jobHost, $detail) @{ Host=$jobHost; Ping=''; Status='FAILED'; Detail=$detail; Added=0 } } `
+        -MakeCancelResult { param($jobHost) @{ Host=$jobHost; Ping=''; Status='SKIPPED'; Detail='cancelled by operator'; Added=0 } } `
+        -CancelLogText 'Run cancelled by operator; in-flight deploys stopped.'
 
     $installed   = @($rows | Where-Object { $_.Status -eq 'ROOTS INSTALLED' }).Count
     $already     = @($rows | Where-Object { $_.Status -eq 'ROOTS ALREADY PRESENT' }).Count
@@ -1470,25 +1488,25 @@ $script:CertDeployScanBlock = {
     try { $sess = New-PSSession @splat } catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
 
     # Wrong-box SOFT-skip (read-only path never writes anyway).
-    try {
-        $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-        if ($expectedShort) {
-            $answering = Invoke-Command -Session $sess -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop
-            if (([string]$answering).Trim().ToUpper() -ne $expectedShort.Trim().ToUpper()) {
-                Remove-PSSession $sess -ErrorAction SilentlyContinue
-                $r.Status = 'CHECK ERROR'; $r.Detail = "DNS MISMATCH: dialed '$expectedShort' but remote is '$answering' - soft-skipped, nothing read"
-                return $r
+    # audit 2026-07-23 (finding: standalone guard round-trip): the guard is FOLDED into
+    # the consolidated probe below - it compares $env:COMPUTERNAME to the dialed short
+    # name FIRST and returns the Err sentinel before anything is read, so the scan is
+    # one WinRM round-trip instead of two.
+    $expectedShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+
+    # The consolidated READ-ONLY probe: wrong-box compare, then detect the DISA InstallRoot
+    # agent, count the GPO physical Root/CA store, and read the .Default LocalMachine Root
+    # store count.
+    $scanSb = {
+        param([string]$ExpectedShort)
+        $res = [pscustomobject]@{ InstallRootPresent=$false; InstallRootToken='no'; GpRoots=0; DefaultRootCount=0; Err='' }
+        if ($ExpectedShort) {
+            $actual = ([string]$env:COMPUTERNAME).Trim()
+            if ($actual.ToUpper() -ne $ExpectedShort.Trim().ToUpper()) {
+                $res.Err = "DNS MISMATCH: dialed '$ExpectedShort' but remote is '$actual' - soft-skipped, nothing read"
+                return $res
             }
         }
-    } catch {
-        Remove-PSSession $sess -ErrorAction SilentlyContinue
-        $r.Status = 'CHECK ERROR'; $r.Detail = "wrong-box guard probe failed: $($_.Exception.Message)"; return $r
-    }
-
-    # The consolidated READ-ONLY probe: detect the DISA InstallRoot agent, count the
-    # GPO physical Root/CA store, and read the .Default LocalMachine Root store count.
-    $scanSb = {
-        $res = [pscustomobject]@{ InstallRootPresent=$false; InstallRootToken='no'; GpRoots=0; DefaultRootCount=0; Err='' }
         try {
             # 1. DISA InstallRoot: uninstall registry (64- + 32-bit), a scheduled task, %ProgramFiles%\DoD-PKE.
             $irName = ''; $irVer = ''
@@ -1539,7 +1557,7 @@ $script:CertDeployScanBlock = {
     }
 
     $raw = $null
-    try { $raw = Invoke-Command -Session $sess -ScriptBlock $scanSb -ErrorAction Stop }
+    try { $raw = Invoke-Command -Session $sess -ScriptBlock $scanSb -ArgumentList $expectedShort -ErrorAction Stop }
     catch { $r.Status = 'CHECK ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
     finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
 
@@ -1613,52 +1631,12 @@ function Invoke-CertDeployScanAction {
         if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$row.Host) : $rec - $([string]$row.Detail) | FIX: $hint" } }
     }
 
-    $done = 0
-    try {
-        while ($done -lt $jobs.Count) {
-            # Cap the per-host clock to the pool's real concurrency, stamping in queue order:
-            # a PS queued in a saturated RunspacePool reports State='Running' immediately, so the
-            # old InvocationStateInfo check stamped StartedAt at ENQUEUE for every job and the
-            # watchdog then falsely timed out the whole backlog at once (~threads*timeout hosts in).
-            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
-            foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
-                if ($j.PS -and $j.Async.IsCompleted) {
-                    $res = $null
-                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
-                    catch { $res = @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail="worker error: $($_.Exception.Message)"; Ok=$false } }
-                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail='worker returned no result'; Ok=$false } }
-                    & $emitResult $res
-                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                }
-            }
-            if ($done -lt $jobs.Count) {
-                $nowPh = Get-Date
-                foreach ($j in $jobs) {
-                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
-                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                        & $emitResult @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang"; Ok=$false }
-                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
-                    }
-                }
-            }
-            if ($done -lt $jobs.Count) {
-                if ($cancelCheck -and (& $cancelCheck)) {
-                    foreach ($j in $jobs) {
-                        if ($j.PS) {
-                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                            & $emitResult @{ Host=$j.Host; Ping=''; Status='CHECK ERROR'; Detail='cancelled by operator'; Ok=$false }
-                            $done++
-                        }
-                    }
-                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight scans stopped.' }
-                    break
-                }
-                Start-Sleep -Milliseconds 150
-            }
-        }
-    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+    # audit 2026-07-23: harvest loop extracted to Invoke-CertDeployFanOut (shared with check/deploy).
+    Invoke-CertDeployFanOut -Jobs $jobs -Pool $pool -EmitResult $emitResult -Send $send -CancelCheck $cancelCheck `
+        -PerHostTimeoutSeconds $perHostTimeout -TimeoutDetail 'possible remote read hang' `
+        -MakeErrorResult { param($jobHost, $detail) @{ Host=$jobHost; Ping=''; Status='CHECK ERROR'; Detail=$detail; Ok=$false } } `
+        -MakeCancelResult { param($jobHost) @{ Host=$jobHost; Ping=''; Status='CHECK ERROR'; Detail='cancelled by operator'; Ok=$false } } `
+        -CancelLogText 'Run cancelled by operator; in-flight scans stopped.'
 
     $installRoot = @($rows | Where-Object { @('InstallRoot','InstallRoot+GPO') -contains [string]$_.Reconciler }).Count
     $gpoManaged  = @($rows | Where-Object { @('GPO','InstallRoot+GPO') -contains [string]$_.Reconciler }).Count

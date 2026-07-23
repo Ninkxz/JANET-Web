@@ -1149,7 +1149,6 @@
         if (osUnsub) try { osUnsub(); } catch (e) {}
         if (manUnsub) try { manUnsub(); } catch (e) {}
       };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

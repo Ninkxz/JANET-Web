@@ -194,74 +194,6 @@ function Get-UprCatalogDefault {
 }
 
 # -----------------------------------------------------------------------------
-#  Parsed-report cache (Wave-3 perf). The expensive step is pdftotext + the
-#  regex table parse; cache the resulting finding set keyed by report identity
-#  (file full path + LastWriteTimeUtc + size, OR an MD5 of pasted text) AND a
-#  catalog signature -- so editing + reloading the catalog re-parses (catalog
-#  reload semantics preserved). Bounded LRU so memory can't grow unbounded.
-#  NOTE: 'upr' is non-stateful (fresh runspace + module re-import per action),
-#  so this pays off only within a persistent runspace; it is always correct +
-#  harmless otherwise, and the catalog is re-read per call regardless.
-# -----------------------------------------------------------------------------
-$script:UprFindingCache     = @{}
-$script:UprFindingCacheKeys = New-Object System.Collections.ArrayList   # LRU order, oldest first
-$script:UprFindingCacheMax  = 4
-
-function Get-UprCatalogSignature {
-    param($Catalog)
-    if ($null -eq $Catalog) { return '0' }
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($p in @($Catalog.Profiles)) {
-        [void]$sb.Append([string]$p.PluginNameMatch);     [void]$sb.Append('~')
-        [void]$sb.Append([string]$p.DisplayNameRegex);    [void]$sb.Append('~')
-        [void]$sb.Append([string]$p.VersionMaxExclusive); [void]$sb.Append('~')
-        [void]$sb.Append([string]$p.Proven);              [void]$sb.Append('~')
-        [void]$sb.Append([string]$p.Updater);             [void]$sb.Append('|')
-    }
-    foreach ($o in @($Catalog.OperatingSystemPluginNames)) { [void]$sb.Append([string]$o); [void]$sb.Append('|') }
-    return ([string]($sb.ToString().GetHashCode()))
-}
-
-function Get-UprReportCacheKey {
-    param([string]$ReportPath, [string]$ReportText, $Catalog)
-    $sig = Get-UprCatalogSignature $Catalog
-    if (-not [string]::IsNullOrWhiteSpace($ReportText)) {
-        try {
-            $sha   = [System.Security.Cryptography.SHA256]::Create()
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($ReportText)
-            $hash  = [BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', ''
-            $sha.Dispose()
-            return "text:$hash|cat:$sig"
-        } catch { return $null }
-    }
-    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
-        try {
-            $fi = Get-Item -LiteralPath $ReportPath -ErrorAction Stop
-            return "file:$($fi.FullName)|mt:$($fi.LastWriteTimeUtc.Ticks)|sz:$($fi.Length)|cat:$sig"
-        } catch { return $null }
-    }
-    return $null
-}
-
-function Get-UprCachedFindings {
-    param([string]$Key)
-    if ($Key -and $script:UprFindingCache.ContainsKey($Key)) { return $script:UprFindingCache[$Key] }
-    return $null
-}
-
-function Set-UprCachedFindings {
-    param([string]$Key, $Findings)
-    if ([string]::IsNullOrWhiteSpace($Key)) { return }
-    if (-not $script:UprFindingCache.ContainsKey($Key)) { [void]$script:UprFindingCacheKeys.Add($Key) }
-    $script:UprFindingCache[$Key] = $Findings
-    while ($script:UprFindingCacheKeys.Count -gt $script:UprFindingCacheMax) {
-        $evict = [string]$script:UprFindingCacheKeys[0]
-        $script:UprFindingCacheKeys.RemoveAt(0)
-        if ($script:UprFindingCache.ContainsKey($evict)) { [void]$script:UprFindingCache.Remove($evict) }
-    }
-}
-
-# -----------------------------------------------------------------------------
 #  pdftotext.exe resolution -- portable candidate-list walk, then PATH.
 #  Lifted from the desktop tool. $null when nothing resolves.
 # -----------------------------------------------------------------------------
@@ -284,6 +216,22 @@ function Get-UprPdfTextExe {
 # -----------------------------------------------------------------------------
 #  Helpers
 # -----------------------------------------------------------------------------
+
+# audit 2026-07-23 (finding: severity sort): Severity is a STRING, so a descending
+# string sort ordered it Medium > Low > Info > High > Critical - Critical/High sank
+# to the BOTTOM of report-findings and os-findings. Map to a numeric rank instead
+# (Critical > High > Medium > Low > Info; blank/unknown -> 0, sorted last).
+function Get-UprSeverityRank {
+    param([string]$Severity)
+    switch (([string]$Severity).Trim()) {
+        'Critical' { return 5 }
+        'High'     { return 4 }
+        'Medium'   { return 3 }
+        'Low'      { return 2 }
+        'Info'     { return 1 }
+        default    { return 0 }
+    }
+}
 
 function Get-UprUsefulText {
     # Trim report text at the first trailing non-actionable section anchor so
@@ -312,6 +260,30 @@ function Get-UprSections {
         @{ Name='UnsupportedSoftware';  CountAnchor='Unsupported Software Count';                                       HostsAnchor='Unsupported Software Affected Hosts';                                      Category='UnsupportedSoftware' }
         @{ Name='SEoLSoftware';         CountAnchor='Security End of Life (SEoL) Software Count';                       HostsAnchor='Security End of Life (SEoL) Software Affected Hosts';                      Category='SEoLSoftware' }
     )
+}
+
+# audit 2026-07-23 (extract): locate ONE section's count block + hosts block inside the
+# trimmed report text. Extracted from the duplicate open-coded walk in Parse-ReportText
+# and Parse-ReportTextRelaxed: find the section's CountAnchor, then its HostsAnchor after
+# it; the section ends at the NEXT other-section CountAnchor (or end of text). Returns
+# $null when either anchor is absent (caller skips the section), else
+# @{ CountBlock=<string>; HostsBlock=<string> }.
+function Get-UprSectionBlocks {
+    param([string]$UsefulText, $Section, $Sections)
+    $countIdx = $UsefulText.IndexOf($Section.CountAnchor)
+    if ($countIdx -lt 0) { return $null }
+    $hostsIdx = $UsefulText.IndexOf($Section.HostsAnchor, $countIdx)
+    if ($hostsIdx -lt 0) { return $null }
+    $sectionEnd = $UsefulText.Length
+    foreach ($s2 in @($Sections)) {
+        if ($s2.Name -eq $Section.Name) { continue }
+        $j = $UsefulText.IndexOf($s2.CountAnchor, $hostsIdx)
+        if ($j -ge 0 -and $j -lt $sectionEnd) { $sectionEnd = $j }
+    }
+    return @{
+        CountBlock = $UsefulText.Substring($countIdx, $hostsIdx - $countIdx)
+        HostsBlock = $UsefulText.Substring($hostsIdx, $sectionEnd - $hostsIdx)
+    }
 }
 
 function Get-UprThreadCount {
@@ -549,19 +521,11 @@ function Parse-ReportText {
 
     $findings = @{}
     foreach ($sec in $sections) {
-        $countIdx = $usefulText.IndexOf($sec.CountAnchor)
-        if ($countIdx -lt 0) { continue }
-        $hostsIdx = $usefulText.IndexOf($sec.HostsAnchor, $countIdx)
-        if ($hostsIdx -lt 0) { continue }
-        $sectionEnd = $usefulText.Length
-        foreach ($s2 in $sections) {
-            if ($s2.Name -eq $sec.Name) { continue }
-            $j = $usefulText.IndexOf($s2.CountAnchor, $hostsIdx)
-            if ($j -ge 0 -and $j -lt $sectionEnd) { $sectionEnd = $j }
-        }
-
-        $countBlock = $usefulText.Substring($countIdx, $hostsIdx - $countIdx)
-        $hostsBlock = $usefulText.Substring($hostsIdx, $sectionEnd - $hostsIdx)
+        # audit 2026-07-23: section-walk extracted to Get-UprSectionBlocks (shared with the relaxed parser).
+        $blocks = Get-UprSectionBlocks -UsefulText $usefulText -Section $sec -Sections $sections
+        if ($null -eq $blocks) { continue }
+        $countBlock = [string]$blocks.CountBlock
+        $hostsBlock = [string]$blocks.HostsBlock
 
         $rxNoise   = '(Plugin\s+Plugin\s+Name|Plugin Output|UNCLASSIFIED|^Lakenheath|SEoL_Product_Summary|Exploits by Platform|^Affected Hosts$|MAC Address\b|^IP Address|^NetBIOS Name|^DNS Name|^OS CPE|^Last Observed|^Steps to Remediate|^Plugin\s*$|^Plugin\s+Name\s*$|^Severity\s*$|^Total\s*$|^Unsupported Software Count$|^Unsupported / Security End of Life \(SEoL\) Operating Systems Count$|^Security End of Life \(SEoL\) Software Count$)'
         $rxSevTail = '\s+(?<sev>Critical|High|Medium|Low|Info)\s+(?<tot>\d+)\s*$'
@@ -691,12 +655,11 @@ function Parse-ReportTextRelaxed {
 
     $findings = @{}
     foreach ($sec in $sections) {
-        $countIdx = $usefulText.IndexOf($sec.CountAnchor); if ($countIdx -lt 0) { continue }
-        $hostsIdx = $usefulText.IndexOf($sec.HostsAnchor, $countIdx); if ($hostsIdx -lt 0) { continue }
-        $sectionEnd = $usefulText.Length
-        foreach ($s2 in $sections) { if ($s2.Name -eq $sec.Name) { continue }; $j = $usefulText.IndexOf($s2.CountAnchor, $hostsIdx); if ($j -ge 0 -and $j -lt $sectionEnd) { $sectionEnd = $j } }
-        $countBlock = $usefulText.Substring($countIdx, $hostsIdx - $countIdx)
-        $hostsBlock = $usefulText.Substring($hostsIdx, $sectionEnd - $hostsIdx)
+        # audit 2026-07-23: section-walk extracted to Get-UprSectionBlocks (shared with the structured parser).
+        $blocks = Get-UprSectionBlocks -UsefulText $usefulText -Section $sec -Sections $sections
+        if ($null -eq $blocks) { continue }
+        $countBlock = [string]$blocks.CountBlock
+        $hostsBlock = [string]$blocks.HostsBlock
 
         # IP-only host rows for this section (NetBIOS/DNS unrecoverable here).
         $hostRows = New-Object System.Collections.ArrayList
@@ -794,9 +757,12 @@ $UprWorkerBlock = {
 
         try {
             ## --- Enumerate installed software ONCE ---
-            $installed = $null
+            ## audit 2026-07-23 (finding: DNS-check round-trip): the enumeration also returns
+            ## the answering box's COMPUTERNAME so the DNS-mismatch guard below can compare
+            ## locally instead of paying a second standalone Invoke-Command.
+            $enum = $null
             try {
-                $installed = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                $enum = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
                     $apps = @()
                     $regPaths = @(
                         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -819,14 +785,15 @@ $UprWorkerBlock = {
                             }
                         }
                     }
-                    return $apps
+                    return @{ ComputerName = "$env:COMPUTERNAME"; Apps = $apps }
                 }
             } catch {
                 $r.Error = "scan failed: $($_.Exception.Message)"
                 return $r
             }
 
-            $installed = @($installed)
+            $remoteName = [string]$enum.ComputerName
+            $installed  = @($enum.Apps)
 
             ## --- Match every applicable profile against the install set ---
             $candidates = @()
@@ -903,12 +870,14 @@ $UprWorkerBlock = {
                 ## DNS-mismatch guard (HARD ABORT): UPR uninstall is PERMANENT removal, and
                 ## the Tenable PDF hands back stale/ambiguous host tokens (see ~330-345), so
                 ## verify the box that answered is the one we dialed before removing anything.
-                ## Session-based name compare, copied from WptPatchBlock (JanetWeb.wpt.psm1
-                ## ~1606); an IPv4-literal target has no shortname to compare -> skip. Empty
-                ## probe -> proceed (don't regress). On a confirmed mismatch, remove NOTHING.
+                ## audit 2026-07-23 (finding: DNS-check round-trip): compares against the
+                ## COMPUTERNAME already returned by the enumeration call above - the standalone
+                ## Invoke-Command probe is gone. An IPv4-literal target has no shortname to
+                ## compare -> skip. Empty name -> proceed (don't regress). On a confirmed
+                ## mismatch, remove NOTHING.
                 if ($ConnectTarget -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
                     $targetShort = ($ConnectTarget -split '\.')[0]
-                    $actualName = try { Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
+                    $actualName = [string]$remoteName
                     if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
                         $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no uninstall performed"
                         foreach ($cand in $candidates) { if ($cand.Decision -eq 'Uninstall') { $cand.Result = 'Aborted (DNS mismatch)' } }
@@ -1011,13 +980,23 @@ $UprWorkerBlock = {
                                     # trusted built-in Office C2R remover (setup.exe /configure) below.
                                     $setupExe = Join-Path $c2rPath "setup.exe"
                                     if (Test-Path $setupExe) {
-                                        New-Item -Path C:\Temp -ItemType Directory -Force -EA SilentlyContinue | Out-Null
-                                        $xmlPath = "C:\Temp\OfficeRemoveAll.xml"
-                                        '<Configuration><Remove All="TRUE"/><Display Level="None" AcceptEULA="TRUE"/><Property Name="FORCEAPPSHUTDOWN" Value="TRUE"/></Configuration>' | Out-File $xmlPath -Encoding ASCII -Force
-                                        $proc = Start-Process $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
-                                        Remove-Item $xmlPath -Force -EA SilentlyContinue
-                                        if ($proc.ExitCode -eq 0) { return "OK (Office removed via setup.exe /configure)" }
-                                        $steps += "setup.exe /configure exit $($proc.ExitCode)"
+                                        # audit 2026-07-23 (finding: C:\Temp staging): the removal XML was
+                                        # written to fixed, often world-writable C:\Temp - the same TOCTOU
+                                        # class audit#11 removed for the .cmd (a low-priv local user could
+                                        # pre-plant/swap the file consumed under the admin WinRM credential).
+                                        # Stage it in a per-run RANDOM-named directory under %ProgramData%
+                                        # (admin-writable root) and clean the whole directory up in finally.
+                                        $cfgDir = Join-Path $env:ProgramData ("JanetUpr_" + [Guid]::NewGuid().ToString('N'))
+                                        try {
+                                            New-Item -Path $cfgDir -ItemType Directory -Force -EA SilentlyContinue | Out-Null
+                                            $xmlPath = Join-Path $cfgDir "OfficeRemoveAll.xml"
+                                            '<Configuration><Remove All="TRUE"/><Display Level="None" AcceptEULA="TRUE"/><Property Name="FORCEAPPSHUTDOWN" Value="TRUE"/></Configuration>' | Out-File $xmlPath -Encoding ASCII -Force
+                                            $proc = Start-Process $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
+                                            if ($proc.ExitCode -eq 0) { return "OK (Office removed via setup.exe /configure)" }
+                                            $steps += "setup.exe /configure exit $($proc.ExitCode)"
+                                        } finally {
+                                            Remove-Item $cfgDir -Recurse -Force -EA SilentlyContinue
+                                        }
                                     }
                                     if (-not [string]::IsNullOrWhiteSpace($unStr)) {
                                         $u = Invoke-SafeUninstall -UnStr $unStr
@@ -1787,27 +1766,18 @@ function Invoke-JanetToolAction {
         }
     }
 
-    # Reuse the cached parse when the same report (file path+mtime+size, or pasted-
-    # text hash) is re-submitted under the same catalog -- findings/OS/scan/uninstall
-    # all re-enter here, so this avoids re-spawning pdftotext + re-running the parse.
-    $cacheKey = Get-UprReportCacheKey -ReportPath $reportPath -ReportText $reportText -Catalog $catalog
-    $findings = $null
-    if ($cacheKey) { $findings = Get-UprCachedFindings $cacheKey }
-    if ($null -ne $findings) {
-        $findings = @($findings)
-        & $log "Report unchanged - reusing cached parse ($($findings.Count) finding(s))." 'info'
+    # audit 2026-07-23 (simplify): the Wave-3 parsed-finding LRU cache is deleted - 'upr' runs
+    # in a fresh runspace + module re-import per action (header contract), so the $script:
+    # cache state never survived between calls and a hit was impossible. Parse every call.
+    if (-not [string]::IsNullOrWhiteSpace($reportText)) {
+        & $log "Parsing pasted report text ($($reportText.Length) chars; no pdftotext needed)..." 'info'
+        $findings = @(Parse-ReportText -Text $reportText -Catalog $catalog -Log $log)
     } else {
-        if (-not [string]::IsNullOrWhiteSpace($reportText)) {
-            & $log "Parsing pasted report text ($($reportText.Length) chars; no pdftotext needed)..." 'info'
-            $findings = @(Parse-ReportText -Text $reportText -Catalog $catalog -Log $log)
-        } else {
-            & $log "Parsing $([IO.Path]::GetFileName($reportPath))..." 'info'
-            $findings = @(Import-UprFinding -Path $reportPath -Catalog $catalog -Log $log)
-        }
-        if ($findings.Count -gt 0) {
-            if ($cacheKey) { Set-UprCachedFindings $cacheKey $findings }
-            & $log "Parsed $($findings.Count) finding(s)." 'ok'
-        }
+        & $log "Parsing $([IO.Path]::GetFileName($reportPath))..." 'info'
+        $findings = @(Import-UprFinding -Path $reportPath -Catalog $catalog -Log $log)
+    }
+    if ($findings.Count -gt 0) {
+        & $log "Parsed $($findings.Count) finding(s)." 'ok'
     }
     if ($findings.Count -eq 0) {
         & $log "No findings parsed from the report." 'warn'
@@ -1821,7 +1791,8 @@ function Invoke-JanetToolAction {
         $rows = New-Object System.Collections.ArrayList
         $hiddenUpdate = 0
         $search = [string]$Params['search']
-        $sorted = @($findings) | Sort-Object @{e='Category'}, @{e='Severity'; descending=$true}, @{e='PluginName'}
+        # audit 2026-07-23: numeric severity rank (was a string sort - Critical/High sank to the bottom).
+        $sorted = @($findings) | Sort-Object @{e='Category'}, @{e={ Get-UprSeverityRank $_.Severity }; descending=$true}, @{e='PluginName'}
         foreach ($f in $sorted) {
             # Free-text search over Plugin / Plugin Name / Category (mirrors the desktop Findings search box).
             if (-not [string]::IsNullOrWhiteSpace($search)) {
@@ -1882,7 +1853,8 @@ function Invoke-JanetToolAction {
     # =====================================================================
     if ($ActionId -eq 'os-findings') {
         $rows = New-Object System.Collections.ArrayList
-        $sorted = @($findings) | Sort-Object @{e='Severity'; descending=$true}, @{e='PluginName'}
+        # audit 2026-07-23: numeric severity rank (was a string sort - Critical/High sank to the bottom).
+        $sorted = @($findings) | Sort-Object @{e={ Get-UprSeverityRank $_.Severity }; descending=$true}, @{e='PluginName'}
         foreach ($f in $sorted) {
             if (-not (($f.Category -eq 'OS') -or (Test-IsOsFinding $catalog $f.PluginName))) { continue }
             $emitted = 0

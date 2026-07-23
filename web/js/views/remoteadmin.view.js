@@ -199,8 +199,7 @@
           var rows = grid.rows();
           if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a script first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
           var cols = [['Host', 'Host'], ['Online', 'Online'], ['Status', 'Status'], ['Output', 'Output'], ['Error', 'Error']];
-          var csv = ctx.util.toCsv(cols.map(function (c) { return c[1]; }), rows, cols.map(function (c) { return c[0]; }));
-          ctx.util.downloadBlob('RemoteAdmin_RunScript_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          ctx.util.exportCsv('RemoteAdmin_RunScript', cols, rows);
           actlog.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
         };
         clearBtn.onclick = function () { grid.clear(); stats.reset(); setLine(statusLine, 'Ready'); };
@@ -275,7 +274,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { subs.forEach(function (u) { try { u(); } catch (e) {} }); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

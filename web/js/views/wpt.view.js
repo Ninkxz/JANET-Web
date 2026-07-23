@@ -1081,6 +1081,7 @@
         [cycleBtn, pushBtn, el('span'), ui.label('KBs:'), kbInput, msuBtn, msuLabel, noRebootCb, installBtn].forEach(function (n) { bar.appendChild(n); });
         tab.prog.el.parentNode.appendChild(bar);
 
+        var kbUnsubs = {};   // actionId -> live unsub; a re-click must replace, not stack, its handler
         function kbFleet(actionId, params, label, danger, confirmBody) {
           return async function () {
             if (!ctx.targets.count()) { notice('No Targets', 'Build the host list on Targets first.'); return; }
@@ -1093,7 +1094,8 @@
             tab.log.banner(label + ' - ' + ctx.targets.count() + ' host(s)');
             [cycleBtn, pushBtn, installBtn].forEach(function (b) { b.disabled = true; });
             var run = ctx.run(actionId, Object.assign({ targets: ctx.targets.raw }, params));
-            track(run.subscribe({
+            if (kbUnsubs[actionId]) { var i = unsubs.indexOf(kbUnsubs[actionId]); if (i >= 0) unsubs.splice(i, 1); kbUnsubs[actionId](); }
+            kbUnsubs[actionId] = track(run.subscribe({
               status: function (t) { tab.prog.setPhase(t); },
               progress: function (p) { tab.prog.setProgress(p.done, p.total); },
               row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || r.Result || JSON.stringify(stripRow(r))), level: /error|fail/i.test(JSON.stringify(r)) ? 'warn' : 'ok' }); },
@@ -1224,13 +1226,16 @@
           var prof = applySel.value;
           if (prof === 'Custom Command' && !customCmd.value.trim()) { notice('Command required', 'Enter the custom command to run.'); return; }
           var isCustom = (prof === 'Custom Command');
-          var ok = await ctx.confirm({
+          // audit 2026-07-23: custom commands must go through ctx.arm - ConfirmDialog
+          // ignores confirmWord, so the typed-RUN gate passed to ctx.confirm was inert.
+          var dlgOpts = {
             title: 'Apply ' + prof, danger: true,
             body: 'Run profile <b>' + esc(prof) + '</b> on <b>' + count + '</b> ' + noun + ' host(s)? This changes machines.'
               + (isCustom ? '<br><br>This runs an <b>arbitrary remote command</b> you typed, with admin rights, on every target above.' : ''),
-            confirmWord: isCustom ? 'RUN' : null,
             okText: 'Apply', cancelText: 'Cancel'
-          });
+          };
+          if (isCustom) { dlgOpts.confirmWord = 'RUN'; dlgOpts.banner = 'ARBITRARY REMOTE COMMAND - RUNS WITH ADMIN RIGHTS ON EVERY TARGET'; }
+          var ok = await (isCustom ? ctx.arm(dlgOpts) : ctx.confirm(dlgOpts));
           if (!ok) { tab.log.append({ text: 'Apply cancelled.', level: 'warn' }); return; }
           tab.log.banner('Apply ' + prof + ' - ' + count + ' ' + noun + ' host(s)');
           applyBtn.disabled = applySelBtn.disabled = true;
@@ -1404,9 +1409,10 @@
             var s = api.getSettings();
             if (s.dryrun) return Promise.resolve(true);   // dry-run is safe
             if (needCred()) return Promise.resolve(false);
-            return ctx.confirm({
-              title: 'Confirm LIVE Disk Cleanup', danger: true,
+            return ctx.arm({
+              title: 'Confirm LIVE Disk Cleanup',
               body: 'Dry run is OFF. This PERMANENTLY deletes ' + (s.operation === 'TempFiles' ? 'temp files' : s.operation === 'OldProfiles' ? ('user profiles idle > ' + s.days + ' days') : s.operation === 'CcmCache' ? 'the MECM cache (C:\\Windows\\ccmcache)' : ('temp files AND stale profiles (> ' + s.days + ' days)')) + ' on <b>' + ctx.targets.count() + '</b> host(s) and cannot be undone. Proceed?',
+              confirmWord: 'CLEAN',
               okText: 'Delete', cancelText: 'Cancel'
             });
           },
@@ -1483,6 +1489,7 @@
         // APPLY bar
         var bar = el('div'); bar.style.cssText = 'display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap';
         rebootCb = ui.checkbox('Notify user + reboot 1 hour after a successful apply', { color: 'var(--warn)' });
+        var applyUnsub = null;   // re-clicking APPLY FIX must replace, not stack, its handler
         var applyBtn = ui.button('APPLY FIX', { variant: 'danger', title: 'Write the selected STIG/CVE fix to the targets.' });
         bar.appendChild(applyBtn); bar.appendChild(rebootCb);
         tab.prog.el.parentNode.appendChild(bar);
@@ -1500,7 +1507,8 @@
           tab.log.banner('Apply ' + fix + ' - ' + ctx.targets.count() + ' host(s)' + (rebootAfter ? ' (+reboot 1h)' : ''));
           applyBtn.disabled = true;
           var run = ctx.run('registry-key-apply', { targets: ctx.targets.raw, cvekey: fix, rebootafter: rebootAfter });
-          track(run.subscribe({
+          if (applyUnsub) { var i = unsubs.indexOf(applyUnsub); if (i >= 0) unsubs.splice(i, 1); applyUnsub(); }
+          applyUnsub = track(run.subscribe({
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
             row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (r.Status || '') + (r.NewValue != null ? (' -> ' + r.NewValue) : '') + (asBool(r.Reboot) ? ' [reboot scheduled]' : ''), level: /error|fail/i.test(String(r.Status)) ? 'err' : 'ok' }); },
@@ -1670,6 +1678,7 @@
         tab.prog.el.parentNode.appendChild(bar);
 
         var healerActive = false;
+        var healerUnsubs = {};   // actionId -> live unsub; a healer re-run must replace, not stack, its handler
         async function runHealer(actionId, label, destructive) {
           if (healerActive) { notice('Healer running', 'A healer is already running on the fleet - let it finish first.'); return; }
           if (!ctx.targets.count()) { notice('No Targets', 'Build the host list first.'); return; }
@@ -1682,7 +1691,8 @@
           healerActive = true;
           healerBtns.forEach(function (b) { b.disabled = true; });
           var run = ctx.run(actionId, { targets: ctx.targets.raw });
-          track(run.subscribe({
+          if (healerUnsubs[actionId]) { var i = unsubs.indexOf(healerUnsubs[actionId]); if (i >= 0) unsubs.splice(i, 1); healerUnsubs[actionId](); }
+          healerUnsubs[actionId] = track(run.subscribe({
             status: function (t) { tab.prog.setPhase(t); },
             progress: function (p) { tab.prog.setProgress(p.done, p.total); },
             row: function (r) { tab.log.append({ text: '[' + r.Host + '] ' + (asBool(r.Success) ? 'OK' : 'Failed') + (r.Detail ? ' - ' + r.Detail : ''), level: asBool(r.Success) ? 'ok' : 'err' }); },
@@ -2397,7 +2407,7 @@
             var s = api.getSettings();
             if (s.dryrun) return Promise.resolve(true);
             if (needCred()) return Promise.resolve(false);
-            return ctx.confirm({ title: 'Confirm LIVE Clean User Apps', danger: true, body: 'Dry run is OFF. This PERMANENTLY deletes the selected per-user app binaries on <b>' + ctx.targets.count() + '</b> host(s). User data (bookmarks/history/profiles) is preserved. Proceed?', okText: 'Delete', cancelText: 'Cancel' });
+            return ctx.arm({ title: 'Confirm LIVE Clean User Apps', body: 'Dry run is OFF. This PERMANENTLY deletes the selected per-user app binaries on <b>' + ctx.targets.count() + '</b> host(s). User data (bookmarks/history/profiles) is preserved. Proceed?', confirmWord: 'DELETE', okText: 'Delete', cancelText: 'Cancel' });
           },
           onFinal: function (log, grid) { log.banner('Clean User Apps complete: ' + grid.rows().length + ' host(s)'); },
           intro: [{ text: 'Clean User Apps ready. DRY RUN is on by default - uncheck it to actually delete. Chrome + Firefox preselected.', level: 'accent' }]
@@ -2507,10 +2517,15 @@
           confirmBeforeRun: function (api) {
             if (needCred()) return Promise.resolve(false);
             var s = api.getSettings();
-            var body = s.hardlock
-              ? 'HARD-LOCK <b>' + ctx.targets.count() + '</b> host(s): set the maintenance banner AND restrict interactive logon to local Administrators (standard users cannot sign in) until you Unlock. The original logon right is backed up per host; admins keep access. Proceed?'
-              : 'Set the maintenance banner on <b>' + ctx.targets.count() + '</b> host(s). Logon is NOT blocked (banner only). Proceed?';
-            return ctx.confirm({ title: 'Confirm Maintenance Lock', danger: !!s.hardlock, body: body, okText: s.hardlock ? 'Hard Lock' : 'Set Banner', cancelText: 'Cancel' });
+            if (!s.hardlock) {
+              return ctx.confirm({ title: 'Confirm Maintenance Lock', body: 'Set the maintenance banner on <b>' + ctx.targets.count() + '</b> host(s). Logon is NOT blocked (banner only). Proceed?', okText: 'Set Banner', cancelText: 'Cancel' });
+            }
+            return ctx.arm({
+              title: 'Confirm Maintenance Lock',
+              body: 'HARD-LOCK <b>' + ctx.targets.count() + '</b> host(s): set the maintenance banner AND restrict interactive logon to local Administrators (standard users cannot sign in) until you Unlock. The original logon right is backed up per host; admins keep access. Proceed?',
+              confirmWord: 'LOCK',
+              okText: 'Hard Lock', cancelText: 'Cancel'
+            });
           },
           onFinal: function (log, grid) { log.banner('Maintenance Lock complete - ' + grid.rows().length + ' host(s)'); },
           intro: [{ text: 'Maintenance Lock ready. Set a banner (and optionally hard-lock) for a patch window, then UNLOCK when done.', level: 'accent' }]
@@ -2580,7 +2595,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { unsubs.forEach(function (u) { try { u(); } catch (e) {} }); unsubs = []; };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

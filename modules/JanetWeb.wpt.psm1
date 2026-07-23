@@ -74,6 +74,10 @@ function Get-JanetToolManifest {
             },
             @{
                 id='reboot'; label='Reboot Selected'; kind='stream-table'; destructive=$true
+                # audit 2026-07-23: the INSTANT reboot had no confirm while its gentler sibling
+                # reboot-schedule (below) requires one - the harsher action must not be the
+                # easier one to fire. Same style as reboot-schedule's confirm.
+                confirm='Force an IMMEDIATE reboot on the target(s)? Restart-Computer -Force gives logged-on users NO warning and NO chance to save work. Prefer Arm Reboot Countdown for a warned, cancellable reboot. Proceed?'
                 description='Force an immediate reboot on each target (Restart-Computer -Force).'
                 columns=@('Host','Success','Detail')
                 inputs=@(
@@ -545,7 +549,9 @@ function Get-WptThreadCount {
 # path AFTER the destructive CCM trigger already ran, losing the per-item VulnPatched audits). A case-SENSITIVE
 # Hashtable holds both, and ConvertTo-Json (the server's emit serializer) renders them as the distinct JSON keys
 # the case-sensitive JS view expects. (Mirror of upr's New-UprRowEvent, loop85.) ANY future Type-bearing wpt row
-# must emit via this rather than `@{ type='row' } + $row`.
+# must emit via this rather than `@{ type='row' } + $row`. audit 2026-07-23: adopted at EVERY dispatcher-side
+# row-emit site (was 2 of ~30) - the mechanical swap is behavior-identical for Type-less rows and removes the
+# entire latent-collision class, so new columns can never re-introduce the loop89 crash.
 function New-WptRowEvent {
     param($Row)
     $m = New-Object System.Collections.Hashtable   # case-SENSITIVE
@@ -2647,7 +2653,22 @@ $script:WptWuResetBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
-        $out = Invoke-Command @splat -ScriptBlock {
+        # Wrong-box (DNS-mismatch) guard (audit 2026-07-23): this block STOPS the WU service stack
+        # and RENAMES SoftwareDistribution/catroot2 on the box that answers - a stale DNS / reused
+        # IP would gut Windows Update state on the WRONG machine, and this was one of the three
+        # destructive blocks missing the guard every sibling carries (WptMaintLockBlock parity).
+        # FOLDED into the first (only) working Invoke-Command instead of a dedicated probe
+        # round-trip, the WptRebootScheduleBlock pattern (~:2166): the scriptblock runs ON the
+        # answering box, so $env:COMPUTERNAME is the real machine - abort before touching anything
+        # if it isn't the host we dialed. An IPv4-literal target has no shortname to compare ->
+        # skip (an IP dialed directly can't be a stale-DNS mismatch).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
+        $out = Invoke-Command @splat -ArgumentList $targetShort, $isIPv4 -ScriptBlock {
+            param($expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
+            }
             $completed = New-Object System.Collections.ArrayList
             $failed    = New-Object System.Collections.ArrayList
             $criticalFailed = $false; $wuRestarted = $false
@@ -2672,6 +2693,11 @@ $script:WptWuResetBlock = {
                 }
             }
             return [pscustomobject]@{ Completed=@($completed.ToArray()); Failed=@($failed.ToArray()); CriticalFailed=[bool]$criticalFailed; WuRestarted=[bool]$wuRestarted }
+        }
+        # audit 2026-07-23: the wrong-box marker wins before any result is interpreted (hard abort).
+        if ($out.DnsMismatch) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$out.DnsMismatch).Trim())' - ABORTED, no WU reset performed"
+            return $r
         }
         $r.Success = ($out.WuRestarted -and -not $out.CriticalFailed)
         $r.Detail = if ($r.Success) { "WU reset OK. Steps: $((@($out.Completed)) -join ' | ')" } else { "WU reset degraded. Failed: $((@($out.Failed)) -join ' | ')" }
@@ -2737,7 +2763,22 @@ $script:WptRdpRebindBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
-        $out = Invoke-Command @splat -ScriptBlock {
+        # Wrong-box (DNS-mismatch) guard (audit 2026-07-23): this block REBINDS the RDP-tcp
+        # listener certificate and CLEARS the Remote Desktop store on the box that answers - a
+        # stale DNS / reused IP would rewire RDP on the WRONG machine, and this was one of the
+        # three destructive blocks missing the guard every sibling carries (WptMaintLockBlock
+        # parity). FOLDED into the first (only) working Invoke-Command instead of a dedicated
+        # probe round-trip, the WptRebootScheduleBlock pattern (~:2166): the scriptblock runs ON
+        # the answering box, so $env:COMPUTERNAME is the real machine - abort before touching
+        # anything if it isn't the host we dialed. An IPv4-literal target has no shortname to
+        # compare -> skip (an IP dialed directly can't be a stale-DNS mismatch).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
+        $out = Invoke-Command @splat -ArgumentList $targetShort, $isIPv4 -ScriptBlock {
+            param($expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
+            }
             $tsgs = Get-CimInstance -Namespace 'root/cimv2/terminalservices' -ClassName 'Win32_TSGeneralSetting' -Filter "TerminalName='RDP-tcp'" -ErrorAction Stop
             $rdpHash = (([string]$tsgs.SSLCertificateSHA1Hash) -replace '[^0-9A-Fa-f]', '').ToUpper()
             $now = Get-Date
@@ -2771,6 +2812,11 @@ $script:WptRdpRebindBlock = {
             } catch {
                 return [pscustomobject]@{ Ok=$false; Msg="RDP listener was $state - bind to CA-issued cert $($cand.Thumbprint) FAILED, old cert/listener left intact: $($_.Exception.Message)" }
             }
+        }
+        # audit 2026-07-23: the wrong-box marker wins before any result is interpreted (hard abort).
+        if ($out.DnsMismatch) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$out.DnsMismatch).Trim())' - ABORTED, RDP listener untouched"
+            return $r
         }
         $r.Success = [bool]$out.Ok; $r.Detail = [string]$out.Msg
     } catch { $r.Detail = $_.Exception.Message }
@@ -3299,7 +3345,21 @@ $script:WptCleanBlock = {
             if ($r.FreedMB -lt 0) { $r.FreedMB = 0 }   # dry-run / concurrent-write noise -> floor at 0
             $r.Events = @($r.Events) + @(@{ Level='OK'; Msg="[$Computer] Freed $($r.FreedMB) MB; C: free $($r.FreeBeforeGB) -> $($r.FreeAfterGB) GB" })
         }
-        $r.Status = if ($DryRun) { 'Dry Run OK' } else { 'Success' }
+        # audit 2026-07-23: MIRROR of Get-WptCleanStatus (~:909) - Status was UNCONDITIONALLY
+        # 'Success' here, so a host where EVERY stale-profile deletion failed (Chrome-holding
+        # locks, ACL walls -> ProfilesFound>0, ProfilesRemoved=0) still read Success, lit the ok
+        # tile, and booked a VulnPatched Success audit while nothing was removed - the exact
+        # false-clean loop50 already fixed in clean-user-apps (~:3719). Temp/cache stay
+        # best-effort (locked files are warned, not failed); only the PROFILE ledger gates the
+        # status, matching the helper's Found/Removed contract. The cleanup-disk OkOf accepts
+        # only Success/'Dry Run OK', so Partial/Failed now drop out of the ok/audit bucket
+        # automatically. This block runs in a module-less pool runspace and can't call the
+        # module helper - keep this inline mirror in lockstep with Get-WptCleanStatus.
+        $r.Status = if ($DryRun) { 'Dry Run OK' }
+                    elseif ([int]$r.ProfilesFound -eq 0)                          { 'Success' }
+                    elseif ([int]$r.ProfilesRemoved -ge [int]$r.ProfilesFound)    { 'Success' }
+                    elseif ([int]$r.ProfilesRemoved -gt 0)                        { 'Partial' }
+                    else                                                          { 'Failed' }
         $r.Detail = "Temp: $($r.TempMB)MB / $($r.TempFiles) files | Cache: $($r.CacheMB)MB | Profiles found: $($r.ProfilesFound), removed: $($r.ProfilesRemoved), skipped: $($r.Skipped) | Freed: $($r.FreedMB)MB (C: free $($r.FreeBeforeGB) -> $($r.FreeAfterGB) GB)"
         if (@($r.ProfileNames).Count -gt 0) { $r.Detail += " | Profiles: $((@($r.ProfileNames)) -join ', ')" }
         $r.Events = @($r.Events) + @(@{ Level='OK'; Msg="[$Computer] DONE -- $($r.Detail)" })
@@ -3742,22 +3802,20 @@ $script:WptMaintLockBlock = {
     try {
         # DNS-mismatch guard (HARD ABORT): a maintenance hard-lock restricts interactive
         # logon on the box that answers; verify it's the one we dialed before touching it
-        # (stale DNS / reused IP could lock out the WRONG machine). One quick WinRM probe,
-        # copied from WptRebootBlock (~1665) / WptPatchBlock (~1606). An IPv4-literal target
-        # has no shortname to compare -> skip. Empty probe -> proceed (don't regress).
-        if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            $targetShort = ($Computer -split '\.')[0]
-            $probeSplat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
-            if ($Cred) { $probeSplat['Credential']=$Cred; $probeSplat['Authentication']=$Auth }
-            $actualName = try { Invoke-Command @probeSplat -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                $r.Mode = 'Failed'
-                $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no maintenance lock applied"
-                return $r
+        # (stale DNS / reused IP could lock out the WRONG machine). An IPv4-literal target
+        # has no shortname to compare -> skip. audit 2026-07-23: FOLDED into the first
+        # working Invoke-Command instead of a dedicated probe round-trip - the
+        # WptRebootScheduleBlock pattern (~:2166): the scriptblock runs ON the answering
+        # box, so $env:COMPUTERNAME is the real machine; same abort semantics, one WinRM
+        # round-trip saved per host (and the check can no longer be skipped by a probe
+        # that failed while the main call succeeded).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
+        $out = Invoke-Command @splat -ArgumentList $Caption, $Message, $HardLock, $targetShort, $isIPv4 -ScriptBlock {
+            param($caption, $message, $hardlock, $expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
             }
-        }
-        $out = Invoke-Command @splat -ArgumentList $Caption, $Message, $HardLock -ScriptBlock {
-            param($caption, $message, $hardlock)
             $res = @{ Banner=$false; HardLock=$false; Err='' }
             $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
             try {
@@ -3823,6 +3881,13 @@ SeInteractiveLogonRight = *S-1-5-32-544
             }
             return $res
         }
+        # audit 2026-07-23: the wrong-box marker wins before any result is interpreted (hard abort,
+        # same message the standalone probe produced).
+        if ($out.DnsMismatch) {
+            $r.Mode = 'Failed'
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$out.DnsMismatch).Trim())' - ABORTED, no maintenance lock applied"
+            return $r
+        }
         # Success reflects the PRIMARY intent: when a hard-lock was requested, a
         # successful lock IS success (even if the banner write failed) - so the host
         # never reads "Success=false" while actually being locked.
@@ -3852,7 +3917,22 @@ $script:WptMaintUnlockBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
-        $out = Invoke-Command @splat -ScriptBlock {
+        # Wrong-box (DNS-mismatch) guard (audit 2026-07-23): this block REWRITES SeInteractiveLogonRight
+        # via secedit and CLEARS the logon banner on the box that answers - a stale DNS / reused IP
+        # would rewrite security policy on the WRONG machine, and Unlock was missing the guard its
+        # sibling Lock has carried since loop-era (the lock/unlock pair must be symmetric). FOLDED
+        # into the first (only) working Invoke-Command instead of a dedicated probe round-trip, the
+        # WptRebootScheduleBlock pattern (~:2166): the scriptblock runs ON the answering box, so
+        # $env:COMPUTERNAME is the real machine - abort before touching anything if it isn't the
+        # host we dialed. An IPv4-literal target has no shortname to compare -> skip (an IP dialed
+        # directly can't be a stale-DNS mismatch).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
+        $out = Invoke-Command @splat -ArgumentList $targetShort, $isIPv4 -ScriptBlock {
+            param($expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
+            }
             $res = @{ Banner=$false; Restored=$false; Source=''; Err='' }
             $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
             try {
@@ -3918,6 +3998,11 @@ SeInteractiveLogonRight = $orig
                 $res.Restored = $true; $res.Source = 'banner-only'
             }
             return $res
+        }
+        # audit 2026-07-23: the wrong-box marker wins before any result is interpreted (hard abort).
+        if ($out.DnsMismatch) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$out.DnsMismatch).Trim())' - ABORTED, logon rights/banner untouched"
+            return $r
         }
         $r.Success = ([bool]$out.Banner -and [bool]$out.Restored)
         $bits = New-Object System.Collections.Generic.List[string]
@@ -4918,7 +5003,7 @@ function Invoke-WptFanOut {
                     $hint = if (-not $ok) { Get-JanetTroubleshootHint -Message $(if ($res.Error) { [string]$res.Error } else { $auditDetailStr }) -Server ([string]$res.Host) } else { '' }
                     if ($hint -and ($row -is [hashtable])) { $row['Hint'] = $hint }
                     [void]$rows.Add($row)
-                    & $Send (@{ type='row' } + $row)
+                    & $Send (New-WptRowEvent $row)
                     $auditResult = if ($AuditResultOf) { [string](& $AuditResultOf $res $ok) } else { if ($ok) { 'Success' } else { 'Failure' } }
                     & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$auditResult; itemCount=$(if($ok){1}else{0}); detail=$auditDetailStr }
                     if ($hint) { & $Send @{ type='log'; level='err'; text="$($res.Host) : $(if ($res.Error) { [string]$res.Error } else { 'failed' }) | FIX: $hint" } }
@@ -4939,7 +5024,7 @@ function Invoke-WptFanOut {
                         try { [void]$j.PS.BeginStop($null, $null) } catch {}
                         $j.PS = $null
                         $rowT = & $RowOf @{ Host=$j.Host; Error="per-host timeout (${PerHostTimeoutSeconds}s) - possible WMI/CIM hang" }
-                        [void]$rows.Add($rowT); & $Send (@{ type='row' } + $rowT)
+                        [void]$rows.Add($rowT); & $Send (New-WptRowEvent $rowT)
                         & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail="per-host timeout (${PerHostTimeoutSeconds}s)" }
                         & $Send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${PerHostTimeoutSeconds}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
                         $failCount++; $done++
@@ -4965,7 +5050,7 @@ function Invoke-WptFanOut {
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}
                             $j.PS = $null
                             $rowR = & $RowOf @{ Host=$j.Host; Error=$reason }
-                            [void]$rows.Add($rowR); & $Send (@{ type='row' } + $rowR)
+                            [void]$rows.Add($rowR); & $Send (New-WptRowEvent $rowR)
                             & $Send @{ type='audit'; action=$AuditAction; target=$j.Host; result='Failure'; itemCount=0; detail=$reason }
                             $failCount++; $done++; $abandoned++
                         }
@@ -5028,7 +5113,7 @@ function Invoke-JanetToolAction {
             foreach ($a in (Expand-WptSingleHostResult $call.Result)) {
                 $g = { param($k) if ($a -is [hashtable]) { [string]$a[$k] } else { [string]$a.$k } }
                 $row = @{ _rk="$hostName|$(& $g 'Property')"; Host=$hostName; Property=(& $g 'Property'); Value=(& $g 'Value') }
-                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
             }
             $detail = "$($rows.Count) field(s)"
             & $send @{ type='status'; text="$hostName : info retrieved" }
@@ -5069,7 +5154,7 @@ function Invoke-JanetToolAction {
                 $g = { param($k) if ($a -is [hashtable]) { [string]$a[$k] } else { [string]$a.$k } }
                 $i++
                 $row = @{ _rk="$hostName|$i"; Host=$hostName; Log=(& $g 'Log'); TimeCreated=(& $g 'TimeCreated'); EventId=(& $g 'EventId'); Provider=(& $g 'Provider'); Message=(& $g 'Message') }
-                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
             }
             $detail = "$($rows.Count) event row(s)"
             & $send @{ type='status'; text="$hostName : $detail" }
@@ -5186,7 +5271,7 @@ function Invoke-JanetToolAction {
                 if ($filter -and -not ("$name $os" -like "*$filter*")) { continue }
                 $ou = ($dn -replace '^CN=[^,]+,', '')
                 $row = @{ _rk=$dn; Name=$name.ToUpperInvariant(); OU=$ou; OS=$os; Enabled=$enabled }
-                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
             }
             $ress.Dispose(); $searcher.Dispose(); $de.Dispose(); $rootDse.Dispose()
             $ok = $true; $detail = "$($rows.Count) computer(s)"
@@ -5239,7 +5324,7 @@ function Invoke-JanetToolAction {
                     Size=$(if ($a -is [hashtable]) { [string]$a['Size'] } else { [string]$a.Size })
                 }
                 [void]$rows.Add($row)
-                & $send (@{ type='row' } + $row)
+                & $send (New-WptRowEvent $row)
             }
             $detail = "$($rows.Count) application(s)"
             & $send @{ type='status'; text="$hostName : $detail" }
@@ -5280,7 +5365,7 @@ function Invoke-JanetToolAction {
             foreach ($n in @($names)) {
                 if ([string]::IsNullOrWhiteSpace([string]$n)) { continue }
                 $row = @{ _rk="$hostName|$channel|$n"; Host=$hostName; Channel=$channel; Name=[string]$n }
-                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
             }
         }
         & $emitItems 'MECM'         $r.UpdateNames
@@ -5337,7 +5422,7 @@ function Invoke-JanetToolAction {
                 if ($isOk) { $okCount++ } else { $failCount++ }
                 $row = @{ Host=$hostName; App=$app; 'Install Type'=$typ; Result=$rst; Detail=$det }
                 [void]$rows.Add($row)
-                & $send (@{ type='row' } + $row)
+                & $send (New-WptRowEvent $row)
                 & $send @{ type='audit'; action='VulnPatched'; target=$hostName; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($isOk){1}else{0}); detail="$app : $rst - $det" }
             }
         } else {
@@ -5378,7 +5463,7 @@ function Invoke-JanetToolAction {
                     PercentComplete=(& $g 'PercentComplete')
                 }
                 [void]$rows.Add($row)
-                & $send (@{ type='row' } + $row)
+                & $send (New-WptRowEvent $row)
             }
             $detail = "$($rows.Count) application(s)"
             & $send @{ type='status'; text="$hostName : $detail" }
@@ -5405,7 +5490,7 @@ function Invoke-JanetToolAction {
         foreach ($s in $snaps) {
             $idx++
             $row = @{ _rk=("$idx|$($s.File)"); ScanStamp=[string]$s.Stamp; File=[string]$s.File; TotalHosts=[int]$s.Total; Online=[int]$s.Online; HostsPending=[int]$s.HostsPending; RebootPending=[int]$s.RebootPending; PendingUpdates=[int]$s.PendingUpdates; Errors=[int]$s.Errors }
-            [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+            [void]$rows.Add($row); & $send (New-WptRowEvent $row)
         }
         $latest = $snaps[0]
         $stuck  = @($trend.Stuck)
@@ -5446,7 +5531,15 @@ function Invoke-JanetToolAction {
             $scanResult = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send -PerHostTimeoutSeconds 300 `
                 -Work $script:WptScanBlock -AuditAction 'TouchHost' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
-                -OkOf { param($r) [bool]$r.Online } `
+                -OkOf { param($r)
+                    # audit 2026-07-23: Online alone is NOT a good scan. WptScanBlock pre-sets
+                    # Online=$true the moment TCP answers (~:1921), and its DNS-mismatch return
+                    # (~:2010) DISCARDS every gathered read (they describe the WRONG machine)
+                    # while leaving Online=$true - so a wrong-box host formerly counted Success,
+                    # booked a TouchHost Success audit, and persisted a bogus all-zeroes row into
+                    # the snapshot. Require Online AND NOT DnsMismatch; the row/detail rendering
+                    # below is unchanged (the mismatch text still rides in the Error column).
+                    ([bool]$r.Online -and -not [bool]$r.DnsMismatch) } `
                 -AuditDetail { param($r) if ($r.Online) { "MECM=$(if($r.UpdatesOK){$r.UpdateCount}else{'Error'}) WU=$(if($r.WuOK){$r.WuCount}else{'Error'}) Apps=$(if($r.AppsOK){$r.AppCount}else{'Error'})" } elseif ($r.Error) { $r.Error } else { 'offline' } } `
                 -RowOf { param($r)
                     # Desktop parity (12301-12306): a channel whose query failed renders
@@ -5702,7 +5795,7 @@ function Invoke-JanetToolAction {
                             $ok = ($res.Result -eq 'Triggered')
                             if ($ok) { $okCount++ } else { $failCount++ }
                             $row = @{ Host=[string]$res.Host; App=[string]$res.App; Method=[string]$res.Method; Result=[string]$res.Result; Detail=[string]$res.Detail }
-                            [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                            [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                             & $send @{ type='audit'; action='VulnPatched'; target=$res.Host; result=$(if($ok){'Success'}else{'Failure'}); itemCount=$(if($ok){1}else{0}); detail="$($res.Method) $($res.App): $($res.Detail)" }
                             $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                         }
@@ -5714,7 +5807,7 @@ function Invoke-JanetToolAction {
                                 try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
                                 $detPh = "per-host timeout (${perHostTimeout}s) - possible WMI/CIM hang"
                                 $row = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail=$detPh }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$detPh }
                                 & $send @{ type='log'; level='warn'; text="$($j.Host) : abandoned after ${perHostTimeout}s per-host timeout (in-flight WinRM/CIM call being stopped); the rest of the run continues." }
                                 $failCount++; $done++
@@ -5731,7 +5824,7 @@ function Invoke-JanetToolAction {
                                 if ($j.PS) {
                                     try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
                                     $row = @{ Host=$j.Host; App=$j.Id; Method=$method; Result='Failed'; Detail=$reason }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                     & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$reason }
                                     $failCount++; $done++
                                 }
@@ -5800,7 +5893,7 @@ function Invoke-JanetToolAction {
                                                 Host=$j.Host; Product=$prof.Label; InstalledName=$name; Version=$ver
                                                 Category=$prof.Category; Action=$effAction; Notes=$prof.Notes
                                             }
-                                            [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                            [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                             $matchCount++; $hostMatches++
                                             break   # one row per app (first matching profile)
                                         }
@@ -5894,7 +5987,7 @@ function Invoke-JanetToolAction {
                             if ($err) {
                                 foreach ($n in $j.Names) {
                                     $row = @{ _rk="$($j.Host)|$n"; Host=$j.Host; App=$n; 'Install Type'=''; Result='Failed'; Detail=$err }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 }
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
                             } else {
@@ -5906,7 +5999,7 @@ function Invoke-JanetToolAction {
                                     $isOk = ($rst -eq 'Removed')
                                     if ($isOk) { $okCount++ } else { $failCount++ }
                                     $row = @{ _rk="$($j.Host)|$app"; Host=$j.Host; App=$app; 'Install Type'=$typ; Result=$rst; Detail=$det }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                     & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($isOk){1}else{0}); detail="$app : $rst - $det" }
                                 }
                             }
@@ -5923,7 +6016,7 @@ function Invoke-JanetToolAction {
                                     try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
                                     foreach ($n in $j.Names) {
                                         $row = @{ _rk="$($j.Host)|$n"; Host=$j.Host; App=$n; 'Install Type'=''; Result='Failed'; Detail=$reason }
-                                        [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                        [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                     }
                                     & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
                                 }
@@ -5978,11 +6071,11 @@ function Invoke-JanetToolAction {
                             if ($err -or $null -eq $res) {
                                 if (-not $err) { $err = 'no result' }
                                 $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail=$err }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
                             } elseif ($res.Error) {
                                 $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
                             } else {
                                 # The shared engine returns a single rollup 'Java' row per host.
@@ -5992,7 +6085,7 @@ function Invoke-JanetToolAction {
                                 $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
                                 if ($isOk) { $okCount++ } else { $failCount++ }
                                 $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
                             }
                             $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
@@ -6007,7 +6100,7 @@ function Invoke-JanetToolAction {
                                 if ($j.PS) {
                                     try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
                                     $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                     & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason - already-dispatched removals may proceed" }
                                     $done++
                                 }
@@ -6056,11 +6149,11 @@ function Invoke-JanetToolAction {
                             if ($err -or $null -eq $res) {
                                 if (-not $err) { $err = 'no result' }
                                 $row = @{ _rk=$j.Host; Host=$j.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=$err }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
                             } elseif ($res.Error) {
                                 $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error=[string]$res.Error }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
                             } else {
                                 $verdict = [string]$res.Verdict
@@ -6068,7 +6161,7 @@ function Invoke-JanetToolAction {
                                 if ($verdict -ne 'COMPLIANT') { $needCount++ }
                                 $okCount++
                                 $row = @{ _rk=$j.Host; Host=$j.Host; CPU=[string]$res.Cpu; Verdict=$verdict; FeatureSettingsOverride=[string]$res.Fso; Mask=[string]$res.Mask; Recommendation=$rec; Error='' }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                 & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Success'; itemCount=0; detail="Verdict=$verdict; $rec" }
                             }
                             $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
@@ -6083,7 +6176,7 @@ function Invoke-JanetToolAction {
                                 if ($j.PS) {
                                     try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
                                     $row = @{ _rk=$j.Host; Host=$j.Host; CPU=''; Verdict=''; FeatureSettingsOverride=''; Mask=''; Recommendation=''; Error="abandoned: $reason" }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                     & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
                                     $done++
                                 }
@@ -6139,11 +6232,11 @@ function Invoke-JanetToolAction {
                             if ($err -or $null -eq $res) {
                                 if (-not $err) { $err = 'no result' }
                                 $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail=$err }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=$err }
                             } elseif ($res.Error) {
                                 $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result='FAIL'; Detail=[string]$res.Error }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail=[string]$res.Error }
                             } else {
                                 # The shared engine returns a single rollup 'SpecExec' row per host.
@@ -6153,7 +6246,7 @@ function Invoke-JanetToolAction {
                                 $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
                                 if ($isOk) { $okCount++ } else { $failCount++ }
                                 $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                                 & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result=$(if($isOk){'Success'}else{'Failure'}); itemCount=$(if($rslt -eq 'FIXED'){1}else{0}); detail="$rslt - $det" }
                             }
                             $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
@@ -6168,7 +6261,7 @@ function Invoke-JanetToolAction {
                                 if ($j.PS) {
                                     try { [void]$j.PS.BeginStop($null,$null) } catch {}; $j.PS=$null
                                     $row = @{ _rk=$j.Host; Host=$j.Host; Reachable=$false; Result='FAIL'; Detail="abandoned: $reason" }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $failCount++
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $failCount++
                                     & $send @{ type='audit'; action='VulnPatched'; target=$j.Host; result='Failure'; itemCount=0; detail="abandoned: $reason" }
                                     $done++
                                 }
@@ -6262,7 +6355,7 @@ function Invoke-JanetToolAction {
                                     $row = @{ _rk="$($res.Host)|$kbTarget"; Host=$res.Host; HotFixID=$kbTarget; Description='Missing'; InstalledOn=''; InstalledBy='' }
                                     $kbMissing++
                                 }
-                                [void]$rows.Add($row); & $send (@{ type='row' } + $row)
+                                [void]$rows.Add($row); & $send (New-WptRowEvent $row)
                             } elseif ($hostOk) {
                                 foreach ($kb in $kbArr) {
                                     $kbID  = if ($kb -is [hashtable]) { [string]$kb['HotFixID'] } else { [string]$kb.HotFixID }
@@ -6271,7 +6364,7 @@ function Invoke-JanetToolAction {
                                     $kbBy  = if ($kb -is [hashtable]) { [string]$kb['InstalledBy'] } else { [string]$kb.InstalledBy }
                                     $row = @{ _rk="$($res.Host)|$kbID"; Host=$res.Host; HotFixID=$kbID; Description=$kbDes; InstalledOn=$kbOn; InstalledBy=$kbBy }
                                     [void]$rows.Add($row)
-                                    & $send (@{ type='row' } + $row)
+                                    & $send (New-WptRowEvent $row)
                                 }
                             } else {
                                 & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" }
@@ -6379,7 +6472,7 @@ function Invoke-JanetToolAction {
                                     $ust = if ($u -is [hashtable]) { [string]$u['State'] }  else { [string]$u.State }
                                     $uss = if ($u -is [hashtable]) { [string]$u['Status'] } else { [string]$u.Status }
                                     $row = @{ _rk="$($res.Host)|$un"; Host=$res.Host; Update=$un; State=$ust; Status=$uss }
-                                    [void]$rows.Add($row); & $send (@{ type='row' } + $row); $updRows++
+                                    [void]$rows.Add($row); & $send (New-WptRowEvent $row); $updRows++
                                 }
                             } elseif ($hostOk) {
                                 $msg = if ($res.NoSccm) { 'no SCCM client (root\ccm absent)' } else { 'no matching updates' }
@@ -6699,7 +6792,7 @@ function Invoke-JanetToolAction {
                                 if ($state -eq 'Vulnerable') { $hostVuln++; $vulnTotal++ }
                                 $row = @{ _rk="$($res.Host)|$path"; Host=$res.Host; JARPath=$path; Filename=$fn; VulnerableVersion=$(if($state -eq 'Patched'){"$ver (patched)"}elseif($state -eq 'Unknown'){"$ver (unknown)"}else{$ver}) }
                                 [void]$rows.Add($row)
-                                & $send (@{ type='row' } + $row)
+                                & $send (New-WptRowEvent $row)
                             }
                             if (-not $hostOk -and $res.Error) { & $send @{ type='log'; level='err'; text="$($res.Host) : $($res.Error)" } }
                             & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$(if($hostOk){'Success'}else{'Failure'}); itemCount=$jars.Count; detail=$(if($hostOk){"$($jars.Count) jar(s), $hostVuln vulnerable"}else{[string]$res.Error}) }

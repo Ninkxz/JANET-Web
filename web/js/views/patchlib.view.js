@@ -138,8 +138,7 @@
           var rows = grid.rows();
           if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run an inventory first.', okText: 'OK', cancelText: null }); return; }
           var cols = [['Name', 'Name'], ['ItemType', 'Type'], ['KB', 'KB'], ['Size', 'Size'], ['Modified', 'Modified'], ['Location', 'Root']];
-          var csv = ctx.util.toCsv(cols.map(function (c) { return c[1]; }), rows, cols.map(function (c) { return c[0]; }));
-          ctx.util.downloadBlob('PatchContent_Inventory_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          ctx.util.exportCsv('PatchContent_Inventory', cols, rows);
         };
 
         function doInventory() {
@@ -275,8 +274,7 @@
           var rows = grid.rows();
           if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a cross-reference first.', okText: 'OK', cancelText: null }); return; }
           var cols = [['Needed', 'Needed'], ['Kind', 'Kind'], ['Status', 'Status'], ['Matches', 'On-Hand Content']];
-          var csv = ctx.util.toCsv(cols.map(function (c) { return c[1]; }), rows, cols.map(function (c) { return c[0]; }));
-          ctx.util.downloadBlob('PatchContent_CrossRef_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          ctx.util.exportCsv('PatchContent_CrossRef', cols, rows);
         };
 
         function doCrossref() {
@@ -329,7 +327,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { subs.forEach(function (u) { try { u(); } catch (e) {} }); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

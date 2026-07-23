@@ -134,12 +134,19 @@
     });
     return [(headers || []).map(q).join(',')].concat(body).join('\r\n') + '\r\n';
   }
+  // One-call grid export used by the per-view Export CSV buttons: colPairs is an
+  // array of [rowKey, csvHeader] pairs; downloads <nameBase>_<stamp>.csv.
+  // (Collapses the copy-pasted map(header)/map(key)/toCsv/downloadBlob blocks.)
+  function exportCsv(nameBase, colPairs, rows) {
+    var csv = toCsv(colPairs.map(function (c) { return c[1]; }), rows, colPairs.map(function (c) { return c[0]; }));
+    downloadBlob(String(nameBase) + '_' + fileStamp() + '.csv', 'text/csv', csv);
+  }
   // MERGE (do not replace): component files (e.g. xlsx.js) may have already
   // attached helpers to Janet.util before shell.js loaded.
   Janet.util = Object.assign(Janet.util || {}, {
     el: el, qs: qs, sleep: sleep, esc: esc, fileStamp: fileStamp,
     clockStr: clockStr, parseHosts: parseHosts, resolveTargets: resolveTargets, targetModel: targetModel, downloadBlob: downloadBlob,
-    parseCsv: parseCsv, toCsv: toCsv
+    parseCsv: parseCsv, toCsv: toCsv, exportCsv: exportCsv
   });
   /* ========================================================================
      api  (the ONLY fetch in the app, besides RunController which calls it)
@@ -421,8 +428,16 @@
      view registry + lazy loader
      ===================================================================== */
   var views = {};
+  // Standard teardown, applied as the DEFAULT when a view registers no unmount of
+  // its own: every view stores its detached root as this._root and its
+  // subscription-teardown fn as this._unsub in mount(). (This exact function body
+  // was previously copy-pasted verbatim at the bottom of ~18 views.)
+  function defaultUnmount() {
+    try { if (this._unsub) this._unsub(); } catch (e) {}
+    if (this._root) this._root.remove();
+  }
   window.JanetViews = {
-    register: function (id, def) { views[id] = def; }
+    register: function (id, def) { if (def && !def.unmount) def.unmount = defaultUnmount; views[id] = def; }
   };
   function loadView(id) {
     return new Promise(function (resolve, reject) {

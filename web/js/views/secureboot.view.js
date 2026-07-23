@@ -346,9 +346,12 @@
         setStatus('Starting ' + targets.hosts().length + ' target(s)...', 'st-info');
         lockInputs(true);
         var threads = Math.max(1, Math.min(10, parseInt(jobsInput.value, 10) || 5));
+        // audit 2026-07-23: the module now enforces the typed word SERVER-SIDE on the
+        // live path (mirrors pkginstall DEPLOY). The ArmingDialog above validated the
+        // operator typed ENABLE, so send the literal word; dry runs send '' (ungated).
         run = ctx.run('enable-secure-boot', {
           targets: targets.hosts().join('\n'), bios_password: pwInput.value, allowEmptyPassword: allowEmpty,
-          dry_run: isDry, threads: threads
+          dry_run: isDry, threads: threads, confirm: isDry ? '' : 'ENABLE'
         });
         if (unsub) unsub();
         unsub = run.subscribe({

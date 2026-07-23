@@ -970,8 +970,7 @@
       function doExport() {
         var rows = grid.rows();
         if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run an operation first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
-        var csv = ctx.util.toCsv(EXPORT_COLS.map(function (p) { return p[1]; }), rows, EXPORT_COLS.map(function (p) { return p[0]; }));
-        ctx.util.downloadBlob('WindowsUpgrade_results_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv('WindowsUpgrade_results', EXPORT_COLS, rows);
         log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
       }
 
@@ -1100,8 +1099,7 @@
         fExport.onclick = function () {
           var rows = fGrid.rows();
           if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Scan the fleet first - there are no rows yet.', okText: 'OK', cancelText: null }); return; }
-          var csv = ctx.util.toCsv(FLEET_EXPORT.map(function (p) { return p[1]; }), rows, FLEET_EXPORT.map(function (p) { return p[0]; }));
-          ctx.util.downloadBlob('WindowsUpgrade_FleetStatus_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+          ctx.util.exportCsv('WindowsUpgrade_FleetStatus', FLEET_EXPORT, rows);
           log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' fleet-status row(s) to CSV.', level: 'info' });
         };
         fClear.onclick = function () { if (fleetRun && fleetRun.state && fleetRun.state.active) return; fGrid.clear(); fStats.reset(); fProg.reset(); fStatus.textContent = 'Ready'; fStatus.className = 'muted'; };
@@ -1118,10 +1116,36 @@
           fStats.setAll(c);
         }
 
+        // O(1) running tally for the streamed rows (recount() per row was O(n^2) on
+        // big fleets). Rows can mutate through phases via upsert (same Host key), so
+        // remember each host's last-counted bucket and move it; the authoritative
+        // full recount()/summary paint still runs once in final() (drift-proof).
+        var fTally = { counts: { already: 0, ready: 0, blocked: 0, pending: 0 }, byHost: {} };
+        function fTallyReset() { fTally = { counts: { already: 0, ready: 0, blocked: 0, pending: 0 }, byHost: {} }; }
+        function fBucket(status) {
+          var s = String(status);
+          if (s.indexOf('Already ') === 0) return 'already';
+          if (s === 'Ready') return 'ready';
+          if (s.indexOf('Blocked') === 0) return 'blocked';
+          if (s === 'Pending reboot') return 'pending';
+          return null;
+        }
+        function fTallyRow(r) {
+          var k = String(r.Host == null ? '' : r.Host);
+          var b = fBucket(r.Win24H2Status);
+          var prev = fTally.byHost[k];
+          if (prev !== b) {
+            if (prev) fTally.counts[prev]--;
+            if (b) fTally.counts[b]++;
+            fTally.byHost[k] = b;
+          }
+          return fTally.counts;
+        }
+
         function doFleetScan() {
           var hosts = fTargets.hosts();
           var ver = fVersion.value;
-          fGrid.clear(); fStats.reset(); fProg.reset();
+          fGrid.clear(); fStats.reset(); fProg.reset(); fTallyReset();
           fStatus.textContent = 'Scanning...'; fStatus.className = 'st-info';
           log.banner('Fleet Status scan (' + ver + ', ' + hosts.length + ' computer(s))');
           fOffline.disabled = true; fThreads.disabled = true; fClear.disabled = true; fVersion.disabled = true;
@@ -1135,7 +1159,7 @@
           fleetUnsub = fleetRun.subscribe({
             status: function (t) { fStatus.textContent = t; fStatus.className = 'st-info'; },
             progress: function (p) { fProg.setProgress(p.done, p.total); },
-            row: function (r) { fGrid.upsert(r); recount(); },
+            row: function (r) { fGrid.upsert(r); fStats.setAll(fTallyRow(r)); },
             log: function (l) { log.append(l); },
             error: function (e) { fStatus.textContent = (e && e.text) || 'Error'; fStatus.className = 'st-bad'; log.append({ text: (e && e.text) || 'error', level: 'err' }); },
             active: function (a) { fRunbar.setActive(a); if (!a) { fOffline.disabled = false; fThreads.disabled = false; fClear.disabled = false; fVersion.disabled = false; } },
@@ -1403,8 +1427,7 @@
           dExport.onclick = function () {
             var rows = dGrid.rows();
             if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run Drive / Auto-Fix / Repair Health first - there are no rows yet.', okText: 'OK', cancelText: null }); return; }
-            var csv = ctx.util.toCsv(MAIN_EXPORT.map(function (p) { return p[1]; }), rows, MAIN_EXPORT.map(function (p) { return p[0]; }));
-            ctx.util.downloadBlob('WindowsUpgrade_' + cfg.key + '_Results_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+            ctx.util.exportCsv('WindowsUpgrade_' + cfg.key + '_Results', MAIN_EXPORT, rows);
             log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' result row(s) to CSV.', level: 'info' });
           };
           dClear.onclick = function () { if (panelBusy()) return; dGrid.clear(); dStats.reset(); dProg.reset(); dStatus.textContent = 'Ready'; dStatus.className = 'muted'; };
@@ -1413,8 +1436,7 @@
           eExport.onclick = function () {
             var rows = eGrid.rows();
             if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run ERROR REPORT first - there are no rows yet.', okText: 'OK', cancelText: null }); return; }
-            var csv = ctx.util.toCsv(ERR_EXPORT.map(function (p) { return p[1]; }), rows, ERR_EXPORT.map(function (p) { return p[0]; }));
-            ctx.util.downloadBlob('WindowsUpgrade_Errors_' + cfg.key + '_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+            ctx.util.exportCsv('WindowsUpgrade_Errors_' + cfg.key, ERR_EXPORT, rows);
             log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' error row(s) to CSV.', level: 'info' });
           };
           eClear.onclick = function () { if (panelBusy()) return; eGrid.clear(); };
@@ -1429,6 +1451,32 @@
               else if (s === 'Skipped' || s === 'DRY-RUN') c.skipped++;
             });
             dStats.setAll(c);
+          }
+
+          // O(1) running tally for the streamed Drive rows (dRecount() per row was
+          // O(n^2)). Rows mutate Queued -> terminal via upsert (same Host key), so
+          // remember each host's last-counted bucket and move it; the authoritative
+          // full dRecount() recompute still runs on active:false and in final().
+          var dTally = { counts: { driven: 0, staged: 0, rebooting: 0, skipped: 0 }, byHost: {} };
+          function dTallyReset() { dTally = { counts: { driven: 0, staged: 0, rebooting: 0, skipped: 0 }, byHost: {} }; }
+          function dBucket(status) {
+            var s = String(status);
+            if (s === 'DRIVEN') return 'driven';
+            if (s === 'STAGED' || s === 'NEEDS REBOOT') return 'staged';
+            if (s === 'REBOOTING') return 'rebooting';
+            if (s === 'Skipped' || s === 'DRY-RUN') return 'skipped';
+            return null;
+          }
+          function dTallyRow(r) {
+            var k = String(r.Host == null ? '' : r.Host);
+            var b = dBucket(r.Status);
+            var prev = dTally.byHost[k];
+            if (prev !== b) {
+              if (prev) dTally.counts[prev]--;
+              if (b) dTally.counts[b]++;
+              dTally.byHost[k] = b;
+            }
+            return dTally.counts;
           }
 
           // Full-tab lock: only one of Drive / Auto-Fix / Repair Health / Error Report can
@@ -1475,7 +1523,7 @@
             });
             if (!ok) { log.append({ text: '[' + ts() + '] Drive cancelled at confirm.', level: 'warn' }); return; }
 
-            dGrid.clear(); dStats.reset(); dProg.reset();
+            dGrid.clear(); dStats.reset(); dProg.reset(); dTallyReset();
             hosts.forEach(function (h) { dGrid.upsert({ Host: h, Online: false, OsBuild: 0, DisplayVersion: '', WasPinned: false, TriggerResult: '', Staged: false, Rebooted: false, CountdownSec: 0, Skipped: '', Error: '', Status: 'Queued', Detail: 'Queued' }); });
             dStatus.textContent = 'Driving...'; dStatus.className = 'st-info';
             log.banner(label + ' on ' + hosts.length + ' computer(s)');
@@ -1496,7 +1544,7 @@
             driveUnsub = driveRun.subscribe({
               status: function (t) { dStatus.textContent = t; dStatus.className = 'st-info'; },
               progress: function (p) { dProg.setProgress(p.done, p.total); },
-              row: function (r) { dGrid.upsert(r); dRecount(); },
+              row: function (r) { dGrid.upsert(r); dStats.setAll(dTallyRow(r)); },
               log: function (l) { log.append(l); },
               error: function (e) { dStatus.textContent = (e && e.text) || 'Error'; dStatus.className = 'st-bad'; log.append({ text: (e && e.text) || 'error', level: 'err' }); },
               active: function (a) { dRunbar.setActive(a); lockOtherRunbars(dRunbar, a); lockPanel(a); if (!a) dRecount(); },
@@ -1679,7 +1727,6 @@
         try { if (fleetUnsub) fleetUnsub(); } catch (e) {}
         versionPanelUnsubs.forEach(function (fn) { try { fn(); } catch (e) {} });
       };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

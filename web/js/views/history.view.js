@@ -90,8 +90,7 @@
           for (var i = 0; i < keys.length; i++) { o[keys[i]] = csvGuard(row[keys[i]]); }
           return o;
         });
-        var csv = ctx.util.toCsv(cols.map(function (c) { return c[1]; }), safeRows, keys);
-        ctx.util.downloadBlob(fileBase + '_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv(fileBase, cols, safeRows);
         actlog.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
       }
 
@@ -435,7 +434,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { subs.forEach(function (u) { try { u(); } catch (e) {} }); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

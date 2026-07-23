@@ -582,6 +582,29 @@ function Test-JanetWebRouteActionable {
     return [bool]($Route -and -not [string]::IsNullOrWhiteSpace([string]$Route.ToolId))
 }
 
+# audit 2026-07-23: ONE severity -> numeric rank map for every rollup that sorts or
+# maxes by severity (kb-needed / thirdparty-catalog / iavm-board / export-poam) -
+# previously re-declared inline per action. The two hot-loop switch forms in
+# Build-RemediationPlan / Build-CoraSummary stay local (converting them is not a
+# mechanical swap).
+$script:SeverityRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+
+# audit 2026-07-23: the Router / Planner / Third-Party Catalog / Campaign /
+# Command-Brief bucket classifier (Defender + unquoted-service-path promotion,
+# else the finding's Category, blank -> Other) lived as five identical copies -
+# one function so the bucketing can never drift between the views.
+# Build-RemediationPlan's Defender-only split keeps its own variant by design
+# (no unquoted-service-path promotion there).
+function Get-ReportsRouteBucket {
+    param($Finding)
+    $vn = ($Finding.VulnName -as [string]).ToLower()
+    if ($vn -match 'defender|microsoft security essentials|antimalware') { return 'Defender' }
+    if ("$vn $(($Finding.Solution -as [string]).ToLower())" -match 'unquoted service path') { return 'Unquoted Service Path' }
+    $bucket = [string]$Finding.Category
+    if ([string]::IsNullOrWhiteSpace($bucket)) { return 'Other' }
+    return $bucket
+}
+
 # Scan-name -> category/owner classifier. ORDER MATTERS - first match wins.
 # Lifted verbatim from ReportsTool_2.14.5.ps1 ($global:AcasCategoryRules:2417).
 $script:AcasCategoryRules = @(
@@ -869,15 +892,10 @@ function Get-ReportsIavmForCves {
 # acceptable for a rarely-edited reference list, matching Write-KevCatalog.
 function Write-ReportsIavmMap {
     param([System.Collections.IDictionary]$Map, [string]$Path)
-    # loop14 (item 12): formula-injection guard (prefix ' when a cell begins = + - @ tab cr),
-    # matching ConvertTo-ReportsCsvCell and every other exporter - IavmMap.csv had only the
-    # quote-wrap. CVE is regex-validated (can't lead with a sigil) but Title/IAVA are free text.
-    $q = {
-        param($v)
-        $s = [string]$v
-        if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
-        if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s }
-    }
+    # loop14 (item 12): formula-injection guard (prefix ' when a cell begins = + - @ tab cr).
+    # CVE is regex-validated (can't lead with a sigil) but Title/IAVA are free text.
+    # audit 2026-07-23: the hand-rolled guard+quote scriptblock collapsed onto the
+    # canonical ConvertTo-ReportsCsvCell (identical behavior, byte-for-byte output).
     $keys = @($Map.Keys | Sort-Object `
         @{ Expression = { [long]($_ -replace '^CVE-(\d+)-(\d+)$','$1') } }, `
         @{ Expression = { [long]($_ -replace '^CVE-(\d+)-(\d+)$','$2') } })
@@ -885,7 +903,7 @@ function Write-ReportsIavmMap {
     [void]$sb.AppendLine('CVE,IAVA,Title')
     foreach ($k in $keys) {
         $e = $Map[$k]
-        [void]$sb.AppendLine((@((& $q $k), (& $q $e.IAVA), (& $q $e.Title)) -join ','))
+        [void]$sb.AppendLine((@((ConvertTo-ReportsCsvCell $k), (ConvertTo-ReportsCsvCell $e.IAVA), (ConvertTo-ReportsCsvCell $e.Title)) -join ','))
     }
     $content = $sb.ToString()
     $dir = Split-Path -Parent $Path
@@ -1529,12 +1547,18 @@ function Compare-AcasScans {
     $results = New-Object System.Collections.ArrayList
     $cmp = [System.StringComparer]::OrdinalIgnoreCase
 
+    # audit 2026-07-23: the hostname/IP gathering for the collision guard below is
+    # folded into these two existing key-building passes (was two extra full passes
+    # over both finding sets).
+    $allHostnames = New-Object System.Collections.ArrayList
+    $allIps       = New-Object System.Collections.ArrayList
     $baselineKeys   = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     $baselineLookup = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
     foreach ($f in $script:BaselineFindings) {
         $key = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
         [void]$baselineKeys.Add($key)
         $baselineLookup[$key] = $f
+        [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP)
     }
     $comparisonKeys   = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     $comparisonLookup = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
@@ -1542,6 +1566,7 @@ function Compare-AcasScans {
         $key = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
         [void]$comparisonKeys.Add($key)
         $comparisonLookup[$key] = $f
+        [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP)
     }
 
     # loop39 (ledger row 36): cross-domain short-name COLLISIONS across BOTH scans. The
@@ -1562,10 +1587,6 @@ function Compare-AcasScans {
     # loop40 P1: thread the per-finding scan IP (parallel to the hostname) so the collision
     # guard also fires on two BARE short names on DIFFERENT IPs (the AFNET short-name-only norm
     # the FQDN-only signal missed). IP defaults to '' on legacy findings that carry no IP field.
-    $allHostnames = New-Object System.Collections.ArrayList
-    $allIps       = New-Object System.Collections.ArrayList
-    foreach ($f in $script:BaselineFindings)   { [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP) }
-    foreach ($f in $script:ComparisonFindings) { [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP) }
     $collisions = Get-ReportsHostKeyCollisions -Hostnames @($allHostnames.ToArray()) -IPs @($allIps.ToArray())
 
     # REMEDIATED: in baseline but NOT in comparison (patched/fixed) - UNLESS the short host
@@ -1945,7 +1966,7 @@ function Build-RemediationPlan {
 
 function Read-AcasCsvMatrix {
     param([string]$FilePath)
-    if (-not (Test-Path $FilePath)) { return $null }
+    if (-not (Test-Path -LiteralPath $FilePath)) { return $null }   # audit 2026-07-23: -LiteralPath (lone offender; [ ] in a filename must not glob)
     try { Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop } catch {
         return $null
     }
@@ -2218,31 +2239,22 @@ function Export-AcasFindingsCsvText {
     # "Export Full CSV" handler (ReportsTool_2.14.5.ps1:6735-6741).
     param($Findings)
     $lines = New-Object System.Collections.ArrayList
-    # Neutralize spreadsheet formula injection on scanner-supplied free text: a
-    # quoted cell beginning with = + - @ (or a leading tab/CR) is treated by
-    # Excel/Sheets as a formula. Prefix such values with a single quote so they
-    # render as literal text (same guard as Export-Dirty30CsvText).
-    $guard = {
-        param($Cell)
-        $s = [string]$Cell
-        if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { return "'" + $s }
-        return $s
-    }
+    # Neutralize spreadsheet formula injection on scanner-supplied free text via the
+    # canonical ConvertTo-ReportsCsvCell (guard + RFC-4180 quote-when-needed).
+    # audit 2026-07-23: the hand-rolled guard + quote-doubling collapsed onto the
+    # helper; cells with no comma/quote/newline are no longer force-quoted - the
+    # parsed CSV is unchanged.
+    # audit loop7 P3: run EVERY cell through the guard - PatchedBy is operator-typed (EDIPI)
+    # free text, the rest are scanner-supplied; a leading = + - @ would otherwise evaluate in Excel.
     [void]$lines.Add('"Host","PluginID","VulnName","Severity","IAVA","Category","Status","PatchedDate","PatchedBy","Solution"')
     foreach ($f in $Findings) {
-        # audit loop7 P3: run EVERY cell through $guard - PatchedBy is operator-typed (EDIPI)
-        # free text, the rest are scanner-supplied; a leading = + - @ would otherwise evaluate in Excel.
-        $hn = (& $guard $f.Hostname)    -replace '"','""'
-        $pl = (& $guard $f.PluginID)    -replace '"','""'
-        $ev = (& $guard $f.VulnName)    -replace '"','""'
-        $sv = (& $guard $f.Severity)    -replace '"','""'
-        $ia = (& $guard $f.IAVA)        -replace '"','""'
-        $ca = (& $guard $f.Category)    -replace '"','""'
-        $st = (& $guard $f.Status)      -replace '"','""'
-        $pd = (& $guard $f.PatchedDate) -replace '"','""'
-        $pb = (& $guard $f.PatchedBy)   -replace '"','""'
-        $es = (& $guard $f.Solution)    -replace '"','""'
-        [void]$lines.Add("`"$hn`",`"$pl`",`"$ev`",`"$sv`",`"$ia`",`"$ca`",`"$st`",`"$pd`",`"$pb`",`"$es`"")
+        [void]$lines.Add((@(
+            (ConvertTo-ReportsCsvCell $f.Hostname), (ConvertTo-ReportsCsvCell $f.PluginID),
+            (ConvertTo-ReportsCsvCell $f.VulnName), (ConvertTo-ReportsCsvCell $f.Severity),
+            (ConvertTo-ReportsCsvCell $f.IAVA),     (ConvertTo-ReportsCsvCell $f.Category),
+            (ConvertTo-ReportsCsvCell $f.Status),   (ConvertTo-ReportsCsvCell $f.PatchedDate),
+            (ConvertTo-ReportsCsvCell $f.PatchedBy),(ConvertTo-ReportsCsvCell $f.Solution)
+        ) -join ','))
     }
     return (($lines -join "`r`n") + "`r`n")
 }
@@ -2252,15 +2264,12 @@ function Export-WeeklyToCsvText {
     param([Parameter(Mandatory)]$Week)
     $lines = New-Object System.Collections.ArrayList
     # Neutralize spreadsheet formula injection on scanner/user-supplied free text
-    # (scan Name / Category / Owner / ScanNames): a quoted cell beginning with
-    # = + - @ (or a leading tab/CR) is treated by Excel/Sheets as a formula.
-    # Prefix such values with a single quote (same guard as Export-Dirty30CsvText).
-    $guard = {
-        param($Cell)
-        $s = [string]$Cell
-        if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { return "'" + $s }
-        return $s
-    }
+    # (scan Name / Category / Owner / ScanNames) via the canonical
+    # ConvertTo-ReportsCsvCell (guard + RFC-4180 quote-when-needed).
+    # audit 2026-07-23: the hand-rolled guard + quote-doubling collapsed onto the
+    # helper (cells with no comma/quote/newline are no longer force-quoted - the
+    # parsed CSV is unchanged), and the inline NaN->'N/A' number formatting now
+    # goes through Format-AcasNumber / Format-AcasPercent (same output).
     [void]$lines.Add("# ACAS Weekly Export - $($Week.Enclave) - $($Week.DateRange)")
     [void]$lines.Add("# Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') by $(Get-ReportsCleanUser) on $env:COMPUTERNAME")
     if ($Week.Stale) {
@@ -2269,12 +2278,12 @@ function Export-WeeklyToCsvText {
     [void]$lines.Add('')
     [void]$lines.Add('"SCAN","CATEGORY","OWNER","GOOD","BAD","CRIT","HIGH","MED","LOW","TOTAL VULNS","TOTAL IPS","LIMBO","VPH","AR %"')
     foreach ($s in $Week.Scans) {
-        $nm = (& $guard $s.Name) -replace '"','""'
-        $cat = (& $guard $s.Category) -replace '"','""'
-        $vphStr = if ([double]::IsNaN($s.Vph))   { 'N/A' } else { $s.Vph.ToString('0.00') }
-        $arStr  = if ([double]::IsNaN($s.ArPct)) { 'N/A' } else { ($s.ArPct.ToString('0.00') + '%') }
-        $own = if ($s.Owner) { (& $guard $s.Owner) -replace '"','""' } else { '' }
-        [void]$lines.Add("`"$nm`",`"$cat`",`"$own`",$($s.Good),$($s.Bad),$($s.Crit),$($s.High),$($s.Med),$($s.Low),$($s.TotalVulns),$($s.TotalIps),$($s.LimboIps),`"$vphStr`",`"$arStr`"")
+        $nm  = ConvertTo-ReportsCsvCell $s.Name
+        $cat = ConvertTo-ReportsCsvCell $s.Category
+        $vphStr = Format-AcasNumber $s.Vph '0.00'
+        $arStr  = Format-AcasPercent $s.ArPct
+        $own = if ($s.Owner) { ConvertTo-ReportsCsvCell $s.Owner } else { '' }
+        [void]$lines.Add("$nm,$cat,$own,$($s.Good),$($s.Bad),$($s.Crit),$($s.High),$($s.Med),$($s.Low),$($s.TotalVulns),$($s.TotalIps),$($s.LimboIps),$vphStr,$arStr")
     }
     [void]$lines.Add('')
     [void]$lines.Add('# === BY CATEGORY ===')
@@ -2282,10 +2291,10 @@ function Export-WeeklyToCsvText {
     $cats = Get-WeeklyCategoryMetrics -Week $Week
     foreach ($k in ($cats.Keys | Sort-Object)) {
         $c = $cats[$k]
-        $ccat = (& $guard $c.Category) -replace '"','""'
-        $vphStr = if ([double]::IsNaN($c.Vph))   { 'N/A' } else { $c.Vph.ToString('0.00') }
-        $arStr  = if ([double]::IsNaN($c.ArPct)) { 'N/A' } else { ($c.ArPct.ToString('0.00') + '%') }
-        [void]$lines.Add("`"$ccat`",$($c.ScanCount),$($c.Good),$($c.Bad),$($c.TotalVulns),$($c.TotalIps),`"$vphStr`",`"$arStr`"")
+        $ccat = ConvertTo-ReportsCsvCell $c.Category
+        $vphStr = Format-AcasNumber $c.Vph '0.00'
+        $arStr  = Format-AcasPercent $c.ArPct
+        [void]$lines.Add("$ccat,$($c.ScanCount),$($c.Good),$($c.Bad),$($c.TotalVulns),$($c.TotalIps),$vphStr,$arStr")
     }
     [void]$lines.Add('')
     [void]$lines.Add('# === PMO BREAKDOWN BY OWNER ===')
@@ -2293,10 +2302,10 @@ function Export-WeeklyToCsvText {
     $owners = Get-WeeklyPmoOwnerMetrics -Week $Week
     foreach ($k in ($owners.Keys | Sort-Object)) {
         $o = $owners[$k]
-        $oown = (& $guard $o.Owner) -replace '"','""'
-        $vphStr = if ([double]::IsNaN($o.Vph)) { 'N/A' } else { $o.Vph.ToString('0.00') }
-        $names  = (& $guard ($o.ScanNames -join ' | ')) -replace '"','""'
-        [void]$lines.Add("`"$oown`",$($o.ScanCount),$($o.Good),$($o.Bad),$($o.TotalVulns),$($o.TotalIps),`"$vphStr`",`"$names`"")
+        $oown = ConvertTo-ReportsCsvCell $o.Owner
+        $vphStr = Format-AcasNumber $o.Vph '0.00'
+        $names  = ConvertTo-ReportsCsvCell ($o.ScanNames -join ' | ')
+        [void]$lines.Add("$oown,$($o.ScanCount),$($o.Good),$($o.Bad),$($o.TotalVulns),$($o.TotalIps),$vphStr,$names")
     }
     [void]$lines.Add('')
     [void]$lines.Add('# === ROLLUP ROWS ===')
@@ -2307,9 +2316,9 @@ function Export-WeeklyToCsvText {
     )) {
         $r = $pair.Row
         if (-not $r) { continue }
-        $vphStr = if ([double]::IsNaN($r.Vph))   { 'N/A' } else { $r.Vph.ToString('0.00') }
-        $arStr  = if ([double]::IsNaN($r.ArPct)) { 'N/A' } else { ($r.ArPct.ToString('0.00') + '%') }
-        [void]$lines.Add("`"$($pair.Label)`",$($r.Good),$($r.Bad),$($r.Crit),$($r.High),$($r.Med),$($r.Low),$($r.TotalVulns),$($r.TotalIps),$($r.LimboIps),`"$vphStr`",`"$arStr`"")
+        $vphStr = Format-AcasNumber $r.Vph '0.00'
+        $arStr  = Format-AcasPercent $r.ArPct
+        [void]$lines.Add("$(ConvertTo-ReportsCsvCell $pair.Label),$($r.Good),$($r.Bad),$($r.Crit),$($r.High),$($r.Med),$($r.Low),$($r.TotalVulns),$($r.TotalIps),$($r.LimboIps),$vphStr,$arStr")
     }
     return ($lines -join "`r`n")
 }
@@ -3387,17 +3396,13 @@ $rowsBlock
 function Export-Dirty30CsvText {
     # CSV export string of the merged Dirty 30 + AD + probe data.
     $lines = New-Object System.Collections.ArrayList
-    # Neutralize spreadsheet formula injection: a quoted text cell whose value
-    # begins with = + - @ (or a leading tab/CR) is treated by Excel/Sheets as a
-    # formula. Prefix such values with a single quote so they render as literal
-    # text. Values without a dangerous leading char are returned unchanged, so
-    # the normal path is byte-for-byte identical to before.
-    $guard = {
-        param($Cell)
-        $s = [string]$Cell
-        if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { return "'" + $s }
-        return $s
-    }
+    # Neutralize spreadsheet formula injection via the canonical
+    # ConvertTo-ReportsCsvCell (guard + RFC-4180 quote-when-needed).
+    # audit 2026-07-23: the hand-rolled guard + per-cell quote-doubling collapsed
+    # onto the helper. Strict improvement: Squadron / Status / Last AD Logon
+    # previously skipped the quote-doubling entirely, so an embedded " could
+    # corrupt the row; the helper doubles quotes on every cell. Cells with no
+    # comma/quote/newline are no longer force-quoted - the parsed CSV is unchanged.
     [void]$lines.Add("# Dirty 30 Triage - Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') by $(Get-ReportsCleanUser) on $env:COMPUTERNAME")
     if ($script:Dirty30SourceLabel) { [void]$lines.Add("# Source: $($script:Dirty30SourceLabel)") }
     [void]$lines.Add('')
@@ -3405,15 +3410,15 @@ function Export-Dirty30CsvText {
     foreach ($d30h in $script:Dirty30Hosts) {
         $ad = $script:Dirty30AdResults[$d30h.Hostname]
         $lastUser = if ($script:Dirty30LastUserMap.ContainsKey($d30h.Hostname)) { $script:Dirty30LastUserMap[$d30h.Hostname] } elseif ($ad) { $ad.LastUser } else { '' }
-        $lastUser = (& $guard $lastUser) -replace '"','""'
-        $sq = if ($ad) { (& $guard $ad.Squadron) } else { '?' }
-        $ou = if ($ad) { ((& $guard $ad.OUChain) -replace '"','""') } else { '' }
-        $loc = if ($ad -and $ad.PSObject.Properties['LocationInfo']) { ((& $guard $ad.LocationInfo) -replace '"','""') } else { '' }
-        $st = if ($ad) { (& $guard $ad.Status) } else { 'Unknown' }
-        $ll = if ($ad) { (& $guard $ad.LastLogon) } else { '' }
-        $hn = (& $guard $d30h.Hostname) -replace '"','""'
-        $ip = (& $guard $d30h.IP) -replace '"','""'
-        [void]$lines.Add("`"$hn`",`"$ip`",$($d30h.Score),$($d30h.Crit),$($d30h.High),$($d30h.Med),$($d30h.Low),`"$ll`",`"$lastUser`",`"$sq`",`"$loc`",`"$ou`",`"$st`",`"`"")
+        $lastUser = ConvertTo-ReportsCsvCell $lastUser
+        $sq = ConvertTo-ReportsCsvCell $(if ($ad) { $ad.Squadron } else { '?' })
+        $ou = ConvertTo-ReportsCsvCell $(if ($ad) { $ad.OUChain } else { '' })
+        $loc = ConvertTo-ReportsCsvCell $(if ($ad -and $ad.PSObject.Properties['LocationInfo']) { $ad.LocationInfo } else { '' })
+        $st = ConvertTo-ReportsCsvCell $(if ($ad) { $ad.Status } else { 'Unknown' })
+        $ll = ConvertTo-ReportsCsvCell $(if ($ad) { $ad.LastLogon } else { '' })
+        $hn = ConvertTo-ReportsCsvCell $d30h.Hostname
+        $ip = ConvertTo-ReportsCsvCell $d30h.IP
+        [void]$lines.Add("$hn,$ip,$($d30h.Score),$($d30h.Crit),$($d30h.High),$($d30h.Med),$($d30h.Low),$ll,$lastUser,$sq,$loc,$ou,$st,")
     }
     return ($lines -join "`r`n")
 }
@@ -4462,7 +4467,14 @@ function Invoke-JanetToolAction {
             $outPath = [string]$Params['OutputPath']
             $written = ''; $writeErr = $null
             if ($outPath) {
-                try { [System.IO.File]::WriteAllText($outPath, $html, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                # audit 2026-07-23: TCP-445 pre-gate (same idiom as weekly-render-html) so a
+                # dead UNC share fails fast instead of hanging the serialized reports runspace.
+                if (Test-JanetUncReachable -Path $outPath) {
+                    try { [System.IO.File]::WriteAllText($outPath, $html, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                } else {
+                    $writeErr = 'output share unreachable (ping/TCP-445 failed)'
+                    & $send @{ type='log'; level='err'; text="Output share unreachable (ping/TCP-445 failed): $outPath" }
+                }
                 if ($written) { & $send @{ type='audit'; action='TouchHost'; target=(Split-Path -Leaf $outPath); result='Success'; itemCount=$script:Dirty30Hosts.Count; detail="Dirty 30 HTML report written ($bytes bytes, $($script:Dirty30Hosts.Count) host(s))" } }
                 else { & $send @{ type='audit'; action='TouchHost'; target=$outPath; result='Failure'; itemCount=0; detail="HTML report write failed: $writeErr" } }
             }
@@ -4483,7 +4495,14 @@ function Invoke-JanetToolAction {
             $outPath = [string]$Params['OutputPath']
             $written = ''; $writeErr = $null
             if ($outPath) {
-                try { [System.IO.File]::WriteAllText($outPath, $csv, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                # audit 2026-07-23: TCP-445 pre-gate (same idiom as weekly-render-html) so a
+                # dead UNC share fails fast instead of hanging the serialized reports runspace.
+                if (Test-JanetUncReachable -Path $outPath) {
+                    try { [System.IO.File]::WriteAllText($outPath, $csv, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                } else {
+                    $writeErr = 'output share unreachable (ping/TCP-445 failed)'
+                    & $send @{ type='log'; level='err'; text="Output share unreachable (ping/TCP-445 failed): $outPath" }
+                }
                 if ($written) { & $send @{ type='audit'; action='TouchHost'; target=(Split-Path -Leaf $outPath); result='Success'; itemCount=$script:Dirty30Hosts.Count; detail="Dirty 30 CSV written ($bytes bytes, $($script:Dirty30Hosts.Count) host(s))" } }
                 else { & $send @{ type='audit'; action='TouchHost'; target=$outPath; result='Failure'; itemCount=0; detail="CSV write failed: $writeErr" } }
             }
@@ -4795,7 +4814,14 @@ function Invoke-JanetToolAction {
             $outPath = [string]$Params['OutputPath']
             $written = ''; $writeErr = $null
             if ($outPath) {
-                try { [System.IO.File]::WriteAllText($outPath, $html, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                # audit 2026-07-23: TCP-445 pre-gate (same idiom as weekly-render-html) so a
+                # dead UNC share fails fast instead of hanging the serialized reports runspace.
+                if (Test-JanetUncReachable -Path $outPath) {
+                    try { [System.IO.File]::WriteAllText($outPath, $html, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                } else {
+                    $writeErr = 'output share unreachable (ping/TCP-445 failed)'
+                    & $send @{ type='log'; level='err'; text="Output share unreachable (ping/TCP-445 failed): $outPath" }
+                }
                 if ($written) { & $send @{ type='audit'; action='TouchHost'; target=(Split-Path -Leaf $outPath); result='Success'; itemCount=$summary.UniqueHosts; detail="CORA commander brief written ($bytes bytes, $($summary.UniqueHosts) host(s))" } }
                 else { & $send @{ type='audit'; action='TouchHost'; target=$outPath; result='Failure'; itemCount=0; detail="CORA HTML write failed: $writeErr" } }
             }
@@ -4894,28 +4920,32 @@ function Invoke-JanetToolAction {
             foreach ($f in $script:AcasFindings) {
                 if ($f.Status -eq 'Patched') { continue }
                 $totalOpen++
-                $vn = ($f.VulnName -as [string]).ToLower()
                 # Promote genuine unquoted-service-path findings (by vuln name/solution)
                 # into their own routable bucket - the broad 'Registry Fix' category is
                 # otherwise NOT safe to run the ImagePath-mutating profile against, so it
                 # falls through to manual review (no route map entry).
-                $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
-                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' }
-                          elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' }
-                          else { [string]$f.Category }
-                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                # audit 2026-07-23: classifier extracted to Get-ReportsRouteBucket (was
+                # copy-pasted across five actions).
+                $bucket = Get-ReportsRouteBucket $f
                 if (-not $buckets.ContainsKey($bucket)) {
                     $buckets[$bucket] = @{
                         Bucket       = $bucket
                         FindingCount = 0
                         Hosts        = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
+                        HostKeys     = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
                         Plugins      = New-Object System.Collections.ArrayList
                         PluginSeen   = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
                     }
                 }
                 $b = $buckets[$bucket]
                 $b.FindingCount++
-                if (-not [string]::IsNullOrWhiteSpace([string]$f.Hostname)) { [void]$b.Hosts.Add([string]$f.Hostname) }
+                # audit 2026-07-23: HostCount counts DISTINCT hosts on the normalized audit
+                # key (short+FQDN of one host = one, like the sibling rollups); the raw-name
+                # Hosts set stays as-is for the display list + Send-to-tool handoff.
+                if (-not [string]::IsNullOrWhiteSpace([string]$f.Hostname)) {
+                    [void]$b.Hosts.Add([string]$f.Hostname)
+                    [void]$b.HostKeys.Add((Get-ReportsAuditHostKey ([string]$f.Hostname)))
+                }
                 $plgId = [string]$f.PluginID
                 if (-not [string]::IsNullOrWhiteSpace($plgId) -and $b.PluginSeen.Add($plgId)) { [void]$b.Plugins.Add($plgId) }
             }
@@ -4960,7 +4990,7 @@ function Invoke-JanetToolAction {
                     ActionId      = $(if ($isAct) { $route.ActionId } else { '' })
                     Profile       = $(if ($isAct -and $route.Profile) { $route.Profile } else { '-' })
                     FindingCount  = $b.FindingCount
-                    HostCount     = $hostList.Count
+                    HostCount     = $b.HostKeys.Count        # audit 2026-07-23: distinct normalized hosts (see above)
                     Hosts         = ($hostList -join "`n")   # full list for the view's Send-to-tool handoff
                     HostsDisplay  = $hostsDisplay
                     SamplePlugins = $sampleStr
@@ -4994,22 +5024,24 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             & $send @{ type='status'; text='Building per-host remediation work queue...' }
-            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
-            $hosts = @{}   # hostname -> aggregate
+            # audit 2026-07-23: the unused local $sevRank copy is gone (severity here is
+            # tallied by the switch below); the shared map lives at $script:SeverityRank.
+            $hosts = @{}   # normalized host key -> aggregate
             $totalOpen = 0
             foreach ($f in $script:AcasFindings) {
                 if ($f.Status -eq 'Patched') { continue }
                 $hn = [string]$f.Hostname
                 if ([string]::IsNullOrWhiteSpace($hn)) { continue }
                 $totalOpen++
-                $vn = ($f.VulnName -as [string]).ToLower()
-                $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
-                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' }
-                          elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' }
-                          else { [string]$f.Category }
-                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
-                if (-not $hosts.ContainsKey($hn)) {
-                    $hosts[$hn] = @{
+                # audit 2026-07-23: classifier extracted to Get-ReportsRouteBucket (was
+                # copy-pasted across five actions).
+                $bucket = Get-ReportsRouteBucket $f
+                # audit 2026-07-23: ONE work-queue row per physical host - key on the
+                # normalized audit key (short+FQDN of one host fold to one, like the
+                # sibling rollups); Host keeps the first-seen raw name for display.
+                $hk = Get-ReportsAuditHostKey $hn
+                if (-not $hosts.ContainsKey($hk)) {
+                    $hosts[$hk] = @{
                         Host=$hn; Findings=0; Crit=0; High=0; Med=0; Low=0; Kev=0
                         Routable=0; Manual=0; Exception=0
                         Routes = New-Object System.Collections.ArrayList        # ordered distinct route labels
@@ -5018,7 +5050,7 @@ function Invoke-JanetToolAction {
                         ExceptionBuckets = New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)
                     }
                 }
-                $h = $hosts[$hn]
+                $h = $hosts[$hk]
                 $h.Findings++
                 switch ([string]$f.Severity) { 'Critical' { $h.Crit++ } 'High' { $h.High++ } 'Medium' { $h.Med++ } 'Low' { $h.Low++ } }
                 if ([bool]$f.InKEV) { $h.Kev++ }
@@ -5083,7 +5115,7 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             & $send @{ type='status'; text='Extracting KB ids from the loaded findings...' }
-            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $sevRank = $script:SeverityRank   # audit 2026-07-23: shared module-scope map
             $kbMap = @{}                 # KB -> aggregate
             $perHost = @{}               # host -> HashSet of KBs (for the WPT handoff)
             $openFindings = 0; $withKb = 0; $noKb = 0
@@ -5170,7 +5202,7 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             & $send @{ type='status'; text='Cataloging third-party (non-KB) products from the loaded findings...' }
-            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $sevRank = $script:SeverityRank   # audit 2026-07-23: shared module-scope map
             $prodMap = @{}                 # product -> aggregate
             $allHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $thirdPartyFindings = 0; $unclassified = 0
@@ -5184,12 +5216,9 @@ function Invoke-JanetToolAction {
                 if ([string]::IsNullOrWhiteSpace($product)) { $unclassified++; continue }
                 # Route via the SAME bucket mapping the Router / Planner use (Defender
                 # + unquoted-service-path promotion, else the finding's Category).
-                $vn = ($f.VulnName -as [string]).ToLower()
-                $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
-                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' }
-                          elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' }
-                          else { [string]$f.Category }
-                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                # audit 2026-07-23: classifier extracted to Get-ReportsRouteBucket (was
+                # copy-pasted across five actions).
+                $bucket = Get-ReportsRouteBucket $f
                 $route = if ($script:RemediationRouteMap.ContainsKey($bucket)) { $script:RemediationRouteMap[$bucket] } else { $null }
                 $hn = [string]$f.Hostname
                 $sev = [string]$f.Severity
@@ -5197,13 +5226,21 @@ function Invoke-JanetToolAction {
                 if (-not $prodMap.ContainsKey($product)) {
                     $entry = @{ Product = $product; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false; MaxVer = $null; MaxVerText = '' }
                     $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $entry.HostKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
                     $entry.RouteCounts = @{}      # route label -> finding count (route = plurality)
                     $entry.RouteObjs   = @{}      # route label -> structured route ($null for manual/none)
                     $prodMap[$product] = $entry
                 }
                 $p = $prodMap[$product]
                 $p.Findings = [int]$p.Findings + 1
-                if ($hn) { [void]$p.Hosts.Add($hn); [void]$allHosts.Add($hn) }
+                # audit 2026-07-23: host COUNTS key on the normalized audit key (short+FQDN
+                # of one host = one, like the sibling rollups); the raw-name Hosts set stays
+                # for the HostsList handoff below.
+                if ($hn) {
+                    [void]$p.Hosts.Add($hn)
+                    [void]$p.HostKeys.Add((Get-ReportsAuditHostKey $hn))
+                    [void]$allHosts.Add((Get-ReportsAuditHostKey $hn))
+                }
                 if ($isKev) { $p.Kev = $true }
                 $rank = if ($sevRank.ContainsKey($sev)) { $sevRank[$sev] } else { 0 }
                 if ($rank -gt $p.MaxSev) { $p.MaxSev = $rank; $p.SevName = $sev }
@@ -5231,7 +5268,7 @@ function Invoke-JanetToolAction {
             # Rank: KEV first, then most hosts, then worst severity (supersedence-style).
             $ordered = @($prodMap.Values | Sort-Object -Property `
                 @{ Expression = { [bool]$_.Kev }; Descending = $true }, `
-                @{ Expression = { $_.Hosts.Count }; Descending = $true }, `
+                @{ Expression = { $_.HostKeys.Count }; Descending = $true }, `
                 @{ Expression = { $_.MaxSev }; Descending = $true }, `
                 @{ Expression = { $_.Product } })
             $rows = New-Object System.Collections.ArrayList
@@ -5256,7 +5293,7 @@ function Invoke-JanetToolAction {
                 $bestRoute = if ($p.RouteObjs.ContainsKey($bestLabel)) { $p.RouteObjs[$bestLabel] } else { $null }
                 $hostList  = @($p.Hosts | Sort-Object)
                 $row = @{
-                    _rk=$p.Product; Product=$p.Product; Hosts=$p.Hosts.Count
+                    _rk=$p.Product; Product=$p.Product; Hosts=$p.HostKeys.Count   # audit 2026-07-23: distinct normalized hosts
                     Severity=$(if ($p.SevName) { $p.SevName } else { 'n/a' })
                     KEV=$(if ($p.Kev) { 'KEV' } else { '' })
                     FixedVersion=$(if ($p.MaxVerText) { $p.MaxVerText } else { '-' })
@@ -5298,7 +5335,7 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             & $send @{ type='status'; text='Rolling the loaded findings up by IAVA/IAVM bulletin...' }
-            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $sevRank = $script:SeverityRank   # audit 2026-07-23: shared module-scope map
             $iavaMap = @{}                 # IAVA -> aggregate
             $allHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $findingsWithIava = 0; $findingsNoIava = 0
@@ -5307,7 +5344,10 @@ function Invoke-JanetToolAction {
                 $iava = ([string]$f.IAVA).Trim()
                 if ([string]::IsNullOrWhiteSpace($iava)) { $findingsNoIava++; continue }
                 $findingsWithIava++
-                $hn = [string]$f.Hostname
+                # audit 2026-07-23: host tallies (count-only here - no display list) key on
+                # the normalized audit key so short+FQDN of one host counts once, agreeing
+                # with the sibling rollups.
+                $hn = Get-ReportsAuditHostKey ([string]$f.Hostname)
                 $sev = [string]$f.Severity
                 $isKev = [bool]$f.InKEV
                 if (-not $iavaMap.ContainsKey($iava)) {
@@ -5383,9 +5423,7 @@ function Invoke-JanetToolAction {
                 [void]$keys.Add("$(Get-ReportsAuditHostKey $hn)|$($f.PluginID)")
                 switch ([string]$f.Severity) { 'Critical' { $crit++ } 'High' { $high++ } 'Medium' { $med++ } 'Low' { $low++ } }
                 if ([bool]$f.InKEV) { $kev++ }
-                $vn = ($f.VulnName -as [string]).ToLower(); $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
-                $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' } elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' } else { [string]$f.Category }
-                if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                $bucket = Get-ReportsRouteBucket $f   # audit 2026-07-23: extracted classifier (was copy-pasted across five actions)
                 $r = if ($script:RemediationRouteMap.ContainsKey($bucket)) { $script:RemediationRouteMap[$bucket] } else { $null }
                 if (Test-JanetWebRouteActionable $r) {
                     [void]$routes.Add($(if ($r.Profile) { "$($r.ToolId): $($r.Profile)" } else { "$($r.ToolId): $($r.Action)" }))
@@ -6091,7 +6129,11 @@ function Invoke-JanetToolAction {
             & $send @{ type='status'; text="Building per-host summary over $($script:AcasFindings.Count) finding(s)..." }
             $perHost = @{}
             foreach ($f in $script:AcasFindings) {
-                $h = $f.Hostname
+                # audit 2026-07-23 (BUG): tally on the normalized audit key like every
+                # sibling rollup (CORA / sla-aging) - keying on the RAW hostname split a
+                # short+FQDN pair of ONE host into two rows and halved its PatchRate.
+                # Rows display the normalized key, matching sla-aging / CORA.
+                $h = Get-ReportsAuditHostKey ([string]$f.Hostname)
                 if (-not $perHost.ContainsKey($h)) {
                     $perHost[$h] = @{ Total=0; Critical=0; High=0; Medium=0; Low=0; Info=0; Patched=0; NotOurs=0; Kev=0 }
                 }
@@ -6160,16 +6202,10 @@ function Invoke-JanetToolAction {
             $cLedgerCarried = 0
 
             $today = (Get-Date).Date
-            # Neutralize spreadsheet formula injection (audit#5): a cell beginning with
-            # = + - @ tab CR is evaluated as a formula by Excel/Sheets; prefix a single
-            # quote so scanner free-text (VulnName/IAVA/CVE) renders as literal text -
-            # same guard the sibling exporters carry.
-            $csvQ = {
-                param($v)
-                $s = [string]$v
-                if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
-                if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s }
-            }
+            # Neutralize spreadsheet formula injection (audit#5): scanner free-text
+            # (VulnName/IAVA/CVE) goes through the canonical ConvertTo-ReportsCsvCell.
+            # audit 2026-07-23: the hand-rolled guard+quote scriptblock collapsed onto
+            # the helper (identical behavior, byte-for-byte output).
             $sb = New-Object System.Text.StringBuilder
             [void]$sb.AppendLine('Host,Plugin,VulnName,Severity,KEV,IAVA,CVE,FirstSeen,AgeDays,DueInDays,Deadline,Bucket')
 
@@ -6236,9 +6272,9 @@ function Invoke-JanetToolAction {
                 [void]$rows.Add($row)
                 & $send (@{ type='row' } + $row)
                 [void]$sb.AppendLine((@(
-                    (& $csvQ $hn), (& $csvQ $f.PluginID), (& $csvQ $f.VulnName), (& $csvQ $f.Severity),
-                    (& $csvQ $(if ($inKev) { 'KEV' } else { '' })), (& $csvQ $iava), (& $csvQ $f.CVE), (& $csvQ $fsDisplay),
-                    (& $csvQ $age), (& $csvQ $dueIn), (& $csvQ $deadline), (& $csvQ $bucket)
+                    (ConvertTo-ReportsCsvCell $hn), (ConvertTo-ReportsCsvCell $f.PluginID), (ConvertTo-ReportsCsvCell $f.VulnName), (ConvertTo-ReportsCsvCell $f.Severity),
+                    (ConvertTo-ReportsCsvCell $(if ($inKev) { 'KEV' } else { '' })), (ConvertTo-ReportsCsvCell $iava), (ConvertTo-ReportsCsvCell $f.CVE), (ConvertTo-ReportsCsvCell $fsDisplay),
+                    (ConvertTo-ReportsCsvCell $age), (ConvertTo-ReportsCsvCell $dueIn), (ConvertTo-ReportsCsvCell $deadline), (ConvertTo-ReportsCsvCell $bucket)
                 ) -join ','))
             }
             & $send @{ type='progress'; done=$total; total=$total }
@@ -6276,13 +6312,9 @@ function Invoke-JanetToolAction {
             $today = (Get-Date).Date
             # DISA CAT mapping from ACAS severity (Critical=CAT I, High=CAT II, Med/Low=CAT III).
             $catOf = { param($sev) switch ([string]$sev) { 'Critical' { 'CAT I' } 'High' { 'CAT II' } 'Medium' { 'CAT III' } 'Low' { 'CAT III' } 'Info' { 'CAT III' } default { 'CAT III' } } }
-            # Formula-injection-guarded CSV cell (audit#5 pattern).
-            $csvQ = {
-                param($v)
-                $s = [string]$v
-                if ($s.Length -gt 0 -and ('=','+','-','@',"`t","`r") -contains $s[0]) { $s = "'" + $s }
-                if ($s -match '[",\r\n]') { '"' + ($s -replace '"','""') + '"' } else { $s }
-            }
+            # Formula-injection-guarded CSV cells via the canonical ConvertTo-ReportsCsvCell
+            # (audit 2026-07-23: the hand-rolled audit#5-pattern scriptblock collapsed onto
+            # the helper - identical behavior, byte-for-byte output).
             $cols = @(
                 'Control Vulnerability Description','Security Control Number (NIST 800-53)','CCI','Office/Org',
                 'Security Checks','Resources Required','Scheduled Completion Date','Milestones with Completion Dates',
@@ -6292,14 +6324,14 @@ function Invoke-JanetToolAction {
                 'Resulting Residual Risk after Proposed Mitigations','Finding Details','Host','Finding Number'
             )
             $sb = New-Object System.Text.StringBuilder
-            [void]$sb.AppendLine((($cols | ForEach-Object { & $csvQ $_ }) -join ','))
+            [void]$sb.AppendLine((($cols | ForEach-Object { ConvertTo-ReportsCsvCell $_ }) -join ','))
 
             $operator = ''   # Office/Org - left blank for the ISSM/ISSO to fill on submission
             $rows = New-Object System.Collections.ArrayList
             $perHostCounter = @{}
             $nOpen = 0; $nKev = 0; $nOverdue = 0
             # Open findings only, worst-severity first, then KEV, then host.
-            $sevRank = @{ 'Critical'=4; 'High'=3; 'Medium'=2; 'Low'=1; 'Info'=0 }
+            $sevRank = $script:SeverityRank   # audit 2026-07-23: shared module-scope map
             $open = @($script:AcasFindings | Where-Object { $_.Status -ne 'Patched' -and $_.Status -ne 'NOT OUR PATCH' -and $_.Category -ne 'NOT OUR PATCH' })
             $open = @($open | Sort-Object -Property `
                 @{ Expression = { if ($sevRank.ContainsKey([string]$_.Severity)) { $sevRank[[string]$_.Severity] } else { 0 } }; Descending = $true }, `
@@ -6347,7 +6379,7 @@ function Invoke-JanetToolAction {
                     '', '', [string]$f.Solution,
                     '', ("CVE(s): " + [string]$f.CVE), $hn, [string]$perHostCounter[$hnKey]
                 )
-                [void]$sb.AppendLine((($cellVals | ForEach-Object { & $csvQ $_ }) -join ','))
+                [void]$sb.AppendLine((($cellVals | ForEach-Object { ConvertTo-ReportsCsvCell $_ }) -join ','))
                 if ($nOpen -le 500) {
                     $row = @{ Host=$hn; Finding=[string]$f.VulnName; Severity=[string]$f.Severity; CAT=$cat; Status='Ongoing'; ScheduledCompletion=$schedDate; KEV=$(if ($isKev) { 'KEV' } else { '' }) }
                     [void]$rows.Add($row); & $send (@{ type='row' } + $row)
@@ -7175,15 +7207,15 @@ function Invoke-JanetToolAction {
                 foreach ($f in $script:AcasFindings) {
                     if ($f.Status -eq 'Patched') { continue }
                     $totalOpen++
-                    $vn = ($f.VulnName -as [string]).ToLower()
-                    $vnSol = "$vn $(($f.Solution -as [string]).ToLower())"
-                    $bucket = if ($vn -match 'defender|microsoft security essentials|antimalware') { 'Defender' }
-                              elseif ($vnSol -match 'unquoted service path') { 'Unquoted Service Path' }
-                              else { [string]$f.Category }
-                    if ([string]::IsNullOrWhiteSpace($bucket)) { $bucket = 'Other' }
+                    # audit 2026-07-23: classifier extracted to Get-ReportsRouteBucket (was
+                    # copy-pasted across five actions); the count-only Hosts set keys on the
+                    # normalized audit key so short+FQDN of one host counts once, agreeing
+                    # with the KEV section above and the sibling rollups.
+                    $bucket = Get-ReportsRouteBucket $f
                     if (-not $rbuckets.ContainsKey($bucket)) { $rbuckets[$bucket] = @{ Bucket=$bucket; FindingCount=0; Hosts=(New-Object 'System.Collections.Generic.HashSet[string]'([System.StringComparer]::OrdinalIgnoreCase)) } }
                     $b = $rbuckets[$bucket]; $b.FindingCount++
-                    if (-not [string]::IsNullOrWhiteSpace([string]$f.Hostname)) { [void]$b.Hosts.Add([string]$f.Hostname) }
+                    $bhk = Get-ReportsAuditHostKey ([string]$f.Hostname)
+                    if (-not [string]::IsNullOrWhiteSpace($bhk)) { [void]$b.Hosts.Add($bhk) }
                 }
                 $agg = New-Object System.Collections.ArrayList
                 foreach ($key in $rbuckets.Keys) {
@@ -7237,7 +7269,14 @@ function Invoke-JanetToolAction {
             $outPath = [string]$Params['OutputPath']
             $written = ''; $writeErr = $null
             if ($outPath) {
-                try { [System.IO.File]::WriteAllText($outPath, $html, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                # audit 2026-07-23: TCP-445 pre-gate (same idiom as weekly-render-html) so a
+                # dead UNC share fails fast instead of hanging the serialized reports runspace.
+                if (Test-JanetUncReachable -Path $outPath) {
+                    try { [System.IO.File]::WriteAllText($outPath, $html, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                } else {
+                    $writeErr = 'output share unreachable (ping/TCP-445 failed)'
+                    & $send @{ type='log'; level='err'; text="Output share unreachable (ping/TCP-445 failed): $outPath" }
+                }
                 if ($written) { & $send @{ type='audit'; action='TouchHost'; target=(Split-Path -Leaf $outPath); result='Success'; itemCount=$sectionsWithData; detail="Executive command brief written ($bytes bytes, $sectionsWithData/6 sections populated)" } }
                 else { & $send @{ type='audit'; action='TouchHost'; target=$outPath; result='Failure'; itemCount=0; detail="Command brief write failed: $writeErr" } }
             }
@@ -7271,6 +7310,14 @@ function Invoke-JanetToolAction {
             if ([string]::IsNullOrWhiteSpace($outDir)) { $outDir = Join-Path $PSScriptRoot '..\JanetLocal\digests' }
             $title = ([string]$Params['title']).Trim()
             if ([string]::IsNullOrWhiteSpace($title)) { $title = 'Posture Digest' }
+
+            # audit 2026-07-23: TCP-445 pre-gate (same idiom as weekly-render-html) BEFORE
+            # the Test-Path/mkdir below - outDir can be a UNC audit share, and a dead share
+            # would otherwise hang the serialized reports runspace mid-snapshot.
+            if (-not (Test-JanetUncReachable -Path $outDir)) {
+                & $send @{ type='error'; text="Output share unreachable (ping/TCP-445 failed): $outDir" }
+                return @{ rows=@(); summary=@{ ok=$false; error='output share unreachable (ping/TCP-445 failed)' } }
+            }
 
             try {
                 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }

@@ -121,6 +121,11 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
                 if ($t -match 'doBypass')      { [void]$script:__calls.Add('PIN'); if ($script:__pinx) { throw 'Access is denied (policy write)' }; return 'ProductVersion=Windows 11; TargetReleaseVersionInfo=24H2' }
                 return $null
             }
+            # audit 2026-07-23: the drive branch now opens ONE reusable PSSession for its
+            # pin/trigger/re-read/reboot dials (the InstallCab pattern) - shim the session
+            # cmdlets too so no real WinRM is ever dialed.
+            function script:New-PSSession { param($ComputerName,$Authentication,$SessionOption,$ErrorAction,$Credential,$UseSSL) return [pscustomobject]@{ ComputerName = $ComputerName } }
+            function script:Remove-PSSession { param($Session,$ErrorAction) }
             try {
                 $argl = @(
                     $Computer,'UpgradeDrive',$null,'Windows 11','24H2',
@@ -134,6 +139,8 @@ Describe 'upgrade-drive worker end to end (shimmed Invoke-Command - no real WinR
                 return @{ Row = $row; Calls = @($script:__calls); RebootCd = $script:__rbcd }
             } finally {
                 Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue
+                Remove-Item function:script:New-PSSession -ErrorAction SilentlyContinue
+                Remove-Item function:script:Remove-PSSession -ErrorAction SilentlyContinue
                 Remove-Variable -Name __ob,__rep,__st,__pinx,__calls,__rbcd -Scope script -ErrorAction SilentlyContinue
             }
         } $Computer $OsBuild $Report $StagedAfter $Bypass $RebootWhenStaged $Countdown $DryRun $PinThrows

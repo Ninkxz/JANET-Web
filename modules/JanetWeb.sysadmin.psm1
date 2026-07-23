@@ -293,8 +293,14 @@ $script:SysadminSweepBlock = {
         return $r
     }
 
+    # audit 2026-07-23: fold the remote computer name into the SAME round-trip
+    # (the biosfirmware one-Invoke-Command idiom) so the DNS-mismatch guard below
+    # costs no extra remote call. The wrapper is rebuilt from the sweep block's
+    # text because a scriptblock cannot ride along as a remoting argument.
+    $wrapped = [scriptblock]::Create('@{ __SweepName = $env:COMPUTERNAME; __SweepData = @(& { ' + $remote.ToString() + ' }) }')
+
     $raw = $null
-    try { $raw = Invoke-Command -Session $sess -ScriptBlock $remote -ErrorAction Stop }
+    try { $raw = Invoke-Command -Session $sess -ScriptBlock $wrapped -ErrorAction Stop }
     catch {
         $r.Error = "Probe: $($_.Exception.Message)"
         $r.Rows = @((& $baseRow $r.Online $r.Error))
@@ -302,6 +308,31 @@ $script:SysadminSweepBlock = {
         try { Remove-PSSession $sess -ErrorAction SilentlyContinue } catch {}
         return $r
     } finally { if ($sess) { try { Remove-PSSession $sess -ErrorAction SilentlyContinue } catch {} } }
+
+    # Unwrap. A shimmed/legacy Invoke-Command may hand back the bare sweep data
+    # (no wrapper); then the name is unknown and the guard is skipped (soft-warn
+    # guard only - never turns a good probe into an error on its own).
+    $remoteName = ''
+    if ($raw -is [System.Collections.IDictionary] -and $raw.Contains('__SweepName')) {
+        $remoteName = ([string]$raw['__SweepName']).Trim()
+        $raw = $raw['__SweepData']
+    }
+
+    # DNS-mismatch guard (read-only soft-warn, copied from biosfirmware; audit
+    # 2026-07-23): a wrong box (stale DNS / reused IP) would report ITS facts
+    # under the dialed name. Session name compare, never PTR. IP-literal targets
+    # skip (no DNS indirection - the box answering at that IP IS the box). On
+    # mismatch, emit a clearly-marked DNS MISMATCH row instead of wrong-box data.
+    $ipLit = $null
+    if ($remoteName -and -not [System.Net.IPAddress]::TryParse($Computer, [ref]$ipLit)) {
+        $targetShort = ($Computer -split '\.')[0]
+        if ($remoteName.ToUpper() -ne $targetShort.ToUpper()) {
+            $r.Error = "DNS MISMATCH: dialed '$targetShort' but remote is '$remoteName' - wrong-box data suppressed"
+            $r.Rows = @((& $baseRow $r.Online $r.Error))
+            $r.Report = "$Computer : DNS MISMATCH - dialed '$targetShort', answered '$remoteName' - skipped"
+            return $r
+        }
+    }
 
     # ---- Build display rows from the raw remote data (server-side) ----
     $rows = New-Object System.Collections.ArrayList

@@ -89,7 +89,9 @@ function ConvertTo-MessageHostList {
 function Get-JanetMessageLocalIdentity {
     # Every identity that names THIS dispatcher host: shortname, FQDN, all NIC IPs,
     # loopback. Case-insensitive HashSet, computed once and cached.
-    if ($script:MessageLocalIdentity) { return $script:MessageLocalIdentity }
+    # Unary comma keeps the HashSet intact through the pipeline so the
+    # OrdinalIgnoreCase comparer survives (parity-ledger row-9; audit 2026-07-23).
+    if ($script:MessageLocalIdentity) { return ,$script:MessageLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -110,7 +112,7 @@ function Get-JanetMessageLocalIdentity {
         }
     } catch {}
     $script:MessageLocalIdentity = $set
-    return $set
+    return ,$set
 }
 
 # True when a target token names THIS dispatcher host (short / FQDN / NIC IP / loopback).

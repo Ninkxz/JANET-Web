@@ -70,7 +70,7 @@
       var run = null, unsub = null;
       var scanRun = null, scanUnsub = null;
       function ts() { return ctx.util.clockStr(); }
-      var esc = (ctx.util && ctx.util.esc) ? ctx.util.esc : function (s) { return String(s == null ? '' : s); };
+      var esc = ctx.util.esc;   // always the real escaper - no unescaping fallback (a trap)
 
       var actlog = C.ActivityLog({ title: 'ACTIVITY LOG', defaultName: 'CertDeploy_ActivityLog' });
 
@@ -270,8 +270,7 @@
       exportBtn.onclick = function () {
         var rows = grid.rows();
         if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a Check or Deploy first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
-        var csv = ctx.util.toCsv(EXPORT_COLS.map(function (p) { return p[1]; }), rows, EXPORT_COLS.map(function (p) { return p[0]; }));
-        ctx.util.downloadBlob('CertDeploy_Results_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv('CertDeploy_Results', EXPORT_COLS, rows);
         actlog.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
       };
 
@@ -288,12 +287,39 @@
         return { hosts: total, ok: okC, missing: miss, errors: err };
       }
 
+      // O(1) running tally for the streamed rows (summarize() per row was O(n^2)).
+      // Rows MUTATE Queued -> terminal via upsert (same Host key), so remember each
+      // host's last-counted bucket and move it between buckets; the authoritative
+      // full summarize() recompute still runs once on active:false (drift-proof).
+      // 'other' = counted in hosts but no bucket (mirrors summarize's fall-through).
+      var tally = { counts: { hosts: 0, ok: 0, missing: 0, errors: 0 }, byHost: {} };
+      function tallyReset() { tally = { counts: { hosts: 0, ok: 0, missing: 0, errors: 0 }, byHost: {} }; }
+      function tallyBucket(status) {
+        var s = String(status);
+        if (s === 'Queued') return null;
+        if (s === 'ALL PRESENT' || s === 'ROOTS INSTALLED' || s === 'ROOTS ALREADY PRESENT') return 'ok';
+        if (s.indexOf('MISSING') === 0 || s === 'FAILED') return 'missing';
+        if (s === 'OFFLINE' || s === 'CHECK ERROR' || s === 'SKIPPED' || s === 'Cancelled') return 'errors';
+        return 'other';
+      }
+      function tallyRow(r) {
+        var k = String(r.Host == null ? '' : r.Host);
+        var b = tallyBucket(r.Status);
+        var prev = tally.byHost[k];
+        if (prev !== b) {
+          if (prev) { tally.counts.hosts--; if (prev !== 'other') tally.counts[prev]--; }
+          if (b) { tally.counts.hosts++; if (b !== 'other') tally.counts[b]++; }
+          tally.byHost[k] = b;
+        }
+        return tally.counts;
+      }
+
       function bindRun(verb, finalNoun) {
         if (unsub) unsub();
         unsub = run.subscribe({
           status: function (t) { prog.setPhase(t); setStatus(t, (String(t) === 'error') ? 'st-bad' : 'st-info'); },
           progress: function (p) { prog.setProgress(p.done, p.total); setStatus('Running... ' + p.done + ' / ' + p.total + ' done', 'st-info'); },
-          row: function (r) { grid.upsert(r); stats.setAll(summarize()); },
+          row: function (r) { grid.upsert(r); stats.setAll(tallyRow(r)); },
           log: function (l) { actlog.append(l); },
           error: function (e) { setStatus((e && e.text) || 'Error', 'st-bad'); actlog.append({ text: '[' + ts() + '] ' + ((e && e.text) || 'error'), level: 'err' }); },
           active: function (a) {
@@ -325,7 +351,7 @@
       function doCheck() {
         if (isRunning()) return;
         var hosts = targets.hosts();
-        grid.clear(); prog.reset(); stats.reset();
+        grid.clear(); prog.reset(); stats.reset(); tallyReset();
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Legacy: '', Detail: 'Queued' }); });
         actlog.append({ text: '[' + ts() + '] Check Trust Certs on ' + hosts.length + ' host(s).', level: 'accent' });
         lockInputs(true);
@@ -378,7 +404,7 @@
           confirmWord: 'DEPLOY', okText: 'Deploy Trust Certs', cancelText: 'Cancel'
         });
         if (!ok) { actlog.append({ text: '[' + ts() + '] Deploy cancelled at the arming dialog.', level: 'warn' }); return; }
-        grid.clear(); prog.reset(); stats.reset();
+        grid.clear(); prog.reset(); stats.reset(); tallyReset();
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Legacy: '', Detail: 'Queued' }); });
         actlog.append({ text: '[' + ts() + '] Deploy Trust Certs on ' + hosts.length + ' host(s) (additive; never removes).', level: 'accent' });
         lockInputs(true);
@@ -408,11 +434,36 @@
         });
         return { total: t, installRoot: ir, gpoManaged: gpo, none: none, offline: off };
       }
+      // O(1) running tally (scanSummarize() per streamed row was O(n^2)). A host can
+      // sit in BOTH the InstallRoot and GPO buckets ('InstallRoot+GPO'), so remember
+      // per-host FLAGS and swap them on mutation (Queued -> result via upsert); every
+      // row (Queued included) counts toward total, mirroring scanSummarize. The
+      // authoritative full scanSummarize() recompute still runs once on active:false.
+      var scanTally = { counts: { total: 0, installRoot: 0, gpoManaged: 0, none: 0, offline: 0 }, byHost: {} };
+      function scanTallyReset() { scanTally = { counts: { total: 0, installRoot: 0, gpoManaged: 0, none: 0, offline: 0 }, byHost: {} }; }
+      function scanFlags(rec) {
+        var s = String(rec == null ? '' : rec);
+        return {
+          installRoot: (s === 'InstallRoot' || s === 'InstallRoot+GPO') ? 1 : 0,
+          gpoManaged: (s === 'GPO' || s === 'InstallRoot+GPO') ? 1 : 0,
+          none: (s === 'None detected') ? 1 : 0,
+          offline: (s === 'OFFLINE') ? 1 : 0
+        };
+      }
+      function scanTallyRow(r) {
+        var k = String(r.Host == null ? '' : r.Host);
+        var f = scanFlags(r.Reconciler);
+        var c = scanTally.counts, prev = scanTally.byHost[k];
+        if (prev) { c.total--; c.installRoot -= prev.installRoot; c.gpoManaged -= prev.gpoManaged; c.none -= prev.none; c.offline -= prev.offline; }
+        c.total++; c.installRoot += f.installRoot; c.gpoManaged += f.gpoManaged; c.none += f.none; c.offline += f.offline;
+        scanTally.byHost[k] = f;
+        return c;
+      }
       function doScanMgmt() {
         if (isRunning()) return;
         var hosts = targets.hosts();
-        scanGrid.clear(); scanProg.reset(); scanStats.reset();
-        hosts.forEach(function (h) { scanGrid.upsert({ Host: h, Ping: '', InstallRoot: '', GPRoots: '', Reconciler: 'Queued', Detail: 'Queued' }); });
+        scanGrid.clear(); scanProg.reset(); scanStats.reset(); scanTallyReset();
+        hosts.forEach(function (h) { scanGrid.upsert({ Host: h, Ping: '', InstallRoot: '', GPRoots: '', Reconciler: 'Queued', Detail: 'Queued' }); scanTallyRow({ Host: h, Reconciler: 'Queued' }); });
         actlog.append({ text: '[' + ts() + '] Scan Cert Management on ' + hosts.length + ' host(s).', level: 'accent' });
         lockInputs(true);
         scanRun = ctx.run('scan-cert-management', {
@@ -424,7 +475,7 @@
         scanUnsub = scanRun.subscribe({
           status: function (t) { scanProg.setPhase(t); },
           progress: function (p) { scanProg.setProgress(p.done, p.total); },
-          row: function (r) { scanGrid.upsert(r); scanStats.setAll(scanSummarize()); },
+          row: function (r) { scanGrid.upsert(r); scanStats.setAll(scanTallyRow(r)); },
           log: function (l) { actlog.append(l); },
           error: function (e) { actlog.append({ text: '[' + ts() + '] ' + ((e && e.text) || 'error'), level: 'err' }); },
           active: function (a) {
@@ -487,7 +538,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { try { if (unsub) unsub(); } catch (e) {} try { if (scanUnsub) scanUnsub(); } catch (e) {} };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

@@ -165,7 +165,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-pki'
                 label       = 'Fix PKI Trust Roots'
-                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. Two PKI-Fix-ScanFix v1.9 companions are OPT-IN via their own boxes (both default OFF; the core additive bundle install above always runs): (a) prunePki - EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) fixRdp - a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Client Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Each companion runs only when its box is ticked. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. Two PKI-Fix-ScanFix v1.9 companions are OPT-IN via their own boxes (both default OFF; the core additive bundle install above always runs): (a) prunePki - EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) fixRdp - a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Server Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Each companion runs only when its box is ticked. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Fix the PKI Trust Roots pillar on the import-flagged host(s) you checked? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
@@ -2096,7 +2096,7 @@ $script:C2cFixBlock = {
                     } catch {} finally { try { $tcpG.Close() } catch {} }
 
                     $blobPresent = $false
-                    try { $ppAtp = Get-ItemProperty $policyKey -ErrorAction Stop; $blobPresent = -not [string]::IsNullOrWhiteSpace([string]$ppAtp.OnboardingInfo) } catch {}
+                    try { $ppAtp = Get-ItemProperty -LiteralPath $policyKey -ErrorAction Stop; $blobPresent = -not [string]::IsNullOrWhiteSpace([string]$ppAtp.OnboardingInfo) } catch {}   # audit 2026-07-23: -LiteralPath
 
                     # 1. Dependencies: DiagTrack (Sense depends on it) + Sense start types.
                     $depNotes = New-Object System.Collections.ArrayList
@@ -2115,9 +2115,9 @@ $script:C2cFixBlock = {
                             $gpProc = Start-Process -FilePath "$env:windir\System32\gpupdate.exe" -ArgumentList '/target:computer /force' -Wait -PassThru -ErrorAction Stop
                             $gpNote = "gpupdate exit $($gpProc.ExitCode)"
                         } catch { $gpNote = "gpupdate failed: $($_.Exception.Message)" }
-                        try { $pp2 = Get-ItemProperty $policyKey -ErrorAction Stop; $blobPresent = -not [string]::IsNullOrWhiteSpace([string]$pp2.OnboardingInfo) } catch { $blobPresent = $false }
+                        try { $pp2 = Get-ItemProperty -LiteralPath $policyKey -ErrorAction Stop; $blobPresent = -not [string]::IsNullOrWhiteSpace([string]$pp2.OnboardingInfo) } catch { $blobPresent = $false }   # audit 2026-07-23: -LiteralPath
                         if (-not $blobPresent -and $blobUsable) {
-                            if (-not (Test-Path $policyKey)) { New-Item -Path $policyKey -Force -ErrorAction Stop | Out-Null }
+                            if (-not (Test-Path -LiteralPath $policyKey)) { New-Item -Path $policyKey -Force -ErrorAction Stop | Out-Null }   # audit 2026-07-23: -LiteralPath on the test (New-Item creates, keeps -Path)
                             Set-ItemProperty -Path $policyKey -Name 'OnboardingInfo' -Value ([string]$MdeBlob) -Type String -Force -ErrorAction Stop
                             $usedLocalBlob = $true; $blobPresent = $true
                         }
@@ -2359,7 +2359,7 @@ $script:C2cFixBlock = {
         if ($OfflineDefPath -and (@($fix.Pillars | Where-Object { $_.Name -eq 'AntiMalware' -and $_.Result -eq 'FAIL' -and "$($_.Detail)" -match 'sig update failed via all sources' }).Count -gt 0)) {
             try {
                 $remotePkg = 'C:\Windows\Temp\mpam-fe.exe'
-                Copy-Item -Path $OfflineDefPath -Destination $remotePkg -ToSession $sess -Force -ErrorAction Stop
+                Copy-Item -LiteralPath $OfflineDefPath -Destination $remotePkg -ToSession $sess -Force -ErrorAction Stop   # audit 2026-07-23: -LiteralPath
                 $offR = Invoke-Command -Session $sess -ArgumentList $remotePkg, $SigMaxAgeHours, $OfflineDefSha256 -ErrorAction Stop -ScriptBlock {
                     param($Pkg, $MaxAgeHours, $ExpectHash)
                     $r = @{ Ok = $false; AgeH = $null; Note = '' }
@@ -2842,15 +2842,20 @@ function Invoke-C2cFixAction {
     # stages Microsoft's mpam-fe.exe in Packages\DefenderDefinitions (shipped empty); it is
     # resolved + Authenticode-validated HERE, once, before any host is dialed, and pushed
     # ONLY to hosts where every online signature source fails. Empty folder = rung off.
+    # audit 2026-07-23: gated to the actions whose worker rung can actually consume it
+    # (fix-antimalware / run-all, cert-bundle gating idiom below) - the resolve SHA-256
+    # hashes a 50-150 MB staged package, which every other fix action paid for nothing.
     $offlineDefPath = ''
     $offlineDefSha256 = ''
-    $offPkg = Resolve-C2cDefenderPackage
-    $offlineDefSha256 = [string]$offPkg.Sha256
-    if ($offPkg.Note) { & $send @{ type='log'; level='warn'; text="[AntiMalware] $($offPkg.Note) - offline rung disabled this run." } }
-    elseif ($offPkg.Path) {
-        $offlineDefPath = [string]$offPkg.Path
-        $offMb = [math]::Round((Get-Item -LiteralPath $offlineDefPath).Length / 1MB, 0)
-        & $send @{ type='log'; level='info'; text="[AntiMalware] offline definition package staged: $offlineDefPath ($offMb MB, Microsoft-signed) - pushed ONLY to hosts where every online signature source fails." }
+    if ($ActionId -eq 'fix-antimalware' -or $isRunAll) {
+        $offPkg = Resolve-C2cDefenderPackage
+        $offlineDefSha256 = [string]$offPkg.Sha256
+        if ($offPkg.Note) { & $send @{ type='log'; level='warn'; text="[AntiMalware] $($offPkg.Note) - offline rung disabled this run." } }
+        elseif ($offPkg.Path) {
+            $offlineDefPath = [string]$offPkg.Path
+            $offMb = [math]::Round((Get-Item -LiteralPath $offlineDefPath).Length / 1MB, 0)
+            & $send @{ type='log'; level='info'; text="[AntiMalware] offline definition package staged: $offlineDefPath ($offMb MB, Microsoft-signed) - pushed ONLY to hosts where every online signature source fails." }
+        }
     }
 
     # --- Cert bundle for the PkiRoots fixer -------------------------------------
@@ -3145,15 +3150,18 @@ function Invoke-C2cFixAction {
         $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail; Hint=[string]$hint }
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
-        # per-pillar fixed/nochange/fail tally (raw tokens from the worker).
+        # per-pillar fixed/nochange/unverified/fail tally (raw tokens from the worker).
+        # audit 2026-07-23: NOT VERIFIED / SKIP / IN PROGRESS used to lump into nochange,
+        # overstating "already compliant" in the per-pillar summary line - explicit bucket.
         try {
             foreach ($p in @($res.Pillars)) {
                 $pn = [string]$p.Name; if (-not $pn) { continue }
                 $pr = [string]$p.Result
-                if (-not $perPillar.ContainsKey($pn)) { $perPillar[$pn] = @{ fixed=0; nochange=0; fail=0 } }
-                if     ($pr -eq 'FAIL')                              { $perPillar[$pn].fail++ }
-                elseif (@('FIXED','STARTED','KICKED') -contains $pr) { $perPillar[$pn].fixed++ }
-                else                                                 { $perPillar[$pn].nochange++ }
+                if (-not $perPillar.ContainsKey($pn)) { $perPillar[$pn] = @{ fixed=0; nochange=0; unverified=0; fail=0 } }
+                if     ($pr -eq 'FAIL')                                        { $perPillar[$pn].fail++ }
+                elseif (@('FIXED','STARTED','KICKED') -contains $pr)           { $perPillar[$pn].fixed++ }
+                elseif (@('NOT VERIFIED','SKIP','IN PROGRESS') -contains $pr)  { $perPillar[$pn].unverified++ }
+                else                                                           { $perPillar[$pn].nochange++ }
             }
         } catch {}
         # JANET audit: a fix is a security-state change.
@@ -3236,11 +3244,17 @@ function Invoke-C2cFixAction {
     $cFailed  = @($rows | Where-Object { $_.Status -eq 'FAILED' }).Count
     $cOffline = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
     $cSkipped = @($rows | Where-Object { $_.Status -eq 'SKIPPED' }).Count
+    # audit 2026-07-23: NOT VERIFIED is a first-class host status (:2424, the loudest
+    # fail-closed state) but had NO bucket here - it vanished from the done-line and the
+    # six counters above never reconciled to total. Explicit counter + an 'other'
+    # catch-all (scan-tally idiom) so any future status can't silently disappear either.
+    $cNotVer  = @($rows | Where-Object { $_.Status -eq 'NOT VERIFIED' }).Count
+    $cOther   = $rows.Count - $cFixed - $cNoChange - $cPartial - $cFailed - $cOffline - $cSkipped - $cNotVer
 
-    $ppTxt = (@($perPillar.Keys | Sort-Object | ForEach-Object { "{0} fixed {1}/nochange {2}/fail {3}" -f $_, $perPillar[$_].fixed, $perPillar[$_].nochange, $perPillar[$_].fail }) -join ' | ')
-    & $send @{ type='log'; level='ok'; text="$verb done - FIXED: $cFixed, NO CHANGE: $cNoChange, PARTIAL: $cPartial, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped.$(if ($ppTxt) { "  Per-pillar: $ppTxt" } else { '' })" }
-    & $send @{ type='status'; text="Done. $cFixed fixed, $cPartial partial, $cNoChange no-change, $cFailed failed of $($rows.Count) row(s)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; partial=$cPartial; failed=$cFailed; offline=$cOffline; skipped=$cSkipped; selfSkipped=$selfSkipped.Count; perPillar=$perPillar } }
+    $ppTxt = (@($perPillar.Keys | Sort-Object | ForEach-Object { "{0} fixed {1}/nochange {2}/unverified-skip {3}/fail {4}" -f $_, $perPillar[$_].fixed, $perPillar[$_].nochange, $perPillar[$_].unverified, $perPillar[$_].fail }) -join ' | ')
+    & $send @{ type='log'; level='ok'; text="$verb done - FIXED: $cFixed, NO CHANGE: $cNoChange, PARTIAL: $cPartial, NOT VERIFIED: $cNotVer, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped$(if ($cOther -gt 0) { ", Other: $cOther" } else { '' }).$(if ($ppTxt) { "  Per-pillar: $ppTxt" } else { '' })" }
+    & $send @{ type='status'; text="Done. $cFixed fixed, $cPartial partial, $cNotVer not-verified, $cNoChange no-change, $cFailed failed of $($rows.Count) row(s)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; partial=$cPartial; notVerified=$cNotVer; failed=$cFailed; offline=$cOffline; skipped=$cSkipped; other=$cOther; selfSkipped=$selfSkipped.Count; perPillar=$perPillar } }
 }
 
 # =============================================================================
@@ -3295,13 +3309,27 @@ $script:C2cVersionBlock = {
     $readSb = {
         param($match, $src)
         if ($src) { try { . ([scriptblock]::Create($src)) } catch {} }
-        if (Get-Command Get-C2cInstalledProduct -ErrorAction SilentlyContinue) { return (Get-C2cInstalledProduct -Match $match) }
-        return [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' }
+        $p = if (Get-Command Get-C2cInstalledProduct -ErrorAction SilentlyContinue) { Get-C2cInstalledProduct -Match $match }
+             else { [pscustomobject]@{ Installed=$false; DisplayName=''; Version='' } }
+        # RemoteName rides along for the admin-side DNS-mismatch guard (scan-probe idiom).
+        return [pscustomobject]@{ RemoteName = $env:COMPUTERNAME; Product = $p }
     }
-    $prod = $null
-    try { $prod = Invoke-Command -Session $sess -ScriptBlock $readSb -ArgumentList $ProductMatch, $InstalledProductSrc -ErrorAction Stop }
+    $read = $null
+    try { $read = Invoke-Command -Session $sess -ScriptBlock $readSb -ArgumentList $ProductMatch, $InstalledProductSrc -ErrorAction Stop }
     catch { $r.Status = 'ERROR'; $r.Detail = "Query: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
     finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
+
+    # DNS-mismatch guard (read-only soft-warn, same idiom as the scan worker): a wrong
+    # box would report the wrong machine's product versions. Session name compare, never
+    # a PTR lookup; IP-literal targets have no name to compare, so skip the compare.
+    # (audit 2026-07-23: the version block was the only worker without this guard.)
+    $actualName  = ([string]$read.RemoteName).Trim()
+    $targetShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+    if ($targetShort -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+        $r.Status = 'DNS MISMATCH'; $r.Detail = "dialed '$targetShort' but remote is '$actualName' - skipped (would report the wrong machine's versions)"
+        return $r
+    }
+    $prod = $read.Product
 
     $installed = [bool]$prod.Installed
     $ver       = [string]$prod.Version
@@ -3449,11 +3477,12 @@ function Invoke-C2cVersionCheckAction {
     } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
 
     $counts = @{}
-    foreach ($st in @('UP TO DATE','OUTDATED','NEWER','INSTALLED','NOT INSTALLED','OFFLINE','Cancelled')) { $counts[$st] = @($rows | Where-Object { $_.Status -eq $st }).Count }
-    $ppTxt = (@('UP TO DATE','OUTDATED','NEWER','INSTALLED','NOT INSTALLED','OFFLINE') | Where-Object { $counts[$_] -gt 0 } | ForEach-Object { "$_ $($counts[$_])" }) -join ', '
+    # audit 2026-07-23: DNS MISMATCH added alongside the worker's new wrong-box guard so the status counts in the summary.
+    foreach ($st in @('UP TO DATE','OUTDATED','NEWER','INSTALLED','NOT INSTALLED','DNS MISMATCH','OFFLINE','Cancelled')) { $counts[$st] = @($rows | Where-Object { $_.Status -eq $st }).Count }
+    $ppTxt = (@('UP TO DATE','OUTDATED','NEWER','INSTALLED','NOT INSTALLED','DNS MISMATCH','OFFLINE') | Where-Object { $counts[$_] -gt 0 } | ForEach-Object { "$_ $($counts[$_])" }) -join ', '
     & $send @{ type='log'; level='ok'; text="Version check done - $ppTxt (of $($targets.Count) host(s))." }
     & $send @{ type='status'; text="Done. $($rows.Count) host(s): $ppTxt." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; upToDate=$counts['UP TO DATE']; outdated=$counts['OUTDATED']; newer=$counts['NEWER']; installed=$counts['INSTALLED']; notInstalled=$counts['NOT INSTALLED']; offline=$counts['OFFLINE'] } }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; upToDate=$counts['UP TO DATE']; outdated=$counts['OUTDATED']; newer=$counts['NEWER']; installed=$counts['INSTALLED']; notInstalled=$counts['NOT INSTALLED']; dnsMismatch=$counts['DNS MISMATCH']; offline=$counts['OFFLINE'] } }
 }
 
 function Invoke-JanetToolAction {
@@ -3494,11 +3523,8 @@ function Invoke-JanetToolAction {
         return @{ rows=@(); summary=@{ total=0 } }
     }
 
-    $attemptOffline = $false
-    if ($null -ne $Params['attemptOffline']) {
-        $av = $Params['attemptOffline']
-        $attemptOffline = if ($av -is [bool]) { [bool]$av } else { ("$av" -match '^(?i:true|1|yes|on)$') }
-    }
+    # audit 2026-07-23: was an inline re-implementation of Get-C2cBool (:1323) - one coercer.
+    $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
     $threads = 16
     if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))

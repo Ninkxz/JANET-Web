@@ -367,8 +367,11 @@ function Get-JanetToolManifest {
 }
 
 # Normalize a DirectorySearcher result into the hashtable the pure functions expect.
+# audit 2026-07-23: -RecertAttribute lets the caller pass the attribute name from its
+# already-loaded baseline; the Get-AdToBaseline fallback (JSON re-read + parse) was
+# paid PER AD OBJECT on whole-domain scans. Fallback kept for bare/legacy callers.
 function ConvertTo-AdToObject {
-    param($SearchResult)
+    param($SearchResult, [string]$RecertAttribute)
     $p = $SearchResult.Properties
     $get = { param($n) if ($p[$n] -and $p[$n].Count -gt 0) { $p[$n][0] } else { $null } }
     $cls = @($p['objectclass']); $isComputer = ($cls -contains 'computer')
@@ -378,6 +381,7 @@ function ConvertTo-AdToObject {
     # [int]("0"+[string]$null)=0 reads as "no bad bits" -> COMPLIANT. Carry a UacReadable flag so the
     # compliance test can fail closed on an unreadable UAC instead of silently passing it.
     $uacRaw = (& $get 'useraccountcontrol')
+    if ([string]::IsNullOrWhiteSpace($RecertAttribute)) { $RecertAttribute = [string](Get-AdToBaseline).recertifyAttribute }
     @{
         SamAccountName       = [string](& $get 'samaccountname')
         DistinguishedName    = [string](& $get 'distinguishedname')
@@ -390,7 +394,7 @@ function ConvertTo-AdToObject {
         LastLogonTicks       = $ll
         Description          = [string](& $get 'description')
         Manager              = [string](& $get 'manager')
-        RecertValue          = [string](& $get ((Get-AdToBaseline).recertifyAttribute))
+        RecertValue          = [string](& $get $RecertAttribute)
     }
 }
 
@@ -454,7 +458,7 @@ function Invoke-JanetToolAction {
     try {
         $results = $ds.FindAll()
         foreach ($sr in $results) {
-            $obj = ConvertTo-AdToObject $sr
+            $obj = ConvertTo-AdToObject $sr -RecertAttribute ([string]$baseline.recertifyAttribute)   # audit 2026-07-23: no per-object baseline re-read
             $cat = Get-AdToCategory -Obj $obj -Baseline $baseline
             if ($wantCats.Count -gt 0 -and $wantCats -notcontains $cat) { continue }
             $ev = Test-AdToCompliance -Obj $obj -Category $cat -Baseline $baseline -Now $now

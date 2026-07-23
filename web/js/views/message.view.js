@@ -358,7 +358,6 @@
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (pingUnsub) pingUnsub(); if (sendUnsub) sendUnsub(); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

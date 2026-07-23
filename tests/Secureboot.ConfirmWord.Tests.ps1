@@ -93,3 +93,32 @@ Describe 'secureboot 1.6.3 - dry_run parse fails closed (unrecognized token stay
         foreach ($t in 'ture','dry','y','preflight','maybe','2') { (DryOf $t) | Should Be $true }
     }
 }
+
+# audit 2026-07-23: the loop-15 gate was manifest-string + view-dialog only, so a direct
+# API call could arm a fleet firmware write with no typed word at all. The module now
+# enforces the typed ENABLE SERVER-SIDE on the LIVE path (mirrors pkginstall's loop62
+# DEPLOY gate; dry run stays ungated), and the view sends confirm='ENABLE' after its
+# arming dialog passes. Assert BOTH halves so they can only land together (the
+# pkginstall lesson: a server gate the view never feeds bricks the action).
+Describe 'secureboot server-side ENABLE gate (audit 2026-07-23)' {
+    It 'refuses a LIVE enable without the typed ENABLE (fail-closed: rejected summary, no rows, err log)' {
+        $logs = New-Object System.Collections.ArrayList
+        $r = & $m { param($p, $sink) Invoke-JanetToolAction -ActionId 'enable-secure-boot' -Params $p -Emit $sink } `
+            @{ targets = 'WS-GATE-TEST-01'; dry_run = 'false'; confirm = '' } { param($e) [void]$logs.Add($e) }
+        @($r.rows).Count | Should Be 0
+        [bool]$r.summary.rejected | Should Be $true
+        (@($logs | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'ENABLE' }).Count -ge 1) | Should Be $true
+    }
+    It 'refuses a LIVE enable with a wrong word (pkginstall-gate parity: -ne, so case folds but the word must match)' {
+        $r = & $m { param($p) Invoke-JanetToolAction -ActionId 'enable-secure-boot' -Params $p -Emit { param($e) } } `
+            @{ targets = 'WS-GATE-TEST-01'; dry_run = 'false'; confirm = 'DEPLOY' }
+        [bool]$r.summary.rejected | Should Be $true
+    }
+    It 'the gate sits on the LIVE path only - dry run stays ungated (static source check)' {
+        $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
+        ($src -match '\(-not \$isDry\) -and \(\[string\]\$Params\[''confirm''\] -ne ''ENABLE''\)') | Should Be $true
+    }
+    It 'the view SENDS the confirm param the module now checks (must land together)' {
+        ($script:View.IndexOf("confirm: isDry ? '' : 'ENABLE'") -ge 0) | Should Be $true
+    }
+}

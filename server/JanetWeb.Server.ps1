@@ -107,6 +107,30 @@ function New-JanetWebSecureToken {
     } finally { $rng.Dispose() }
 }
 
+# audit 2026-07-23: ONE cached UNC reachability gate for every route-level probe on
+# the single-threaded accept loop, replacing ~5 hand-rolled regex+probe idioms that
+# each paid the UNCACHED 1.5s TCP timeout per request against a dead share. Non-UNC
+# paths return $true (local disk can't hang the SMB pre-probe; callers still
+# Test-Path the target themselves). Per-HOST cache (~30s) because the routes gate
+# several DIFFERENT roots (log share, packages share, arbitrary operator paths) -
+# Logging's Test-JanetWebShareCached is a single-slot cache bound to one share root,
+# so it would conflate them. Probes via Logging's Test-JanetWebTcpPort (445 only,
+# NEVER ICMP - see that helper's AFNET rationale); a probe that THROWS (the logging
+# bridge isn't dot-sourced yet during early startup) returns $false UNCACHED,
+# matching the old per-site try/catch behavior without poisoning the cache.
+$script:JanetWebHostProbeCache = @{}
+function Test-JanetWebPathReachable {
+    param([string]$Path)
+    if ($Path -notmatch '^\\\\([^\\]+)') { return $true }
+    $probeHost = $Matches[1]
+    $hit = $script:JanetWebHostProbeCache[$probeHost]
+    if ($hit -and ((Get-Date) - $hit.At).TotalSeconds -lt 30) { return $hit.Ok }
+    $ok = $false
+    try { $ok = [bool](Test-JanetWebTcpPort -ComputerName $probeHost -Port 445) } catch { return $false }
+    $script:JanetWebHostProbeCache[$probeHost] = @{ At = (Get-Date); Ok = $ok }
+    return $ok
+}
+
 function Start-JanetWebServer {
     param(
         [Parameter(Mandatory)] [string]$Root,
@@ -157,10 +181,10 @@ function Start-JanetWebServer {
         $localHasPkgs = $false
         try { $localHasPkgs = [bool](Get-ChildItem -LiteralPath $localPackages -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'Log4j' } | Select-Object -First 1) } catch {}
         if (-not $localHasPkgs) {
-            $shareHost = if ($JanetPackageShare -match '^\\\\([^\\]+)') { $Matches[1] } else { $null }
-            $shareUp = $false
-            if ($shareHost) { try { $shareUp = [bool](Test-JanetWebHostReachable $shareHost) } catch {} }
-            if ($shareUp -and (Test-Path -LiteralPath $JanetPackageShare)) { $packagesDir = $JanetPackageShare }
+            # audit 2026-07-23: shared cached probe helper (a thrown probe - the logging
+            # bridge isn't dot-sourced yet here - still resolves $false, exactly like the
+            # old per-site try/catch did).
+            if ((Test-JanetWebPathReachable $JanetPackageShare) -and (Test-Path -LiteralPath $JanetPackageShare)) { $packagesDir = $JanetPackageShare }
         }
     }
     Write-Host ("  Packages: $packagesDir") -ForegroundColor DarkGray
@@ -284,6 +308,25 @@ function Start-JanetWebServer {
         & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes($json)) $code 'application/json; charset=utf-8'
     }
 
+    # Drain ONE finished worker: EndInvoke + Dispose its [powershell], finalize a
+    # raced cancel, and free the stateful tool's serialized Busy slot. One shared
+    # scriptblock for the reaper below AND the events-poll fast path (audit
+    # 2026-07-23: the logic was duplicated at both sites, and both carried a dead
+    # $job.RS close branch - RS is never assigned on job hashtables - now deleted).
+    $drainJob = {
+        param($j)
+        if ($j.Status -ne 'running' -and $j.PS -and $j.Async -and $j.Async.IsCompleted) {
+            try { $j.PS.EndInvoke($j.Async) | Out-Null } catch {}
+            try { $j.PS.Dispose() } catch {}   # disposes the [powershell] only; a persistent tool runspace is assigned, not owned, so it stays open
+            $j.PS = $null; $j.Async = $null
+            # cancel raced the worker's own completion: the worker is gone, so
+            # nothing else will ever map 'cancelling' to a terminal status
+            if ($j.Status -eq 'cancelling') { $j.Status = 'cancelled' }
+            # free the stateful tool's serialized slot for the next action
+            if ($j.Tool -and $state.ToolRunspaces.ContainsKey($j.Tool)) { $state.ToolRunspaces[$j.Tool].Busy = $false }
+        }
+    }
+
     # Reaper: drain finished workers' runspaces (so $job.PS doesn't leak when the
     # client stops polling), free stateful Busy slots, and evict jobs 5 min after
     # they FINISH (FinishedAt, not StartedAt - a job running >5 min must survive
@@ -295,17 +338,7 @@ function Start-JanetWebServer {
         foreach ($k in @($state.Jobs.Keys)) {
             $j = $state.Jobs[$k]
             if (-not $j) { continue }
-            if ($j.Status -ne 'running' -and $j.PS -and $j.Async -and $j.Async.IsCompleted) {
-                try { $j.PS.EndInvoke($j.Async) | Out-Null } catch {}
-                try { $j.PS.Dispose() } catch {}   # disposes the [powershell] only; a persistent tool runspace is assigned, not owned, so it stays open
-                if ($j.ContainsKey('RS') -and $j.RS) { try { $j.RS.Close(); $j.RS.Dispose() } catch {}; $j.RS = $null }
-                $j.PS = $null; $j.Async = $null
-                # cancel raced the worker's own completion: the worker is gone, so
-                # nothing else will ever map 'cancelling' to a terminal status
-                if ($j.Status -eq 'cancelling') { $j.Status = 'cancelled' }
-                # free the stateful tool's serialized slot for the next action
-                if ($j.Tool -and $state.ToolRunspaces.ContainsKey($j.Tool)) { $state.ToolRunspaces[$j.Tool].Busy = $false }
-            }
+            & $drainJob $j
             # 'cancelling' counts as live: the worker is still draining its abandon
             # events and will stamp FinishedAt when it maps itself to 'cancelled'.
             if ($j.Status -eq 'running' -or $j.Status -eq 'cancelling') { continue }
@@ -421,7 +454,22 @@ function Start-JanetWebServer {
                 if ($path -notlike '/api/*') {
                     $asset = Get-JanetWebAssetPath -WebDir $webDir -UrlPath $path
                     if ($asset) {
-                        & $writeBytes $resp ([System.IO.File]::ReadAllBytes($asset)) 200 (& $contentType ([System.IO.Path]::GetExtension($asset)))
+                        # audit 2026-07-23: conditional GET. Send Last-Modified with every 200
+                        # and honor If-Modified-Since with a bodyless 304 so warm reloads skip
+                        # the disk read + full-body send. Compare at WHOLE-SECOND granularity
+                        # (HTTP dates carry no sub-second part, so an untruncated mtime would
+                        # never match). Deliberately minimal - no ETag machinery.
+                        $assetType = & $contentType ([System.IO.Path]::GetExtension($asset))
+                        $mtime = [System.IO.File]::GetLastWriteTimeUtc($asset)
+                        $mtime = $mtime.AddTicks(-($mtime.Ticks % [TimeSpan]::TicksPerSecond))
+                        try { $resp.Headers['Last-Modified'] = $mtime.ToString('r') } catch {}
+                        $ims = [datetime]::MinValue
+                        $imsOk = [datetime]::TryParse([string]$req.Headers['If-Modified-Since'], [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal), [ref]$ims)
+                        if ($imsOk -and $ims -ge $mtime) {
+                            & $writeBytes $resp ([byte[]]@()) 304 $assetType
+                        } else {
+                            & $writeBytes $resp ([System.IO.File]::ReadAllBytes($asset)) 200 $assetType
+                        }
                     } else {
                         & $writeBytes $resp ([System.Text.Encoding]::UTF8.GetBytes('not found')) 404 'text/plain'
                     }
@@ -631,9 +679,11 @@ function Start-JanetWebServer {
                     $root = if ($lc.OnShare) { $lc.NetRoot } else { $lc.JanetLocal }
                     $file = Join-Path (Join-Path (Join-Path $root $toolName) $lc.UserFolder) "$($lc.Month)_detail.csv"
                     $header = ''; $rows = @(); $exists = $false
-                    # Ping-gate a share-hosted CSV first, and tail it instead of
+                    # Ping-gate a share-hosted CSV first (CACHED host probe, audit
+                    # 2026-07-23 - the uncached 1.5s TCP probe ran per poll, so a dead
+                    # log share stalled every request), and tail it instead of
                     # full-reading: this runs on the single-threaded accept loop.
-                    $tailOk = Test-JanetWebShare -Root $file
+                    $tailOk = Test-JanetWebPathReachable $file
                     if ($tailOk -and (Test-Path -LiteralPath $file)) {
                         $exists = $true
                         try {
@@ -655,7 +705,7 @@ function Start-JanetWebServer {
                     $tgt  = Get-JanetWebSessionLogTarget -Context $lc -Tool $toolId
                     $file = if ($lc.OnShare) { $tgt.Net } else { $tgt.Local }
                     $exists = $false; $lines = @()
-                    $tailOk = Test-JanetWebShare -Root $file
+                    $tailOk = Test-JanetWebPathReachable $file   # audit 2026-07-23: cached probe (see /logs/tail)
                     if ($tailOk -and (Test-Path -LiteralPath $file)) {
                         $exists = $true
                         try { $lines = @(Get-Content -LiteralPath $file -Tail $n -Encoding UTF8 -ErrorAction Stop) } catch {}
@@ -748,10 +798,8 @@ function Start-JanetWebServer {
                     $pkgs = New-Object System.Collections.ArrayList
                     # Ping-gate a UNC packages root (the work share) first, mirroring /msis:
                     # a dead share must not hang the accept loop on the recursive enumeration.
-                    $pkgRootOk = $true
-                    if ($packagesDir -match '^\\\\([^\\]+)') {
-                        $pkgRootOk = (Test-JanetWebHostReachable $Matches[1])
-                    }
+                    # audit 2026-07-23: cached probe helper (was an uncached 1.5s TCP hit per call).
+                    $pkgRootOk = Test-JanetWebPathReachable $packagesDir
                     if ($pkgRootOk -and (Test-Path -LiteralPath $packagesDir)) {
                         foreach ($d in (Get-ChildItem -LiteralPath $packagesDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
                             $hasPsadt = $false; $msiCount = 0
@@ -781,12 +829,13 @@ function Start-JanetWebServer {
                 if ($verb -eq 'GET' -and $path -eq '/api/tool/pkginstall/msis') {
                     $bp = [string]$req.QueryString['path']
                     $msis = New-Object System.Collections.ArrayList
-                    # Arbitrary operator path: ping-gate a UNC host so a dead share
-                    # can't hang the accept loop on Test-Path/enumeration.
-                    $bpOk = $true
-                    if ($bp -match '^\\\\([^\\]+)') {
-                        $bpOk = (Test-JanetWebHostReachable $Matches[1])
-                    }
+                    # Arbitrary operator path BY DESIGN (audit 2026-07-23): this listing is
+                    # token-gated and read-only (returns .msi names only), and the tool must
+                    # deploy from wherever the operator staged a bundle (local disk, any
+                    # reachable share) - so the path is deliberately NOT confined to the
+                    # packages root. Ping-gate a UNC host (cached probe helper, same audit)
+                    # so a dead share can't hang the accept loop on Test-Path/enumeration.
+                    $bpOk = Test-JanetWebPathReachable $bp
                     if ($bpOk -and $bp -and ($bp -like '*.msi') -and (Test-Path -LiteralPath $bp -PathType Leaf)) {
                         # Direct .msi file path: the file IS the bundle - one relative leaf.
                         [void]$msis.Add((Split-Path -Leaf $bp))
@@ -863,38 +912,9 @@ function Start-JanetWebServer {
                         if ($raw) { try { foreach ($p in (ConvertFrom-Json $raw).PSObject.Properties) { $params[$p.Name] = $p.Value } } catch {} }
                     }
 
-                    # ACAS: retain a timestamped archive copy of each uploaded CSV (once
-                    # per unique source) next to this operator's ACAS logs - an audit trail
-                    # of exactly what was imported. Best-effort; never blocks the action.
-                    if ($toolId -eq 'acas' -and $params['csvPaths']) {
-                        try {
-                            $lc = $state.LogCtx
-                            $archRoot = if ($lc.OnShare) { $lc.NetRoot } else { $lc.JanetLocal }
-                            # The DESTINATION can be a share too - ping-gate it like the
-                            # UNC sources below. The throw lands in this block's empty
-                            # catch: archiving is skipped this pass and (since nothing
-                            # was added to ArchivedCsvs) retried on the next action.
-                            if ($archRoot -match '^\\\\([^\\]+)') {
-                                if (-not (Test-JanetWebHostReachable $Matches[1])) { throw 'archive share unreachable' }
-                            }
-                            $archDir = Join-Path (Join-Path (Join-Path $archRoot (Resolve-JanetWebToolName -ToolId 'acas')) $lc.UserFolder) 'CsvArchive'
-                            foreach ($cp in ([string]$params['csvPaths'] -split "`r?`n")) {
-                                $src = $cp.Trim().Trim('"'); if (-not $src) { continue }
-                                if ($state.ArchivedCsvs.Contains($src)) { continue }
-                                # Uploaded CSVs are local temp paths (fast). A manually-typed UNC
-                                # source must be ping-gated first so an unreachable share can't
-                                # block Test-Path/Copy-Item on the single-threaded accept loop.
-                                if ($src -match '^\\\\([^\\]+)') {
-                                    if (-not (Test-JanetWebHostReachable $Matches[1])) { [void]$state.ArchivedCsvs.Add($src); continue }
-                                }
-                                if (-not (Test-Path -LiteralPath $src)) { continue }
-                                [void]$state.ArchivedCsvs.Add($src)
-                                if (-not (Test-Path -LiteralPath $archDir)) { New-Item -ItemType Directory -Path $archDir -Force -ErrorAction Stop | Out-Null }
-                                $dest = Join-Path $archDir ((Get-Date -Format 'yyyy-MM-dd_HHmmss') + '_' + (Split-Path -Leaf $src))
-                                Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
-                            }
-                        } catch {}
-                    }
+                    # (audit 2026-07-23: the ACAS uploaded-CSV archive copy moved off this
+                    # accept thread into the spawned worker below - a slow share Copy-Item
+                    # stalled every request while it ran.)
 
                     $state.JobSeq++
                     $jobId = "j$($state.JobSeq)_$([guid]::NewGuid().ToString('N').Substring(0,6))"
@@ -910,7 +930,7 @@ function Start-JanetWebServer {
                     $params['__job'] = $job
 
                     $worker = {
-                        param($modulePath, $actionId, $prms, $cred, $job, $logScript, $logCtx, $toolId, $skipImport, $toolVer)
+                        param($modulePath, $actionId, $prms, $cred, $job, $logScript, $logCtx, $toolId, $skipImport, $toolVer, $archivedCsvs)
                         try {
                             # Stateful tools run in a persistent runspace where the module +
                             # logging script were imported ONCE at runspace creation;
@@ -918,6 +938,43 @@ function Start-JanetWebServer {
                             if (-not $skipImport) {
                                 . $logScript
                                 Import-Module $modulePath -Force -ErrorAction Stop
+                            }
+                            # ACAS: retain a timestamped archive copy of each uploaded CSV (once
+                            # per unique source) next to this operator's ACAS logs - an audit
+                            # trail of exactly what was imported. Best-effort; never blocks or
+                            # fails the action. audit 2026-07-23: ran on the single-threaded
+                            # accept loop before - moved here so a slow share Copy-Item can't
+                            # stall every request. $archivedCsvs (the server's once-per-source
+                            # set) is now shared across concurrent worker runspaces: hold its
+                            # monitor for the whole pass (rare + best-effort, so coarse is fine).
+                            if ($toolId -eq 'acas' -and $prms['csvPaths'] -and $null -ne $archivedCsvs) {
+                                [System.Threading.Monitor]::Enter($archivedCsvs)
+                                try {
+                                    $archRoot = if ($logCtx.OnShare) { $logCtx.NetRoot } else { $logCtx.JanetLocal }
+                                    # The DESTINATION can be a share too - ping-gate it like the
+                                    # UNC sources below. The throw lands in this block's empty
+                                    # catch: archiving is skipped this pass and (since nothing
+                                    # was added to $archivedCsvs) retried on the next action.
+                                    if ($archRoot -match '^\\\\([^\\]+)') {
+                                        if (-not (Test-JanetWebHostReachable $Matches[1])) { throw 'archive share unreachable' }
+                                    }
+                                    $archDir = Join-Path (Join-Path (Join-Path $archRoot (Resolve-JanetWebToolName -ToolId 'acas')) $logCtx.UserFolder) 'CsvArchive'
+                                    foreach ($cp in ([string]$prms['csvPaths'] -split "`r?`n")) {
+                                        $src = $cp.Trim().Trim('"'); if (-not $src) { continue }
+                                        if ($archivedCsvs.Contains($src)) { continue }
+                                        # Uploaded CSVs are local temp paths (fast). A manually-typed
+                                        # UNC source is still ping-gated first: worker time is cheap,
+                                        # but a bounded probe beats a 30s SMB stall even here.
+                                        if ($src -match '^\\\\([^\\]+)') {
+                                            if (-not (Test-JanetWebHostReachable $Matches[1])) { [void]$archivedCsvs.Add($src); continue }
+                                        }
+                                        if (-not (Test-Path -LiteralPath $src)) { continue }
+                                        [void]$archivedCsvs.Add($src)
+                                        if (-not (Test-Path -LiteralPath $archDir)) { New-Item -ItemType Directory -Path $archDir -Force -ErrorAction Stop | Out-Null }
+                                        $dest = Join-Path $archDir ((Get-Date -Format 'yyyy-MM-dd_HHmmss') + '_' + (Split-Path -Leaf $src))
+                                        Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
+                                    }
+                                } catch {} finally { [System.Threading.Monitor]::Exit($archivedCsvs) }
                             }
                             # The manifest ToolVersion rides to the audit CSV only when the
                             # loaded logging bridge has the (optional) parameter, so the two
@@ -1023,10 +1080,10 @@ function Start-JanetWebServer {
                         }
                         $slot.Busy = $true
                         $ps = [powershell]::Create(); $ps.Runspace = $slot.RS
-                        [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($params).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($true).AddArgument($toolVer)
+                        [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($params).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($true).AddArgument($toolVer).AddArgument($state.ArchivedCsvs)
                     } else {
                         $ps = [powershell]::Create()
-                        [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($params).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($false).AddArgument($toolVer)
+                        [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($params).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($false).AddArgument($toolVer).AddArgument($state.ArchivedCsvs)
                     }
                     # Transactional start: if BeginInvoke throws (dead persistent
                     # runspace, OOM), free the stateful Busy slot and drop the job so
@@ -1077,15 +1134,9 @@ function Start-JanetWebServer {
                     } finally { [System.Threading.Monitor]::Exit($evtRoot) }
                     # Clean up the runspace only once it has actually finished, so a
                     # cancelling worker (still stopping its WinRM children) never blocks
-                    # this poll / the accept loop.
-                    if ($job.Status -ne 'running' -and $job.PS -and $job.Async -and $job.Async.IsCompleted) {
-                        try { $job.PS.EndInvoke($job.Async) | Out-Null } catch {}
-                        try { $job.PS.Dispose() } catch {}
-                        if ($job.ContainsKey('RS') -and $job.RS) { try { $job.RS.Close(); $job.RS.Dispose() } catch {}; $job.RS = $null }
-                        $job.PS = $null; $job.Async = $null
-                        if ($job.Status -eq 'cancelling') { $job.Status = 'cancelled' }   # worker already gone - finalize a raced cancel
-                        if ($job.Tool -and $state.ToolRunspaces.ContainsKey($job.Tool)) { $state.ToolRunspaces[$job.Tool].Busy = $false }
-                    }
+                    # this poll / the accept loop. (audit 2026-07-23: shared $drainJob -
+                    # this was a hand-rolled copy of the reaper's drain.)
+                    & $drainJob $job
                     & $writeJson $resp @{ status=$statusNow; nextSince=$count; events=@($new) }
                     continue
                 }

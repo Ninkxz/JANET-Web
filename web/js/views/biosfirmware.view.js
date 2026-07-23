@@ -133,8 +133,7 @@
       exportBtn.onclick = function () {
         var rows = grid.rows();
         if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a scan first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
-        var csv = ctx.util.toCsv(EXPORT_COLS.map(function (p) { return p[1]; }), rows, EXPORT_COLS.map(function (p) { return p[0]; }));
-        ctx.util.downloadBlob('BiosFirmware_Results_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv('BiosFirmware_Results', EXPORT_COLS, rows);
       };
 
       // List Baselines: run the read-only action, collect the Model->Target rows,
@@ -209,7 +208,6 @@
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); if (blUnsub) blUnsub(); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

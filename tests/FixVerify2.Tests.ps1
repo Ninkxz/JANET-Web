@@ -150,6 +150,12 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 if ($t -match 'PINREAD') { return $script:__rb }
                 return 'ProductVersion=Windows 11; TargetReleaseVersionInfo=24H2'
             }
+            # audit 2026-07-23: harness updated for session reuse - Pin now opens ONE reusable
+            # PSSession for the write + verify read-back (the InstallCab pattern); shim the
+            # session cmdlets too so no real WinRM is ever dialed and the Invoke-Command shim
+            # above keeps intercepting the calls. Assertions unchanged.
+            function script:New-PSSession { param($ComputerName,$Authentication,$SessionOption,$ErrorAction,$Credential,$UseSSL) return [pscustomobject]@{ ComputerName = $ComputerName } }
+            function script:Remove-PSSession { param($Session,$ErrorAction) }
             try {
                 # positional arg 17 = $Bypass (loop33 bypass read-back verify)
                 $argl = @(
@@ -162,7 +168,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 [pscustomobject]@{ Status=[string]$row.Status; Ok=[bool]$row.Ok; Detail=[string]$row.Detail }
-            } finally { Remove-Item function:script:Invoke-Command -EA SilentlyContinue }
+            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -EA SilentlyContinue }
         } $ReadBack $Bypass
     }
 
@@ -177,6 +183,12 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 if ($t -match 'PINREAD') { return $script:__rb }
                 return 'removal attempted; other policy values kept'
             }
+            # audit 2026-07-23: harness updated for session reuse - Unpin now opens ONE
+            # reusable PSSession for the removal + verify read-back (the InstallCab pattern);
+            # shim the session cmdlets too so no real WinRM is ever dialed and the
+            # Invoke-Command shim above keeps intercepting the calls. Assertions unchanged.
+            function script:New-PSSession { param($ComputerName,$Authentication,$SessionOption,$ErrorAction,$Credential,$UseSSL) return [pscustomobject]@{ ComputerName = $ComputerName } }
+            function script:Remove-PSSession { param($Session,$ErrorAction) }
             try {
                 # positional arg 19 = $RemoveBypass (loop33 bypass read-back verify)
                 $argl = @(
@@ -189,7 +201,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 [pscustomobject]@{ Status=[string]$row.Status; Ok=[bool]$row.Ok; Detail=[string]$row.Detail }
-            } finally { Remove-Item function:script:Invoke-Command -EA SilentlyContinue }
+            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -EA SilentlyContinue }
         } $ReadBack $RemoveBypass
     }
 

@@ -252,9 +252,9 @@ function Invoke-JanetToolAction {
                   InstalledBIOS=[string]$res.InstalledBIOS; TargetBIOS=$target; Status=$status
                   BiosDate=[string]$res.BiosDate; Error=[string]$res.Error }
         [void]$rows.Add($row); & $send (@{ type='row' } + $row)
-        $ok = ($status -eq 'Current')
-        $auditResult = if ($status -eq 'Error' -or $status -eq 'Offline') { 'Failure' } elseif ($ok) { 'Success' } else { 'Skipped' }
-        & $send @{ type='audit'; action='TouchHost'; target=[string]$res.Host; result=$auditResult; itemCount=$(if($ok){1}else{0}); detail="BIOS $($res.InstalledBIOS) vs target $target -> $status" }
+        # audit 2026-07-23: no audit emit for this read-only scan. The per-host
+        # TouchHost rows inflated the TouchedHosts freshness trail on every scan;
+        # the read-only cohort (history/sysadmin/patchlib/kev) deliberately emits none.
     }
 
     try {

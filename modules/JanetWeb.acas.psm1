@@ -633,7 +633,7 @@ $script:AcasUpdateProfiles = @{
                     return @{ Version = 'not installed'; LastUpdated = 'n/a'; Verified = $null; Detail = 'Microsoft.WindowsApp package not found' }
                 }
                 $ver = "$($pkg.Version)"
-                $inst = Get-Item -Path $pkg.InstallLocation -ErrorAction SilentlyContinue
+                $inst = Get-Item -LiteralPath $pkg.InstallLocation -ErrorAction SilentlyContinue   # audit 2026-07-23: -LiteralPath (lone -Path offender)
                 $mod = if ($inst) { $inst.LastWriteTime } else { $null }
                 $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
                 $verified = if ($mod) { ((Get-Date) - $mod).TotalDays -lt 14 } else { $null }
@@ -1168,7 +1168,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.17'
+        version  = '1.11.17'   # audit 2026-07-23 changes shipped under this version: Acas.ClientVerify.Tests.ps1 pins it EXACTLY and tests are out of scope for this pass - bump both together next loop
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1200,6 +1200,7 @@ function Get-JanetToolManifest {
                 description  = 'Import the ACAS CSV and automatically push the matched remediation to every affected host: group findings by plugin, match each Patchable vulnerability to its App Update profile, de-duplicate (profile, host) work, and run it in parallel over WinRM. Coverage gaps (Reboot / Unpatchable / package-staged) are listed but not run. Verify-only does a dry check without changing anything.'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Auto-push the matched remediation to EVERY affected host in the CSV? Proceed?'   # audit 2026-07-23: confirm parity with kb-install (manifest-string + view-dialog; Verify-only dry run stays ungated in the view)
                 columns      = @('Host','Profile','Result','Version Before','Version After','Timestamp','Detail')
                 inputs       = @(
                     @{ name='csvPaths';            label='ACAS CSV file'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$true },
@@ -1215,6 +1216,7 @@ function Get-JanetToolManifest {
                 description  = 'Push a single App Update profile to the host set affected by one vulnerability. TCP probe, bounded Negotiate PSSession (NetBIOS NTLM fallback), update + verify in one session.'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Push the App Update profile to the affected host(s)? Proceed?'   # audit 2026-07-23: confirm parity with kb-install (Verify-only dry run stays ungated in the view)
                 columns      = @('Host','Result','Version Before','Version After','Mode','Timestamp','Detail')
                 inputs       = @(
                     @{ name='profileName'; label='App Update profile'; type='text'; required=$true; default='Windows Defender - Update Definitions' },
@@ -1230,6 +1232,7 @@ function Get-JanetToolManifest {
                 description  = 'Run a queue of (profile, host-set) jobs one profile at a time, draining each before the next. Same per-host engine as Run Vulnerability Update.'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Run every queued (profile, host-set) job sequentially? Proceed?'   # audit 2026-07-23: confirm parity with kb-install (Verify-only dry run stays ungated in the view)
                 columns      = @('Host','Profile','Result','Version Before','Version After','Timestamp','Detail')
                 inputs       = @(
                     @{ name='jobs';       label='Jobs: lines of  profile | host1,host2,...'; type='textarea'; required=$true },
@@ -1243,6 +1246,7 @@ function Get-JanetToolManifest {
                 description  = 'Submit every (profile, host) tuple to the runspace pool at once. Single drain across the heterogeneous batch. Each job tracks its own profile context.'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Run every (profile, host) tuple in the batch in parallel? Proceed?'   # audit 2026-07-23: confirm parity with kb-install (Verify-only dry run stays ungated in the view)
                 columns      = @('Host','Profile','Result','Version Before','Version After','Timestamp','Detail')
                 inputs       = @(
                     @{ name='jobs';       label='Jobs: lines of  profile | host1,host2,...'; type='textarea'; required=$true },
@@ -1256,6 +1260,7 @@ function Get-JanetToolManifest {
                 description  = 'Ensure the three services remote patching depends on (winrm, Winmgmt, RemoteRegistry) are Running + Automatic on each target over RPC (TCP 135/445 probe first, fast-fail on dead hosts). Run this when hosts fail to connect before a patch or verify wave.'
                 kind         = 'stream-table'
                 destructive  = $true   # sets winrm/Winmgmt/RemoteRegistry to Running+Automatic on each target - a state change, so confirm first (parity with the desktop pre-flight prompt)
+                confirm      = 'Set winrm / Winmgmt / RemoteRegistry to Running + Automatic on each target? Proceed?'   # audit 2026-07-23: the comment above promised a confirm the manifest never declared - kb-install parity
                 columns      = @('Host','Changes Made','Result','Timestamp','Detail')
                 inputs       = @(
                     @{ name='targets'; label='Target hosts (one per line)'; type='hostlist'; required=$true },
@@ -1268,6 +1273,7 @@ function Get-JanetToolManifest {
                 description  = 'Schedule a reboot (shutdown /r /t 300) on the affected hosts of a Reboot-category vulnerability, showing the user a save-your-work warning. Use for findings whose only remediation is a pending reboot.'
                 kind         = 'stream-table'
                 destructive  = $true
+                confirm      = 'Schedule a reboot (shutdown /r /t 300) on the affected host(s)? Proceed?'   # audit 2026-07-23: confirm parity with kb-install (manifest-string + view-dialog)
                 columns      = @('Host','Result','Exit Code','Timestamp','Detail')
                 inputs       = @(
                     @{ name='targets';     label='Affected hosts (one per line)'; type='hostlist'; required=$true },
@@ -1641,6 +1647,58 @@ function ConvertFrom-AcasCsv {
         & $Send @{ type='log'; level='warn'; text="Parsed $($allRows.Count) row(s) but none had a DNS/NetBIOS/IP value - check the CSV column headers match the expected ACAS export (DNS Name / NetBIOS Name / IP Address)." }
     }
     return @{ Findings=@($findings); RowCount=$allRows.Count; ServersSkipped=$serversSkipped; NoHostSkipped=$noHostSkipped }
+}
+
+# -----------------------------------------------------------------------------
+#  audit 2026-07-23: findings-CSV memo. The same ACAS CSV was fully re-parsed at
+#  ~7 call sites per operator session (analyze, patch-selected, auto-patch,
+#  kb-scan, group-findings, reboot/verify-selected, findings-for-host) - the
+#  server's per-tool runspace is REUSED across actions, so a module-scope memo
+#  keyed on resolved path + size + LastWriteTimeUtc pays for every subsequent
+#  call and self-invalidates the moment any source file changes on disk. The
+#  grouped (Get-AcasRemediationGroups) output is cached alongside, keyed by
+#  reference-equality to the memoized parse, so the Text/pasted-CSV path (no
+#  stable file key -> never memoized) can never be served stale groups.
+# -----------------------------------------------------------------------------
+$script:AcasCsvMemo = @{ Key=''; Parsed=$null; Groups=$null }
+
+function Get-AcasParsedFindings {
+    param([string[]]$Paths, [string]$Text, [scriptblock]$Send)
+    # Pasted CSV text has no (path,size,mtime) identity - bypass the memo entirely.
+    if ($Text -and -not [string]::IsNullOrWhiteSpace($Text)) {
+        return ConvertFrom-AcasCsv -Paths $Paths -Text $Text -Send $Send
+    }
+    $keyParts = New-Object System.Collections.ArrayList
+    foreach ($p in @($Paths | Where-Object { $_ })) {
+        $pp = ([string]$p).Trim().Trim('"')
+        if (-not $pp) { continue }
+        try {
+            $fi = Get-Item -LiteralPath $pp -ErrorAction Stop
+            [void]$keyParts.Add("$($fi.FullName)|$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)")
+        } catch {
+            [void]$keyParts.Add("$pp|missing")   # missing file still keys (parser warns; a later appearance changes the key)
+        }
+    }
+    $key = ($keyParts.ToArray() -join ';;')
+    if ($key -and $script:AcasCsvMemo.Key -eq $key -and $null -ne $script:AcasCsvMemo.Parsed) {
+        return $script:AcasCsvMemo.Parsed
+    }
+    $parsed = ConvertFrom-AcasCsv -Paths $Paths -Send $Send
+    $script:AcasCsvMemo = @{ Key=$key; Parsed=$parsed; Groups=$null }
+    return $parsed
+}
+
+function Get-AcasCachedRemediationGroups {
+    param($Parsed)
+    # Serve the cached grouping ONLY for the exact memoized parse object; anything
+    # else (pasted-CSV parse, direct test call) computes fresh and is never stored
+    # against a stale key.
+    if ($null -ne $script:AcasCsvMemo.Groups -and [object]::ReferenceEquals($script:AcasCsvMemo.Parsed, $Parsed)) {
+        return @($script:AcasCsvMemo.Groups)
+    }
+    $groups = @(Get-AcasRemediationGroups -Findings $Parsed.Findings)
+    if ([object]::ReferenceEquals($script:AcasCsvMemo.Parsed, $Parsed)) { $script:AcasCsvMemo.Groups = $groups }
+    return @($groups)
 }
 
 # -----------------------------------------------------------------------------
@@ -2036,16 +2094,13 @@ $script:AcasUpdateWorker = {
 
         # DNS-mismatch guard (HARD ABORT): before running ANY remediation/install,
         # verify the box that answered is the one we dialed (stale DNS / reused IP could
-        # remediate the WRONG machine). Session-based name compare, copied from
-        # WptPatchBlock (JanetWeb.wpt.psm1 ~1606); an IPv4-literal target has no shortname
-        # to compare, so skip the compare. Empty probe -> proceed (don't regress).
-        if ($TargetIn -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            $targetShort = ($TargetIn -split '\.')[0]
-            $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no remediation run"
-            }
-        }
+        # remediate the WRONG machine). audit 2026-07-23: folded INTO the combined
+        # scriptblock below (was a standalone $env:COMPUTERNAME round-trip per host) -
+        # same session, same compare, one hop; the combined block aborts BEFORE the
+        # update text runs. An IPv4-literal target has no shortname to compare, so pass
+        # '' (guard skipped - don't regress). The Log4j staging copy below may land jars
+        # in the remote temp before the abort fires - inert files, the update never runs.
+        $guardShort = if ($TargetIn -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { ($TargetIn -split '\.')[0] } else { '' }
 
         # Full update: verify-before, update, verify-after in ONE session.
         # Scriptblocks do not round-trip over WinRM -ArgumentList, so we pass
@@ -2098,7 +2153,15 @@ $script:AcasUpdateWorker = {
             $updateText = [regex]::Replace($updateText, "\`$sourceShare\s*=\s*'[^']*'", { param($m) "`$sourceShare = '$remoteTemp'" })
         }
         $combined = {
-            param($updateTxt, $verifyTxt)
+            param($updateTxt, $verifyTxt, $guardShort)
+            # audit 2026-07-23: in-session wrong-box abort (see guard comment above).
+            # Runs FIRST so a mismatched box never executes the pre-probe or the update.
+            if ($guardShort) {
+                $selfName = ([string]$env:COMPUTERNAME).Trim()
+                if ($selfName -and ($selfName.ToUpper() -ne ([string]$guardShort).ToUpper())) {
+                    return @{ Abort = "DNS mismatch: dialed '$guardShort' but remote is '$selfName' - ABORTED, no remediation run" }
+                }
+            }
             $pre = $null
             if ($verifyTxt) {
                 try { $pre = & ([scriptblock]::Create($verifyTxt)) } catch { $pre = 'JANET_PROBE_ERR' }
@@ -2116,8 +2179,13 @@ $script:AcasUpdateWorker = {
         }
         try {
             $result = Invoke-Command -Session $sess -ScriptBlock $combined `
-                                     -ArgumentList $updateText, $verifyText `
+                                     -ArgumentList $updateText, $verifyText, $guardShort `
                                      -ErrorAction Stop
+            # audit 2026-07-23: the folded wrong-box guard aborted in-session - hard FAIL,
+            # nothing ran (same message the old standalone round-trip produced).
+            if ($result -is [hashtable] -and $result.ContainsKey('Abort')) {
+                return "FAIL: $([string]$result.Abort)"
+            }
             $updateStr = [string]$result.Update
             # Distinguish "verify probe THREW" (host went unreachable / access-denied
             # mid-op) from "verify probe RAN but found no version". The combined
@@ -2148,6 +2216,17 @@ $script:AcasUpdateWorker = {
             }
             if ($preV -eq 'n/a' -and $postV -eq 'n/a') { return "$updateStr $marker" }
             if ($preV -eq $postV) {
+                # audit 2026-07-23: honor the post-state Verified boolean the verify-only
+                # branch already trusts (~:2018-2028 / Get-AcasVerifyRowStatus). An
+                # unchanged version whose post probe CONFIRMS currency (Verified=$true,
+                # e.g. Defender defs already at today's release) is the IDEMPOTENT success
+                # state - it was rendered UNCONFIRMED amber and dropped from the PATCHED
+                # tally purely because the version string didn't move. Applied ONLY when a
+                # Verified key actually exists in the post hashtable AND is exactly $true;
+                # $false (stale) and $null (indeterminate) keep the UNCONFIRMED verdict.
+                if ($result.Post -is [hashtable] -and $result.Post.ContainsKey('Verified') -and $result.Post.Verified -eq $true) {
+                    return "$updateStr | confirmed current: v=$postV (Verified=true, version unchanged - already compliant) $marker"
+                }
                 # The trigger was sent but the version did NOT change (or is not yet
                 # verifiable). That is NOT a confirmed update - a genuinely-failed trigger
                 # whose version stayed put would otherwise read as OK/green. Return a
@@ -2205,22 +2284,28 @@ $script:AcasRebootWorker = {
     if ($Cred) {
         # DNS-mismatch guard (HARD ABORT): verify the box that answers is the one we
         # dialed before scheduling a reboot (stale DNS / reused IP could reboot the WRONG
-        # machine). One quick WinRM probe, copied from WptRebootBlock (JanetWeb.wpt.psm1
-        # ~1665). An IPv4-literal target has no shortname to compare -> skip. If the probe
-        # can't run (empty), proceed as before so a working reboot isn't regressed.
-        if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            $targetShort = ($Target -split '\.')[0]
-            $actualName = try { Invoke-Command -ComputerName $Target -Authentication Negotiate -Credential $Cred -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent <<EXIT=>>"
-            }
-        }
+        # machine). audit 2026-07-23: folded INTO the reboot scriptblock below (was a
+        # standalone $env:COMPUTERNAME round-trip, i.e. two WinRM calls per host) - the
+        # compare runs in the SAME invocation, immediately before shutdown.exe, which is
+        # also atomically safer (no window between probe and reboot). An IPv4-literal
+        # target has no shortname to compare -> pass '' (guard skipped, don't regress).
+        $guardShort = if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { ($Target -split '\.')[0] } else { '' }
         try {
             $rc = Invoke-Command -ComputerName $Target -Authentication Negotiate -Credential $Cred `
-                                 -ArgumentList $warn -ErrorAction Stop -ScriptBlock {
-                param($w)
+                                 -ArgumentList $warn, $guardShort -ErrorAction Stop -ScriptBlock {
+                param($w, $expectShort)
+                if ($expectShort) {
+                    $selfName = ([string]$env:COMPUTERNAME).Trim()
+                    if ($selfName -and ($selfName.ToUpper() -ne ([string]$expectShort).ToUpper())) {
+                        return "JANET_DNS_MISMATCH:$selfName"
+                    }
+                }
                 & "$env:WinDir\System32\shutdown.exe" /r /t 300 /c $w | Out-Null
                 $LASTEXITCODE
+            }
+            if ("$rc" -like 'JANET_DNS_MISMATCH:*') {
+                $actualName = "$rc".Substring('JANET_DNS_MISMATCH:'.Length)
+                return "FAIL: DNS mismatch: dialed '$guardShort' but remote is '$actualName' - ABORTED, no reboot sent <<EXIT=>>"
             }
             $rc = [int]$rc
             $who = [string]$Cred.UserName
@@ -2235,6 +2320,8 @@ $script:AcasRebootWorker = {
     # DNS-mismatch guard (HARD ABORT) before the ambient /m reboot: same compare as the
     # credentialed path above / WptRebootBlock (JanetWeb.wpt.psm1 ~1665). An IPv4-literal
     # target has no shortname to compare -> skip. Empty probe -> proceed (don't regress).
+    # (audit 2026-07-23: stays a standalone probe here - shutdown.exe /m \\HOST runs
+    # LOCALLY on the controller, so there is no main remote call to fold it into.)
     if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
         $targetShort = ($Target -split '\.')[0]
         $actualName = try { Invoke-Command -ComputerName $Target -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
@@ -2410,10 +2497,24 @@ $script:AcasPreflightWorker = {
     }
 
     try {
+        # audit 2026-07-23: wrong-box abort (DNS-mismatch HARD ABORT) - this was the
+        # lone destructive worker in the file without it (it flips service state/start
+        # type, so a stale-DNS / reused-IP answer would reconfigure the WRONG machine).
+        # Folded into the main scriptblock (no extra round-trip), mirroring the update
+        # (~:2100) / reboot (~:2219) / kb-install (~:2810) workers. IPv4-literal target
+        # has no shortname to compare -> pass '' (guard skipped, don't regress).
+        $guardShort = if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { ($Target -split '\.')[0] } else { '' }
         # Build the marker result string INSIDE the session (where the service
         # counts are unambiguous) and return it as a plain string - avoids any
         # empty-array-vs-$null deserialization quirk on the way back.
-        $svcOut = Invoke-Command -Session $sess -ErrorAction Stop -ScriptBlock {
+        $svcOut = Invoke-Command -Session $sess -ErrorAction Stop -ArgumentList $guardShort -ScriptBlock {
+            param($expectShort)
+            if ($expectShort) {
+                $selfName = ([string]$env:COMPUTERNAME).Trim()
+                if ($selfName -and ($selfName.ToUpper() -ne ([string]$expectShort).ToUpper())) {
+                    return "FAIL: DNS mismatch: dialed '$expectShort' but remote is '$selfName' - ABORTED, no service changes <<CHANGES=>>"
+                }
+            }
             $names   = @('winrm', 'Winmgmt', 'RemoteRegistry')
             $changes = @()
             $errs    = @()
@@ -2512,6 +2613,56 @@ $script:AcasDetOfProfile = { param($res, $hostName, $ctx) "$($ctx.Profile): $(Re
 
 # $script:AcasDetOfPlain   -- audit detail, marker-stripped only
 $script:AcasDetOfPlain   = { param($res, $hostName, $ctx) (Remove-AcasMarkers $res) }
+
+# audit 2026-07-23 (simplify): the reboot / reboot-verify / run-vulnerability rowOf
+# scriptblocks were copy-pasted across switch arms (schedule-reboot vs reboot-selected,
+# verify-post-reboot vs verify-selected, run-vulnerability vs AcasUpdateRowOf). Hoisted
+# here as closure-free module constants beside AcasUpdateRowOf ($stamp inlined the same
+# way); they execute inside Invoke-AcasFanOut's module runspace, so Get-AcasMarker /
+# Remove-AcasMarkers resolve.
+
+# $script:AcasRebootRowOf -- schedule-reboot / reboot-selected row.
+$script:AcasRebootRowOf = {
+    param($res, $hostName, $ctx)
+    @{
+        Host        = $hostName
+        Result      = $(if ($res -like 'FAIL*') { 'failed' } elseif ($res -match 'already') { 'already-pending' } else { 'scheduled' })
+        'Exit Code' = (Get-AcasMarker $res 'EXIT')
+        Timestamp   = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        Detail      = (Remove-AcasMarkers $res)
+    }
+}
+
+# $script:AcasRebootVerifyRowOf -- verify-post-reboot / verify-selected row.
+$script:AcasRebootVerifyRowOf = {
+    param($res, $hostName, $ctx)
+    @{
+        Host          = $hostName
+        Reachable     = (Get-AcasMarker $res 'REACH')
+        RebootPending = (Get-AcasMarker $res 'PENDING')
+        'OS Build'    = (Get-AcasMarker $res 'BUILD')
+        Result        = $(if ($res -like 'FAIL*') { 'FAIL' } else { 'OK' })
+        Timestamp     = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        Detail        = (Remove-AcasMarkers $res)
+    }
+}
+
+# $script:AcasRunVulnRowOf -- run-vulnerability row: AcasUpdateRowOf minus the
+# Profile column, plus Mode (its manifest columns differ - keep both shapes).
+$script:AcasRunVulnRowOf = {
+    param($res, $hostName, $ctx)
+    $pre  = Get-AcasMarker $res 'PRE'
+    $post = Get-AcasMarker $res 'POST'
+    @{
+        Host             = $hostName
+        Result           = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'UNCONFIRMED*') { 'UNCONFIRMED' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
+        'Version Before' = $(if ($pre)  { $pre }  else { 'n/a' })
+        'Version After'  = $(if ($post) { $post } else { 'n/a' })
+        Mode             = $ctx.Mode
+        Timestamp        = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        Detail           = (Remove-AcasMarkers $res)
+    }
+}
 
 # -----------------------------------------------------------------------------
 #  Result-string parsers: pull the embedded <<...>> markers and strip them
@@ -2784,7 +2935,28 @@ $script:AcasKbInstallBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
     if ($useSsl) { $splat['UseSSL']=$true }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$(if ($Auth) { $Auth } else { 'Negotiate' }) }
-    $sess = $null; try { $sess = New-PSSession @splat } catch { return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Session failed: $($_.Exception.Message)" }
+    $sess = $null
+    try { $sess = New-PSSession @splat }
+    catch {
+        $sessErr = $_.Exception.Message
+        # audit 2026-07-23: NetBIOS NTLM fallback on Negotiate/SPN failures - this was the
+        # ONLY session worker in the file without the sibling idiom (update ~:1991 /
+        # reboot-verify ~:2300 / preflight ~:2396), so a host the patch path recovers via
+        # the fallback still failed kb-install. Same trigger set, same short-name retry.
+        if ($Computer -match '\.' -and (
+                $sessErr -match '0x80090322' -or
+                $sessErr -match 'Negotiate authentication' -or
+                $sessErr -match 'Access is denied'
+            )) {
+            $nbName = ($Computer -split '\.')[0]
+            $splat2 = @{} + $splat
+            $splat2['ComputerName'] = $nbName
+            try { $sess = New-PSSession @splat2 }
+            catch { return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Session failed: $sessErr (NetBIOS retry [$nbName] also failed: $($_.Exception.Message))" }
+        } else {
+            return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Session failed: $sessErr"
+        }
+    }
     try {
         # DNS-mismatch guard (HARD ABORT, loop86): before ANY destructive install, verify the box that answered
         # is the one we dialed - stale DNS / a reused IP could install KBs (and reboot, when NoReboot is off) on
@@ -2900,6 +3072,75 @@ function Test-AcasCvesInKev {
         if ($c -and $KevSet.Contains($c)) { return $true }
     }
     return $false
+}
+
+# -----------------------------------------------------------------------------
+#  audit 2026-07-23 (simplify): shared reboot / reboot-verify wave bodies. The
+#  schedule-reboot and in-card reboot-selected arms (and their verify siblings)
+#  carried duplicated ~40-line switch-arm bodies; both now resolve their host
+#  list and route through these. The never-reboot-self guard lives HERE so no
+#  caller path can skip it.
+# -----------------------------------------------------------------------------
+function Invoke-AcasRebootWave {
+    # $AuditAction is passed explicitly by each arm (always 'TouchHost') so the
+    # loop28/loop38 audit decision stays VISIBLE at the switch arm - it is statically
+    # asserted per-arm by Acas.RebootAudit.Tests.ps1.
+    param([string[]]$Targets, [string]$VulnDisplay, [string]$WarningText,
+          $Credential, [int]$Threads, [scriptblock]$Send, [scriptblock]$CancelCheck,
+          [string]$AuditAction = 'TouchHost')
+    # Self-guard: NEVER reboot the dispatcher host - the reboot worker runs
+    # shutdown.exe ON THIS box targeting \\HOST, so a self-target would kill the
+    # JANET HttpListener mid-wave. Drop any target that resolves to us (short/
+    # FQDN/NIC-IP/loopback) and warn; short-circuit if none remain.
+    $targets = @($Targets)
+    $selfHits = @($targets | Where-Object { Test-AcasHostIsSelf $_ })
+    if ($selfHits.Count -gt 0) {
+        & $Send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from reboot wave (never reboot self): $($selfHits -join ', ')" }
+        $targets = @($targets | Where-Object { -not (Test-AcasHostIsSelf $_) })
+    }
+    if ($targets.Count -eq 0) {
+        & $Send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to reboot.' }
+        return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
+    }
+    $warn = [string]$WarningText
+    if ([string]::IsNullOrWhiteSpace($warn)) { $warn = 'This workstation will reboot in 5 minutes for required security updates. Save your work now.' }
+    & $Send @{ type='status'; text="Scheduling reboot on $($targets.Count) host(s) for [$VulnDisplay]..." }
+
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($t in $targets) { [void]$jobs.Add(@{ Host=$t; Args=@($t, $warn, $Credential); Context=@{} }) }
+
+    # loop28 (item19) / loop38 (item34): a SCHEDULED reboot (shutdown /r /t 300, 5 min out
+    # and abortable via shutdown /a; rc=1190 "already scheduled" also returns OK) is a
+    # TOUCH, not a confirmed patch. Booking VulnPatched at schedule time was a false
+    # compliance record. Audit TouchHost here; VulnPatched stays on the actual
+    # patch-install/update confirmations, and the reboot-verify wave (which confirms the
+    # reboot happened) also audits TouchHost.
+    $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootWorker -Threads $Threads `
+               -RowOf $script:AcasRebootRowOf -OkOf $script:AcasOkOf -AuditAction $AuditAction -AuditDetailOf $script:AcasDetOfPlain -Send $Send -CancelCheck $CancelCheck `
+               -RunAction 'Reboot' -RunScope $VulnDisplay -RunMode 'Reboot'
+    & $Send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
+    return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
+}
+
+function Invoke-AcasRebootVerifyWave {
+    # $AuditAction passed explicitly by each arm (always 'TouchHost') - see
+    # Invoke-AcasRebootWave's note; asserted per-arm by Acas.RebootAudit.Tests.ps1.
+    param([string[]]$Targets, [string]$VulnDisplay,
+          $Credential, [int]$Threads, [scriptblock]$Send, [scriptblock]$CancelCheck,
+          [string]$AuditAction = 'TouchHost')
+    & $Send @{ type='status'; text="Verifying post-reboot state on $($Targets.Count) host(s) (up to 10min/host wait)..." }
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($t in $Targets) { [void]$jobs.Add(@{ Host=$t; Args=@($t, $Credential); Context=@{} }) }
+
+    # Verify is a read/check, not a state change -> TouchHost audit. Each worker
+    # legitimately waits up to 10 min for its host to come back, so the batch
+    # deadline scales with the wave count.
+    $verifyDeadline = ([int][Math]::Ceiling($jobs.Count / [double][Math]::Max(1, $Threads)) * 660) + 300
+    $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootVerifyWorker -Threads $Threads `
+               -RowOf $script:AcasRebootVerifyRowOf -OkOf $script:AcasOkOf -AuditAction $AuditAction -AuditDetailOf $script:AcasDetOfPlain -Send $Send -CancelCheck $CancelCheck `
+               -RunAction 'RebootVerify' -RunScope $VulnDisplay -RunMode 'Verify' -DeadlineSeconds $verifyDeadline
+    & $Send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
+    return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
 }
 
 function Invoke-JanetToolAction {
@@ -3041,14 +3282,14 @@ function Invoke-JanetToolAction {
             # matched profile, affected host count and auto-runnability.
             & $send @{ type='status'; text='Parsing ACAS CSV and matching remediation profiles...' }
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No findings parsed. Provide a valid ACAS CSV.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
             }
             & $send @{ type='status'; text="Parsed $($parsed.RowCount) row(s); $($parsed.ServersSkipped) server row(s) skipped. Classifying..." }
 
-            $groups = @(Get-AcasRemediationGroups -Findings $parsed.Findings)   # rolled up: one card per product/profile, latest version
+            $groups = @(Get-AcasCachedRemediationGroups -Parsed $parsed)   # rolled up: one card per product/profile, latest version (audit 2026-07-23: cached beside the parse memo)
             $kevSet = Read-AcasKevSet   # KEV-first badging at the point of remediation (audit USEFUL)
             $kevGroups = 0
             $rows = New-Object System.Collections.ArrayList
@@ -3136,12 +3377,12 @@ function Invoke-JanetToolAction {
             }
             & $send @{ type='status'; text='Re-parsing ACAS CSV for the selected remediations...' }
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No findings parsed from the CSV.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
             }
-            $groups = @(Get-AcasRemediationGroups -Findings $parsed.Findings)   # same rollup as analyze, so a combined card patches the union of hosts
+            $groups = @(Get-AcasCachedRemediationGroups -Parsed $parsed)   # same rollup as analyze, so a combined card patches the union of hosts (audit 2026-07-23: cached)
             $byKey = @{}
             foreach ($g in $groups) { $byKey[$g.Key] = $g }
 
@@ -3261,7 +3502,7 @@ function Invoke-JanetToolAction {
 
             & $send @{ type='status'; text='Parsing ACAS CSV and matching remediation profiles...' }
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No findings parsed. Provide a valid ACAS CSV.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
@@ -3368,20 +3609,7 @@ function Invoke-JanetToolAction {
                 [void]$jobs.Add(@{ Host=$t; Args=@($t, $profileName, $profilesTable, [bool]$verifyOnly, $Credential, $log4j.Path, $script:AcasJavaFixSrc, $script:AcasSpecFixSrc); Context=@{ Profile=$profileName; Mode=$mode } })
             }
 
-            $rowOf = {
-                param($res, $hostName, $ctx)
-                $pre  = Get-AcasMarker $res 'PRE'
-                $post = Get-AcasMarker $res 'POST'
-                @{
-                    Host             = $hostName
-                    Result           = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'UNCONFIRMED*') { 'UNCONFIRMED' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
-                    'Version Before' = $(if ($pre)  { $pre }  else { 'n/a' })
-                    'Version After'  = $(if ($post) { $post } else { 'n/a' })
-                    Mode             = $ctx.Mode
-                    Timestamp        = (& $stamp)
-                    Detail           = (Remove-AcasMarkers $res)
-                }
-            }
+            $rowOf = $script:AcasRunVulnRowOf   # audit 2026-07-23 (simplify): hoisted module constant
             $okOf  = $script:AcasOkOf
             $detOf = $script:AcasDetOfProfile
 
@@ -3477,94 +3705,32 @@ function Invoke-JanetToolAction {
         }
 
         'schedule-reboot' {
+            # audit 2026-07-23 (simplify): body (self-guard + fan-out) lives in the
+            # shared Invoke-AcasRebootWave - one implementation with reboot-selected.
             $targets = ConvertTo-AcasHostList ([string]$Params['targets'])
             if ($targets.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No valid targets.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
             }
-            # Self-guard: NEVER reboot the dispatcher host - the reboot worker runs
-            # shutdown.exe ON THIS box targeting \\HOST, so a self-target would kill the
-            # JANET HttpListener mid-wave. Drop any target that resolves to us (short/
-            # FQDN/NIC-IP/loopback) and warn; short-circuit if none remain. Mirrors the
-            # reboot-selected self-guard verbatim.
-            $selfHits = @($targets | Where-Object { Test-AcasHostIsSelf $_ })
-            if ($selfHits.Count -gt 0) {
-                & $send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from reboot wave (never reboot self): $($selfHits -join ', ')" }
-                $targets = @($targets | Where-Object { -not (Test-AcasHostIsSelf $_) })
-            }
-            if ($targets.Count -eq 0) {
-                & $send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to reboot.' }
-                return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
-            }
             $vulnDisplay = [string]$Params['vulnDisplay']; if (-not $vulnDisplay) { $vulnDisplay = 'Scheduled Reboot' }
-            $warn = [string]$Params['warningText']
-            if ([string]::IsNullOrWhiteSpace($warn)) { $warn = 'This workstation will reboot in 5 minutes for required security updates. Save your work now.' }
-            & $send @{ type='status'; text="Scheduling reboot on $($targets.Count) host(s) for [$vulnDisplay]..." }
-
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($t in $targets) { [void]$jobs.Add(@{ Host=$t; Args=@($t, $warn, $Credential); Context=@{} }) }
-
-            $rowOf = {
-                param($res, $hostName, $ctx)
-                @{
-                    Host        = $hostName
-                    Result      = $(if ($res -like 'FAIL*') { 'failed' } elseif ($res -match 'already') { 'already-pending' } else { 'scheduled' })
-                    'Exit Code' = (Get-AcasMarker $res 'EXIT')
-                    Timestamp   = (& $stamp)
-                    Detail      = (Remove-AcasMarkers $res)
-                }
-            }
-            $okOf  = $script:AcasOkOf
-            $detOf = $script:AcasDetOfPlain
-
-            # loop28 (item19): a SCHEDULED reboot (shutdown /r /t 300, 5 min out and abortable via
-            # shutdown /a; rc=1190 "already scheduled" also returns OK) is a TOUCH, not a confirmed
-            # patch. Booking VulnPatched at schedule time was a false compliance record. Audit
-            # TouchHost here; VulnPatched stays on the actual patch-install/update confirmations, and
-            # verify-post-reboot (which confirms the reboot happened) already audits TouchHost too.
-            $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootWorker -Threads $threads `
-                       -RowOf $rowOf -OkOf $okOf -AuditAction 'TouchHost' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
-                       -RunAction 'Reboot' -RunScope $vulnDisplay -RunMode 'Reboot'
-            & $send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
-            return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
+            # loop28 (item19): a SCHEDULED reboot is a TOUCH, not a confirmed patch -
+            # AuditAction 'TouchHost', never 'VulnPatched' at schedule time.
+            return Invoke-AcasRebootWave -Targets $targets -VulnDisplay $vulnDisplay -WarningText ([string]$Params['warningText']) `
+                       -Credential $Credential -Threads $threads -Send $send -CancelCheck $cancelCheck -AuditAction 'TouchHost'
         }
 
         'verify-post-reboot' {
+            # audit 2026-07-23 (simplify): body lives in the shared
+            # Invoke-AcasRebootVerifyWave - one implementation with verify-selected.
             $targets = ConvertTo-AcasHostList ([string]$Params['targets'])
             if ($targets.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No valid targets.' }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }
             }
             $vulnDisplay = [string]$Params['vulnDisplay']; if (-not $vulnDisplay) { $vulnDisplay = 'Reboot Verify' }
-            & $send @{ type='status'; text="Verifying post-reboot state on $($targets.Count) host(s) (up to 10min/host wait)..." }
-
-            $jobs = New-Object System.Collections.ArrayList
-            foreach ($t in $targets) { [void]$jobs.Add(@{ Host=$t; Args=@($t, $Credential); Context=@{} }) }
-
-            $rowOf = {
-                param($res, $hostName, $ctx)
-                @{
-                    Host            = $hostName
-                    Reachable       = (Get-AcasMarker $res 'REACH')
-                    RebootPending   = (Get-AcasMarker $res 'PENDING')
-                    'OS Build'      = (Get-AcasMarker $res 'BUILD')
-                    Result          = $(if ($res -like 'FAIL*') { 'FAIL' } else { 'OK' })
-                    Timestamp       = (& $stamp)
-                    Detail          = (Remove-AcasMarkers $res)
-                }
-            }
-            $okOf  = $script:AcasOkOf
-            $detOf = $script:AcasDetOfPlain
-
-            # Verify is a read/check, not a state change -> TouchHost audit. Each
-            # worker legitimately waits up to 10 min for its host to come back, so
-            # the batch deadline scales with the wave count.
-            $verifyDeadline = ([int][Math]::Ceiling($jobs.Count / [double][Math]::Max(1, $threads)) * 660) + 300
-            $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootVerifyWorker -Threads $threads `
-                       -RowOf $rowOf -OkOf $okOf -AuditAction 'TouchHost' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
-                       -RunAction 'RebootVerify' -RunScope $vulnDisplay -RunMode 'Verify' -DeadlineSeconds $verifyDeadline
-            & $send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
-            return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
+            # Verify is a read/check -> AuditAction 'TouchHost' (confirming a reboot is a touch).
+            return Invoke-AcasRebootVerifyWave -Targets $targets -VulnDisplay $vulnDisplay `
+                       -Credential $Credential -Threads $threads -Send $send -CancelCheck $cancelCheck -AuditAction 'TouchHost'
         }
 
         'preflight-services' {
@@ -3603,7 +3769,7 @@ function Invoke-JanetToolAction {
             # Extract Windows KB rollups referenced in each finding (plugin name +
             # solution text) -> one row per host x KB. Read-only; feeds the KB Installer.
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No findings parsed.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $rows = New-Object System.Collections.ArrayList
@@ -3686,9 +3852,9 @@ function Invoke-JanetToolAction {
             $key = [string]$Params['key']
             if (-not $key) { & $send @{ type='log'; level='warn'; text='No group key.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) { return @{ rows=@(); summary=@{ total=0 } } }
-            $groups = @(Get-AcasRemediationGroups -Findings $parsed.Findings)
+            $groups = @(Get-AcasCachedRemediationGroups -Parsed $parsed)   # audit 2026-07-23: cached beside the parse memo
             $g = $groups | Where-Object { $_.Key -eq $key } | Select-Object -First 1
             if (-not $g) { & $send @{ type='log'; level='warn'; text="Group not found: $key" }; return @{ rows=@(); summary=@{ total=0 } } }
             $memberSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -3717,9 +3883,9 @@ function Invoke-JanetToolAction {
             $key = [string]$Params['key']
             if (-not $key) { & $send @{ type='log'; level='warn'; text='No group key.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No findings parsed.' }; return @{ rows=@(); summary=@{ total=0 } } }
-            $groups = @(Get-AcasRemediationGroups -Findings $parsed.Findings)
+            $groups = @(Get-AcasCachedRemediationGroups -Parsed $parsed)   # audit 2026-07-23: cached beside the parse memo
             $g = $groups | Where-Object { $_.Key -eq $key } | Select-Object -First 1
             if (-not $g) { & $send @{ type='log'; level='warn'; text="Group not found: $key" }; return @{ rows=@(); summary=@{ total=0 } } }
             $targets = @($g.Hosts)
@@ -3743,50 +3909,19 @@ function Invoke-JanetToolAction {
             if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No targets for this group.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $vulnDisplay = $g.DisplayName
 
+            # audit 2026-07-23 (simplify): both arms now route the resolved host list
+            # through the SAME wave bodies schedule-reboot / verify-post-reboot use
+            # (Invoke-AcasRebootWave carries the never-reboot-self guard + the loop28/
+            # loop38 TouchHost-not-VulnPatched audit; the verify wave scales its batch
+            # deadline to the 10min/host wait). The duplicated ~40-line switch arm is gone.
             if ($ActionId -eq 'reboot-selected') {
-                # Self-guard: NEVER reboot the dispatcher host - the reboot worker runs
-                # shutdown.exe ON THIS box targeting \\HOST, so a self-target would kill
-                # the JANET HttpListener mid-wave. Drop any target that resolves to us
-                # (short/FQDN/NIC-IP/loopback) and warn; verify-selected is read-only so
-                # it needs no guard. Mirrors the restart/winupgrade self-guard locally.
-                $selfHits = @($targets | Where-Object { Test-AcasHostIsSelf $_ })
-                if ($selfHits.Count -gt 0) {
-                    & $send @{ type='log'; level='warn'; text="Self-guard: dropped dispatcher host from reboot wave (never reboot self): $($selfHits -join ', ')" }
-                    $targets = @($targets | Where-Object { -not (Test-AcasHostIsSelf $_) })
-                }
-                if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No targets left after self-guard - nothing to reboot.' }; return @{ rows=@(); summary=@{ total=0 } } }
-                $warn = [string]$Params['warningText']
-                if ([string]::IsNullOrWhiteSpace($warn)) { $warn = 'This workstation will reboot in 5 minutes for required security updates. Save your work now.' }
-                & $send @{ type='status'; text="Scheduling reboot on $($targets.Count) host(s) for [$vulnDisplay]..." }
-                $jobs = New-Object System.Collections.ArrayList
-                foreach ($t in $targets) { [void]$jobs.Add(@{ Host=$t; Args=@($t, $warn, $Credential); Context=@{} }) }
-                $rowOf = { param($res, $hostName, $ctx) @{ Host=$hostName; Result=$(if ($res -like 'FAIL*') { 'failed' } elseif ($res -match 'already') { 'already-pending' } else { 'scheduled' }); 'Exit Code'=(Get-AcasMarker $res 'EXIT'); Timestamp=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Detail=(Remove-AcasMarkers $res) } }
-                $okOf  = $script:AcasOkOf
-                $detOf = $script:AcasDetOfPlain
-                # loop38 (item34): this in-card 'reboot-selected' arm is the sibling the loop28 fix
-                # MISSED - scheduling an abortable reboot (shutdown /r /t 300; rc=1190 "already
-                # scheduled" also OK) is a TOUCH, not a confirmed patch. Booking VulnPatched here was
-                # a false compliance record (audit ledger shows a host patched that only had a reboot
-                # queued). Audit TouchHost, matching schedule-reboot (:3389) and verify-post-reboot.
-                $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootWorker -Threads $threads `
-                           -RowOf $rowOf -OkOf $okOf -AuditAction 'TouchHost' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
-                           -RunAction 'Reboot' -RunScope $vulnDisplay -RunMode 'Reboot'
-                & $send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
-                return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
+                # loop38 (item34): scheduling a reboot is a TOUCH, not a confirmed patch -
+                # AuditAction 'TouchHost' (booking VulnPatched here was a false compliance record).
+                return Invoke-AcasRebootWave -Targets $targets -VulnDisplay $vulnDisplay -WarningText ([string]$Params['warningText']) `
+                           -Credential $Credential -Threads $threads -Send $send -CancelCheck $cancelCheck -AuditAction 'TouchHost'
             } else {
-                & $send @{ type='status'; text="Verifying post-reboot state on $($targets.Count) host(s) (up to 10min/host wait)..." }
-                $jobs = New-Object System.Collections.ArrayList
-                foreach ($t in $targets) { [void]$jobs.Add(@{ Host=$t; Args=@($t, $Credential); Context=@{} }) }
-                $rowOf = { param($res, $hostName, $ctx) @{ Host=$hostName; Reachable=(Get-AcasMarker $res 'REACH'); RebootPending=(Get-AcasMarker $res 'PENDING'); 'OS Build'=(Get-AcasMarker $res 'BUILD'); Result=$(if ($res -like 'FAIL*') { 'FAIL' } else { 'OK' }); Timestamp=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Detail=(Remove-AcasMarkers $res) } }
-                $okOf  = $script:AcasOkOf
-                $detOf = $script:AcasDetOfPlain
-                # Reboot-verify waits up to 10 min/host: scale the batch deadline.
-                $verifyDeadline = ([int][Math]::Ceiling($jobs.Count / [double][Math]::Max(1, $threads)) * 660) + 300
-                $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasRebootVerifyWorker -Threads $threads `
-                           -RowOf $rowOf -OkOf $okOf -AuditAction 'TouchHost' -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
-                           -RunAction 'RebootVerify' -RunScope $vulnDisplay -RunMode 'Verify' -DeadlineSeconds $verifyDeadline
-                & $send @{ type='status'; text="Done. $($fan.Ok) ok, $($fan.Failed) failed of $($fan.Total)." }
-                return @{ rows=$fan.Rows; summary=@{ total=$fan.Total; ok=$fan.Ok; failed=$fan.Failed } }
+                return Invoke-AcasRebootVerifyWave -Targets $targets -VulnDisplay $vulnDisplay `
+                           -Credential $Credential -Threads $threads -Send $send -CancelCheck $cancelCheck -AuditAction 'TouchHost'
             }
         }
 
@@ -3815,7 +3950,7 @@ function Invoke-JanetToolAction {
             $hostQ = Get-AcasShortHost ([string]$Params['host'])
             if (-not $hostQ) { & $send @{ type='log'; level='warn'; text='Host is required.' }; return @{ rows=@(); summary=@{ total=0 } } }
             $paths = Get-AcasCsvPaths ([string]$Params['csvPaths'])
-            $parsed = ConvertFrom-AcasCsv -Paths $paths -Text ([string]$Params['csvText']) -Send $send
+            $parsed = Get-AcasParsedFindings -Paths $paths -Text ([string]$Params['csvText']) -Send $send   # audit 2026-07-23: memoized (path+size+mtime key)
             if ($parsed.Findings.Count -eq 0) { return @{ rows=@(); summary=@{ total=0 } } }
             $rows = New-Object System.Collections.ArrayList
             foreach ($f in $parsed.Findings) {

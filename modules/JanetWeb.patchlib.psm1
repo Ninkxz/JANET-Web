@@ -176,9 +176,11 @@ function Format-PatchlibSize {
 }
 
 # Classify one item (file or directory) -> @{ Type; KbList }.
-# Directory: PSADT when it holds a Deploy-Application.ps1 (recurse, bounded);
-# else Folder. File: by extension. KB ids come from the item name AND, for a
-# package folder, from any installer filename inside it. Never throws.
+# Directory: PSADT when it holds a Deploy-Application.ps1 OR an
+# Invoke-AppDeployToolkit.ps1 (PSADT v4's entry script - parity with the
+# pkginstall v4 support; audit 2026-07-23) anywhere in the tree (recurse,
+# bounded); else Folder. File: by extension. KB ids come from the item name AND,
+# for a package folder, from any installer filename inside it. Never throws.
 function Get-PatchlibItemInfo {
     param($Item)
     $info = @{ Type='Other'; KbList=@() }
@@ -186,19 +188,25 @@ function Get-PatchlibItemInfo {
     foreach ($k in (Get-PatchlibKbTokens $Item.Name)) { [void]$kbSet.Add($k) }
 
     if ($Item.PSIsContainer) {
-        $isPsadt = $false
-        try { $isPsadt = [bool](Get-ChildItem -LiteralPath $Item.FullName -Filter 'Deploy-Application.ps1' -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Select-Object -First 1) } catch {}
-        if ($isPsadt) { $info.Type = 'PSADT' } else { $info.Type = 'Folder' }
-        # Pull KB ids from installer filenames staged inside the package folder.
+        # audit 2026-07-23: ONE bounded walk detects the PSADT marker AND harvests
+        # installer-filename KB ids (was two full recursive share walks per folder).
         # NOTE: -Include is silently ignored when combined with -LiteralPath on
-        # PS 5.1 (it only filters with -Path), so filter by extension with
-        # Where-Object BEFORE the -First cap; Select-Object -First still stops the
-        # upstream enumeration, so the 200 cap keeps bounding a huge package.
+        # PS 5.1 (it only filters with -Path), so match names/extensions inline.
+        # The 200-installer cap keeps bounding a huge package; the walk stops early
+        # once the marker is found AND the cap is hit.
+        $isPsadt = $false
+        $harvested = 0
         try {
-            foreach ($f in (Get-ChildItem -LiteralPath $Item.FullName -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^(?i)\.(msi|msu|cab|exe)$' } | Select-Object -First 200)) {
-                foreach ($k in (Get-PatchlibKbTokens $f.Name)) { [void]$kbSet.Add($k) }
+            foreach ($f in (Get-ChildItem -LiteralPath $Item.FullName -Recurse -Depth 4 -File -ErrorAction SilentlyContinue)) {
+                if (-not $isPsadt -and ($f.Name -eq 'Deploy-Application.ps1' -or $f.Name -eq 'Invoke-AppDeployToolkit.ps1')) { $isPsadt = $true }
+                if ($harvested -lt 200 -and $f.Extension -match '^(?i)\.(msi|msu|cab|exe)$') {
+                    $harvested++
+                    foreach ($k in (Get-PatchlibKbTokens $f.Name)) { [void]$kbSet.Add($k) }
+                }
+                if ($isPsadt -and $harvested -ge 200) { break }
             }
         } catch {}
+        if ($isPsadt) { $info.Type = 'PSADT' } else { $info.Type = 'Folder' }
     } else {
         $ext = ''
         try { $ext = ([string]$Item.Extension).ToLower() } catch {}

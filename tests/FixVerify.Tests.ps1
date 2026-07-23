@@ -199,13 +199,17 @@ Describe 'FIX 3 - UPR uninstall gates OK on a post-uninstall re-enumeration (Jan
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
                 param($Session, $ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
-                if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $env:COMPUTERNAME }
                 if ($ScriptBlock -and ($ScriptBlock.ToString() -match 'UprVerifyPresent')) {
                     if ($script:__verifyThrows) { throw 'winrm re-read failed' }
                     return ([pscustomobject]@{ Present = $script:__present })
                 }
                 if ($ArgumentList) { return $script:__uninstallResult }
-                return @( @{ Name = 'FakeVulnApp'; Version = '1.0'; Publisher = 'x'; Type = 'EXE'; UninstallString = 'C:\x.exe'; QuietUninstall = ''; PSChildName = 'FakeVulnApp' } )
+                # audit 2026-07-23: harness updated for the folded guard - the standalone DNS
+                # probe is gone; the enumeration now ALSO returns the answering box's
+                # ComputerName (this box, so the admin-side compare passes and the verify
+                # gating under test is reached). Apps carries what the old shim returned.
+                # Assertions unchanged.
+                return @{ ComputerName = $env:COMPUTERNAME; Apps = @( @{ Name = 'FakeVulnApp'; Version = '1.0'; Publisher = 'x'; Type = 'EXE'; UninstallString = 'C:\x.exe'; QuietUninstall = ''; PSChildName = 'FakeVulnApp' } ) }
             }
             try {
                 $prof = @{ DisplayNameRegex = 'FakeVulnApp'; VersionMaxExclusive = ''; Proven = $true; PluginNameMatch = 'P'; Notes = 'n' }

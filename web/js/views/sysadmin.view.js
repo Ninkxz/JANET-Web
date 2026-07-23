@@ -73,9 +73,7 @@
       function exportGrid(grid, cols, fileBase) {
         var rows = grid.rows();
         if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a sweep first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
-        var keys = cols.map(function (c) { return c[0]; });
-        var csv = ctx.util.toCsv(cols.map(function (c) { return c[1]; }), rows, keys);
-        ctx.util.downloadBlob(fileBase + '_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv(fileBase, cols, rows);
         actlog.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
       }
 
@@ -285,7 +283,6 @@
       host.appendChild(root);
       this._root = root;
       this._unsub = function () { subs.forEach(function (u) { try { u(); } catch (e) {} }); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

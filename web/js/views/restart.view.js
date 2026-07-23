@@ -647,6 +647,12 @@
         });
         if (!ok) { if (refs.dispatchLog) refs.dispatchLog.append({ text: 'Dispatch cancelled at the arming dialog.', level: 'warn' }); return; }
 
+        // audit 2026-07-23: the server now enforces the typed RESTART word for LIVE
+        // dispatches (refuses without it - pkginstall lesson: gate + param must land
+        // together). The operator just typed it in the ArmingDialog above (confirmWord
+        // is only demanded when live); dry-run needs no word server-side either.
+        if (!p.dryRun) p.confirm = 'RESTART';
+
         // delayed-start arming: "Begin at the scheduled time" holds a live countdown
         // to the Restart time (non-rolling) and auto-fires at zero - the desktop's
         // Start-button "Starts in HH:MM:SS". Already confirmed above, so the fire is

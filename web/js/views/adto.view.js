@@ -198,8 +198,7 @@
       exportBtn.onclick = function () {
         var rows = allRows.filter(rowMatches);
         if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a scan first - there are no result rows yet.', okText: 'OK', cancelText: null }); return; }
-        var csv = ctx.util.toCsv(EXPORT_COLS.map(function (p) { return p[1]; }), rows, EXPORT_COLS.map(function (p) { return p[0]; }));
-        ctx.util.downloadBlob('ADNemesis_' + (filterCat === 'All' ? 'all' : filterCat) + '_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv('ADNemesis_' + (filterCat === 'All' ? 'all' : filterCat), EXPORT_COLS, rows);
       };
 
       function ingestRow(r) {
@@ -322,7 +321,6 @@
       resetState();
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

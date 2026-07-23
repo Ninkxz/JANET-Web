@@ -456,7 +456,7 @@
       function isRunning() { return !!(run && run.state && run.state.active); }
       function threads() { return Math.max(1, Math.min(64, parseInt(threadsInput.value, 10) || 16)); }
       function threadsFix() { return Math.max(1, Math.min(16, parseInt(fixThreads.value, 10) || 8)); }
-      function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+      var esc = Janet.util.esc;   // the single shared escaper (audit: local copy duplicated it)
       function alertDialog(title, bodyTxt) { ctx.confirm({ title: title, body: bodyTxt, okText: 'OK', cancelText: null }); }
       function keyByHost(ev) { return ev.Host != null ? String(ev.Host) : (ev.host != null ? String(ev.host) : null); }
       // Short name that PRESERVES an IPv4 literal (mirrors the backend Get-C2cShortHost). The
@@ -1190,8 +1190,7 @@
       function doExport() {
         var rows = grid.rows();
         if (!rows.length) { alertDialog('Nothing to export', 'Run a scan or fix first - there are no result rows yet.'); return; }
-        var csv = ctx.util.toCsv(EXPORT_COLS.map(function (p) { return p[1]; }), rows, EXPORT_COLS.map(function (p) { return p[0]; }));
-        ctx.util.downloadBlob('C2CReadiness_results_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv('C2CReadiness_results', EXPORT_COLS, rows);
         log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
       }
 
@@ -1207,7 +1206,6 @@
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); if (offTargets) offTargets(); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

@@ -72,7 +72,10 @@ function Get-JanetToolManifest {
                     @{ name='skipServersRegex';     label='Skip servers regex (blank = off)';     type='text';     required=$false; default='^MSEK-[A-Za-z]{2,4}-' },
                     @{ name='skipUnreachablePing';  label='Skip unreachable (pre-flight ping)';   type='bool';     required=$false; default=$true },
                     @{ name='onlyIfPending';        label='Only restart hosts with a pending reboot'; type='bool'; required=$false; default=$false },
-                    @{ name='threads';              label='Parallel hosts';                       type='int';      required=$false; default=96 }
+                    @{ name='threads';              label='Parallel hosts';                       type='int';      required=$false; default=96 },
+                    # audit 2026-07-23: typed confirm word, enforced SERVER-side for LIVE dispatch
+                    # only (dry-run exempt) - the view's ArmingDialog collects it (confirmWord).
+                    @{ name='confirm';              label='Type RESTART to arm (live dispatch only; dry run exempt)'; type='text'; required=$false }
                 )
             },
             @{
@@ -1205,6 +1208,74 @@ function Invoke-RrsFanOut {
 }
 
 # -----------------------------------------------------------------------------
+# audit 2026-07-23 (finding: duplicated ping fan-outs): one bounded-pool parallel
+# sweep of a single-shot worker ($script:PingWorker / $script:BootTimeWorker) with
+# reap-as-completed + operator-cancel. Shared by the 'ping' action, the dispatch
+# pre-flight ping gate, and 'verify-boottime' - three previously hand-rolled
+# copies of the same submit/reap/cancel loop. (The verify-reboots WAVE manager
+# keeps its own loop: it re-pings on an interval with per-host state, not a
+# single sweep.) For each completed host $OnResult runs with ($host, $result) -
+# $result is the worker's returned object or $null on a worker error. NOTE for
+# callers: $OnResult executes in ITS defining scope, so accumulate counters in a
+# reference type (hashtable / ArrayList), not plain locals. Returns $true when
+# the operator cancelled (in-flight workers BeginStop'ped, remaining abandoned;
+# the caller emits its own cancel log/status).
+# -----------------------------------------------------------------------------
+function Invoke-RrsPingSweep {
+    param(
+        [string[]]$Targets,
+        [scriptblock]$Worker,          # single-shot worker; first arg is always the hostname
+        [object[]]$WorkerArgs = @(),   # extra worker args appended after the hostname
+        [int]$MaxThreads = 64,
+        [scriptblock]$OnResult,        # param($h, $res) per completed host
+        [scriptblock]$CancelCheck,     # optional; $true -> stop in-flight, abandon the rest
+        [int]$PollMs = 60
+    )
+    $pmax = [Math]::Min($MaxThreads, [Math]::Max(4, $Targets.Count))
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $ppool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $pmax, $iss, $Host)
+    $pjobs = @{}
+    $cancelled = $false
+    try {
+        # Pool Open inside the try so a throw still hits the finally that disposes it.
+        $ppool.Open()
+        foreach ($h in $Targets) {
+            $ps = [powershell]::Create(); $ps.RunspacePool = $ppool
+            [void]$ps.AddScript($Worker); [void]$ps.AddArgument($h)
+            foreach ($a in $WorkerArgs) { [void]$ps.AddArgument($a) }
+            $pjobs[$h] = @{ PS = $ps; Async = $ps.BeginInvoke() }
+        }
+        while ($pjobs.Count -gt 0) {
+            $finished = @()
+            foreach ($k in @($pjobs.Keys)) { if ($pjobs[$k].Async.IsCompleted) { $finished += $k } }
+            foreach ($k in $finished) {
+                $jp = $pjobs[$k]; $rp = $null
+                try { $rp = $jp.PS.EndInvoke($jp.Async) | Select-Object -First 1 } catch { $rp = $null }
+                try { $jp.PS.Dispose() } catch {}
+                $pjobs.Remove($k)
+                if ($OnResult) { & $OnResult $k $rp }
+            }
+            if ($pjobs.Count -gt 0) {
+                if ($CancelCheck -and (& $CancelCheck)) {
+                    $cancelled = $true
+                    foreach ($k in @($pjobs.Keys)) {
+                        # BeginStop only; the pool finally disposes.
+                        try { [void]$pjobs[$k].PS.BeginStop($null, $null) } catch {}
+                        $pjobs[$k].PS = $null
+                    }
+                    $pjobs.Clear()
+                    break
+                }
+                Start-Sleep -Milliseconds $PollMs
+            }
+        }
+    } finally {
+        try { $ppool.Close(); $ppool.Dispose() } catch {}
+    }
+    return $cancelled
+}
+
+# -----------------------------------------------------------------------------
 # Resolve an int param with a default and bounds.
 # -----------------------------------------------------------------------------
 function Get-RrsInt {
@@ -1265,50 +1336,28 @@ function Invoke-JanetToolAction {
                 return @{ rows=@(); summary=@{ total=0 } }
             }
             & $send @{ type='status'; text="Pinging $($targets.Count) host(s)..." }
-            $pmax = [Math]::Min(64, [Math]::Max(4, $targets.Count))
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $ppool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $pmax, $iss, $Host)
-            $pjobs = @{}
+            # audit 2026-07-23: hand-rolled submit/reap/cancel loop replaced by the shared
+            # Invoke-RrsPingSweep. Counters live in a hashtable so the callback (which runs
+            # in its defining scope's child) mutates the shared instance, not a scope copy.
             $rows  = New-Object System.Collections.ArrayList
-            $online = 0; $offline = 0; $done = 0
-            try {
-                $ppool.Open()
-                foreach ($h in $targets) {
-                    $ps = [powershell]::Create(); $ps.RunspacePool = $ppool
-                    [void]$ps.AddScript($script:PingWorker); [void]$ps.AddArgument($h); [void]$ps.AddArgument(1500)
-                    $pjobs[$h] = @{ PS = $ps; Async = $ps.BeginInvoke() }
-                }
-                while ($pjobs.Count -gt 0) {
-                    $finished = @()
-                    foreach ($k in @($pjobs.Keys)) { if ($pjobs[$k].Async.IsCompleted) { $finished += $k } }
-                    foreach ($k in $finished) {
-                        $jp = $pjobs[$k]; $rp = $null
-                        try { $rp = $jp.PS.EndInvoke($jp.Async) | Select-Object -First 1 } catch { $rp = $null }
-                        try { $jp.PS.Dispose() } catch {}
-                        $pjobs.Remove($k)
-                        $up = ($rp -and [bool]$rp.Up)
-                        if ($up) { $online++ } else { $offline++ }
-                        $row = [ordered]@{ Host = $k; Pingable = $up }
-                        [void]$rows.Add($row)
-                        & $send (@{ type='row' } + $row)
-                        $done++
-                        & $send @{ type='progress'; done=$done; total=$targets.Count }
-                    }
-                    if ($pjobs.Count -gt 0) {
-                        if (& $cancelCheck) {
-                            foreach ($k in @($pjobs.Keys)) { try { [void]$pjobs[$k].PS.BeginStop($null, $null) } catch {}; $pjobs[$k].PS = $null }
-                            $pjobs.Clear()
-                            & $send @{ type='log'; level='warn'; text='Ping cancelled by operator; remaining host(s) abandoned.' }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 60
-                    }
-                }
-            } finally {
-                try { $ppool.Close(); $ppool.Dispose() } catch {}
+            $tally = @{ Online = 0; Offline = 0; Done = 0 }
+            $onPing = {
+                param($k, $rp)
+                $up = ($rp -and [bool]$rp.Up)
+                if ($up) { $tally.Online++ } else { $tally.Offline++ }
+                $row = [ordered]@{ Host = $k; Pingable = $up }
+                [void]$rows.Add($row)
+                & $send (@{ type='row' } + $row)
+                $tally.Done++
+                & $send @{ type='progress'; done=$tally.Done; total=$targets.Count }
             }
-            & $send @{ type='status'; text="Ping complete: $online online, $offline offline of $($targets.Count)." }
-            return @{ rows=@($rows); summary=@{ total=$targets.Count; online=$online; offline=$offline } }
+            $pingCancelled = Invoke-RrsPingSweep -Targets $targets -Worker $script:PingWorker -WorkerArgs @(1500) `
+                -MaxThreads 64 -OnResult $onPing -CancelCheck $cancelCheck -PollMs 60
+            if ($pingCancelled) {
+                & $send @{ type='log'; level='warn'; text='Ping cancelled by operator; remaining host(s) abandoned.' }
+            }
+            & $send @{ type='status'; text="Ping complete: $($tally.Online) online, $($tally.Offline) offline of $($targets.Count)." }
+            return @{ rows=@($rows); summary=@{ total=$targets.Count; online=$tally.Online; offline=$tally.Offline } }
         }
 
         # ---------------------------------------------------------------------
@@ -1415,6 +1464,21 @@ function Invoke-JanetToolAction {
             $promptSec   = $promptMin * 60
             $pollInt     = 20
 
+            # audit 2026-07-23 (finding: typed confirm): server-side enforcement of the
+            # view's ArmingDialog confirmWord (pkginstall/certdeploy pattern). The dialog
+            # alone is client-side only, so a non-UI or stale client could fire a LIVE
+            # fleet reboot - including the consent-OFF burst path, which then reboots every
+            # reachable host with no human in the loop - without ever typing the word.
+            # LIVE dispatch only: dry-run stays word-free, matching the view (confirmWord
+            # is null when dryRun). The paired view change sends confirm='RESTART' after
+            # the operator types it - both sides landed together (the pkginstall lesson:
+            # a server gate without the view param bricks the action).
+            if (-not $dryRun -and ([string]$Params['confirm']).Trim() -cne 'RESTART') {
+                & $send @{ type='log'; level='err'; text='Refused: type RESTART (exactly) to arm a LIVE dispatch (dry run needs no confirm word). Nothing was dispatched.' }
+                & $send @{ type='status'; text='Dispatch refused: missing/wrong confirm word for a live restart.' }
+                return @{ rows=@(); summary=@{ total=$targets.Count; sent=0; failed=0; declined=0; skipped=0; rejected=$true } }
+            }
+
             $modeText = if ($rolling) { "ROLLING (~${rollingGrace}s after approve; no shared time)" } elseif ($burst) { "burst converge @ $($restartTime.ToString('yyyy-MM-dd HH:mm'))" } else { "time-gated (hold until $($restartTime.AddMinutes(-1 * $leadMinutes).ToString('yyyy-MM-dd HH:mm')), then /t = $leadMinutes min; reboot @ $($restartTime.ToString('yyyy-MM-dd HH:mm')))" }
             & $send @{ type='status'; text="Planning restart of $($targets.Count) host(s) - mode: $modeText; dryRun=$dryRun; consent=$consent$(if ($onlyIfPending) { '; only-if-pending ON' })$(if ($excludedCount) { "; $excludedCount excepted" })." }
 
@@ -1463,50 +1527,17 @@ function Invoke-JanetToolAction {
             # --- Pre-flight ping gate (parallel, cap 64). Skipped on dry runs. ---
             if ($skipPing -and -not $dryRun -and $pending.Count -gt 0) {
                 & $send @{ type='status'; text="Pre-flight ping of $($pending.Count) host(s)..." }
-                $pmax = [Math]::Min(64, [Math]::Max(4, $pending.Count))
-                $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-                $ppool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $pmax, $iss, $Host)
-                $pjobs = @{}
+                # audit 2026-07-23: hand-rolled submit/reap/cancel loop replaced by the shared
+                # Invoke-RrsPingSweep. $reachable / $useSslMap are reference types, so the
+                # callback mutates the shared instances. A cancel here still skips the WinRM
+                # dispatch entirely (server cancel contract honored during the gate too).
                 $reachable = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                $preflightCancelled = $false
-                try {
-                    # Pool Open inside the try so a throw still hits the finally that disposes it.
-                    $ppool.Open()
-                    foreach ($h in $pending) {
-                        $ps = [powershell]::Create(); $ps.RunspacePool = $ppool
-                        [void]$ps.AddScript($script:PingWorker); [void]$ps.AddArgument($h); [void]$ps.AddArgument(1000)
-                        $pjobs[$h] = @{ PS = $ps; Async = $ps.BeginInvoke() }
-                    }
-                    while ($pjobs.Count -gt 0) {
-                        $finished = @()
-                        foreach ($k in @($pjobs.Keys)) { if ($pjobs[$k].Async.IsCompleted) { $finished += $k } }
-                        foreach ($k in $finished) {
-                            $jp = $pjobs[$k]; $rp = $null
-                            try { $rp = $jp.PS.EndInvoke($jp.Async) | Select-Object -First 1 } catch { $rp = $null }
-                            try { $jp.PS.Dispose() } catch {}
-                            $pjobs.Remove($k)
-                            if ($rp -and [bool]$rp.Up) { [void]$reachable.Add([string]$rp.Host); $useSslMap[[string]$rp.Host] = [bool]$rp.UseSsl }
-                        }
-                        if ($pjobs.Count -gt 0) {
-                            # Honor the server cancel contract during the pre-flight gate too:
-                            # stop the in-flight pings and skip the WinRM dispatch entirely.
-                            if ($script:RrsCancelCheck -and (& $script:RrsCancelCheck)) {
-                                $preflightCancelled = $true
-                                foreach ($k in @($pjobs.Keys)) {
-                                    $pp = $pjobs[$k].PS
-                                    # BeginStop only; the pool finally disposes.
-                                    try { [void]$pp.BeginStop($null, $null) } catch {}
-                                    $pjobs[$k].PS = $null
-                                }
-                                $pjobs.Clear()
-                                break
-                            }
-                            Start-Sleep -Milliseconds 60
-                        }
-                    }
-                } finally {
-                    try { $ppool.Close(); $ppool.Dispose() } catch {}
+                $onPreflight = {
+                    param($k, $rp)
+                    if ($rp -and [bool]$rp.Up) { [void]$reachable.Add([string]$rp.Host); $useSslMap[[string]$rp.Host] = [bool]$rp.UseSsl }
                 }
+                $preflightCancelled = Invoke-RrsPingSweep -Targets @($pending) -Worker $script:PingWorker -WorkerArgs @(1000) `
+                    -MaxThreads 64 -OnResult $onPreflight -CancelCheck $script:RrsCancelCheck -PollMs 60
                 if ($preflightCancelled) {
                     & $send @{ type='log'; level='warn'; text='Cancelled by operator; remaining host(s) abandoned (in-flight calls stopped).' }
                     & $send @{ type='status'; text='Dispatch cancelled by operator during pre-flight ping; no WinRM restart attempted.' }
@@ -1897,59 +1928,36 @@ function Invoke-JanetToolAction {
             }
             & $send @{ type='status'; text="WinRM boot-time verify: $($targets.Count) host(s)$(if ($refShown) { " vs restart @ $refShown" }) with $threads thread(s)..." }
 
-            $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $pmax = [Math]::Min($threads, [Math]::Max(4, $targets.Count))
-            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $pmax, $iss, $Host)
+            # audit 2026-07-23: hand-rolled submit/reap/cancel loop replaced by the shared
+            # Invoke-RrsPingSweep (BootTimeWorker is single-shot, same shape as a ping).
+            # Counters live in a hashtable so the callback mutates the shared instance.
             $rows = New-Object System.Collections.ArrayList
-            $confirmed = 0; $notRestarted = 0; $online = 0; $failed = 0; $done = 0; $cancelled = $false
-            $jobs = @{}
-            try {
-                $pool.Open()
-                foreach ($h in $targets) {
-                    $ps = [powershell]::Create(); $ps.RunspacePool = $pool
-                    [void]$ps.AddScript($script:BootTimeWorker); [void]$ps.AddArgument($h); [void]$ps.AddArgument($refTicks); [void]$ps.AddArgument($Credential)
-                    $jobs[$h] = @{ PS = $ps; Async = $ps.BeginInvoke() }
+            $vt = @{ Confirmed = 0; NotRestarted = 0; Online = 0; Failed = 0; Done = 0 }
+            $onBoot = {
+                param($k, $res)
+                $vk = if ($res) { [string]$res.Verdict } else { 'failed' }
+                $bootStr = ''
+                if ($res -and [long]$res.BootTicks -gt 0) { $bootStr = ([datetime]::new([long]$res.BootTicks)).ToString('yyyy-MM-dd HH:mm:ss') }
+                switch ($vk) {
+                    'restarted'       { $verdict = "RESTARTED - confirmed by boot time ($bootStr)"; $vt.Confirmed++;   $auditRes='Success' }
+                    'did-not-restart' { $verdict = "Did NOT restart - confirmed (last boot $bootStr)"; $vt.NotRestarted++; $auditRes='Failure' }
+                    'online-no-ref'   { $verdict = "Online (last boot $bootStr - no restart time to compare)"; $vt.Online++; $auditRes='Skipped' }
+                    default           { $verdict = "Boot-time check failed$(if ($res -and $res.Detail) { ' - ' + $res.Detail })"; $vt.Failed++; $auditRes='Failure' }
                 }
-                while ($jobs.Count -gt 0) {
-                    $finished = @()
-                    foreach ($k in @($jobs.Keys)) { if ($jobs[$k].Async.IsCompleted) { $finished += $k } }
-                    foreach ($k in $finished) {
-                        $jp = $jobs[$k]; $res = $null
-                        try { $res = $jp.PS.EndInvoke($jp.Async) | Select-Object -First 1 } catch { $res = $null }
-                        try { $jp.PS.Dispose() } catch {}
-                        $jobs.Remove($k)
-                        $vk = if ($res) { [string]$res.Verdict } else { 'failed' }
-                        $bootStr = ''
-                        if ($res -and [long]$res.BootTicks -gt 0) { $bootStr = ([datetime]::new([long]$res.BootTicks)).ToString('yyyy-MM-dd HH:mm:ss') }
-                        switch ($vk) {
-                            'restarted'       { $verdict = "RESTARTED - confirmed by boot time ($bootStr)"; $confirmed++;   $auditRes='Success' }
-                            'did-not-restart' { $verdict = "Did NOT restart - confirmed (last boot $bootStr)"; $notRestarted++; $auditRes='Failure' }
-                            'online-no-ref'   { $verdict = "Online (last boot $bootStr - no restart time to compare)"; $online++; $auditRes='Skipped' }
-                            default           { $verdict = "Boot-time check failed$(if ($res -and $res.Detail) { ' - ' + $res.Detail })"; $failed++; $auditRes='Failure' }
-                        }
-                        $row = [ordered]@{ Host = $k; State = $verdict; 'Boot-Time' = $bootStr; Result = $verdict }
-                        [void]$rows.Add($row)
-                        & $send (@{ type='row' } + $row)
-                        & $send @{ type='audit'; action='TouchHost'; target=$k; result=$auditRes; itemCount=0; detail=$verdict }
-                        $done++
-                        & $send @{ type='progress'; done=$done; total=$targets.Count }
-                    }
-                    if ($jobs.Count -gt 0) {
-                        if ($script:RrsCancelCheck -and (& $script:RrsCancelCheck)) {
-                            $cancelled = $true
-                            foreach ($k in @($jobs.Keys)) { try { [void]$jobs[$k].PS.BeginStop($null, $null) } catch {}; $jobs[$k].PS = $null }
-                            $jobs.Clear()
-                            & $send @{ type='log'; level='warn'; text='Cancelled by operator; remaining boot-time checks abandoned.' }
-                            break
-                        }
-                        Start-Sleep -Milliseconds 80
-                    }
-                }
-            } finally {
-                try { $pool.Close(); $pool.Dispose() } catch {}
+                $row = [ordered]@{ Host = $k; State = $verdict; 'Boot-Time' = $bootStr; Result = $verdict }
+                [void]$rows.Add($row)
+                & $send (@{ type='row' } + $row)
+                & $send @{ type='audit'; action='TouchHost'; target=$k; result=$auditRes; itemCount=0; detail=$verdict }
+                $vt.Done++
+                & $send @{ type='progress'; done=$vt.Done; total=$targets.Count }
             }
-            & $send @{ type='status'; text="Boot-time verify done: $confirmed restarted, $notRestarted did-not-restart, $online online-no-ref, $failed failed of $($targets.Count)$(if ($cancelled) { ' (cancelled)' })." }
-            return @{ rows=@($rows); summary=@{ total=$targets.Count; restarted=$confirmed; notRestarted=$notRestarted; online=$online; failed=$failed; cancelled=$cancelled } }
+            $cancelled = Invoke-RrsPingSweep -Targets $targets -Worker $script:BootTimeWorker -WorkerArgs @($refTicks, $Credential) `
+                -MaxThreads $threads -OnResult $onBoot -CancelCheck $script:RrsCancelCheck -PollMs 80
+            if ($cancelled) {
+                & $send @{ type='log'; level='warn'; text='Cancelled by operator; remaining boot-time checks abandoned.' }
+            }
+            & $send @{ type='status'; text="Boot-time verify done: $($vt.Confirmed) restarted, $($vt.NotRestarted) did-not-restart, $($vt.Online) online-no-ref, $($vt.Failed) failed of $($targets.Count)$(if ($cancelled) { ' (cancelled)' })." }
+            return @{ rows=@($rows); summary=@{ total=$targets.Count; restarted=$vt.Confirmed; notRestarted=$vt.NotRestarted; online=$vt.Online; failed=$vt.Failed; cancelled=$cancelled } }
         }
 
         # ---------------------------------------------------------------------

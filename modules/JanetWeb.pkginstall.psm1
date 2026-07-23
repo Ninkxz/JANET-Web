@@ -143,19 +143,36 @@ function Test-PkgInstallHostIsSelf {
     return $false
 }
 
+# audit 2026-07-23: ONE internal single-pass split shared by ConvertTo-JanetMsiList
+# and Get-JanetMsiListDropped, so the keep/drop predicate can never drift between
+# them (it was duplicated - and inverted by hand - in each). An entry is DROPPED
+# when it is a rooted path (C:\, \, \\server) or carries any '..' segment: each
+# entry MUST stay inside the bundle, otherwise a pasted '..\..\Windows\System32\x.msi'
+# would read outside $PkgPath and write outside the target's staging dir. Subdir
+# entries like 'x64\foo.msi' are kept. Returns @{ Kept = [string[]]; Dropped = [string[]] }.
+function Split-JanetMsiListEntries {
+    param([string]$Raw)
+    $kept    = New-Object System.Collections.ArrayList
+    $dropped = New-Object System.Collections.ArrayList
+    if (-not [string]::IsNullOrWhiteSpace($Raw)) {
+        foreach ($entry in ($Raw -split '[\r\n]+')) {
+            $e = $entry.Trim()
+            if (-not $e) { continue }
+            if ([System.IO.Path]::IsPathRooted($e) -or ($e -match '(^|[\\/])\.\.([\\/]|$)')) { [void]$dropped.Add($e) }
+            else { [void]$kept.Add($e) }
+        }
+    }
+    @{ Kept = @($kept.ToArray()); Dropped = @($dropped.ToArray()) }
+}
+
 function ConvertTo-JanetMsiList {
     # Split a pasted blob into relative MSI paths (one per line). Preserves
     # subdir entries like 'x64\foo.msi'. Returns @() when blank (caller then
     # falls back to discovering *.msi recursively under the bundle folder).
+    # Predicate lives in Split-JanetMsiListEntries (audit 2026-07-23).
     param([string]$Raw)
     if ([string]::IsNullOrWhiteSpace($Raw)) { return @() }
-    # Reject a rooted path (C:\, \, \\server) or any '..' segment: each entry MUST
-    # stay inside the bundle. Otherwise a pasted '..\..\Windows\System32\x.msi' would
-    # read outside $PkgPath and write outside the target's staging dir. Subdir
-    # entries like 'x64\foo.msi' are kept.
-    @($Raw -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object {
-        $_ -and -not [System.IO.Path]::IsPathRooted($_) -and ($_ -notmatch '(^|[\\/])\.\.([\\/]|$)')
-    })
+    @((Split-JanetMsiListEntries -Raw $Raw).Kept)
 }
 
 function Get-JanetMsiListDropped {
@@ -163,12 +180,11 @@ function Get-JanetMsiListDropped {
     # (rooted path or '..' traversal). The caller warns per dropped entry so a partial selection isn't
     # reported as a clean "All N succeeded", and REFUSES a non-blank selection that dropped to empty so
     # an all-invalid list can't silently escalate to the install-EVERY-*.msi fallback. Blank -> @() (the
-    # intentional install-everything path stays). Kept in sync with ConvertTo-JanetMsiList's predicate.
+    # intentional install-everything path stays). Shares Split-JanetMsiListEntries' single-pass
+    # predicate with ConvertTo-JanetMsiList (audit 2026-07-23) - in sync by construction.
     param([string]$Raw)
     if ([string]::IsNullOrWhiteSpace($Raw)) { return @() }
-    @($Raw -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object {
-        $_ -and ([System.IO.Path]::IsPathRooted($_) -or ($_ -match '(^|[\\/])\.\.([\\/]|$)'))
-    })
+    @((Split-JanetMsiListEntries -Raw $Raw).Dropped)
 }
 
 # Per-host scriptblock. Runs inside an isolated runspace -- NO outer-scope vars

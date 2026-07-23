@@ -970,7 +970,14 @@ try {
 # as a REMOTE Invoke-Command -ScriptBlock (serialized to the target), so it is safe to
 # hand to a bare pool runspace. Body copied verbatim from the reference $sbApply.
 $script:WinUpgradePinBlock = {
-    param($tv, $prod, $doBypass)
+    param($tv, $prod, $doBypass, $expected)
+    # DNS-mismatch guard (HARD ABORT) - audit 2026-07-23: this block WRITES the WUfB pin
+    # policy (+ optional MoSetup bypass). The box that answered runs this, so
+    # $env:COMPUTERNAME IS the real machine; if it isn't the one we dialed (stale DNS /
+    # reused IP), abort before writing. An IP-literal dial passes '' to skip the compare.
+    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+        throw "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, policy not written"
+    }
     $regPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
     if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
     New-ItemProperty -Path $regPath -Name 'TargetReleaseVersion'     -PropertyType DWord  -Value 1    -Force | Out-Null
@@ -984,6 +991,42 @@ $script:WinUpgradePinBlock = {
         $msg += '; CPU/TPM BYPASS SET (MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU=1)'
     }
     $msg
+}
+
+# Shared guarded-reboot remote block (audit 2026-07-23): the SAME delayed shutdown.exe
+# reboot (ProcessStartInfo for the real exit code + the DNS-mismatch HARD ABORT) was
+# copy-pasted at every reboot site (InstallCab / SetPageFile / UpgradeDrive /
+# RepairHealth). Hoisted ONCE at module scope following the $script:WinUpgradePinBlock
+# precedent and threaded to the worker as $RebootBlock (a bare pool runspace cannot see
+# module scope). Body is the proven parameterized upgrade-drive copy, verbatim.
+# (AutoFix's reboot runs INSIDE its single analyse+fix remote block and cannot invoke a
+# locally-defined scriptblock over remoting, so it keeps its inline guarded copy.)
+$script:WinUpgradeRebootBlock = {
+    param($sec, $msg, $expected)
+    $o = @{ ExitCode = $null; Error = '' }
+    # PHASE:REBOOT - DNS-mismatch guard (HARD ABORT), mirrors the Restart tool:
+    # the box that answered runs this, so $env:COMPUTERNAME IS the real machine;
+    # if it isn't the one we dialed (stale DNS / reused IP), abort before shutdown.
+    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+        $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
+        return $o
+    }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = 'shutdown.exe'
+        $psi.Arguments              = "/r /t $sec /f /c `"$msg`""
+        $psi.UseShellExecute        = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.CreateNoWindow         = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $sout = $proc.StandardOutput.ReadToEnd()
+        $serr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        $o.ExitCode = $proc.ExitCode
+        if ($proc.ExitCode -ne 0) { $o.Error = ($sout + $serr).Trim() }
+    } catch { $o.Error = $_.Exception.Message }
+    return $o
 }
 
 # loop32 (F6): CANONICAL Diagnose one-word verdict from the report markers. The verdict is the
@@ -1060,11 +1103,22 @@ $script:WinUpgradeWorker = {
         [bool]$AllowHttp = $true,    # InstallUpdates: allow WinRM HTTP 5985 fallback
         [bool]$AllowWmi = $true,     # InstallUpdates: allow WMI/DCOM 135 fallback
         [int]$TimeoutMin = 45,       # InstallUpdates: per-host result.json poll timeout (minutes)
-        $WuaDriver = ''              # InstallUpdates: the SYSTEM WUA driver text (#__INCLUDEMU__# unreplaced)
+        $WuaDriver = '',             # InstallUpdates: the SYSTEM WUA driver text (#__INCLUDEMU__# unreplaced)
+        # --- audit 2026-07-23 appended param (kept at the END so existing positional args are
+        #     unshifted; DEFAULTS matter: the shimmed worker tests drive the worker without it) ---
+        $RebootBlock = $null         # shared guarded-reboot scriptblock ($script:WinUpgradeRebootBlock)
     )
 
     $r = [ordered]@{ Host = $Computer; Ping = ''; Status = ''; Detail = ''; Ok = $false; Report = '' }
     $isCancelled = { if ($CancelJob) { try { [bool]$CancelJob['Cancel'] } catch { $false } } else { $false } }
+    # audit 2026-07-23: the worker tests drive this scriptblock positionally IN MODULE SCOPE
+    # without the appended $RebootBlock arg - fall back to the module-scope block there (a
+    # bare pool runspace always receives it via the ArgFactory tail).
+    if ($null -eq $RebootBlock) { $RebootBlock = $script:WinUpgradeRebootBlock }
+    # Wrong-box guard input, computed ONCE for every destructive dial below (audit 2026-07-23):
+    # the shortname we DIALED; an IPv4-literal target has no DNS indirection -> '' skips the
+    # remote-side $env:COMPUTERNAME compare (exactly like the Restart tool).
+    $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
     # enqueue a live phase step the harvest loop streams as a row (parity with pkginstall).
     $pushStep = { param($step, $detail) if ($StepQueue) { try { [void]$StepQueue.Enqueue([pscustomobject]@{ Hostname=$Computer; Step=$step; Detail=$detail }) } catch {} } }
 
@@ -1142,84 +1196,85 @@ $script:WinUpgradeWorker = {
                 $pinNote = if ($Bypass) { "Writing TargetReleaseVersion policy ($Product $Version) + CPU/TPM bypass..." } else { "Writing TargetReleaseVersion policy ($Product $Version)..." }
                 & $pushStep 'Pinning' $pinNote
                 # REUSE the shared module-scope pin policy-write ($PinBlock) - the same
-                # write the 'upgrade-drive' action pins with. $doBypass is the last remote
-                # param() arg (matches the call-site ArgumentList order).
+                # write the 'upgrade-drive' action pins with. $doBypass/$expected are the last
+                # remote param() args (matches the call-site ArgumentList order).
+                # audit 2026-07-23: ONE reusable PSSession for the write + verify (+ optional
+                # WU/SCCM triggers) instead of a fresh -ComputerName negotiation per dial
+                # (the InstallCab pattern); the SSL-first splat behavior is identical
+                # (UseSSL/SessionOption now applied once at session creation).
                 $sb = $PinBlock
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
-                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($Version,$Product,$Bypass); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
-                if ($credSet) { $ic.Credential = $Cred }
-                if ($useSsl) { $ic['UseSSL'] = $true }
-                $out = Invoke-Command @ic
-                $detailParts = @("Pinned: $out")
-                # VERIFY the pin actually stuck: re-read the three policy values on the target
-                # and confirm they match what we intended. A GPO refresh could re-overwrite
-                # them, or the client could silently reject the write - either way that must
-                # NOT report DONE (audit: "reports success without verifying").
-                $icv = @{ ComputerName=$Computer; ScriptBlock=$pinReadSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
-                if ($credSet) { $icv.Credential = $Cred }
-                if ($useSsl) { $icv['UseSSL'] = $true }
-                $rb = $null
-                try { $rb = Invoke-Command @icv } catch { $rb = $null }
-                $pinOk = ($null -ne $rb -and [int]$rb.TargetReleaseVersion -eq 1 -and "$($rb.ProductVersion)" -eq "$Product" -and "$($rb.TargetReleaseVersionInfo)" -eq "$Version")
-                # loop33 (F4): when the CPU/TPM bypass was requested, it must ALSO read back as SET -
-                # the write claimed "BYPASS SET" but never verified it (a restrictive MoSetup ACL /
-                # GPO re-overwrite would leave a supported-only host asserting BYPASS SET, and a later
-                # feature-update push then fails on hardware).
-                $bypassOk = ((-not $Bypass) -or ($null -ne $rb -and [bool]$rb.BypassPresent))
-                if (-not $pinOk -or -not $bypassOk) {
-                    $rbNote = if ($rb) { "read-back TRV=$($rb.TargetReleaseVersion) ProductVersion='$($rb.ProductVersion)' TargetReleaseVersionInfo='$($rb.TargetReleaseVersionInfo)' BypassPresent=$([bool]$rb.BypassPresent)" } else { 'policy key not readable after write' }
-                    $why = if (-not $pinOk) { "PIN NOT VERIFIED - policy did not read back as $Product $Version" } else { 'BYPASS NOT VERIFIED - the CPU/TPM bypass (MoSetup) did not read back as set' }
-                    $r.Status = 'FAILED'; $r.Ok = $false
-                    $r.Detail = "Pinned: $out | $why ($rbNote); a GPO refresh may have re-overwritten it or the write was rejected."
-                    break
-                }
-                # "Then run Windows Update": optionally kick the WU agent so the pinned build
-                # is detected/offered without waiting for the next scheduled scan. Best-effort -
-                # a trigger failure never fails the pin (the policy is already written).
-                if ($RunWu) {
-                    & $pushStep 'Scanning' 'Pinned; triggering a Windows Update scan...'
-                    $wuSb = {
-                        try { Start-ScheduledTask -TaskPath '\Microsoft\Windows\WindowsUpdate\' -TaskName 'Scheduled Start' -ErrorAction Stop; 'WU scan triggered (Scheduled Start task)' }
-                        catch {
-                            $uso = Join-Path $env:SystemRoot 'System32\UsoClient.exe'
-                            if (Test-Path -LiteralPath $uso) { Start-Process -FilePath $uso -ArgumentList 'StartScan' -WindowStyle Hidden; 'WU scan triggered (UsoClient StartScan)' }
-                            else { 'WU scan NOT triggered (no Scheduled Start task / UsoClient on this build)' }
+                $sp = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                if ($credSet) { $sp.Credential = $Cred }
+                if ($useSsl) { $sp['UseSSL'] = $true }
+                $session = New-PSSession @sp
+                try {
+                    $out = Invoke-Command -Session $session -ScriptBlock $sb -ArgumentList $Version, $Product, $Bypass, $expectedName -ErrorAction Stop
+                    $detailParts = @("Pinned: $out")
+                    # VERIFY the pin actually stuck: re-read the three policy values on the target
+                    # and confirm they match what we intended. A GPO refresh could re-overwrite
+                    # them, or the client could silently reject the write - either way that must
+                    # NOT report DONE (audit: "reports success without verifying").
+                    $rb = $null
+                    try { $rb = Invoke-Command -Session $session -ScriptBlock $pinReadSb -ErrorAction Stop } catch { $rb = $null }
+                    $pinOk = ($null -ne $rb -and [int]$rb.TargetReleaseVersion -eq 1 -and "$($rb.ProductVersion)" -eq "$Product" -and "$($rb.TargetReleaseVersionInfo)" -eq "$Version")
+                    # loop33 (F4): when the CPU/TPM bypass was requested, it must ALSO read back as SET -
+                    # the write claimed "BYPASS SET" but never verified it (a restrictive MoSetup ACL /
+                    # GPO re-overwrite would leave a supported-only host asserting BYPASS SET, and a later
+                    # feature-update push then fails on hardware).
+                    $bypassOk = ((-not $Bypass) -or ($null -ne $rb -and [bool]$rb.BypassPresent))
+                    if (-not $pinOk -or -not $bypassOk) {
+                        $rbNote = if ($rb) { "read-back TRV=$($rb.TargetReleaseVersion) ProductVersion='$($rb.ProductVersion)' TargetReleaseVersionInfo='$($rb.TargetReleaseVersionInfo)' BypassPresent=$([bool]$rb.BypassPresent)" } else { 'policy key not readable after write' }
+                        $why = if (-not $pinOk) { "PIN NOT VERIFIED - policy did not read back as $Product $Version" } else { 'BYPASS NOT VERIFIED - the CPU/TPM bypass (MoSetup) did not read back as set' }
+                        $r.Status = 'FAILED'; $r.Ok = $false
+                        $r.Detail = "Pinned: $out | $why ($rbNote); a GPO refresh may have re-overwritten it or the write was rejected."
+                        break
+                    }
+                    # "Then run Windows Update": optionally kick the WU agent so the pinned build
+                    # is detected/offered without waiting for the next scheduled scan. Best-effort -
+                    # a trigger failure never fails the pin (the policy is already written).
+                    if ($RunWu) {
+                        & $pushStep 'Scanning' 'Pinned; triggering a Windows Update scan...'
+                        $wuSb = {
+                            try { Start-ScheduledTask -TaskPath '\Microsoft\Windows\WindowsUpdate\' -TaskName 'Scheduled Start' -ErrorAction Stop; 'WU scan triggered (Scheduled Start task)' }
+                            catch {
+                                $uso = Join-Path $env:SystemRoot 'System32\UsoClient.exe'
+                                if (Test-Path -LiteralPath $uso) { Start-Process -FilePath $uso -ArgumentList 'StartScan' -WindowStyle Hidden; 'WU scan triggered (UsoClient StartScan)' }
+                                else { 'WU scan NOT triggered (no Scheduled Start task / UsoClient on this build)' }
+                            }
                         }
+                        $wuOut = ''
+                        try { $wuOut = [string](Invoke-Command -Session $session -ScriptBlock $wuSb -ErrorAction Stop) } catch { $wuOut = "WU trigger error: $($_.Exception.Message)" }
+                        $detailParts += $wuOut
                     }
-                    $icw = @{ ComputerName=$Computer; ScriptBlock=$wuSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
-                    if ($credSet) { $icw.Credential = $Cred }
-                    if ($useSsl) { $icw['UseSSL'] = $true }
-                    $wuOut = ''
-                    try { $wuOut = [string](Invoke-Command @icw) } catch { $wuOut = "WU trigger error: $($_.Exception.Message)" }
-                    $detailParts += $wuOut
-                }
-                # Optional SCCM/MECM client refresh: trigger the client schedule cycles (ported
-                # from $sbApply) so an assigned Software Center deployment surfaces. Best-effort -
-                # a trigger failure never fails the pin. $cycles passed as ONE positional arg
-                # via @(,$Cycles) so the GUID array is not splatted into many params.
-                if ($SccmRefresh) {
-                    & $pushStep 'SCCM' 'Pinned; triggering SCCM client schedule cycles...'
-                    $sccmSb = {
-                        param($cycles)
-                        try {
-                            $svc = Get-Service -Name CcmExec -ErrorAction Stop
-                            if ($svc.Status -eq 'Running') {
-                                foreach ($id in $cycles) {
-                                    try { Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID=$id } -ErrorAction Stop | Out-Null } catch { }
-                                }
-                                'SCCM client cycles triggered'
-                            } else { 'SCCM client present but not running' }
-                        } catch { 'SCCM client (CcmExec) not found' }
+                    # Optional SCCM/MECM client refresh: trigger the client schedule cycles (ported
+                    # from $sbApply) so an assigned Software Center deployment surfaces. Best-effort -
+                    # a trigger failure never fails the pin. $cycles passed as ONE positional arg
+                    # via @(,$Cycles) so the GUID array is not splatted into many params.
+                    if ($SccmRefresh) {
+                        & $pushStep 'SCCM' 'Pinned; triggering SCCM client schedule cycles...'
+                        $sccmSb = {
+                            param($cycles)
+                            try {
+                                $svc = Get-Service -Name CcmExec -ErrorAction Stop
+                                if ($svc.Status -eq 'Running') {
+                                    foreach ($id in $cycles) {
+                                        try { Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID=$id } -ErrorAction Stop | Out-Null } catch { }
+                                    }
+                                    'SCCM client cycles triggered'
+                                } else { 'SCCM client present but not running' }
+                            } catch { 'SCCM client (CcmExec) not found' }
+                        }
+                        $sccmOut = ''
+                        try { $sccmOut = [string](Invoke-Command -Session $session -ScriptBlock $sccmSb -ArgumentList @(,$Cycles) -ErrorAction Stop) } catch { $sccmOut = "SCCM refresh error: $($_.Exception.Message)" }
+                        $detailParts += $sccmOut
                     }
-                    $ics = @{ ComputerName=$Computer; ScriptBlock=$sccmSb; ArgumentList=@(,$Cycles); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
-                    if ($credSet) { $ics.Credential = $Cred }
-                    if ($useSsl) { $ics['UseSSL'] = $true }
-                    $sccmOut = ''
-                    try { $sccmOut = [string](Invoke-Command @ics) } catch { $sccmOut = "SCCM refresh error: $($_.Exception.Message)" }
-                    $detailParts += $sccmOut
+                    $detailParts += 'Reboot target, then run Check for updates.'
+                    $r.Status = 'DONE'; $r.Detail = ($detailParts -join ' | '); $r.Ok = $true
                 }
-                $detailParts += 'Reboot target, then run Check for updates.'
-                $r.Status = 'DONE'; $r.Detail = ($detailParts -join ' | '); $r.Ok = $true
+                finally {
+                    if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
+                }
             }
 
             'Unpin' {
@@ -1229,11 +1284,16 @@ $script:WinUpgradeWorker = {
                 }
                 $unpinNote = if ($RemoveBypass) { 'Removing TargetReleaseVersion policy + CPU/TPM bypass...' } else { 'Removing TargetReleaseVersion policy...' }
                 & $pushStep 'Unpinning' $unpinNote
-                # $removeBypass appended at the END of the remote param() (matches the call-site
-                # ArgumentList order). Bypass removal copied EXACTLY from the reference $sbClear
+                # $removeBypass/$expected appended at the END of the remote param() (matches the
+                # call-site ArgumentList order). Bypass removal copied EXACTLY from the reference $sbClear
                 # (lines 851-858): key HKLM:\SYSTEM\Setup\MoSetup, value AllowUpgradesWithUnsupportedTPMOrCPU.
                 $sb = {
-                    param($removeBypass)
+                    param($removeBypass, $expected)
+                    # DNS-mismatch guard (HARD ABORT) - audit 2026-07-23: this block REMOVES the
+                    # WUfB pin policy (+ optional bypass); never run it on a box we did not dial.
+                    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                        throw "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, nothing removed"
+                    }
                     $regPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
                     if (Test-Path $regPath) {
                         Remove-ItemProperty -Path $regPath -Name 'TargetReleaseVersion'     -ErrorAction SilentlyContinue
@@ -1265,39 +1325,44 @@ $script:WinUpgradeWorker = {
                     }
                     $msg
                 }
+                # audit 2026-07-23: ONE reusable PSSession for the removal + verify read-back
+                # (the InstallCab pattern); SSL-first splat behavior identical.
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
-                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($RemoveBypass); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
-                if ($credSet) { $ic.Credential = $Cred }
-                if ($useSsl) { $ic['UseSSL'] = $true }
-                $out = Invoke-Command @ic
-                # VERIFY removal: re-read the three SPECIFIC pin value names on the target and
-                # confirm they are actually gone. Remove-ItemProperty -EA SilentlyContinue can
-                # fail silently (ACL / GPO re-write), so "removed" must be gated on the read-back
-                # (audit: "reports success without verifying").
-                $icv = @{ ComputerName=$Computer; ScriptBlock=$pinReadSb; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
-                if ($credSet) { $icv.Credential = $Cred }
-                if ($useSsl) { $icv['UseSSL'] = $true }
-                $rb = $null
-                try { $rb = Invoke-Command @icv } catch { $rb = $null }
-                if ($null -eq $rb) {
-                    $r.Status = 'FAILED'; $r.Ok = $false
-                    $r.Detail = "$out | REMOVAL NOT VERIFIED - could not re-read the policy key to confirm the pin is gone."
-                    break
+                $sp = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                if ($credSet) { $sp.Credential = $Cred }
+                if ($useSsl) { $sp['UseSSL'] = $true }
+                $session = New-PSSession @sp
+                try {
+                    $out = Invoke-Command -Session $session -ScriptBlock $sb -ArgumentList $RemoveBypass, $expectedName -ErrorAction Stop
+                    # VERIFY removal: re-read the three SPECIFIC pin value names on the target and
+                    # confirm they are actually gone. Remove-ItemProperty -EA SilentlyContinue can
+                    # fail silently (ACL / GPO re-write), so "removed" must be gated on the read-back
+                    # (audit: "reports success without verifying").
+                    $rb = $null
+                    try { $rb = Invoke-Command -Session $session -ScriptBlock $pinReadSb -ErrorAction Stop } catch { $rb = $null }
+                    if ($null -eq $rb) {
+                        $r.Status = 'FAILED'; $r.Ok = $false
+                        $r.Detail = "$out | REMOVAL NOT VERIFIED - could not re-read the policy key to confirm the pin is gone."
+                        break
+                    }
+                    $stillSet = @()
+                    if ($rb.HasTRV)     { $stillSet += 'TargetReleaseVersion' }
+                    if ($rb.HasProduct) { $stillSet += 'ProductVersion' }
+                    if ($rb.HasInfo)    { $stillSet += 'TargetReleaseVersionInfo' }
+                    # loop33 (F3): when the bypass removal was requested, the MoSetup value must ALSO read
+                    # back as GONE - "bypass key removed" was asserted after a SilentlyContinue delete that
+                    # can fail on a restrictive ACL, leaving the Microsoft-unsupported bypass STILL ARMED
+                    # while the row reported it removed. A security-relevant false-clean.
+                    if ($RemoveBypass -and [bool]$rb.BypassPresent) { $stillSet += 'MoSetup CPU/TPM bypass' }
+                    if ($stillSet.Count -eq 0) {
+                        $r.Status = 'DONE'; $r.Detail = "$out"; $r.Ok = $true
+                    } else {
+                        $r.Status = 'FAILED'; $r.Ok = $false
+                        $r.Detail = "$out | NOT REMOVED - still present after removal: $([string]::Join(', ', $stillSet)) (the pin/bypass may still be active)."
+                    }
                 }
-                $stillSet = @()
-                if ($rb.HasTRV)     { $stillSet += 'TargetReleaseVersion' }
-                if ($rb.HasProduct) { $stillSet += 'ProductVersion' }
-                if ($rb.HasInfo)    { $stillSet += 'TargetReleaseVersionInfo' }
-                # loop33 (F3): when the bypass removal was requested, the MoSetup value must ALSO read
-                # back as GONE - "bypass key removed" was asserted after a SilentlyContinue delete that
-                # can fail on a restrictive ACL, leaving the Microsoft-unsupported bypass STILL ARMED
-                # while the row reported it removed. A security-relevant false-clean.
-                if ($RemoveBypass -and [bool]$rb.BypassPresent) { $stillSet += 'MoSetup CPU/TPM bypass' }
-                if ($stillSet.Count -eq 0) {
-                    $r.Status = 'DONE'; $r.Detail = "$out"; $r.Ok = $true
-                } else {
-                    $r.Status = 'FAILED'; $r.Ok = $false
-                    $r.Detail = "$out | NOT REMOVED - still present after removal: $([string]::Join(', ', $stillSet)) (the pin/bypass may still be active)."
+                finally {
+                    if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
                 }
             }
 
@@ -1338,10 +1403,16 @@ $script:WinUpgradeWorker = {
                     }
 
                     & $pushStep 'DISM' 'DISM /Online /Add-Package (this can run for minutes)...'
-                    $res = Invoke-Command -Session $session -ArgumentList $CabName -ScriptBlock {
-                        param($name)
+                    $res = Invoke-Command -Session $session -ArgumentList $CabName, $expectedName -ScriptBlock {
+                        param($name, $expected)
                         $cab = Join-Path 'C:\Temp' $name
                         $o = @{ ExitCode = $null; Output = ''; Error = '' }
+                        # DNS-mismatch guard (HARD ABORT) - audit 2026-07-23: DISM installs a feature
+                        # update; never run it on a box we did not dial (stale DNS / reused IP).
+                        if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                            $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, DISM not run"
+                            return $o
+                        }
                         try {
                             $psi = New-Object System.Diagnostics.ProcessStartInfo
                             $psi.FileName               = 'dism.exe'
@@ -1374,39 +1445,11 @@ $script:WinUpgradeWorker = {
                         $note = if ($needsReboot) { 'installed (reboot required)' } else { 'installed (exit 0)' }
                         if ($Reboot -and -not (& $isCancelled)) {
                             & $pushStep 'Rebooting' 'Install OK; issuing reboot (10s)...'
-                            # DNS-mismatch guard: mirror the upgrade-drive reboot (~1298-1307).
-                            # An IPv4-literal target has no shortname to compare -> pass '' to skip.
-                            $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-                            # Delayed reboot via shutdown.exe (ProcessStartInfo so we capture its
-                            # real exit code); /t 10 lets the WinRM call return before the box drops.
+                            # Guarded delayed reboot via the shared $RebootBlock (audit 2026-07-23:
+                            # hoisted copy - DNS-mismatch HARD ABORT + ProcessStartInfo exit code);
+                            # /t 10 lets the WinRM call return before the box drops.
                             try {
-                                $rbres = Invoke-Command -Session $session -ErrorAction Stop -ArgumentList $expectedName -ScriptBlock {
-                                    param($expected)
-                                    $o = @{ ExitCode = $null; Error = '' }
-                                    # DNS-mismatch guard (HARD ABORT): the box that answered runs this,
-                                    # so $env:COMPUTERNAME IS the real machine; if it isn't the one we
-                                    # dialed (stale DNS / reused IP), abort before shutdown.
-                                    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
-                                        $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
-                                        return $o
-                                    }
-                                    try {
-                                        $psi = New-Object System.Diagnostics.ProcessStartInfo
-                                        $psi.FileName               = 'shutdown.exe'
-                                        $psi.Arguments              = '/r /t 10 /f /c "JANET Web Windows Upgrade: feature update installed"'
-                                        $psi.UseShellExecute        = $false
-                                        $psi.RedirectStandardOutput = $true
-                                        $psi.RedirectStandardError  = $true
-                                        $psi.CreateNoWindow         = $true
-                                        $proc = [System.Diagnostics.Process]::Start($psi)
-                                        $sout = $proc.StandardOutput.ReadToEnd()
-                                        $serr = $proc.StandardError.ReadToEnd()
-                                        $proc.WaitForExit()
-                                        $o.ExitCode = $proc.ExitCode
-                                        if ($proc.ExitCode -ne 0) { $o.Error = ($sout + $serr).Trim() }
-                                    } catch { $o.Error = $_.Exception.Message }
-                                    return $o
-                                }
+                                $rbres = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock $RebootBlock -ArgumentList 10, 'JANET Web Windows Upgrade: feature update installed', $expectedName
                                 if ($rbres.ExitCode -eq 0) { $r.Status = 'DONE'; $r.Detail = "$CabName $note; reboot issued (10s)"; $r.Ok = $true }
                                 else { $r.Status = 'NEEDS REBOOT'; $r.Detail = "$CabName $note; REBOOT FAILED (shutdown exit $($rbres.ExitCode)): $($rbres.Error)"; $r.Ok = $true }
                             } catch {
@@ -1484,7 +1527,12 @@ $script:WinUpgradeWorker = {
                 }
                 & $pushStep 'PageFile' "Disabling auto-manage and setting C: page file to $mb MB..."
                 $sb = {
-                    param($mb)
+                    param($mb, $expected)
+                    # DNS-mismatch guard (HARD ABORT) - audit 2026-07-23: this block REWRITES the
+                    # page-file config; never run it on a box we did not dial (stale DNS / reused IP).
+                    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                        throw "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, page file not changed"
+                    }
                     $notes = New-Object System.Collections.ArrayList
                     $cs = Get-WmiObject -Class Win32_ComputerSystem -EnableAllPrivileges -ErrorAction Stop
                     if ($cs.AutomaticManagedPagefile) {
@@ -1512,7 +1560,7 @@ $script:WinUpgradeWorker = {
                     ($notes -join '; ')
                 }
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
-                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($mb); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($mb, $expectedName); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
                 if ($useSsl) { $ic['UseSSL'] = $true }
                 $out = [string](Invoke-Command @ic)
@@ -1522,36 +1570,9 @@ $script:WinUpgradeWorker = {
                         $icr = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                         if ($credSet) { $icr.Credential = $Cred }
                         if ($useSsl) { $icr['UseSSL'] = $true }
-                        # DNS-mismatch guard: mirror the upgrade-drive reboot (~1298-1307).
-                        # An IPv4-literal target has no shortname to compare -> pass '' to skip.
-                        $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-                        $rbres = Invoke-Command @icr -ArgumentList $expectedName -ScriptBlock {
-                            param($expected)
-                            $o = @{ ExitCode = $null; Error = '' }
-                            # DNS-mismatch guard (HARD ABORT): the box that answered runs this, so
-                            # $env:COMPUTERNAME IS the real machine; if it isn't the one we dialed
-                            # (stale DNS / reused IP), abort before shutdown.
-                            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
-                                $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
-                                return $o
-                            }
-                            try {
-                                $psi = New-Object System.Diagnostics.ProcessStartInfo
-                                $psi.FileName               = 'shutdown.exe'
-                                $psi.Arguments              = '/r /t 10 /f /c "JANET Web Windows Upgrade: page file resized"'
-                                $psi.UseShellExecute        = $false
-                                $psi.RedirectStandardOutput = $true
-                                $psi.RedirectStandardError  = $true
-                                $psi.CreateNoWindow         = $true
-                                $proc = [System.Diagnostics.Process]::Start($psi)
-                                $sout = $proc.StandardOutput.ReadToEnd()
-                                $serr = $proc.StandardError.ReadToEnd()
-                                $proc.WaitForExit()
-                                $o.ExitCode = $proc.ExitCode
-                                if ($proc.ExitCode -ne 0) { $o.Error = ($sout + $serr).Trim() }
-                            } catch { $o.Error = $_.Exception.Message }
-                            return $o
-                        }
+                        # Guarded delayed reboot via the shared $RebootBlock (audit 2026-07-23:
+                        # hoisted copy - DNS-mismatch HARD ABORT + ProcessStartInfo exit code).
+                        $rbres = Invoke-Command @icr -ScriptBlock $RebootBlock -ArgumentList 10, 'JANET Web Windows Upgrade: page file resized', $expectedName
                         if ($rbres.ExitCode -eq 0) { $r.Status = 'DONE'; $r.Detail = "$out; reboot issued (10s)"; $r.Ok = $true }
                         else { $r.Status = 'NEEDS REBOOT'; $r.Detail = "$out; REBOOT FAILED (shutdown exit $($rbres.ExitCode)): $($rbres.Error). Reboot manually to apply."; $r.Ok = $true }
                     } catch {
@@ -1772,19 +1793,26 @@ $script:WinUpgradeWorker = {
                     $lines += ""
                     $lines += "=== WINDOWS UPDATE HEALTH ==="
 
-                    # WU services
+                    # WU services - audit 2026-07-23: ONE Win32_Service query + hashtable lookup
+                    # instead of a Get-Service + per-service Get-CimInstance pair per service
+                    # (8 provider calls -> 1). Win32_Service.State carries the same
+                    # Running/Stopped strings Get-Service.Status rendered.
+                    $wuSvcMap = @{}
+                    try {
+                        foreach ($sw in @(Get-CimInstance Win32_Service -Filter "Name='wuauserv' OR Name='bits' OR Name='cryptSvc' OR Name='UsoSvc'" -ErrorAction Stop)) { $wuSvcMap[$sw.Name] = $sw }
+                    } catch {}
                     foreach ($svcName in @("wuauserv","bits","cryptSvc","UsoSvc")) {
-                        try {
-                            $svc = Get-Service -Name $svcName -ErrorAction Stop
-                            $startType = (Get-CimInstance Win32_Service -Filter "Name='$svcName'" -ErrorAction SilentlyContinue).StartMode
-                            if ($svc.Status -eq 'Running') {
+                        $sw = $wuSvcMap[$svcName]
+                        if ($sw) {
+                            $startType = [string]$sw.StartMode
+                            if ($sw.State -eq 'Running') {
                                 $lines += "[PASS] Service $svcName : Running ($startType)"
-                            } elseif ($svc.Status -eq 'Stopped' -and $startType -eq 'Manual') {
+                            } elseif ($sw.State -eq 'Stopped' -and $startType -eq 'Manual') {
                                 $lines += "[INFO] Service $svcName : Stopped (Manual start - normal)"
                             } else {
-                                $lines += "[WARN] Service $svcName : $($svc.Status) ($startType)"
+                                $lines += "[WARN] Service $svcName : $($sw.State) ($startType)"
                             }
-                        } catch {
+                        } else {
                             $lines += "[WARN] Service $svcName : not found"
                         }
                     }
@@ -2216,146 +2244,132 @@ $script:WinUpgradeWorker = {
                         $r.Ok = $true; return $r
                     }
 
+                    # audit 2026-07-23: ONE reusable PSSession for the pin / trigger / staged
+                    # re-read / reboot dials (the InstallCab pattern) instead of a fresh
+                    # -ComputerName negotiation per dial; SSL-first splat behavior identical
+                    # (UseSSL/SessionOption now applied once at session creation).
                     $so2 = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 120000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
-                    $baseIc = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so2; ErrorAction='Stop' }
-                    if ($credSet) { $baseIc.Credential = $Cred }
-                    if ($useSsl) { $baseIc['UseSSL'] = $true }
-
-                    # -- 3) PIN to the target (REUSE the shared pin policy-write $PinBlock) --
-                    & $pushStep 'Pinning' "Pinning $Product $Version..."
-                    $pinOut = ''
+                    $sp2 = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$so2; ErrorAction='Stop' }
+                    if ($credSet) { $sp2.Credential = $Cred }
+                    if ($useSsl) { $sp2['UseSSL'] = $true }
+                    $driveSession = New-PSSession @sp2
                     try {
-                        $icP = $baseIc.Clone(); $icP.ScriptBlock = $PinBlock; $icP.ArgumentList = @($Version, $Product, $Bypass)
-                        $pinOut = [string](Invoke-Command @icP); $r.WasPinned = $true
-                    } catch { $pinOut = "pin error: $($_.Exception.Message)"; $r.WasPinned = $false }
+                        $baseIc = @{ Session=$driveSession; ErrorAction='Stop' }
 
-                    # loop31 (F1): a FAILED pin must ABORT the drive. Triggering Windows Update
-                    # without a successful pin lets WU upgrade the host to the LATEST feature update
-                    # instead of the pinned target (the exact thing the pin prevents), and reporting
-                    # green "Pinned + triggered" while the pin threw is a false-clean (the pin error
-                    # was being discarded). Fail-closed: no pin -> no trigger, surface the error.
-                    if (-not $r.WasPinned) {
-                        $r.Status = 'PIN FAILED'; $r.Ok = $false
-                        $r.Detail = "Pin did NOT apply - upgrade NOT triggered (an unpinned trigger could upgrade to the wrong build). $pinOut"
-                        return $r
-                    }
-
-                    # -- 4) TRIGGER Windows Update (best-effort accelerator; NOT a guaranteed install) --
-                    & $pushStep 'Triggering' 'Triggering Windows Update detect/download/install...'
-                    $trigSb = {
-                        # PHASE:TRIGGER - HONEST: Windows does NOT guarantee a headless feature-
-                        # update INSTALL from a trigger. This kicks the WU agent to detect/download/
-                        # install the OFFERED feature update; the reliable completion is
-                        # pin -> WU stages the update -> reboot. We report what we KICKED, never
-                        # "installed". UsoClient StartScan/StartDownload/StartInstall exist on 22631;
-                        # the WUA COM DetectNow is a belt-and-braces detect trigger.
-                        $fired = New-Object System.Collections.ArrayList
-                        $uso = Join-Path $env:SystemRoot 'System32\UsoClient.exe'
-                        if (Test-Path -LiteralPath $uso) {
-                            foreach ($verb in 'StartScan','StartDownload','StartInstall') {
-                                try { Start-Process -FilePath $uso -ArgumentList $verb -WindowStyle Hidden -ErrorAction Stop; [void]$fired.Add("UsoClient $verb") } catch {}
-                            }
-                        }
-                        try { (New-Object -ComObject Microsoft.Update.AutoUpdate).DetectNow(); [void]$fired.Add('WUA DetectNow') } catch {}
-                        if ($fired.Count -eq 0) { 'no WU trigger fired (UsoClient/WUA unavailable on this build)' } else { 'triggered: ' + ($fired -join ', ') + ' (accelerator - completion not guaranteed by a trigger)' }
-                    }
-                    try { $icT = $baseIc.Clone(); $icT.ScriptBlock = $trigSb; $r.TriggerResult = [string](Invoke-Command @icT) }
-                    catch { $r.TriggerResult = "trigger error: $($_.Exception.Message)" }
-
-                    # -- 5) RE-READ staged state (is a feature update now pending?) --
-                    & $pushStep 'Checking' 'Re-reading staged / pending-reboot state...'
-                    $stagedAfter = $stagedNow
-                    try {
-                        $stSb = {
-                            # PHASE:STAGED - re-read whether a feature update is now staged / the box
-                            # is pending-reboot (same signals as the readiness read + $WINDOWS.~BT).
-                            $p = $false
-                            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $p = $true }
-                            if (-not $p -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) { $p = $true }
-                            if (-not $p) {
-                                $pfro = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
-                                if ($pfro -and $pfro.PendingFileRenameOperations) { $p = $true }
-                            }
-                            # loop36 (F2): a ROLLED-BACK feature-update attempt leaves the C:\$WINDOWS.~BT
-                            # tree behind while NOTHING is in progress. A bare Test-Path counted that STALE
-                            # tree as "staged" and rebooted an un-staged host (it comes back on the old
-                            # build), weakening the "never reboot an un-staged host" invariant. CLASSIFY
-                            # the tree (mirror of Get-WinUpgradeStagingClass: rollback marker / age / setup
-                            # process); only an Active/Recent staging counts as staged, a Stale one does not.
-                            if (-not $p -and (Test-Path -LiteralPath 'C:\$WINDOWS.~BT\Sources')) {
-                                $btItem = Get-Item -LiteralPath 'C:\$WINDOWS.~BT' -Force -ErrorAction SilentlyContinue
-                                $ageH = if ($btItem) { ((Get-Date) - $btItem.LastWriteTime).TotalHours } else { 9999 }
-                                $setupProcs = @(Get-Process -Name 'SetupHost','SetupPrep','Windows10UpgraderApp','SetupPlatformTool' -ErrorAction SilentlyContinue)
-                                $rollback = $false; $btPanther = 'C:\$WINDOWS.~BT\Sources\Panther'
-                                if (Test-Path -LiteralPath $btPanther) { foreach ($lg in @('setupact.log','setuperr.log')) { $lp = Join-Path $btPanther $lg; if (Test-Path -LiteralPath $lp) { try { if (Select-String -Path $lp -Pattern 'rollback|roll back|abort' -ErrorAction SilentlyContinue | Select-Object -First 1) { $rollback = $true; break } } catch {} } } }
-                                $cls = if ($rollback) { 'Stale' } elseif ($setupProcs.Count -gt 0) { 'Active' } elseif ($ageH -gt 24) { 'Stale' } else { 'Recent' }
-                                if ($cls -ne 'Stale') { $p = $true }
-                            }
-                            [pscustomobject]@{ Staged = $p }
-                        }
-                        $icS = $baseIc.Clone(); $icS.ScriptBlock = $stSb
-                        $sres = Invoke-Command @icS
-                        $stagedAfter = [bool]$sres.Staged
-                    } catch {}
-                    $r.Staged = $stagedAfter
-
-                    # -- 6) REBOOT-WHEN-STAGED (ONLY if opted in AND CONFIRMED staged; guarded) --
-                    #    NEVER reboot an un-staged host. The DNS-mismatch guard runs INSIDE the
-                    #    remote block (authoritative); IP targets skip the name compare (an IP has
-                    #    no DNS indirection) by passing '' - exactly like the Restart tool.
-                    if ($RebootWhenStaged -and $stagedAfter) {
-                        $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-                        & $pushStep 'Rebooting' "Staged; issuing reboot (${CountdownSeconds}s countdown)..."
-                        $rbSb = {
-                            param($sec, $msg, $expected)
-                            $o = @{ ExitCode = $null; Error = '' }
-                            # PHASE:REBOOT - DNS-mismatch guard (HARD ABORT), mirrors the Restart tool:
-                            # the box that answered runs this, so $env:COMPUTERNAME IS the real machine;
-                            # if it isn't the one we dialed (stale DNS / reused IP), abort before shutdown.
-                            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
-                                $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"
-                                return $o
-                            }
-                            try {
-                                $psi = New-Object System.Diagnostics.ProcessStartInfo
-                                $psi.FileName               = 'shutdown.exe'
-                                $psi.Arguments              = "/r /t $sec /f /c `"$msg`""
-                                $psi.UseShellExecute        = $false
-                                $psi.RedirectStandardOutput = $true
-                                $psi.RedirectStandardError  = $true
-                                $psi.CreateNoWindow         = $true
-                                $proc = [System.Diagnostics.Process]::Start($psi)
-                                $sout = $proc.StandardOutput.ReadToEnd()
-                                $serr = $proc.StandardError.ReadToEnd()
-                                $proc.WaitForExit()
-                                $o.ExitCode = $proc.ExitCode
-                                if ($proc.ExitCode -ne 0) { $o.Error = ($sout + $serr).Trim() }
-                            } catch { $o.Error = $_.Exception.Message }
-                            return $o
-                        }
+                        # -- 3) PIN to the target (REUSE the shared pin policy-write $PinBlock) --
+                        & $pushStep 'Pinning' "Pinning $Product $Version..."
+                        $pinOut = ''
                         try {
-                            $icB = $baseIc.Clone(); $icB.ScriptBlock = $rbSb; $icB.ArgumentList = @($CountdownSeconds, 'JANET Web: driving Windows 11 24H2 feature update', $expectedName)
-                            $rb = Invoke-Command @icB
-                            if ($rb.Error) { $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot NOT issued: $($rb.Error)" }
-                            elseif ($rb.ExitCode -eq 0) { $r.Rebooted = $true; $r.CountdownSec = $CountdownSeconds; $r.Status = 'REBOOTING'; $r.Detail = "Pinned + triggered; STAGED; reboot issued (${CountdownSeconds}s). $($r.TriggerResult)" }
-                            else { $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot FAILED (shutdown exit $($rb.ExitCode)): $($rb.Error)" }
-                        } catch {
-                            $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot FAILED to issue: $($_.Exception.Message)"
+                            $icP = $baseIc.Clone(); $icP.ScriptBlock = $PinBlock; $icP.ArgumentList = @($Version, $Product, $Bypass, $expectedName)
+                            $pinOut = [string](Invoke-Command @icP); $r.WasPinned = $true
+                        } catch { $pinOut = "pin error: $($_.Exception.Message)"; $r.WasPinned = $false }
+
+                        # loop31 (F1): a FAILED pin must ABORT the drive. Triggering Windows Update
+                        # without a successful pin lets WU upgrade the host to the LATEST feature update
+                        # instead of the pinned target (the exact thing the pin prevents), and reporting
+                        # green "Pinned + triggered" while the pin threw is a false-clean (the pin error
+                        # was being discarded). Fail-closed: no pin -> no trigger, surface the error.
+                        if (-not $r.WasPinned) {
+                            $r.Status = 'PIN FAILED'; $r.Ok = $false
+                            $r.Detail = "Pin did NOT apply - upgrade NOT triggered (an unpinned trigger could upgrade to the wrong build). $pinOut"
+                            return $r
+                        }
+
+                        # -- 4) TRIGGER Windows Update (best-effort accelerator; NOT a guaranteed install) --
+                        & $pushStep 'Triggering' 'Triggering Windows Update detect/download/install...'
+                        $trigSb = {
+                            # PHASE:TRIGGER - HONEST: Windows does NOT guarantee a headless feature-
+                            # update INSTALL from a trigger. This kicks the WU agent to detect/download/
+                            # install the OFFERED feature update; the reliable completion is
+                            # pin -> WU stages the update -> reboot. We report what we KICKED, never
+                            # "installed". UsoClient StartScan/StartDownload/StartInstall exist on 22631;
+                            # the WUA COM DetectNow is a belt-and-braces detect trigger.
+                            $fired = New-Object System.Collections.ArrayList
+                            $uso = Join-Path $env:SystemRoot 'System32\UsoClient.exe'
+                            if (Test-Path -LiteralPath $uso) {
+                                foreach ($verb in 'StartScan','StartDownload','StartInstall') {
+                                    try { Start-Process -FilePath $uso -ArgumentList $verb -WindowStyle Hidden -ErrorAction Stop; [void]$fired.Add("UsoClient $verb") } catch {}
+                                }
+                            }
+                            try { (New-Object -ComObject Microsoft.Update.AutoUpdate).DetectNow(); [void]$fired.Add('WUA DetectNow') } catch {}
+                            if ($fired.Count -eq 0) { 'no WU trigger fired (UsoClient/WUA unavailable on this build)' } else { 'triggered: ' + ($fired -join ', ') + ' (accelerator - completion not guaranteed by a trigger)' }
+                        }
+                        try { $icT = $baseIc.Clone(); $icT.ScriptBlock = $trigSb; $r.TriggerResult = [string](Invoke-Command @icT) }
+                        catch { $r.TriggerResult = "trigger error: $($_.Exception.Message)" }
+
+                        # -- 5) RE-READ staged state (is a feature update now pending?) --
+                        & $pushStep 'Checking' 'Re-reading staged / pending-reboot state...'
+                        $stagedAfter = $stagedNow
+                        try {
+                            $stSb = {
+                                # PHASE:STAGED - re-read whether a feature update is now staged / the box
+                                # is pending-reboot (same signals as the readiness read + $WINDOWS.~BT).
+                                $p = $false
+                                if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $p = $true }
+                                if (-not $p -and (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) { $p = $true }
+                                if (-not $p) {
+                                    $pfro = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+                                    if ($pfro -and $pfro.PendingFileRenameOperations) { $p = $true }
+                                }
+                                # loop36 (F2): a ROLLED-BACK feature-update attempt leaves the C:\$WINDOWS.~BT
+                                # tree behind while NOTHING is in progress. A bare Test-Path counted that STALE
+                                # tree as "staged" and rebooted an un-staged host (it comes back on the old
+                                # build), weakening the "never reboot an un-staged host" invariant. CLASSIFY
+                                # the tree (mirror of Get-WinUpgradeStagingClass: rollback marker / age / setup
+                                # process); only an Active/Recent staging counts as staged, a Stale one does not.
+                                if (-not $p -and (Test-Path -LiteralPath 'C:\$WINDOWS.~BT\Sources')) {
+                                    $btItem = Get-Item -LiteralPath 'C:\$WINDOWS.~BT' -Force -ErrorAction SilentlyContinue
+                                    $ageH = if ($btItem) { ((Get-Date) - $btItem.LastWriteTime).TotalHours } else { 9999 }
+                                    $setupProcs = @(Get-Process -Name 'SetupHost','SetupPrep','Windows10UpgraderApp','SetupPlatformTool' -ErrorAction SilentlyContinue)
+                                    $rollback = $false; $btPanther = 'C:\$WINDOWS.~BT\Sources\Panther'
+                                    if (Test-Path -LiteralPath $btPanther) { foreach ($lg in @('setupact.log','setuperr.log')) { $lp = Join-Path $btPanther $lg; if (Test-Path -LiteralPath $lp) { try { if (Select-String -Path $lp -Pattern 'rollback|roll back|abort' -ErrorAction SilentlyContinue | Select-Object -First 1) { $rollback = $true; break } } catch {} } } }
+                                    $cls = if ($rollback) { 'Stale' } elseif ($setupProcs.Count -gt 0) { 'Active' } elseif ($ageH -gt 24) { 'Stale' } else { 'Recent' }
+                                    if ($cls -ne 'Stale') { $p = $true }
+                                }
+                                [pscustomobject]@{ Staged = $p }
+                            }
+                            $icS = $baseIc.Clone(); $icS.ScriptBlock = $stSb
+                            $sres = Invoke-Command @icS
+                            $stagedAfter = [bool]$sres.Staged
+                        } catch {}
+                        $r.Staged = $stagedAfter
+
+                        # -- 6) REBOOT-WHEN-STAGED (ONLY if opted in AND CONFIRMED staged; guarded) --
+                        #    NEVER reboot an un-staged host. The DNS-mismatch guard runs INSIDE the
+                        #    remote block (authoritative); IP targets skip the name compare (an IP has
+                        #    no DNS indirection) by passing '' - exactly like the Restart tool.
+                        if ($RebootWhenStaged -and $stagedAfter) {
+                            & $pushStep 'Rebooting' "Staged; issuing reboot (${CountdownSeconds}s countdown)..."
+                            # Guarded delayed reboot via the shared $RebootBlock (audit 2026-07-23: this
+                            # branch's proven parameterized block, hoisted to module scope - DNS-mismatch
+                            # HARD ABORT + ProcessStartInfo exit code).
+                            try {
+                                $icB = $baseIc.Clone(); $icB.ScriptBlock = $RebootBlock; $icB.ArgumentList = @($CountdownSeconds, 'JANET Web: driving Windows 11 24H2 feature update', $expectedName)
+                                $rb = Invoke-Command @icB
+                                if ($rb.Error) { $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot NOT issued: $($rb.Error)" }
+                                elseif ($rb.ExitCode -eq 0) { $r.Rebooted = $true; $r.CountdownSec = $CountdownSeconds; $r.Status = 'REBOOTING'; $r.Detail = "Pinned + triggered; STAGED; reboot issued (${CountdownSeconds}s). $($r.TriggerResult)" }
+                                else { $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot FAILED (shutdown exit $($rb.ExitCode)): $($rb.Error)" }
+                            } catch {
+                                $r.Rebooted = $false; $r.Status = 'NEEDS REBOOT'; $r.Detail = "Pinned + triggered; STAGED; reboot FAILED to issue: $($_.Exception.Message)"
+                            }
+                            $r.Ok = $true; return $r
+                        }
+
+                        # not rebooting: report staged-not-rebooted vs driven-not-yet-staged.
+                        $r.Rebooted = $false
+                        if ($stagedAfter) {
+                            $r.Status = 'STAGED'
+                            $offNote = if ($RebootWhenStaged) { '' } else { ' (rebootWhenStaged off)' }
+                            $r.Detail = "Pinned + triggered; STAGED (feature update pending), not rebooted$offNote. Reboot to complete. $($r.TriggerResult)"
+                        } else {
+                            $r.Status = 'DRIVEN'
+                            $r.Detail = "Pinned + triggered; not yet staged - WU will stage the update, then a reboot completes 24H2. $($r.TriggerResult)"
                         }
                         $r.Ok = $true; return $r
                     }
-
-                    # not rebooting: report staged-not-rebooted vs driven-not-yet-staged.
-                    $r.Rebooted = $false
-                    if ($stagedAfter) {
-                        $r.Status = 'STAGED'
-                        $offNote = if ($RebootWhenStaged) { '' } else { ' (rebootWhenStaged off)' }
-                        $r.Detail = "Pinned + triggered; STAGED (feature update pending), not rebooted$offNote. Reboot to complete. $($r.TriggerResult)"
-                    } else {
-                        $r.Status = 'DRIVEN'
-                        $r.Detail = "Pinned + triggered; not yet staged - WU will stage the update, then a reboot completes 24H2. $($r.TriggerResult)"
+                    finally {
+                        if ($driveSession) { Remove-PSSession $driveSession -ErrorAction SilentlyContinue }
                     }
-                    $r.Ok = $true; return $r
                 }
                 if ($Op -eq 'FleetStatus') {
                     # Fleet Status board: reuse the SAME scan; derive the eligibility gates
@@ -2464,8 +2478,15 @@ $script:WinUpgradeWorker = {
                 $fdMsg = if ($Aggressive) { 'Force discovery (AGGRESSIVE WU reset)...' } else { 'Force discovery (safe re-scan)...' }
                 & $pushStep 'Forcing' $fdMsg
                 $sb = {
-                    param($product, $version, $cycles, $aggressive)
+                    param($product, $version, $cycles, $aggressive, $expected)
                     $log = @()
+
+                    # DNS-mismatch guard (HARD ABORT) - audit 2026-07-23: this block WRITES the
+                    # pin policy and (aggressive) stops WU services + renames the caches; never
+                    # run it on a box we did not dial (stale DNS / reused IP). IP dials pass ''.
+                    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                        throw "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no changes made"
+                    }
 
                     # ===== ALWAYS SAFE: Re-apply target release version policy =====
                     $wuPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
@@ -2512,13 +2533,22 @@ $script:WinUpgradeWorker = {
                     } catch { $log += "SCCM client not found" }
 
                     # ===== ALWAYS SAFE: GPO refresh =====
-                    try { & gpupdate /force /target:computer 2>&1 | Out-Null; $log += "GPO refreshed" }
+                    # audit 2026-07-23: native exes do NOT throw on a non-zero exit, so the catch
+                    # never fired and "GPO refreshed" / "UsoClient StartScan triggered" were logged
+                    # unconditionally - gate the success line on $LASTEXITCODE.
+                    try {
+                        & gpupdate /force /target:computer 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $log += "GPO refreshed" } else { $log += "WARN: GPO refresh failed (gpupdate exit $LASTEXITCODE)" }
+                    }
                     catch { $log += "WARN: GPO refresh failed" }
 
                     # ===== ALWAYS SAFE: WU scan triggers =====
                     try { (New-Object -ComObject Microsoft.Update.AutoUpdate).DetectNow(); $log += "WU scan triggered" }
                     catch { $log += "WARN: WU scan trigger failed: $($_.Exception.Message)" }
-                    try { & UsoClient.exe StartScan 2>&1 | Out-Null; $log += "UsoClient StartScan triggered" }
+                    try {
+                        & UsoClient.exe StartScan 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $log += "UsoClient StartScan triggered" } else { $log += "WARN: UsoClient StartScan failed (exit $LASTEXITCODE)" }
+                    }
                     catch { $log += "WARN: UsoClient failed" }
 
                     # ===== AGGRESSIVE MODE ONLY =====
@@ -2608,7 +2638,7 @@ $script:WinUpgradeWorker = {
                 }
                 # Aggressive mode stops services + re-registers DLLs; no per-op cap (can run minutes).
                 $so = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
-                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($Product,$Version,$Cycles,$Aggressive); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
+                $ic = @{ ComputerName=$Computer; ScriptBlock=$sb; ArgumentList=@($Product,$Version,$Cycles,$Aggressive,$expectedName); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop' }
                 if ($credSet) { $ic.Credential = $Cred }
                 if ($useSsl) { $ic['UseSSL'] = $true }
                 $report = [string](Invoke-Command @ic)
@@ -2633,121 +2663,121 @@ $script:WinUpgradeWorker = {
                 }
                 $rlines = New-Object System.Collections.ArrayList
                 # DISM + sfc can each run 15-45 min -> no per-operation cap (OperationTimeout 0).
+                # audit 2026-07-23: ONE reusable PSSession for the DISM / sfc / state-read /
+                # reboot dials (the InstallCab pattern) instead of a fresh -ComputerName
+                # negotiation per dial; SSL-first splat behavior identical. The quick state-read
+                # and reboot dials now share the no-per-op-cap session; the fan-out watchdog
+                # still bounds a wedged host.
                 $soLong = New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 0 -IdleTimeout 1800000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl
-                $baseIc = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$soLong; ErrorAction='Stop' }
-                if ($credSet) { $baseIc.Credential = $Cred }
-                if ($useSsl) { $baseIc['UseSSL'] = $true }
+                $sp = @{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=$soLong; ErrorAction='Stop' }
+                if ($credSet) { $sp.Credential = $Cred }
+                if ($useSsl) { $sp['UseSSL'] = $true }
+                $session = New-PSSession @sp
+                try {
+                    $baseIc = @{ Session=$session; ErrorAction='Stop' }
 
-                & $pushStep 'DISM' 'DISM /Online /Cleanup-Image /RestoreHealth (15-45 min)...'
-                $dismSb = {
-                    $o = @{ ExitCode=$null; Output=''; Error='' }
-                    try {
-                        $psi = New-Object System.Diagnostics.ProcessStartInfo
-                        $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'
-                        $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
-                        $p=[System.Diagnostics.Process]::Start($psi)
-                        $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit()
-                        $o.ExitCode=$p.ExitCode; $o.Output=(($so+$se).Trim())
-                    } catch { $o.Error=$_.Exception.Message }
-                    return $o
-                }
-                $dismRes=$null; $dismErr=$false
-                try { $icD=$baseIc.Clone(); $icD.ScriptBlock=$dismSb; $dismRes=Invoke-Command @icD } catch { $dismErr=$true; $dismRes=@{ ExitCode=$null; Output=''; Error=$_.Exception.Message } }
-                if ($dismRes.Error) { $dismErr=$true }
-
-                & $pushStep 'sfc' 'sfc /scannow...'
-                $sfcSb = {
-                    $o = @{ ExitCode=$null; Text=''; Error='' }
-                    try {
-                        $psi = New-Object System.Diagnostics.ProcessStartInfo
-                        $psi.FileName='sfc.exe'; $psi.Arguments='/scannow'
-                        $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
-                        $p=[System.Diagnostics.Process]::Start($psi)
-                        $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit()
-                        $o.ExitCode=$p.ExitCode; $o.Text=(($so+$se) -replace "`0","")
-                    } catch { $o.Error=$_.Exception.Message }
-                    return $o
-                }
-                $sfcRes=$null; $sfcErr=$false
-                try { $icS=$baseIc.Clone(); $icS.ScriptBlock=$sfcSb; $sfcRes=Invoke-Command @icS } catch { $sfcErr=$true; $sfcRes=@{ ExitCode=$null; Text=''; Error=$_.Exception.Message } }
-                if ($sfcRes.Error) { $sfcErr=$true }
-
-                # verdict: MIRROR of Get-WinUpgradeRepairVerdict (keep in sync).
-                $dx = $dismRes.ExitCode
-                if ($dismErr -or ($null -eq $dx)) { $dismV='error' }
-                else { $dxi=0; [void][int]::TryParse([string]$dx,[ref]$dxi); if ($dxi -eq 0){$dismV='OK'} elseif($dxi -eq 3010){$dismV='OK (reboot)'} else {$dismV="exit $dxi"} }
-                $stx = [string]$sfcRes.Text
-                if     ($sfcErr) { $sfcV='error' }
-                elseif ($stx -match '(?i)did not find any integrity violations') { $sfcV='no violations' }
-                elseif ($stx -match '(?i)successfully repaired') { $sfcV='repaired' }
-                elseif ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { $sfcV='could not fix' }
-                elseif ($stx -match '(?i)could not perform the requested operation') { $sfcV='blocked (pending repair)' }
-                else { $sfcV='unknown' }   # unparseable/localized/truncated - do NOT assume clean (fail-closed)
-                $dismFailed=($dismV -eq 'error' -or $dismV -match '^exit ')
-                $sfcFailed=($sfcV -eq 'error')
-                if     ($dismFailed -or $sfcFailed) { $statusV='FAILED' }
-                elseif ($sfcV -eq 'could not fix' -or $sfcV -eq 'blocked (pending repair)' -or $sfcV -eq 'unknown') { $statusV='PARTIAL' }
-                elseif ($sfcV -eq 'repaired' -or $dismV -eq 'OK (reboot)') { $statusV='REPAIRED' }
-                else { $statusV='CLEAN' }
-                $rebootNeeded=($dismV -eq 'OK (reboot)' -or $sfcV -eq 'repaired')
-
-                if     ($dismV -eq 'error') { [void]$rlines.Add("[FAIL] DISM RestoreHealth error: $([string]$dismRes.Error)") }
-                elseif ($dismV -eq 'OK (reboot)') { [void]$rlines.Add('[PASS] DISM RestoreHealth completed - REBOOT REQUIRED (exit 3010)') }
-                elseif ($dismV -eq 'OK') { [void]$rlines.Add('[PASS] DISM RestoreHealth completed (exit 0)') }
-                else { $dtail=[string]$dismRes.Output; if ($dtail.Length -gt 200){$dtail=$dtail.Substring(0,200)}; [void]$rlines.Add("[WARN] DISM RestoreHealth $dismV : $dtail") }
-                switch ($sfcV) {
-                    'no violations' { [void]$rlines.Add('[PASS] sfc /scannow: no integrity violations found') }
-                    'repaired'      { [void]$rlines.Add('[PASS] sfc /scannow: found and repaired corrupt files') }
-                    'could not fix' { [void]$rlines.Add('[WARN] sfc /scannow: found corruption it could NOT fully repair - review CBS.log / consider reimage') }
-                    'blocked (pending repair)' { [void]$rlines.Add('[WARN] sfc /scannow: could not run (a pending repair/reboot is needed first)') }
-                    'unknown'       { [void]$rlines.Add('[WARN] sfc /scannow: output not recognized - repair state UNKNOWN, NOT confirmed clean') }
-                    'error'         { [void]$rlines.Add("[FAIL] sfc /scannow error: $([string]$sfcRes.Error)") }
-                }
-
-                & $pushStep 'Checking' 'Reading reboot-pending state / active user...'
-                $stateSb = {
-                    $cbs = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
-                    $wu  = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-                    $au  = ''; try { $au=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch { $au='' }
-                    [pscustomobject]@{ Cbs=$cbs; Wu=$wu; ActiveUser=$au }
-                }
-                $activeUser=''
-                try { $icX=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl); ErrorAction='Stop'; ScriptBlock=$stateSb }; if ($credSet) { $icX.Credential=$Cred }; if ($useSsl) { $icX['UseSSL']=$true }; $stRes=Invoke-Command @icX; if ($stRes.Cbs -or $stRes.Wu) { $rebootNeeded=$true }; $activeUser=[string]$stRes.ActiveUser } catch {}
-
-                $rebootTxt=''
-                if ($Reboot -and $rebootNeeded) {
-                    if ($activeUser) { [void]$rlines.Add("[REBOOT] deferred - active user $activeUser"); $rebootTxt=" Reboot required but DEFERRED (active user $activeUser)." }
-                    else {
-                        $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-                        $rbSb = {
-                            param($expected)
-                            $o=@{ ExitCode=$null; Error='' }
-                            # DNS-mismatch guard (HARD ABORT): the box that answered runs this.
-                            if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) { $o.Error="DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no reboot sent"; return $o }
-                            try {
-                                $psi=New-Object System.Diagnostics.ProcessStartInfo
-                                $psi.FileName='shutdown.exe'; $psi.Arguments='/r /t 60 /f /c "JANET Web Windows Upgrade: component-store repair complete - reboot to finish"'
-                                $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
-                                $p=[System.Diagnostics.Process]::Start($psi); $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit(); $o.ExitCode=$p.ExitCode; if ($p.ExitCode -ne 0){$o.Error=($so+$se).Trim()}
-                            } catch { $o.Error=$_.Exception.Message }
-                            return $o
-                        }
-                        try { $icR=@{ ComputerName=$Computer; Authentication='Negotiate'; SessionOption=(New-PSSessionOption -OpenTimeout 20000 -OperationTimeout 60000 -CancelTimeout 5000 -SkipCACheck:$useSsl -SkipCNCheck:$useSsl); ErrorAction='Stop'; ScriptBlock=$rbSb; ArgumentList=@($expectedName) }; if ($credSet) { $icR.Credential=$Cred }; if ($useSsl) { $icR['UseSSL']=$true }; $rb=Invoke-Command @icR
-                              if ($rb.Error) { [void]$rlines.Add("[WARN] reboot NOT issued: $($rb.Error)"); $rebootTxt=" Reboot required; NOT issued: $($rb.Error)." }
-                              else { [void]$rlines.Add('[REBOOT] issued (60s)'); $rebootTxt=' Reboot issued (60s).' }
-                        } catch { [void]$rlines.Add("[WARN] reboot FAILED to issue: $($_.Exception.Message)"); $rebootTxt=" Reboot required; FAILED to issue: $($_.Exception.Message)." }
+                    & $pushStep 'DISM' 'DISM /Online /Cleanup-Image /RestoreHealth (15-45 min)...'
+                    $dismSb = {
+                        $o = @{ ExitCode=$null; Output=''; Error='' }
+                        try {
+                            $psi = New-Object System.Diagnostics.ProcessStartInfo
+                            $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'
+                            $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
+                            $p=[System.Diagnostics.Process]::Start($psi)
+                            $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit()
+                            $o.ExitCode=$p.ExitCode; $o.Output=(($so+$se).Trim())
+                        } catch { $o.Error=$_.Exception.Message }
+                        return $o
                     }
-                } elseif ($rebootNeeded) {
-                    [void]$rlines.Add('[REC] A reboot is required to complete the repair - reboot this host, then re-run the upgrade.')
-                    $rebootTxt=' Reboot required (not requested).'
-                }
-                if ($statusV -eq 'REPAIRED' -or $statusV -eq 'PARTIAL') { [void]$rlines.Add('[REC] After repairs, clear $WINDOWS.~BT and re-trigger the upgrade.') }
+                    $dismRes=$null; $dismErr=$false
+                    try { $icD=$baseIc.Clone(); $icD.ScriptBlock=$dismSb; $dismRes=Invoke-Command @icD } catch { $dismErr=$true; $dismRes=@{ ExitCode=$null; Output=''; Error=$_.Exception.Message } }
+                    if ($dismRes.Error) { $dismErr=$true }
 
-                $r.Dism=$dismV; $r.Sfc=$sfcV; $r.RebootNeeded=$rebootNeeded
-                $r.Status=$statusV
-                $r.Detail="DISM=$dismV; SFC=$sfcV.$rebootTxt"
-                $r.Report=($rlines -join "`n")
+                    & $pushStep 'sfc' 'sfc /scannow...'
+                    $sfcSb = {
+                        $o = @{ ExitCode=$null; Text=''; Error='' }
+                        try {
+                            $psi = New-Object System.Diagnostics.ProcessStartInfo
+                            $psi.FileName='sfc.exe'; $psi.Arguments='/scannow'
+                            $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
+                            $p=[System.Diagnostics.Process]::Start($psi)
+                            $so=$p.StandardOutput.ReadToEnd(); $se=$p.StandardError.ReadToEnd(); $p.WaitForExit()
+                            $o.ExitCode=$p.ExitCode; $o.Text=(($so+$se) -replace "`0","")
+                        } catch { $o.Error=$_.Exception.Message }
+                        return $o
+                    }
+                    $sfcRes=$null; $sfcErr=$false
+                    try { $icS=$baseIc.Clone(); $icS.ScriptBlock=$sfcSb; $sfcRes=Invoke-Command @icS } catch { $sfcErr=$true; $sfcRes=@{ ExitCode=$null; Text=''; Error=$_.Exception.Message } }
+                    if ($sfcRes.Error) { $sfcErr=$true }
+
+                    # verdict: MIRROR of Get-WinUpgradeRepairVerdict (keep in sync).
+                    $dx = $dismRes.ExitCode
+                    if ($dismErr -or ($null -eq $dx)) { $dismV='error' }
+                    else { $dxi=0; [void][int]::TryParse([string]$dx,[ref]$dxi); if ($dxi -eq 0){$dismV='OK'} elseif($dxi -eq 3010){$dismV='OK (reboot)'} else {$dismV="exit $dxi"} }
+                    $stx = [string]$sfcRes.Text
+                    if     ($sfcErr) { $sfcV='error' }
+                    elseif ($stx -match '(?i)did not find any integrity violations') { $sfcV='no violations' }
+                    elseif ($stx -match '(?i)successfully repaired') { $sfcV='repaired' }
+                    elseif ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { $sfcV='could not fix' }
+                    elseif ($stx -match '(?i)could not perform the requested operation') { $sfcV='blocked (pending repair)' }
+                    else { $sfcV='unknown' }   # unparseable/localized/truncated - do NOT assume clean (fail-closed)
+                    $dismFailed=($dismV -eq 'error' -or $dismV -match '^exit ')
+                    $sfcFailed=($sfcV -eq 'error')
+                    if     ($dismFailed -or $sfcFailed) { $statusV='FAILED' }
+                    elseif ($sfcV -eq 'could not fix' -or $sfcV -eq 'blocked (pending repair)' -or $sfcV -eq 'unknown') { $statusV='PARTIAL' }
+                    elseif ($sfcV -eq 'repaired' -or $dismV -eq 'OK (reboot)') { $statusV='REPAIRED' }
+                    else { $statusV='CLEAN' }
+                    $rebootNeeded=($dismV -eq 'OK (reboot)' -or $sfcV -eq 'repaired')
+
+                    if     ($dismV -eq 'error') { [void]$rlines.Add("[FAIL] DISM RestoreHealth error: $([string]$dismRes.Error)") }
+                    elseif ($dismV -eq 'OK (reboot)') { [void]$rlines.Add('[PASS] DISM RestoreHealth completed - REBOOT REQUIRED (exit 3010)') }
+                    elseif ($dismV -eq 'OK') { [void]$rlines.Add('[PASS] DISM RestoreHealth completed (exit 0)') }
+                    else { $dtail=[string]$dismRes.Output; if ($dtail.Length -gt 200){$dtail=$dtail.Substring(0,200)}; [void]$rlines.Add("[WARN] DISM RestoreHealth $dismV : $dtail") }
+                    switch ($sfcV) {
+                        'no violations' { [void]$rlines.Add('[PASS] sfc /scannow: no integrity violations found') }
+                        'repaired'      { [void]$rlines.Add('[PASS] sfc /scannow: found and repaired corrupt files') }
+                        'could not fix' { [void]$rlines.Add('[WARN] sfc /scannow: found corruption it could NOT fully repair - review CBS.log / consider reimage') }
+                        'blocked (pending repair)' { [void]$rlines.Add('[WARN] sfc /scannow: could not run (a pending repair/reboot is needed first)') }
+                        'unknown'       { [void]$rlines.Add('[WARN] sfc /scannow: output not recognized - repair state UNKNOWN, NOT confirmed clean') }
+                        'error'         { [void]$rlines.Add("[FAIL] sfc /scannow error: $([string]$sfcRes.Error)") }
+                    }
+
+                    & $pushStep 'Checking' 'Reading reboot-pending state / active user...'
+                    $stateSb = {
+                        $cbs = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+                        $wu  = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+                        $au  = ''; try { $au=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch { $au='' }
+                        [pscustomobject]@{ Cbs=$cbs; Wu=$wu; ActiveUser=$au }
+                    }
+                    $activeUser=''
+                    try { $icX=@{ Session=$session; ErrorAction='Stop'; ScriptBlock=$stateSb }; $stRes=Invoke-Command @icX; if ($stRes.Cbs -or $stRes.Wu) { $rebootNeeded=$true }; $activeUser=[string]$stRes.ActiveUser } catch {}
+
+                    $rebootTxt=''
+                    if ($Reboot -and $rebootNeeded) {
+                        if ($activeUser) { [void]$rlines.Add("[REBOOT] deferred - active user $activeUser"); $rebootTxt=" Reboot required but DEFERRED (active user $activeUser)." }
+                        else {
+                            # Guarded delayed reboot via the shared $RebootBlock (audit 2026-07-23:
+                            # hoisted copy - DNS-mismatch HARD ABORT + ProcessStartInfo exit code).
+                            try { $icR=@{ Session=$session; ErrorAction='Stop'; ScriptBlock=$RebootBlock; ArgumentList=@(60, 'JANET Web Windows Upgrade: component-store repair complete - reboot to finish', $expectedName) }; $rb=Invoke-Command @icR
+                                  if ($rb.Error) { [void]$rlines.Add("[WARN] reboot NOT issued: $($rb.Error)"); $rebootTxt=" Reboot required; NOT issued: $($rb.Error)." }
+                                  else { [void]$rlines.Add('[REBOOT] issued (60s)'); $rebootTxt=' Reboot issued (60s).' }
+                            } catch { [void]$rlines.Add("[WARN] reboot FAILED to issue: $($_.Exception.Message)"); $rebootTxt=" Reboot required; FAILED to issue: $($_.Exception.Message)." }
+                        }
+                    } elseif ($rebootNeeded) {
+                        [void]$rlines.Add('[REC] A reboot is required to complete the repair - reboot this host, then re-run the upgrade.')
+                        $rebootTxt=' Reboot required (not requested).'
+                    }
+                    if ($statusV -eq 'REPAIRED' -or $statusV -eq 'PARTIAL') { [void]$rlines.Add('[REC] After repairs, clear $WINDOWS.~BT and re-trigger the upgrade.') }
+
+                    $r.Dism=$dismV; $r.Sfc=$sfcV; $r.RebootNeeded=$rebootNeeded
+                    $r.Status=$statusV
+                    $r.Detail="DISM=$dismV; SFC=$sfcV.$rebootTxt"
+                    $r.Report=($rlines -join "`n")
                 $r.Ok=($statusV -ne 'FAILED')
+                }
+                finally {
+                    if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
+                }
             }
 
             'AutoFix' {
@@ -2756,8 +2786,10 @@ $script:WinUpgradeWorker = {
                 # locally). Its decision logic MIRRORS the pure Get-WinUpgradeAutoFixPlan +
                 # Get-WinUpgradeStagingClass / Get-WinUpgradePauseClass / the setup-err rules /
                 # $script:WinUpgradeNonBootDriverClasses (all kept in sync). The reboot carries the
-                # same DNS-mismatch guard as every other reboot here.
-                $expectedName = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+                # same DNS-mismatch guard as every other reboot here (the worker-top $expectedName;
+                # it runs INSIDE the single analyse+fix remote block, so it keeps its inline copy
+                # rather than the shared $RebootBlock - a local scriptblock cannot be invoked
+                # across the remoting boundary).
                 & $pushStep 'AutoFix' 'Analysing device and applying only the fixes it needs...'
                 $afSb = {
                     param($minBuild,$product,$version,$cpuPatterns,$minTPM,$cycles,
@@ -2810,9 +2842,11 @@ $script:WinUpgradeWorker = {
                     # with the corrected boot-critical guard (mirror $script:WinUpgradeNonBootDriverClasses).
                     if ($fixDrivers) {
                         $failedInfs=@()
+                        # audit 2026-07-23: -LiteralPath on the $WINDOWS.~BT paths (Select-String
+                        # DOES expose -LiteralPath in PS 5.1) - parity with every other ~BT read.
                         foreach ($lp in @("$env:SystemDrive\`$WINDOWS.~BT\Sources\Panther","$env:SystemRoot\Panther")) {
                             $se=Join-Path $lp 'setuperr.log'
-                            if (Test-Path $se) { try { $hits=Select-String -Path $se -Pattern 'Failed to inject driver package.*\\([^\\]+\.inf)' -ErrorAction SilentlyContinue; foreach ($h in $hits) { foreach ($mm in $h.Matches) { if ($mm.Groups.Count -gt 1) { $failedInfs += $mm.Groups[1].Value } } } } catch {} }
+                            if (Test-Path -LiteralPath $se) { try { $hits=Select-String -LiteralPath $se -Pattern 'Failed to inject driver package.*\\([^\\]+\.inf)' -ErrorAction SilentlyContinue; foreach ($h in $hits) { foreach ($mm in $h.Matches) { if ($mm.Groups.Count -gt 1) { $failedInfs += $mm.Groups[1].Value } } } } catch {} }
                         }
                         $failedInfs=@($failedInfs | Sort-Object -Unique)
                         if ($failedInfs.Count -eq 0) { [void]$report.Add('[SKIP] No driver-injection failures in setup logs') }
@@ -2877,8 +2911,10 @@ $script:WinUpgradeWorker = {
 
                     # FIX repair: DISM+SFC ONLY where the setup log matches a corruption signature.
                     if ($fixRepair) {
+                        # audit 2026-07-23: -LiteralPath on the $WINDOWS.~BT path - parity with
+                        # every other ~BT read in this block.
                         $btErr="$env:SystemDrive\`$WINDOWS.~BT\Sources\Panther\setuperr.log"; $et=''
-                        if (Test-Path $btErr) { try { $et=Get-Content $btErr -Raw -ErrorAction Stop } catch {} }
+                        if (Test-Path -LiteralPath $btErr) { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch {} }
                         $needsRepair=($et -match '0x000003F1' -or $et -match '(?i)configuration registry database is corrupt' -or $et -match 'MigPlatformStartupOffline' -or $et -match '(?i)Offline gather failed' -or $et -match '(?i)FOD inventory' -or $et -match '(?i)Failed to enumerate store capabilities' -or $et -match 'CBS_E_INVALID_PACKAGE' -or $et -match '0x800f0805')
                         if ($needsRepair) {
                             [void]$fixes.Add('repair')
@@ -3449,6 +3485,9 @@ function Invoke-JanetToolAction {
     $wuaDriver      = $script:WinUpgradeWuaDriver
     # Shared pin policy-write block threaded to the worker (reused by Pin + UpgradeDrive).
     $pinBlock       = $script:WinUpgradePinBlock
+    # Shared guarded-reboot block threaded to the worker (audit 2026-07-23: reused by
+    # InstallCab / SetPageFile / UpgradeDrive / RepairHealth).
+    $rebootBlock    = $script:WinUpgradeRebootBlock
     # Diagnose constants + SCCM cycle GUIDs (defined once at module scope, copied EXACTLY
     # from the reference) threaded to the worker via the ArgFactory tail.
     $cpuPatterns    = $script:WinUpgradeCpuPatterns
@@ -3574,9 +3613,20 @@ function Invoke-JanetToolAction {
     # worker param() tail (a mismatch silently corrupts every argument).
     # v0.5.0 args ($includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver) appended at the END
     # in the SAME order as the worker param() tail (a mismatch silently corrupts every argument).
-    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging, $includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver) }
+    # audit 2026-07-23 arg ($rebootBlock) appended at the END in the SAME order as the worker
+    # param() tail (a mismatch silently corrupts every argument).
+    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging, $includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver, $rebootBlock) }
     $rowOf       = {
         param($res)
+        # Null-safe field getter, defined ONCE for every per-op branch below (audit 2026-07-23:
+        # it was copy-pasted per branch). Timeout / cancel / worker-error results arrive as a
+        # bare {Host;Ping;Status;Detail} ordered hashtable with no rich fields -> fall back to
+        # the supplied default.
+        $get = {
+            param($k, $d)
+            try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}
+            return $d
+        }
         if ($op -eq 'FleetStatus') {
             # Build the rich Fleet Status row and classify Win24H2Status centrally. Timeout /
             # cancel / worker-error paths pass a bare {Host;Ping;Status;Detail} result with no
@@ -3610,14 +3660,8 @@ function Invoke-JanetToolAction {
             }
         }
         if ($op -eq 'UpgradeDrive') {
-            # Rich drive row. Timeout / cancel / worker-error results arrive as a bare
-            # {Host;Ping;Status;Detail} ordered hashtable with no drive fields -> surface
-            # those as Error=<detail> via the null-safe getter + the FAILED/Cancelled test.
-            $get = {
-                param($k, $d)
-                try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}
-                return $d
-            }
+            # Rich drive row. Timeout / cancel / worker-error results surface as
+            # Error=<detail> via the shared null-safe $get + the FAILED/Cancelled test.
             $status = [string]$res.Status
             $isErr  = ($status -eq 'FAILED' -or $status -eq 'Cancelled')
             return @{
@@ -3641,7 +3685,6 @@ function Invoke-JanetToolAction {
             # OS Version audit row (the manifest's 11 columns) + Status/Detail for the generic
             # grid. Timeout / cancel / worker-error results arrive as a bare {Host;Ping;Status;
             # Detail} -> surface Online=false + Error=<detail> and blank check columns.
-            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
             $status = [string]$res.Status
             $isErr  = ($status -eq 'FAILED' -or $status -eq 'Cancelled' -or $status -eq 'Skipped')
             return @{
@@ -3663,7 +3706,6 @@ function Invoke-JanetToolAction {
         if ($op -eq 'InstallUpdates') {
             # install-updates row (Host/Online/Transport/Method/Status/KBs/Reboot/Error) +
             # Detail for the generic grid. Timeout/cancel/worker-error -> Error=<detail>.
-            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
             $status = [string]$res.Status
             $isErr  = ($status -eq 'FAILED' -or $status -eq 'Cancelled')
             return @{
@@ -3681,7 +3723,6 @@ function Invoke-JanetToolAction {
         if ($op -eq 'RepairHealth') {
             # Rich repair row. Timeout / cancel / worker-error results arrive as a bare
             # {Host;Ping;Status;Detail} -> the Dism/Sfc/RebootNeeded getters fall back to defaults.
-            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
             return @{
                 Host         = $res.Host
                 Ping         = [string]$res.Ping
@@ -3693,7 +3734,6 @@ function Invoke-JanetToolAction {
             }
         }
         if ($op -eq 'AutoFix') {
-            $get = { param($k, $d) try { if ($res.Contains($k)) { $v = $res[$k]; if ($null -ne $v) { return $v } } } catch {}; return $d }
             return @{
                 Host         = $res.Host
                 Ping         = [string]$res.Ping
@@ -3905,7 +3945,9 @@ function Invoke-JanetToolAction {
             if ([bool]$row.Online) { $fleet.online++ } else { $fleet.offline++ }
             if ([bool]$row.Pinned) { $fleet.pinned++ }
             $ob = 0; [void][int]::TryParse([string]$row.OsBuild, [ref]$ob)
-            if ($ob -gt 0 -and $ob -lt 26100) { $fleet.on23h2OrOlder++ }
+            # audit 2026-07-23: below-target tally keyed on the SAME $minBuild the row verdicts
+            # use (it was a hardcoded 26100, wrong for a non-24H2 target version).
+            if ($ob -gt 0 -and $ob -lt $minBuild) { $fleet.on23h2OrOlder++ }
             $ws = [string]$row.Win24H2Status
             if     ($ws -like 'Already *')    { $fleet.already24h2++ }   # 'Already 24H2+' / 'Already 25H2+'
             elseif ($ws -eq 'Ready')          { $fleet.ready++ }

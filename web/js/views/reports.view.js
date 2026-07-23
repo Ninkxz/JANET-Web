@@ -116,6 +116,18 @@
       // keys runs by tool/action, so each action already has its own keep-alive run.
       var unsubs = [];        // every active subscription -> cleaned up on unmount
       function track(unsub) { if (unsub) unsubs.push(unsub); return unsub; }
+      // Per-action-key subscription slot: releasing the PREVIOUS live subscription
+      // for the same action key before tracking the new one, so a re-run REPLACES
+      // its handler instead of stacking it (every stale handler still receives the
+      // new run's events -> duplicate log lines / doubled counts). Same idiom as
+      // wpt:320 / acas:325; keyed because this view runs many actions concurrently.
+      var keyUnsubs = {};     // action key -> live unsub
+      function resub(key, unsub) {
+        var prev = keyUnsubs[key];
+        if (prev) { var i = unsubs.indexOf(prev); if (i >= 0) unsubs.splice(i, 1); prev(); }
+        keyUnsubs[key] = track(unsub);
+        return keyUnsubs[key];
+      }
 
       // ---------- the SINGLE shared ActivityLog (desktop sidebar console) ----------
       var log = C.ActivityLog({ title: 'ACTIVITY LOG', defaultName: 'ReportsTool_ActivityLog' });
@@ -315,7 +327,7 @@
           final: function (res) { if (grid && grid.setLoading) grid.setLoading(false); if (onFinal) onFinal(res); },
           active: function (a) { if (!a && grid && grid.setLoading) grid.setLoading(false); if (opts.onActive) opts.onActive(a); }
         });
-        track(u);
+        resub(actionId, u);
         return handle;
       }
 
@@ -500,7 +512,7 @@
           log.banner('ACAS Ping Hosts');
           pingStat.textContent = 'pinging...'; pingStat.className = 'st-info';
           var h = ctx.run('acas-ping-hosts', { threads: 32, timeoutMs: 1500 }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; } });
-          track(h.subscribe({
+          resub('acas-ping-hosts', h.subscribe({
             status: function (t) { log.append({ text: t, level: 'mode' }); },
             row: function (r) { hostOnline[String(r.Host).toUpperCase()] = /^Online$/i.test(String(r.Online)); },
             log: function (l) { log.append(l); },
@@ -539,7 +551,7 @@
             // findings rows arrive without _rk -> set a Hostname|PluginID key so a host with many plugins shows many rows.
             grid.clear(); prog.reset();
             var h = ctx.run('acas-parse-file', { FilePath: path, Append: appendCb._cb.checked }, { keyOf: findingKey });
-            track(h.subscribe({
+            resub('acas-parse-file', h.subscribe({
               status: function (t) { prog.setPhase(t); log.append({ text: t, level: 'mode' }); },
               progress: function (p) { prog.setProgress(p.done, p.total); },
               row: function (r) { if (!r._rk) r._rk = findingKey(r); grid.upsert(r); },
@@ -559,7 +571,7 @@
             log.banner('ACAS Load Report (JSON)');
             grid.clear(); prog.reset();
             var h = ctx.run('acas-load-report', { file: path }, { keyOf: findingKey });
-            track(h.subscribe({
+            resub('acas-load-report', h.subscribe({
               status: function (t) { prog.setPhase(t); log.append({ text: t, level: 'mode' }); },
               progress: function (p) { prog.setProgress(p.done, p.total); },
               // load-report now streams each loaded finding (same shape as parse-file) -> repaint the grid.
@@ -578,7 +590,7 @@
         saveJsonBtn.onclick = function () {
           log.banner('ACAS Save Report (JSON)');
           var h = ctx.run('acas-save-report', {});
-          track(h.subscribe({
+          resub('acas-save-report', h.subscribe({
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) { artifact.set(res && res.summary, 'ReportsTool_Findings'); }
@@ -591,7 +603,7 @@
           if (!cve || !iava) { ctx.confirm({ title: 'Missing input', body: 'Enter both a CVE and an IAVA / bulletin id.', okText: 'OK', cancelText: null }); return; }
           log.banner('Add IAVM Mapping');
           var h = ctx.run('iavm-add-map', { cve: cve, iava: iava, title: (iavmTitleInput.value || '').trim() });
-          track(h.subscribe({
+          resub('iavm-add-map', h.subscribe({
             row: function (r) { log.append({ text: r.Status + ' ' + r.CVE + ' -> ' + r.IAVA, level: 'ok' }); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
@@ -608,7 +620,7 @@
           var params = { keys: keys, newStatus: newStatus };
           if (newStatus === 'Patched') { params.patchedBy = patchedByInput.value || ''; params.patchedDate = patchedDateInput.value || ''; }
           var h = ctx.run('acas-mark-status', params, { keyOf: function (ev) { return (ev.Hostname && ev.PluginID) ? (ev.Hostname + '|' + ev.PluginID) : null; } });
-          track(h.subscribe({
+          resub('acas-mark-status', h.subscribe({
             row: function (r) {
               // patch the matching grid row's Status/Category visually. Engine emits the TRUE
               // recomputed Category; only set it when present so Object.assign never clobbers
@@ -647,7 +659,7 @@
           artifact.reset();
           log.banner('Export Findings (CSV): ' + viewSel.value);
           var h = ctx.run('acas-export-findings', { view: viewSel.value });
-          track(h.subscribe({
+          resub('acas-export-findings', h.subscribe({
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) { artifact.set(res && res.summary, 'ReportsTool_Findings'); }
@@ -743,7 +755,7 @@
           if (!app) { ctx.confirm({ title: 'No app/group', body: 'Type a bucket (Chrome/Edge/Office/Defender/KB/Other) or an Other-vuln group (Plugin <id> / bare id / "Other: <name>").', okText: 'OK', cancelText: null }); return; }
           log.banner('Mark ' + app + ' -> ' + statusSel.value);
           var h = ctx.run('remediation-mark-pushed', { app: app, status: statusSel.value }, { keyOf: function (ev) { return ev.App != null ? String(ev.App) : null; } });
-          track(h.subscribe({
+          resub('remediation-mark-pushed', h.subscribe({
             row: function (r) { log.append({ text: r.App + ' -> ' + r.NewStatus + ' (' + (r.RowsChanged || 0) + ' row(s))', level: 'ok' }); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
@@ -1411,7 +1423,7 @@
         snapBtn.onclick = function () {
           log.banner('Burndown: Snapshot Now');
           var h = ctx.run('burndown-snapshot', { label: (labelInput.value || '').trim() });
-          track(h.subscribe({
+          resub('burndown-snapshot', h.subscribe({
             row: function (r) { log.append({ text: r.Field + ': ' + r.Value, level: 'ok' }); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
@@ -1468,7 +1480,7 @@
           if (!selectedId) return;
           log.banner('Verify Campaign (close the loop)');
           var h = ctx.run('campaign-verify', { campaignId: selectedId });
-          track(h.subscribe({
+          resub('campaign-verify', h.subscribe({
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) {
@@ -1492,7 +1504,7 @@
         createBtn.onclick = function () {
           log.banner('Create Remediation Campaign');
           var h = ctx.run('campaign-create', { name: (nameInput.value || '').trim() });
-          track(h.subscribe({
+          resub('campaign-create', h.subscribe({
             row: function (r) { log.append({ text: r.Field + ': ' + r.Value, level: 'ok' }); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
@@ -1561,7 +1573,7 @@
           pickAndUpload('.nessus,.csv,.tsv', function (path) {
             log.banner('ACAS Load Baseline');
             var h = ctx.run('acas-load-baseline', { file: path });
-            track(h.subscribe({
+            resub('acas-load-baseline', h.subscribe({
               row: function (r) { baseLbl.textContent = r.File + ': ' + (r.Findings || 0) + ' finding(s), ' + (r.Hosts || 0) + ' host(s)'; baseLbl.className = 'st-ok'; },
               log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }
             }));
@@ -1571,7 +1583,7 @@
           pickAndUpload('.nessus,.csv,.tsv', function (path) {
             log.banner('ACAS Load Comparison');
             var h = ctx.run('acas-load-comparison', { file: path });
-            track(h.subscribe({
+            resub('acas-load-comparison', h.subscribe({
               row: function (r) { compLbl.textContent = r.File + ': ' + (r.Findings || 0) + ' finding(s), ' + (r.Hosts || 0) + ' host(s)'; compLbl.className = 'st-ok'; },
               log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }
             }));
@@ -1597,7 +1609,7 @@
             if (!ok) return;
             log.banner('ACAS Apply Remediated');
             var h = ctx.run('acas-apply-remediated', {});
-            track(h.subscribe({
+            resub('acas-apply-remediated', h.subscribe({
               row: function (r) { log.append({ text: (r.Metric || '') + ': ' + (r.Value != null ? r.Value : ''), level: 'ok' }); },
               log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); },
               final: function (res) { var s = res && res.summary || {}; log.banner('Applied: ' + (s.marked || 0) + ' marked Patched (' + (s.remediated || 0) + ' remediated keys)'); }
@@ -1608,7 +1620,7 @@
           log.banner('Clear Compare State');
           grid.clear(); deltaCards.reset(); baseLbl.textContent = 'no baseline'; baseLbl.className = 'muted'; compLbl.textContent = 'no comparison'; compLbl.className = 'muted';
           var h = ctx.run('acas-clear-state', {});
-          track(h.subscribe({ row: function (r) { log.append({ text: (r.Store || '') + ': ' + (r.Cleared != null ? r.Cleared : ''), level: 'dim' }); }, log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); } }));
+          resub('acas-clear-state', h.subscribe({ row: function (r) { log.append({ text: (r.Store || '') + ': ' + (r.Cleared != null ? r.Cleared : ''), level: 'dim' }); }, log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); } }));
         };
 
         // ---- Wave closure proof (audit-trail causation join) --------------------
@@ -1726,13 +1738,13 @@
           htmlArt.reset();
           log.banner('Weekly Render HTML');
           var h = ctx.run('weekly-render-html', { Enclave: enclaveInput.value || '' });
-          track(h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { htmlArt.set(res && res.summary, 'ReportsTool_Weekly'); } }));
+          resub('weekly-render-html', h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { htmlArt.set(res && res.summary, 'ReportsTool_Weekly'); } }));
         };
         csvBtn.onclick = function () {
           csvArt.reset();
           log.banner('Weekly Export CSV' + (allWeeksCb._cb.checked ? ' (all weeks)' : ''));
           var h = ctx.run('weekly-export-csv', { Enclave: enclaveInput.value || '', Week: weekInput.value || '', AllWeeks: allWeeksCb._cb.checked });
-          track(h.subscribe({
+          resub('weekly-export-csv', h.subscribe({
             log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) {
               var s = res && res.summary || {};
@@ -1848,7 +1860,7 @@
           log.banner('Dirty 30 Probe Last User');
           // blank Hostnames -> engine uses the last lookup's host set.
           var h = ctx.run('dirty30-probe-lastuser', { Hostnames: '', TimeoutSec: Math.max(1, parseInt(timeoutInput.value, 10) || 8), MaxConcurrent: Math.max(1, parseInt(concInput.value, 10) || 16) }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; } });
-          track(h.subscribe({
+          resub('dirty30-probe-lastuser', h.subscribe({
             status: function (t) { prog.setPhase(t); log.append({ text: t, level: 'mode' }); },
             progress: function (p) { prog.setProgress(p.done, p.total); },
             row: function (r) { grid.upsert({ Hostname: r.Host, LastUser: r.LastUser }); log.append({ text: '[' + r.Host + '] last user: ' + (r.LastUser || '--'), level: 'dim' }); },
@@ -1859,12 +1871,12 @@
         htmlBtn.onclick = function () {
           htmlArt.reset(); log.banner('Dirty 30 Render HTML');
           var h = ctx.run('dirty30-render-html', { SourceLabel: sourceInput.value || '' });
-          track(h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { htmlArt.set(res && res.summary, 'ReportsTool_Dirty30'); } }));
+          resub('dirty30-render-html', h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { htmlArt.set(res && res.summary, 'ReportsTool_Dirty30'); } }));
         };
         csvBtn.onclick = function () {
           csvArt.reset(); log.banner('Dirty 30 Export CSV');
           var h = ctx.run('dirty30-export-csv', {});
-          track(h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { csvArt.set(res && res.summary, 'ReportsTool_Dirty30'); } }));
+          resub('dirty30-export-csv', h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { csvArt.set(res && res.summary, 'ReportsTool_Dirty30'); } }));
         };
       }
 
@@ -1904,7 +1916,7 @@
         htmlBtn.onclick = function () {
           htmlArt.reset(); log.banner('CORA Render HTML');
           var h = ctx.run('cora-render-html', { NetworkDeviceCount: Math.max(0, parseInt(netInput.value, 10) || 0) });
-          track(h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { htmlArt.set(res && res.summary, 'ReportsTool_CORA'); } }));
+          resub('cora-render-html', h.subscribe({ log: function (l) { log.append(l); }, error: function (e) { log.append({ text: e.text, level: 'err' }); }, final: function (res) { htmlArt.set(res && res.summary, 'ReportsTool_CORA'); } }));
         };
       }
 
@@ -2202,7 +2214,7 @@
           poamArtifact.reset();
           log.banner('Export eMASS POA&M (CSV)');
           var h = ctx.run('export-poam', {});
-          track(h.subscribe({
+          resub('export-poam', h.subscribe({
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) {
@@ -2336,7 +2348,7 @@
           artifact.reset(); prog.reset(); log.banner('Executive Command Brief');
           noteLbl.textContent = 'building...'; noteLbl.className = 'st-info';
           var h = ctx.run('command-brief', { colorblind: cbSel.value || 'None' });
-          track(h.subscribe({
+          resub('command-brief', h.subscribe({
             status: function (t) { prog.setPhase(t); log.append({ text: t, level: 'mode' }); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },

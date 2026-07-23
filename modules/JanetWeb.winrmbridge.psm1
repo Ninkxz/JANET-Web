@@ -236,7 +236,10 @@ function Invoke-JanetToolAction {
 
     $revertMinutes = [int]("0" + [string]$Params['revertMinutes']); if ($revertMinutes -le 0) { $revertMinutes = 90 }
     $payload = if ($ActionId -eq 'enable') { Get-WinRmBridgePayload -RevertMinutes $revertMinutes } else { $null }
-    $revertEnc = if ($ActionId -ne 'enable') { ConvertTo-WinRmBridgeEncoded (New-WinRmBridgeRevertScript) } else { $payload.RevertEncoded }
+    # audit 2026-07-23: the encoded revert script is only pushed by the 'revert'
+    # task registration below - don't build/encode it for the read-only 'check'
+    # (enable carries its own copy inside $payload and never reads $revertEnc).
+    $revertEnc = if ($ActionId -eq 'revert') { ConvertTo-WinRmBridgeEncoded (New-WinRmBridgeRevertScript) } else { $null }
 
     $rows = New-Object System.Collections.ArrayList
     $n = 0

@@ -108,8 +108,7 @@
       exportBtn.onclick = function () {
         var rows = grid.rows(); if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run an action first.', okText: 'OK', cancelText: null }); return; }
         var mapped = rows.map(function (r) { return { Host: r.Host, Ping: r.Ping, State: stateOf(r), Reverts: r.Reverts || '', Detail: r.Detail }; });
-        var csv = ctx.util.toCsv(EXPORT_COLS.map(function (p) { return p[1]; }), mapped, EXPORT_COLS.map(function (p) { return p[0]; }));
-        ctx.util.downloadBlob('WinRMBridge_' + ctx.util.fileStamp() + '.csv', 'text/csv', csv);
+        ctx.util.exportCsv('WinRMBridge', EXPORT_COLS, mapped);
       };
 
       function preflight(needConfirmWord) {
@@ -180,7 +179,6 @@
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); };
-    },
-    unmount: function () { try { if (this._unsub) this._unsub(); } catch (e) {} if (this._root) this._root.remove(); }
+    }
   });
 })();

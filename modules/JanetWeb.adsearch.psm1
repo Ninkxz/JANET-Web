@@ -662,9 +662,11 @@ $script:AdSearchEngine = {
             $allFound = [System.Collections.ArrayList]::new()
             $seenDNs = @{}
             $searchedOUs = [System.Collections.ArrayList]::new()
-
-            $rootDSE = New-AdEntry "LDAP://RootDSE"
-            $domainDN = $rootDSE.defaultNamingContext.ToString()
+            # audit 2026-07-23: DN -> the searched OU whose subtree query found the
+            # user, recorded at dedup time so _sourceOU needs no per-user rescan of
+            # every searched OU below. (The dead credentialed RootDSE bind that sat
+            # here - $domainDN was never used - is also gone.)
+            $dnSourceOU = @{}
 
             $ouSearcher = [ADSISEARCHER]$root
             $ouSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
@@ -713,6 +715,7 @@ $script:AdSearchEngine = {
                                 if (-not $seenDNs.ContainsKey($dn)) {
                                     $seenDNs[$dn] = $true
                                     [void]$allFound.Add($user)
+                                    $dnSourceOU[$dn] = $childOUDN   # audit 2026-07-23: precomputed _sourceOU
                                 }
                             }
                         } catch {}
@@ -740,6 +743,10 @@ $script:AdSearchEngine = {
                 return @(@{ _Error = $msg })
             }
 
+            # audit 2026-07-23: ArrayList accumulator (the `$results += $props` loop
+            # was O(n^2) array re-copy on the one uncapped path); assigned back to
+            # $results by the sort below.
+            $buRows = [System.Collections.ArrayList]::new()
             foreach ($user in $allFound) {
                 $props = @{}
                 foreach ($key in $user.Properties.PropertyNames) {
@@ -800,17 +807,20 @@ $script:AdSearchEngine = {
                 if ($email -eq $null) { $email = "" }
                 $props["_email"] = "$email"
 
-                $props["_sourceOU"] = ""
-                foreach ($sou in $searchedOUs) {
-                    if ($dn -like "*$sou*") { $props["_sourceOU"] = $sou; break }
-                }
+                # audit 2026-07-23: precomputed at dedup time (the OU whose subtree
+                # search found this user) - was a per-user rescan of every searched OU.
+                $props["_sourceOU"] = if ($dnSourceOU.ContainsKey($dn)) { $dnSourceOU[$dn] } else { "" }
 
-                $results += $props
+                [void]$buRows.Add($props)
             }
 
             # Sort: privileged first, then alphabetical (mirrors the original
             # ListView sort so output order matches the desktop tool).
-            $results = @($results | Sort-Object { $_["_isPrivileged"] } -Descending | Sort-Object { $_["_privLevel"] }, { $_.displayname })
+            # audit 2026-07-23: the former first Sort-Object (by _isPrivileged) was
+            # redundant - the second full sort re-ordered everything anyway, and its
+            # leading _privLevel key ('Privileged' < 'Standard' ascending) already
+            # puts privileged rows first.
+            $results = @($buRows | Sort-Object { $_["_privLevel"] }, { $_.displayname })
         }
         "LastPC" {
             $firstName = "$($SearchParams.FirstName)"
