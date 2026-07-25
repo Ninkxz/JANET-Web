@@ -354,6 +354,10 @@
       var tabHolder = el('div'); tabHolder.style.cssText = 'flex:1;min-height:0;display:flex';
       var tabs = C.TabHost({
         rail: 'top',
+        // audit 2026-07-25: without helpId the per-tab help blurbs never swap into the purple
+        // HOW TO USE box (tabhost.js:82) - only the _overview shows. The keys exist in
+        // help-content.js keyed to these tab ids.
+        helpId: 'patchlib',
         tabs: [
           { id: 'inventory', label: 'Inventory', build: buildInventoryTab },
           { id: 'crossref', label: 'Cross-Reference', build: buildCrossrefTab }

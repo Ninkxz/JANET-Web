@@ -204,8 +204,8 @@ Describe 'secureboot 1.6.9 - manifest pin + the confirm input it always read (au
     $man = & $script:Mod { Get-JanetToolManifest }
     $en  = @($man.actions | Where-Object { $_.id -eq 'enable-secure-boot' })[0]
 
-    It 'manifest version is exactly 1.6.9 (newest bump = audit 2026-07-25 fable re-audit follow-up; exact pin lives here)' {
-        [string]$man.version | Should Be '1.6.9'
+    It 'manifest version is exactly 1.7.0 (newest bump = audit 2026-07-25 capability audit #3, scan/enable BitLocker pre-flight parity; exact pin lives here)' {
+        [string]$man.version | Should Be '1.7.0'
     }
     It 'enable-secure-boot DECLARES the confirm input the module enforces server-side' {
         # The gate at Invoke-JanetToolAction reads $Params['confirm'] - undeclared, it was

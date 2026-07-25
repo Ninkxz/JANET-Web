@@ -26,6 +26,27 @@
 #  rejected OEM write) instead of costing the host an unprotected boot for nothing, and
 #  fills the BitLocker cell on the early-error / timeout / cancel rows.
 #
+#  .CHANGELOG
+#  1.7.0  audit 2026-07-25 (capability audit #3, Secure Boot pre-flight parity): the
+#         READ-ONLY scan carried NO BitLocker/TPM columns, so it said READY TO ENABLE for
+#         hosts the (v1.6.9-hardened) enable path would Refuse at firmware-write time - a
+#         condition the operator only discovered after arming a destructive wave. The
+#         detection half of Suspend-TpmBitLockerForFirmware is now factored out into
+#         Get-SbeBitLockerPosture ($script:SbeBitLockerPostureSrc), injected verbatim into
+#         BOTH the SYSTEM payload and the scan's remote probe: ONE implementation, two
+#         callers, so the scan verdict and the enable refusal cannot diverge. The scan
+#         gains BitLocker / TPM / Escrow columns and two verdicts - 'BLOCKED - BITLOCKER
+#         UNSUSPENDABLE' (protection ON that this tool cannot suspend) and 'RISK - NO
+#         ESCROWED KEY' (TPM-sealed with no RecoveryPassword protector to fall back on).
+#         The scan path is strictly read-only: it never calls Suspend-BitLocker. Fail
+#         CLOSED - an unreadable BitLocker, TPM or escrow state resolves to CHECK ERROR or
+#         BLOCKED, never READY TO ENABLE. Recovery-password VALUES are never read or
+#         emitted; only KeyProtectorType is inspected.
+#  1.6.9  audit 2026-07-25 (fable re-audit follow-up): manage-bde fallback fails CLOSED,
+#         resume-on-no-write, BitLocker cell on every row shape.
+#  1.6.8  audit 2026-07-24: suspend BitLocker for one reboot before the firmware write;
+#         refusals get their own 'Refused' status and tally.
+#
 #  Contract (unchanged across the suite):
 #    Get-JanetToolManifest                                         -> descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit     -> { rows; summary }
@@ -41,17 +62,17 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.9'   # audit 2026-07-25 fable re-audit follow-up (manage-bde fallback fails CLOSED / resume-on-no-write / BitLocker cell on every row shape); Secureboot.BitLockerRefuse.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.7.0'   # audit 2026-07-25 capability audit #3 (scan/enable BitLocker+TPM+Escrow pre-flight parity via the shared Get-SbeBitLockerPosture); Secureboot.BitLockerRefuse.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Hardening'
-        summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
+        summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + suspendable-or-unprotected BitLocker + Dell/HP/Lenovo), RISK - NO ESCROWED KEY, OFF - UNSUPPORTED OEM, BLOCKED - LEGACY/MBR, or BLOCKED - BITLOCKER UNSUSPENDABLE - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
             @{
                 id          = 'scan-secure-boot'
                 label       = 'Scan Secure Boot (Fleet)'
-                description = 'READ-ONLY fleet-wide Secure Boot posture scan. One WinRM Invoke-Command round-trip per host (no C$ drop, no scheduled task, no firmware write) reads Secure Boot state (Confirm-SecureBootUEFI + SecureBoot registry corroboration), firmware type (UEFI/Legacy), the system disk partition style (GPT/MBR), manufacturer/model, BIOS version/date and OS build, then derives an admin-side verdict per host: ENABLED, READY TO ENABLE, OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR. No host cap, no admin-session gate. Unreachable hosts soft-skip (OFFLINE); a stale-DNS wrong box soft-skips (DNS MISMATCH). Feed the READY-TO-ENABLE hosts to Enable Secure Boot in waves of up to 50.'
+                description = 'READ-ONLY fleet-wide Secure Boot PRE-FLIGHT scan. One WinRM Invoke-Command round-trip per host (no C$ drop, no scheduled task, no firmware write, no BitLocker suspend) reads Secure Boot state (Confirm-SecureBootUEFI + SecureBoot registry corroboration), firmware type (UEFI/Legacy), the system disk partition style (GPT/MBR), the BitLocker posture (protector types + ProtectionStatus, with the manage-bde -status fallback), the TPM state and whether a RecoveryPassword protector exists to fall back on, plus manufacturer/model, BIOS version/date and OS build. It then derives an admin-side verdict per host: ENABLED, READY TO ENABLE, RISK - NO ESCROWED KEY, OFF - UNSUPPORTED OEM, BLOCKED - LEGACY/MBR, or BLOCKED - BITLOCKER UNSUSPENDABLE. The BitLocker half runs the SAME detection helper the enable path uses to decide whether it can suspend, so the scan can never call a host ready that the enable path would refuse at write time. Fails CLOSED: an unreadable BitLocker/TPM/escrow state is CHECK ERROR, never READY. No host cap, no admin-session gate. Unreachable hosts soft-skip (OFFLINE); a stale-DNS wrong box soft-skips (DNS MISMATCH). Feed the READY-TO-ENABLE hosts to Enable Secure Boot in waves of up to 50.'
                 kind        = 'stream-table'
                 destructive = $false
-                columns     = @('Host','Ping','Verdict','SecureBoot','Firmware','Disk','Manufacturer','Model','Detail')
+                columns     = @('Host','Ping','Verdict','SecureBoot','Firmware','Disk','BitLocker','TPM','Escrow','Manufacturer','Model','Detail')
                 inputs      = @(
                     @{ name='targets';        label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
@@ -146,13 +167,187 @@ function Test-JanetSbeHostIsSelf {
     return $false
 }
 
+# =============================================================================
+#  v1.7.0 - THE ONE BITLOCKER DETECTION IMPLEMENTATION (capability audit #3).
+#
+#  Until 1.6.9 the rule "can this host's BitLocker be suspended for the firmware
+#  write?" lived ONLY inside the SYSTEM payload's Suspend-TpmBitLockerForFirmware,
+#  where the read-only SCAN could not reach it. So the scan happily printed
+#  READY TO ENABLE for hosts the enable path would Refuse at write time, and the
+#  operator learned that only after arming a destructive wave.
+#
+#  Two implementations of one rule is the defect class this codebase keeps paying
+#  for, so there is now exactly ONE: Get-SbeBitLockerPosture below. Its SOURCE is
+#  injected verbatim into BOTH consumers - prepended to the SYSTEM payload (where
+#  Suspend-TpmBitLockerForFirmware calls it and then owns only the WRITE half) and
+#  dot-sourced into the scan's remote probe scriptblock. Neither consumer re-decides
+#  anything the posture already decided, so the scan verdict and the enable refusal
+#  cannot drift apart.
+#
+#  STRICTLY READ-ONLY. It calls Get-BitLockerVolume / Get-Command / manage-bde
+#  -status and nothing else; there is no Suspend-BitLocker, Resume-BitLocker,
+#  Enable-BitLocker or manage-bde write verb anywhere in it. That is what makes it
+#  safe to run from the scan path.
+#
+#  KEYS ARE NEVER READ. Only $_.KeyProtectorType is inspected - never the
+#  RecoveryPassword VALUE - so no 48-digit key can reach a row, a log or the CSV.
+#
+#  The v1.6.9 fail-CLOSED manage-bde fallback (throw / non-zero exit / empty /
+#  LOCALIZED output all refuse) is preserved verbatim; it fixed real bugs.
+#
+#  Returns:
+#    Readable   [bool]   the BitLocker state was POSITIVELY established
+#    Blocked    [bool]   protection is ON and this tool cannot suspend it (or unread)
+#    Protection [string] 'On' | 'Off' | 'Unknown'
+#    TpmSealed  [bool]   at least one protected volume has a TPM (PCR-sealed) protector
+#    Suspend    [array]  mount points that MUST be suspended before a firmware write
+#    Escrow     [string] 'RecoveryPassword' | 'NONE' | 'n/a' | 'Unknown'
+#    Detail     [string] the operator-facing sentence (unchanged from 1.6.9)
+# =============================================================================
+$script:SbeBitLockerPostureSrc = @'
+function Get-SbeBitLockerPosture {
+    # READ-ONLY. No suspend, no resume, no write of any kind. See the module header.
+    $p = [PSCustomObject]@{
+        Readable   = $true
+        Blocked    = $false
+        Protection = 'Off'
+        TpmSealed  = $false
+        Suspend    = @()
+        Escrow     = 'n/a'
+        Detail     = ''
+    }
+
+    # No BitLocker cmdlets => nothing could suspend a protected volume, so the ONLY
+    # safe way past this branch is POSITIVE proof that nothing is protected.
+    # Corroborate with manage-bde when it exists.
+    if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Suspend-BitLocker  -ErrorAction SilentlyContinue)) {
+        $mbde = Join-Path $env:SystemRoot 'System32\manage-bde.exe'
+        if (-not (Test-Path -LiteralPath $mbde)) {
+            # Neither the cmdlets NOR manage-bde exist: the BitLocker feature is genuinely
+            # not installed on this box, so no volume can be TPM-sealed. That is a positive
+            # fact about the host - not an unread state - so it may proceed.
+            $p.Detail = 'BitLocker cmdlets and manage-bde are both absent (feature not installed); no volume can be TPM-sealed.'
+            return $p
+        }
+        # audit 2026-07-25 (fable re-audit follow-up): this fallback FAILED OPEN. A throw,
+        # a non-zero exit, empty output, or LOCALIZED output (the old regex matched only the
+        # English 'Protection Status: Protection On') all fell through to Ok=$true with a
+        # Detail asserting "no protected volume to suspend" when the true state was UNKNOWN -
+        # and the firmware write then proceeded on a genuinely protected volume. Unknown is
+        # now a REFUSAL, matching the fail-closed contract the rest of this helper keeps.
+        $st = ''; $exitBad = $false
+        try {
+            $st = (& $mbde -status 2>&1 | Out-String)
+            # $LASTEXITCODE is only meaningful once a native command has actually set it; a
+            # $null here means "no signal", NOT success - the parse gate below is what
+            # decides, and it refuses anything it cannot positively read.
+            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $exitBad = $true }
+        } catch { $st = ''; $exitBad = $true }
+        if ($exitBad -or [string]::IsNullOrWhiteSpace($st)) {
+            $p.Readable = $false; $p.Blocked = $true; $p.Protection = 'Unknown'; $p.Escrow = 'Unknown'
+            $p.Detail = 'BitLocker state could not be determined - refusing the firmware write (the BitLocker cmdlets are absent and manage-bde -status failed or returned no output).'
+            return $p
+        }
+        # POSITIVE parse only. Every volume block must yield a readable 'Protection Status:'
+        # line; if none parse, the output is localized/unexpected and we do not know what we
+        # are looking at, so we refuse rather than assume "off".
+        $stLines = @([regex]::Matches($st, '(?im)^\s*Protection\s+Status:\s*(.+?)\s*$'))
+        if ($stLines.Count -eq 0) {
+            $p.Readable = $false; $p.Blocked = $true; $p.Protection = 'Unknown'; $p.Escrow = 'Unknown'
+            $p.Detail = 'BitLocker state could not be determined - refusing the firmware write (manage-bde -status produced no readable "Protection Status:" line; the output may be localized).'
+            return $p
+        }
+        if (@($stLines | Where-Object { $_.Groups[1].Value -match '(?i)Protection\s+On' }).Count -gt 0) {
+            $p.Blocked = $true; $p.Protection = 'On'; $p.Escrow = 'Unknown'
+            $p.Detail = 'BitLocker protection is ON but the BitLocker PowerShell cmdlets are unavailable, so it cannot be suspended for the reboot.'
+            return $p
+        }
+        if (@($stLines | Where-Object { $_.Groups[1].Value -notmatch '(?i)Protection\s+Off' }).Count -gt 0) {
+            $p.Readable = $false; $p.Blocked = $true; $p.Protection = 'Unknown'; $p.Escrow = 'Unknown'
+            $p.Detail = 'BitLocker state could not be determined - refusing the firmware write (manage-bde -status reported a protection state this payload does not recognise).'
+            return $p
+        }
+        $p.Detail = "BitLocker cmdlets not present; manage-bde reports every volume Protection Off ($($stLines.Count) volume(s)) - no protected volume to suspend."
+        return $p
+    }
+
+    # TPM-backed protector types (the PCR-sealed ones).
+    $tpmTypes = @('Tpm','TpmPin','TpmStartupKey','TpmPinStartupKey')
+    $protected = @(); $vols = @()
+    try {
+        $protected = @(Get-BitLockerVolume -ErrorAction Stop | Where-Object {
+            ("$($_.ProtectionStatus)" -match '(?i)^(On|1)$')
+        })
+        $vols = @($protected | Where-Object {
+            (@($_.KeyProtector | Where-Object { $tpmTypes -contains "$($_.KeyProtectorType)" }).Count -gt 0)
+        })
+    } catch {
+        $p.Readable = $false; $p.Blocked = $true; $p.Protection = 'Unknown'; $p.Escrow = 'Unknown'
+        $p.Detail = "Could not read BitLocker volume state ($($_.Exception.Message))."
+        return $p
+    }
+
+    $p.Protection = if ($protected.Count -gt 0) { 'On' } else { 'Off' }
+    $p.TpmSealed  = ($vols.Count -gt 0)
+
+    # Escrow, by protector TYPE ONLY - never the recovery password value. A volume whose
+    # key is sealed to the TPM and that carries NO RecoveryPassword protector has nothing
+    # to type at the recovery prompt if the re-measured boot ever demands one.
+    if ($protected.Count -eq 0) {
+        $p.Escrow = 'n/a'
+    } elseif (@($protected | Where-Object { @($_.KeyProtector).Count -eq 0 }).Count -gt 0) {
+        # Protected, but the protector list came back empty - that is an UNREAD state,
+        # not a "no key" fact. Say so rather than assert either way.
+        $p.Escrow = 'Unknown'
+    } elseif (@($protected | Where-Object {
+                 @($_.KeyProtector | Where-Object { "$($_.KeyProtectorType)" -match '(?i)^RecoveryPassword$' }).Count -eq 0
+              }).Count -gt 0) {
+        $p.Escrow = 'NONE'
+    } else {
+        $p.Escrow = 'RecoveryPassword'
+    }
+
+    if ($vols.Count -eq 0) {
+        $p.Detail = 'No TPM-sealed BitLocker volume; nothing to suspend.'
+        return $p
+    }
+    $mps = @($vols | ForEach-Object { "$($_.MountPoint)" })
+    $p.Suspend = $mps
+    $p.Detail  = "TPM-sealed BitLocker volume(s) needing a one-reboot suspend before the firmware write: $($mps -join ', ')."
+    return $p
+}
+'@
+
+# ----------------------------------------------------------------------------
+# SCAN-ONLY rendering of a posture into the grid's BITLOCKER cell. Injected into
+# the scan probe (never into the payload - the enable path has no grid cell). Kept
+# beside the posture helper so the token vocabulary the verdict function matches on
+# has exactly one definition too.
+# ----------------------------------------------------------------------------
+$script:SbeScanCellSrc = @'
+function ConvertTo-SbeBitLockerCell {
+    param($Posture)
+    if ($null -eq $Posture)     { return 'Unknown' }
+    if (-not $Posture.Readable) { return 'Unknown' }
+    if ($Posture.Blocked)       { return 'On (UNSUSPENDABLE)' }
+    if ("$($Posture.Protection)" -match '(?i)^On$') {
+        if ($Posture.TpmSealed) { return 'On (TPM-sealed, suspendable)' }
+        return 'On (no TPM seal)'
+    }
+    return 'Off'
+}
+'@
+
 # ----------------------------------------------------------------------------
 # PAYLOAD - runs on the REMOTE machine as SYSTEM via scheduled task.
 # $BIOSPassword and $ResultPath are prepended as variable assignments before
 # this block is written to the target. Do NOT add a param() block here.
 # Lifted verbatim from Tools\SecureBootEnabler.ps1 v1.5.0 ($script:Payload).
+# v1.7.0: this is the payload BODY - $script:SbePayload (what the launcher ships)
+# is this prefixed with $script:SbeBitLockerPostureSrc, see just below the here-string.
 # ----------------------------------------------------------------------------
-$script:SbePayload = @'
+$script:SbePayloadCore = @'
 # $BIOSPassword and $ResultPath are injected by the launcher before this block
 
 function New-Result {
@@ -333,86 +528,30 @@ function Get-OSSecureBootState {
 # FAIL CLOSED: if a volume that needs suspending cannot be suspended (or its
 # state cannot be read at all), the caller REFUSES the firmware write on this
 # host. Writing blind is what strands a fleet; refusing only costs a re-run.
+#
+# v1.7.0: this function now owns ONLY the WRITE half - suspend + verify. Every
+# decision about WHETHER a suspend is needed or possible comes from the shared
+# Get-SbeBitLockerPosture (injected above this body), which the READ-ONLY fleet
+# scan calls too. Do NOT re-implement any detection here: two copies of this rule
+# is exactly what let the scan print READY TO ENABLE for hosts this path refuses.
 # ----------------------------------------------------------------------------
 function Suspend-TpmBitLockerForFirmware {
     $res = [PSCustomObject]@{ Ok = $true; Detail = ''; Suspended = @() }
 
-    # No BitLocker cmdlets => we cannot suspend anything, so the ONLY safe way past
-    # this branch is POSITIVE proof that nothing is protected. Corroborate with
-    # manage-bde when it exists.
-    if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) -or
-        -not (Get-Command Suspend-BitLocker  -ErrorAction SilentlyContinue)) {
-        $mbde = Join-Path $env:SystemRoot 'System32\manage-bde.exe'
-        if (-not (Test-Path -LiteralPath $mbde)) {
-            # Neither the cmdlets NOR manage-bde exist: the BitLocker feature is genuinely
-            # not installed on this box, so no volume can be TPM-sealed. That is a positive
-            # fact about the host - not an unread state - so it may proceed.
-            $res.Detail = 'BitLocker cmdlets and manage-bde are both absent (feature not installed); no volume can be TPM-sealed.'
-            return $res
-        }
-        # audit 2026-07-25 (fable re-audit follow-up): this fallback FAILED OPEN. A throw,
-        # a non-zero exit, empty output, or LOCALIZED output (the old regex matched only the
-        # English 'Protection Status: Protection On') all fell through to Ok=$true with a
-        # Detail asserting "no protected volume to suspend" when the true state was UNKNOWN -
-        # and the firmware write then proceeded on a genuinely protected volume. Unknown is
-        # now a REFUSAL, matching the fail-closed contract the rest of this function keeps.
-        $st = ''; $exitBad = $false
-        try {
-            $st = (& $mbde -status 2>&1 | Out-String)
-            # $LASTEXITCODE is only meaningful once a native command has actually set it; a
-            # $null here means "no signal", NOT success - the parse gate below is what
-            # decides, and it refuses anything it cannot positively read.
-            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $exitBad = $true }
-        } catch { $st = ''; $exitBad = $true }
-        if ($exitBad -or [string]::IsNullOrWhiteSpace($st)) {
-            $res.Ok = $false
-            $res.Detail = 'BitLocker state could not be determined - refusing the firmware write (the BitLocker cmdlets are absent and manage-bde -status failed or returned no output).'
-            return $res
-        }
-        # POSITIVE parse only. Every volume block must yield a readable 'Protection Status:'
-        # line; if none parse, the output is localized/unexpected and we do not know what we
-        # are looking at, so we refuse rather than assume "off".
-        $stLines = @([regex]::Matches($st, '(?im)^\s*Protection\s+Status:\s*(.+?)\s*$'))
-        if ($stLines.Count -eq 0) {
-            $res.Ok = $false
-            $res.Detail = 'BitLocker state could not be determined - refusing the firmware write (manage-bde -status produced no readable "Protection Status:" line; the output may be localized).'
-            return $res
-        }
-        if (@($stLines | Where-Object { $_.Groups[1].Value -match '(?i)Protection\s+On' }).Count -gt 0) {
-            $res.Ok = $false
-            $res.Detail = 'BitLocker protection is ON but the BitLocker PowerShell cmdlets are unavailable, so it cannot be suspended for the reboot.'
-            return $res
-        }
-        if (@($stLines | Where-Object { $_.Groups[1].Value -notmatch '(?i)Protection\s+Off' }).Count -gt 0) {
-            $res.Ok = $false
-            $res.Detail = 'BitLocker state could not be determined - refusing the firmware write (manage-bde -status reported a protection state this payload does not recognise).'
-            return $res
-        }
-        $res.Detail = "BitLocker cmdlets not present; manage-bde reports every volume Protection Off ($($stLines.Count) volume(s)) - no protected volume to suspend."
+    $posture    = Get-SbeBitLockerPosture
+    $res.Detail = [string]$posture.Detail
+    # Unread state, or protection ON that cannot be suspended -> REFUSE. Same call,
+    # same verdict the scan showed the operator before the wave was ever armed.
+    if ((-not $posture.Readable) -or $posture.Blocked) {
+        $res.Ok = $false
         return $res
     }
 
-    # TPM-backed protector types (the PCR-sealed ones).
-    $tpmTypes = @('Tpm','TpmPin','TpmStartupKey','TpmPinStartupKey')
-    $vols = @()
-    try {
-        $vols = @(Get-BitLockerVolume -ErrorAction Stop | Where-Object {
-            ("$($_.ProtectionStatus)" -match '(?i)^(On|1)$') -and
-            (@($_.KeyProtector | Where-Object { $tpmTypes -contains "$($_.KeyProtectorType)" }).Count -gt 0)
-        })
-    } catch {
-        $res.Ok = $false
-        $res.Detail = "Could not read BitLocker volume state ($($_.Exception.Message))."
-        return $res
-    }
-    if ($vols.Count -eq 0) {
-        $res.Detail = 'No TPM-sealed BitLocker volume; nothing to suspend.'
-        return $res
-    }
+    $mps = @($posture.Suspend)
+    if ($mps.Count -eq 0) { return $res }
 
     $done = New-Object System.Collections.ArrayList
-    foreach ($v in $vols) {
-        $mp = "$($v.MountPoint)"
+    foreach ($mp in $mps) {
         try {
             Suspend-BitLocker -MountPoint $mp -RebootCount 1 -ErrorAction Stop | Out-Null
         } catch {
@@ -639,6 +778,12 @@ $out | ConvertTo-Json -Depth 5 | Out-File -FilePath $ResultPath -Encoding UTF8 -
 # (the launcher's finally + close-cleanup are backstops).
 if ($PSCommandPath) { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }
 '@
+
+# v1.7.0: what the launcher actually ships = the SHARED BitLocker posture helper +
+# the payload body. Composed here rather than pasting a second copy of the detection
+# into the here-string - that composition IS the guarantee that the scan's verdict and
+# this payload's refusal are computed by literally the same lines of code.
+$script:SbePayload = $script:SbeBitLockerPostureSrc + "`r`n" + $script:SbePayloadCore
 
 # ----------------------------------------------------------------------------
 # Dry-run per-host worker: AFNET-safe TCP (5985/5986/445) reachability + WinRM
@@ -1010,16 +1155,30 @@ $script:SbeLiveWorker = {
 #   Firmware     : 'UEFI' / 'Legacy' / 'Unknown'
 #   Disk         : 'GPT' / 'MBR' / 'Unknown'
 #   Manufacturer : Win32_ComputerSystem.Manufacturer
-# Returns exactly one of: ENABLED / READY TO ENABLE / OFF - UNSUPPORTED OEM /
-# BLOCKED - LEGACY/MBR / CHECK ERROR. (OFFLINE / DNS MISMATCH are host-level
-# statuses resolved before this is ever called.)
+#   BitLocker    : ConvertTo-SbeBitLockerCell over the SHARED Get-SbeBitLockerPosture -
+#                  'Off' / 'On (TPM-sealed, suspendable)' / 'On (no TPM seal)' /
+#                  'On (UNSUSPENDABLE)' / 'Unknown'                       [v1.7.0]
+#   Tpm          : 'Ready' / 'Present - not ready' / 'Absent' / 'Unknown' [v1.7.0]
+#   Escrow       : 'RecoveryPassword' / 'NONE' / 'n/a' / 'Unknown'        [v1.7.0]
+# Returns exactly one of: ENABLED / READY TO ENABLE / RISK - NO ESCROWED KEY /
+# OFF - UNSUPPORTED OEM / BLOCKED - LEGACY/MBR / BLOCKED - BITLOCKER UNSUSPENDABLE /
+# CHECK ERROR. (OFFLINE / DNS MISMATCH are host-level statuses resolved before this
+# is ever called.)
 function Get-SbeScanVerdict {
-    param([string]$SecureBoot, [string]$Firmware, [string]$Disk, [string]$Manufacturer)
+    param([string]$SecureBoot, [string]$Firmware, [string]$Disk, [string]$Manufacturer,
+          [string]$BitLocker, [string]$Tpm, [string]$Escrow)
     $sb = ([string]$SecureBoot).Trim()
     $fw = ([string]$Firmware).Trim()
     $dk = ([string]$Disk).Trim()
+    # v1.7.0 FAIL CLOSED: an absent BitLocker/TPM/escrow reading is an UNREAD state,
+    # not a clean one. It is normalised to 'Unknown' here (never to a permissive
+    # default) so a caller that forgets to supply it can only ever get CHECK ERROR.
+    $bl  = ([string]$BitLocker).Trim(); if ($bl  -eq '') { $bl  = 'Unknown' }
+    $tp  = ([string]$Tpm).Trim();       if ($tp  -eq '') { $tp  = 'Unknown' }
+    $esc = ([string]$Escrow).Trim();    if ($esc -eq '') { $esc = 'Unknown' }
 
-    # Already compliant - nothing to do.
+    # Already compliant - nothing to do. No firmware write happens on this host, so
+    # its BitLocker/TPM posture cannot be disturbed by us: this stays first.
     if ($sb -match '^(?i)on$') { return 'ENABLED' }
 
     # Non-UEFI firmware or an MBR system disk cannot take Secure Boot safely; the
@@ -1035,21 +1194,44 @@ function Get-SbeScanVerdict {
     # Off, but we could not positively confirm the safe UEFI + GPT boot path.
     if ($fw -notmatch '^(?i)UEFI' -or $dk -notmatch '^(?i)GPT') { return 'CHECK ERROR' }
 
-    # Off + UEFI + GPT: supported OEM (the enable payload's Dell/HP/Lenovo branches)
-    # is ready to enable; any other manufacturer is a manual/desk-side job.
-    if ($Manufacturer -match '(?i)LENOVO|HP|Hewlett|Dell') { return 'READY TO ENABLE' }
-    return 'OFF - UNSUPPORTED OEM'
+    # v1.7.0 - THE PRE-FLIGHT PARITY GATE. Protection is ON and the SHARED posture
+    # helper says this tool cannot suspend it. The enable path calls that same helper
+    # and REFUSES at firmware-write time, so the scan must never call this host ready.
+    if ($bl -match '(?i)UNSUSPENDABLE') { return 'BLOCKED - BITLOCKER UNSUSPENDABLE' }
+
+    # Any unread BitLocker / TPM / escrow state is a CHECK ERROR, never a READY.
+    if ($bl -match '^(?i)Unknown$' -or $tp -match '^(?i)Unknown$' -or $esc -match '^(?i)Unknown$') {
+        return 'CHECK ERROR'
+    }
+
+    # Off + UEFI + GPT + a BitLocker state we can handle: supported OEM (the enable
+    # payload's Dell/HP/Lenovo branches) can proceed; any other manufacturer is a
+    # manual/desk-side job and JANET will never write it.
+    if ($Manufacturer -notmatch '(?i)LENOVO|HP|Hewlett|Dell') { return 'OFF - UNSUPPORTED OEM' }
+
+    # v1.7.0 - the installed-base risk. The volume key is sealed to the TPM, the write
+    # WILL re-measure the boot PCRs, and there is no RecoveryPassword protector to type
+    # if anything goes wrong on that boot. The enable path can still suspend it (so this
+    # is a RISK, not a BLOCK) - but it is not "ready" and must not ride out green.
+    if ($bl -match '(?i)TPM-sealed' -and $esc -match '^(?i)NONE$') { return 'RISK - NO ESCROWED KEY' }
+
+    return 'READY TO ENABLE'
 }
 
 # Per-host read-only probe (runs in a pool runspace; no module scope here). One
 # Invoke-Command round-trip; returns the raw fields + a host-level status. The
 # verdict is computed admin-side (Get-SbeScanVerdict) by the orchestrator.
 $script:SbeScanWorker = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline)
+    # v1.7.0: $PostureSrc is the SHARED Get-SbeBitLockerPosture source - the identical
+    # text prepended to the SYSTEM enable payload. $CellSrc renders a posture into the
+    # grid cell the verdict function matches on. Both are dot-sourced INSIDE the remote
+    # probe below (a pool runspace has no module scope, so they must travel as strings).
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$PostureSrc, [string]$CellSrc)
 
     $r = [ordered]@{
         Computer=$Computer; Ping=''; HostStatus=''; SecureBoot='?'; Firmware='?';
-        Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail=''
+        Disk='?'; BitLocker='?'; Tpm='?'; Escrow='?'; BlNote='';
+        Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail=''
     }
 
     # TCP reachability (WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445, 1.5s;
@@ -1085,6 +1267,14 @@ $script:SbeScanWorker = {
     try { $sess = New-PSSession @splat } catch { $r.HostStatus = 'CHECK ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
 
     $probeSb = {
+        param([string]$PostureSrc, [string]$CellSrc)
+        # v1.7.0: define the SHARED BitLocker posture helper (and the scan's cell
+        # renderer) in this remote scope. Dot-sourcing the exact same text the enable
+        # payload carries is what makes divergence impossible. READ-ONLY - the helper
+        # contains no Suspend-BitLocker / Resume-BitLocker / write verb of any kind.
+        . ([scriptblock]::Create($PostureSrc))
+        . ([scriptblock]::Create($CellSrc))
+
         # 1. Secure Boot state: Confirm-SecureBootUEFI, then corroborate via the
         #    SecureBoot State registry key when the cmdlet is unavailable/unreadable.
         $sb = 'Unknown'
@@ -1126,6 +1316,45 @@ $script:SbeScanWorker = {
         }
         if ([string]::IsNullOrWhiteSpace($disk)) { $disk = 'Unknown' }
 
+        # 4. BitLocker posture (v1.7.0) - THE SHARED RULE. Read-only: protector TYPES +
+        #    ProtectionStatus via Get-BitLockerVolume, with the fail-closed manage-bde
+        #    -status fallback when the cmdlets are absent. Never a recovery-password value.
+        #    Any throw here lands on 'Unknown', which the verdict function fails closed on.
+        $blCell = 'Unknown'; $escCell = 'Unknown'; $blDetail = 'BitLocker posture could not be read.'
+        try {
+            $post     = Get-SbeBitLockerPosture
+            $blCell   = ConvertTo-SbeBitLockerCell -Posture $post
+            $escCell  = [string]$post.Escrow
+            $blDetail = [string]$post.Detail
+        } catch {
+            $blCell = 'Unknown'; $escCell = 'Unknown'
+            $blDetail = "BitLocker posture read failed: $($_.Exception.Message)"
+        }
+        if ([string]::IsNullOrWhiteSpace($blCell))  { $blCell  = 'Unknown' }
+        if ([string]::IsNullOrWhiteSpace($escCell)) { $escCell = 'Unknown' }
+
+        # 5. TPM state (v1.7.0). Get-Tpm first; Win32_Tpm in the security namespace is
+        #    the fallback for boxes without the BitLocker PS feature. Both unreadable
+        #    stays 'Unknown' - which the verdict function treats as CHECK ERROR, never READY.
+        $tpmCell = 'Unknown'
+        try {
+            if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
+                $t = Get-Tpm -ErrorAction Stop
+                if     ($null -eq $t)       { $tpmCell = 'Unknown' }
+                elseif (-not $t.TpmPresent) { $tpmCell = 'Absent' }
+                elseif ($t.TpmReady)        { $tpmCell = 'Ready' }
+                else                        { $tpmCell = 'Present - not ready' }
+            }
+        } catch { $tpmCell = 'Unknown' }
+        if ($tpmCell -eq 'Unknown') {
+            try {
+                $wt = @(Get-CimInstance -Namespace 'root\cimv2\security\microsofttpm' -ClassName Win32_Tpm -ErrorAction Stop)
+                if     ($wt.Count -eq 0) { $tpmCell = 'Absent' }
+                elseif ($wt[0].IsEnabled_InitialValue -and $wt[0].IsActivated_InitialValue) { $tpmCell = 'Ready' }
+                else   { $tpmCell = 'Present - not ready' }
+            } catch { $tpmCell = 'Unknown' }
+        }
+
         $cs = $null; $bios = $null; $os = $null
         try { $cs   = Get-CimInstance -ClassName Win32_ComputerSystem  -ErrorAction Stop } catch {}
         try { $bios = Get-CimInstance -ClassName Win32_BIOS            -ErrorAction Stop } catch {}
@@ -1139,6 +1368,10 @@ $script:SbeScanWorker = {
             SecureBoot   = $sb
             Firmware     = $fw
             Disk         = $disk
+            BitLocker    = $blCell
+            Tpm          = $tpmCell
+            Escrow       = $escCell
+            BitLockerNote= $blDetail
             Manufacturer = if ($cs)   { [string]$cs.Manufacturer }     else { '?' }
             Model        = if ($cs)   { [string]$cs.Model }            else { '?' }
             Bios         = if ($bios) { [string]$bios.SMBIOSBIOSVersion } else { '?' }
@@ -1148,7 +1381,7 @@ $script:SbeScanWorker = {
     }
 
     try {
-        $p = Invoke-Command -Session $sess -ScriptBlock $probeSb -ErrorAction Stop
+        $p = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList $PostureSrc, $CellSrc -ErrorAction Stop
     } catch {
         $r.HostStatus = 'CHECK ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -1169,6 +1402,12 @@ $script:SbeScanWorker = {
     $r.SecureBoot   = [string]$p.SecureBoot
     $r.Firmware     = [string]$p.Firmware
     $r.Disk         = [string]$p.Disk
+    # v1.7.0 - fail CLOSED on the way OUT too: a probe that somehow returned nothing for
+    # these must not leave an empty cell that reads as benign.
+    $r.BitLocker    = if ([string]::IsNullOrWhiteSpace([string]$p.BitLocker)) { 'Unknown' } else { [string]$p.BitLocker }
+    $r.Tpm          = if ([string]::IsNullOrWhiteSpace([string]$p.Tpm))       { 'Unknown' } else { [string]$p.Tpm }
+    $r.Escrow       = if ([string]::IsNullOrWhiteSpace([string]$p.Escrow))    { 'Unknown' } else { [string]$p.Escrow }
+    $r.BlNote       = [string]$p.BitLockerNote
     $r.Manufacturer = [string]$p.Manufacturer
     $r.Model        = [string]$p.Model
     $r.Bios         = [string]$p.Bios
@@ -1211,12 +1450,18 @@ function Invoke-SbeScanAction {
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
     $pool.Open()
     # Seed Queued rows so the operator sees the whole target list immediately.
-    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Verdict='Queued'; SecureBoot=''; Firmware=''; Disk=''; Manufacturer=''; Model=''; Detail='waiting for a runspace...' }) }
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Verdict='Queued'; SecureBoot=''; Firmware=''; Disk=''; BitLocker=''; TPM=''; Escrow=''; Manufacturer=''; Model=''; Detail='waiting for a runspace...' }) }
     $jobs = New-Object System.Collections.ArrayList
+    # v1.7.0: the pool-runspace source-injection pattern - a worker scriptblock has NO
+    # module scope, so the shared posture helper travels to it (and on to the remote
+    # probe) as a string argument, not as a resolvable function.
+    $postureSrc = $script:SbeBitLockerPostureSrc
+    $cellSrc    = $script:SbeScanCellSrc
     foreach ($h in $targets) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:SbeScanWorker)
         [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
+        [void]$ps.AddArgument($postureSrc); [void]$ps.AddArgument($cellSrc)
         [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -1227,7 +1472,8 @@ function Invoke-SbeScanAction {
         param($res)
         $hostStatus = [string]$res.HostStatus
         if ($hostStatus -eq 'OK') {
-            $verdict = Get-SbeScanVerdict -SecureBoot ([string]$res.SecureBoot) -Firmware ([string]$res.Firmware) -Disk ([string]$res.Disk) -Manufacturer ([string]$res.Manufacturer)
+            $verdict = Get-SbeScanVerdict -SecureBoot ([string]$res.SecureBoot) -Firmware ([string]$res.Firmware) -Disk ([string]$res.Disk) -Manufacturer ([string]$res.Manufacturer) `
+                                          -BitLocker ([string]$res.BitLocker) -Tpm ([string]$res.Tpm) -Escrow ([string]$res.Escrow)
         } else {
             $verdict = $hostStatus   # OFFLINE / DNS MISMATCH / CHECK ERROR / Cancelled
         }
@@ -1235,12 +1481,18 @@ function Invoke-SbeScanAction {
         if ($hostStatus -eq 'OK') {
             $parts = New-Object System.Collections.ArrayList
             switch ($verdict) {
-                'READY TO ENABLE'       { [void]$parts.Add('off + UEFI + GPT + supported OEM - safe to feed to Enable') }
-                'ENABLED'               { [void]$parts.Add('Secure Boot already on - nothing to do') }
-                'OFF - UNSUPPORTED OEM' { [void]$parts.Add("manufacturer '$($res.Manufacturer)' not supported by the enabler - manual/desk-side") }
-                'BLOCKED - LEGACY/MBR'  { [void]$parts.Add('Legacy BIOS or MBR disk - run MBR2GPT / reimage before enabling') }
-                'CHECK ERROR'           { [void]$parts.Add('could not positively confirm the UEFI + GPT boot path / Secure Boot state') }
+                'READY TO ENABLE'                  { [void]$parts.Add('off + UEFI + GPT + supported OEM + a BitLocker state the enable path can handle - safe to feed to Enable') }
+                'ENABLED'                          { [void]$parts.Add('Secure Boot already on - nothing to do') }
+                'OFF - UNSUPPORTED OEM'            { [void]$parts.Add("manufacturer '$($res.Manufacturer)' not supported by the enabler - manual/desk-side") }
+                'BLOCKED - LEGACY/MBR'             { [void]$parts.Add('Legacy BIOS or MBR disk - run MBR2GPT / reimage before enabling') }
+                # v1.7.0: the two pre-flight verdicts. Both are computed from the SAME
+                # posture helper the enable path calls, so the operator sees them here
+                # instead of discovering them as a 'Refused' after arming the wave.
+                'BLOCKED - BITLOCKER UNSUSPENDABLE'{ [void]$parts.Add('BitLocker protection is ON and this tool cannot suspend it - the ENABLE action would Refuse this host at firmware-write time (fix BitLocker first)') }
+                'RISK - NO ESCROWED KEY'           { [void]$parts.Add('TPM-sealed BitLocker with NO RecoveryPassword protector - the write re-measures the boot PCRs and there is no key to type if that boot asks for one. Escrow a recovery password first') }
+                'CHECK ERROR'                      { [void]$parts.Add('could not positively confirm the UEFI + GPT boot path / Secure Boot state / BitLocker + TPM posture') }
             }
+            if ($res.BlNote) { [void]$parts.Add("BitLocker: $($res.BlNote)") }
             if ($res.Bios -and $res.Bios -ne '?') { [void]$parts.Add("BIOS $($res.Bios)$(if ($res.BiosDate) { " ($($res.BiosDate))" } else { '' })") }
             if ($res.OsBuild -and $res.OsBuild -ne '?') { [void]$parts.Add("OS build $($res.OsBuild)") }
             $detail = ($parts -join '; ')
@@ -1252,22 +1504,25 @@ function Invoke-SbeScanAction {
         $row = @{
             Host=[string]$res.Computer; Ping=[string]$res.Ping; Verdict=$verdict
             SecureBoot=[string]$res.SecureBoot; Firmware=[string]$res.Firmware; Disk=[string]$res.Disk
+            BitLocker=[string]$res.BitLocker; TPM=[string]$res.Tpm; Escrow=[string]$res.Escrow
             Manufacturer=[string]$res.Manufacturer; Model=[string]$res.Model; Detail=$detail; Hint=[string]$hint
         }
         [void]$rows.Add($row)
         if ($verdict -eq 'READY TO ENABLE') { [void]$readyHosts.Add((([string]$res.Computer) -split '\.')[0]) }
         & $send (@{ type='row' } + $row)
         $lvl = switch ($verdict) {
-            'READY TO ENABLE'       { 'ok' }
-            'ENABLED'               { 'ok' }
-            'CHECK ERROR'           { 'error' }
-            'OFFLINE'               { 'warn' }
-            'DNS MISMATCH'          { 'warn' }
-            'BLOCKED - LEGACY/MBR'  { 'warn' }
-            'OFF - UNSUPPORTED OEM' { 'warn' }
-            default                 { 'info' }
+            'READY TO ENABLE'                   { 'ok' }
+            'ENABLED'                           { 'ok' }
+            'CHECK ERROR'                       { 'error' }
+            'OFFLINE'                           { 'warn' }
+            'DNS MISMATCH'                      { 'warn' }
+            'BLOCKED - LEGACY/MBR'              { 'warn' }
+            'BLOCKED - BITLOCKER UNSUSPENDABLE' { 'warn' }
+            'RISK - NO ESCROWED KEY'            { 'warn' }
+            'OFF - UNSUPPORTED OEM'             { 'warn' }
+            default                             { 'info' }
         }
-        & $send @{ type='log'; level=$lvl; text=("{0}: {1} - SB={2} FW={3} Disk={4} [{5} {6}]" -f $res.Computer, $verdict, $res.SecureBoot, $res.Firmware, $res.Disk, $res.Manufacturer, $res.Model) }
+        & $send @{ type='log'; level=$lvl; text=("{0}: {1} - SB={2} FW={3} Disk={4} BL={5} TPM={6} Escrow={7} [{8} {9}]" -f $res.Computer, $verdict, $res.SecureBoot, $res.Firmware, $res.Disk, $res.BitLocker, $res.Tpm, $res.Escrow, $res.Manufacturer, $res.Model) }
         if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$res.Computer) : $verdict - $detail | FIX: $hint" } }
     }
 
@@ -1283,9 +1538,9 @@ function Invoke-SbeScanAction {
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
-                    catch { $res = [ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail="worker error: $($_.Exception.Message)" } }
+                    catch { $res = [ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; BitLocker='?'; Tpm='?'; Escrow='?'; BlNote=''; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail="worker error: $($_.Exception.Message)" } }
                     try { $j.PS.Dispose() } catch {}; $j.PS = $null
-                    if ($null -eq $res) { $res = [ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail='worker returned no result' } }
+                    if ($null -eq $res) { $res = [ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; BitLocker='?'; Tpm='?'; Escrow='?'; BlNote=''; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail='worker returned no result' } }
                     & $emitResult $res
                     $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                 }
@@ -1296,7 +1551,7 @@ function Invoke-SbeScanAction {
                 foreach ($j in $jobs) {
                     if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
                         try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                        & $emitResult ([ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang" })
+                        & $emitResult ([ordered]@{ Computer=$j.Host; Ping=''; HostStatus='CHECK ERROR'; SecureBoot='?'; Firmware='?'; Disk='?'; BitLocker='?'; Tpm='?'; Escrow='?'; BlNote=''; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang" })
                         $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                     }
                 }
@@ -1306,7 +1561,7 @@ function Invoke-SbeScanAction {
                     foreach ($j in $jobs) {
                         if ($j.PS) {
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
-                            & $emitResult ([ordered]@{ Computer=$j.Host; Ping=''; HostStatus='Cancelled'; SecureBoot='?'; Firmware='?'; Disk='?'; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail='cancelled by operator' })
+                            & $emitResult ([ordered]@{ Computer=$j.Host; Ping=''; HostStatus='Cancelled'; SecureBoot='?'; Firmware='?'; Disk='?'; BitLocker='?'; Tpm='?'; Escrow='?'; BlNote=''; Manufacturer='?'; Model='?'; Bios='?'; BiosDate=''; OsBuild='?'; Detail='cancelled by operator' })
                             $done++
                         }
                     }
@@ -1319,27 +1574,35 @@ function Invoke-SbeScanAction {
     } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
 
     # Tally per verdict from the emitted rows (each row carries its Verdict).
-    $verdicts = @('ENABLED','READY TO ENABLE','OFF - UNSUPPORTED OEM','BLOCKED - LEGACY/MBR','CHECK ERROR','OFFLINE','DNS MISMATCH')
+    $verdicts = @('ENABLED','READY TO ENABLE','RISK - NO ESCROWED KEY','OFF - UNSUPPORTED OEM','BLOCKED - LEGACY/MBR','BLOCKED - BITLOCKER UNSUSPENDABLE','CHECK ERROR','OFFLINE','DNS MISMATCH')
     $counts = @{}
     foreach ($v in $verdicts) { $counts[$v] = @($rows | Where-Object { $_.Verdict -eq $v }).Count }
     $ready       = [int]$counts['READY TO ENABLE']
     $enabled     = [int]$counts['ENABLED']
     $blocked     = [int]$counts['BLOCKED - LEGACY/MBR']
     $unsupported = [int]$counts['OFF - UNSUPPORTED OEM']
+    # v1.7.0 pre-flight buckets: hosts the ENABLE action would refuse at write time, and
+    # hosts it could write but that have no recovery key to fall back on.
+    $blBlocked   = [int]$counts['BLOCKED - BITLOCKER UNSUSPENDABLE']
+    $noEscrow    = [int]$counts['RISK - NO ESCROWED KEY']
     $readyList   = @($readyHosts | Sort-Object -Unique)
 
-    & $send @{ type='log'; level='ok'; text="Scan done - ENABLED: $enabled, READY TO ENABLE: $ready, OFF - UNSUPPORTED OEM: $unsupported, BLOCKED - LEGACY/MBR: $blocked, CHECK ERRORS: $($counts['CHECK ERROR']), OFFLINE: $($counts['OFFLINE'])." }
-    & $send @{ type='status'; text="Done. $ready ready-to-enable, $enabled already enabled, $blocked blocked, $unsupported unsupported-OEM of $($targets.Count)." }
+    & $send @{ type='log'; level='ok'; text="Scan done - ENABLED: $enabled, READY TO ENABLE: $ready, RISK - NO ESCROWED KEY: $noEscrow, OFF - UNSUPPORTED OEM: $unsupported, BLOCKED - LEGACY/MBR: $blocked, BLOCKED - BITLOCKER UNSUSPENDABLE: $blBlocked, CHECK ERRORS: $($counts['CHECK ERROR']), OFFLINE: $($counts['OFFLINE'])." }
+    if ($blBlocked -gt 0) { & $send @{ type='log'; level='warn'; text="$blBlocked host(s) would be REFUSED by Enable Secure Boot at firmware-write time - BitLocker protection is ON and JANET cannot suspend it. Fix BitLocker on those hosts before arming a wave." } }
+    if ($noEscrow  -gt 0) { & $send @{ type='log'; level='warn'; text="$noEscrow host(s) are TPM-sealed with NO escrowed recovery password. The firmware write re-measures the boot PCRs; if that boot asks for a key there is none to type. Escrow a recovery password before enabling." } }
+    & $send @{ type='status'; text="Done. $ready ready-to-enable, $enabled already enabled, $noEscrow no-escrowed-key, $blocked legacy/MBR-blocked, $blBlocked BitLocker-blocked, $unsupported unsupported-OEM of $($targets.Count)." }
     return @{
         rows    = @($rows)
         summary = @{
-            total       = $targets.Count
-            counts      = $counts
-            ready       = $ready
-            enabled     = $enabled
-            blocked     = $blocked
-            unsupported = $unsupported
-            readyHosts  = $readyList
+            total             = $targets.Count
+            counts            = $counts
+            ready             = $ready
+            enabled           = $enabled
+            blocked           = $blocked
+            unsupported       = $unsupported
+            bitlockerBlocked  = $blBlocked
+            noEscrowedKey     = $noEscrow
+            readyHosts        = $readyList
         }
     }
 }

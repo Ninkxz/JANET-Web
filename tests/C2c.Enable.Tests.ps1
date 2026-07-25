@@ -375,18 +375,20 @@ Describe 'C2C manifest - C2C Nemesis v1.10.0, per-pillar fix actions (incl. fix-
     It 'reports tool version >= 1.15.2 (floor; exact pin lives in the newest bump test)' {
         ([version][string]$man.version -ge [version]'1.15.2') | Should Be $true
     }
-    It 'exposes 12 actions: scan + import + six per-pillar fixes + fix-lockscreen + fix-java + run-all + version-check' {
-        @($man.actions).Count | Should Be 12
+    # v1.17.0 adds the READ-ONLY audit-encryption (BitLocker escrow audit) action -> 13.
+    It 'exposes 13 actions: scan + audit-encryption + import + six per-pillar fixes + fix-lockscreen + fix-java + run-all + version-check' {
+        @($man.actions).Count | Should Be 13
     }
     It 'has the exact action id set' {
         $ids = @($man.actions | ForEach-Object { $_.id } | Sort-Object)
-        $expect = @('fix-antimalware','fix-encryption','fix-firewall','fix-java','fix-lockscreen','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
+        $expect = @('audit-encryption','fix-antimalware','fix-encryption','fix-firewall','fix-java','fix-lockscreen','fix-monitoring','fix-patches','fix-pki','import','run-all','scan','version-check')
         ($ids -join ',') | Should Be ($expect -join ',')
     }
-    It 'has scan + import + version-check (read-only) and all fix-* + run-all (destructive)' {
-        (@($man.actions | Where-Object { $_.id -eq 'scan' })[0].destructive)          | Should Be $false
-        (@($man.actions | Where-Object { $_.id -eq 'import' })[0].destructive)        | Should Be $false
-        (@($man.actions | Where-Object { $_.id -eq 'version-check' })[0].destructive) | Should Be $false
+    It 'has scan + audit-encryption + import + version-check (read-only) and all fix-* + run-all (destructive)' {
+        (@($man.actions | Where-Object { $_.id -eq 'scan' })[0].destructive)             | Should Be $false
+        (@($man.actions | Where-Object { $_.id -eq 'audit-encryption' })[0].destructive) | Should Be $false
+        (@($man.actions | Where-Object { $_.id -eq 'import' })[0].destructive)           | Should Be $false
+        (@($man.actions | Where-Object { $_.id -eq 'version-check' })[0].destructive)    | Should Be $false
         foreach ($id in $destIds) {
             $a = @($man.actions | Where-Object { $_.id -eq $id })[0]
             $a | Should Not BeNullOrEmpty

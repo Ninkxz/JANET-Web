@@ -366,6 +366,28 @@
       })();
       return makeHandle(key);
     }
+    // Re-attach to a job that is ALREADY running on the server: a page reload, a
+    // second tab, or a wave the server fired from an ARM while the browser was
+    // closed. This is deliberately NOT a resume - it never POSTs the action. It
+    // only opens the existing job's event stream (from since=0, so the server
+    // replays every row and the grid repaints in full) and gives back the same
+    // handle a start() would have, so Cancel works exactly as it always did.
+    // That distinction is the whole safety story for reattaching a destructive
+    // run: you can watch it and you can stop it, you can never re-fire it.
+    function attach(toolId, actionId, jobId, opts) {
+      opts = opts || {};
+      if (!jobId) return null;
+      var key = opts.key || (toolId + '/' + actionId);
+      var rs = freshRun(key, toolId, actionId, opts);
+      var g = gen[key] = (gen[key] || 0) + 1;
+      dispatch(key, 'reset', rs);
+      rs.jobId = jobId;
+      rs.since = 0;             // replay the whole stream the server still holds
+      rs.status = 're-attached to a run already going on the server...';
+      dispatch(key, 'status', rs.status);
+      poll(key, g);
+      return makeHandle(key);
+    }
     function beaconCancel(jobId) {
       if (!jobId) return;
       var url = '/api/job/' + encodeURIComponent(jobId) + '/cancel' + (TOKEN ? ('?t=' + encodeURIComponent(TOKEN)) : '');
@@ -384,6 +406,14 @@
     });
     return {
       start: start,
+      attach: attach,
+      get: function (key) { return runs[key]; },
+      handle: makeHandle,
+      // Is some live run already following this server job? Keeps the shell's
+      // reattach banner from nagging about a run the open tab is already showing.
+      tracking: function (jobId) {
+        return Object.keys(runs).some(function (k) { return runs[k] && runs[k].jobId === jobId && runs[k].active; });
+      },
       dispose: function (key) { delete runs[key]; delete gen[key]; delete subs[key]; },
       cancelDestructive: function (toolId) {
         var hit = [];
@@ -399,6 +429,83 @@
       }
     };
   })();
+
+  /* ========================================================================
+     JobsWatch  ->  Janet.jobs / ctx.jobs
+     The shell's window into work the SERVER is doing, independent of any view:
+
+       - the ARMED restart: one fully-confirmed restart/dispatch-restart param
+         set the server holds IN MEMORY until its scheduled time. It used to be
+         a setInterval in restart.view.js, so a stray F5 silently lost a 2 AM
+         reboot wave. See the ARMED RESTART block in server/JanetWeb.Server.ps1
+         for the safety rules (nothing on disk, hard-expire on session end).
+       - every job the server still knows about, so a reloaded tab can see that
+         a wave is still running and re-attach to its stream.
+
+     Polls GET /api/jobs - 5 s while something is armed or running, 20 s when
+     the server is idle. The ONLY code in the app that talks to /api/jobs.
+     ===================================================================== */
+  var JobsWatch = (function () {
+    var state = { armed: null, jobs: [], loaded: false };
+    var listeners = [], timer = null;
+    // Countdown anchor in LOCAL ms. The server sends secondsRemaining (not a
+    // wall-clock deadline) so the strip counts down correctly even if the
+    // browser clock and the server clock disagree.
+    var armDeadline = null;
+    function emit() { listeners.forEach(function (f) { try { f(state); } catch (e) {} }); }
+    async function refresh() {
+      try {
+        var r = await api('GET', '/jobs');
+        state.jobs = r.jobs || [];
+        state.armed = r.armed || null;
+        armDeadline = state.armed ? (Date.now() + (state.armed.secondsRemaining || 0) * 1000) : null;
+        state.loaded = true;
+        emit();
+      } catch (e) { /* a dead server already surfaces through the run poller's loss message */ }
+      return state;
+    }
+    function activeJobs() {
+      return (state.jobs || []).filter(function (j) { return j.status === 'running' || j.status === 'cancelling'; });
+    }
+    function findJob(toolId, actionId) {
+      var m = activeJobs().filter(function (j) { return j.tool === toolId && (!actionId || j.action === actionId); });
+      return m.length ? m[m.length - 1] : null;
+    }
+    function secondsLeft() { return armDeadline == null ? null : Math.max(0, Math.round((armDeadline - Date.now()) / 1000)); }
+    // Arm a delayed restart wave server-side. params is the SAME param set the
+    // ArmingDialog just confirmed (typed RESTART word included) - the server
+    // re-checks the word before it will hold anything.
+    async function armRestart(fireAt, params, mode) {
+      var r = await api('POST', '/tool/restart/action/arm-dispatch', { fireAt: fireAt, params: params || {}, mode: mode || '' });
+      await refresh();
+      return r;
+    }
+    async function disarm() { var r = await api('POST', '/armed-restart/disarm'); await refresh(); return r; }
+    function schedule() {
+      if (timer) clearTimeout(timer);
+      var busy = !!state.armed || activeJobs().length > 0;
+      timer = setTimeout(function () { refresh().then(schedule); }, busy ? 5000 : 20000);
+    }
+    return {
+      get state() { return state; },
+      refresh: refresh, disarm: disarm, armRestart: armRestart,
+      activeJobs: activeJobs, findJob: findJob, secondsLeft: secondsLeft,
+      onChange: function (fn) { listeners.push(fn); return function () { var i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); }; },
+      start: function () { refresh().then(schedule); }
+    };
+  })();
+  Janet.jobs = JobsWatch;
+
+  // Is this action state-changing? Read from the manifest the catalog already
+  // ships (/api/tools carries every action descriptor). FAIL CLOSED - an unknown
+  // tool/action counts as destructive, mirroring the server's own default-deny.
+  function actionIsDestructive(toolId, actionId) {
+    var t = (TOOLS || []).filter(function (x) { return x.id === toolId; })[0];
+    if (!t || !t.actions) return true;
+    var a = t.actions.filter(function (x) { return x.id === actionId; })[0];
+    if (!a) return true;
+    return !(a.destructive === false);
+  }
 
   /* ========================================================================
      Universal Host Info  ->  Janet.hostInfo / Janet.hostInfoPanel
@@ -643,6 +750,20 @@
     shell.appendChild(main);
     app.appendChild(shell);
 
+    // --- shell-level alert bars (above the status strip, visible in EVERY tool) ---
+    // A server-armed restart is the one piece of state in this app that can change
+    // machines with nobody watching, so it is never allowed to live in a view: this
+    // bar spans the whole window until the wave fires or is stood down, and it
+    // carries its own DISARM button so standing it down is always one click away.
+    dom.armBar = el('div'); dom.armBar.id = 'j-armbar';
+    dom.armBar.style.cssText = 'display:none;align-items:center;gap:14px;padding:9px 16px;background:linear-gradient(90deg,rgba(224,82,82,.30),rgba(224,168,64,.18));border-top:2px solid var(--bad);border-bottom:1px solid rgba(128,128,128,.28);font-size:12.5px;letter-spacing:.02em';
+    app.appendChild(dom.armBar);
+    // Reattach bar: work the SERVER is still doing that this page is not showing
+    // (a reload, a second tab, or a wave an arm fired while the browser was shut).
+    dom.reBar = el('div'); dom.reBar.id = 'j-rebar';
+    dom.reBar.style.cssText = 'display:none;align-items:center;gap:12px;padding:8px 16px;background:rgba(90,160,220,.16);border-top:1px solid rgba(128,128,128,.28);font-size:12.5px;flex-wrap:wrap';
+    app.appendChild(dom.reBar);
+
     // --- status strip ---
     var strip = el('div'); strip.id = 'j-strip';
     dom.stripSession = el('div', 'j-strip-seg'); strip.appendChild(dom.stripSession);
@@ -660,6 +781,92 @@
     dom.clock.textContent = clockStr();
     renderCredbar();
     SessionApi.onChange(renderCredbar);   // keep the header cred pill in sync when any strip sets/clears creds
+    JobsWatch.onChange(function () { renderArmBar(); renderReattachBar(); });
+    setInterval(renderArmBar, 1000);      // smooth countdown between 5 s server polls
+  }
+
+  // hh:mm:ss (drops the hours segment when there are none)
+  function hms(total) {
+    total = Math.max(0, Math.round(total || 0));
+    var h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+    return (h > 0 ? pad2(h) + ':' : '') + pad2(m) + ':' + pad2(s);
+  }
+
+  // The armed-restart bar. Loud on purpose: an armed wave must never be a quiet
+  // timer somewhere. Hidden entirely when nothing is armed.
+  function renderArmBar() {
+    var bar = dom.armBar; if (!bar) return;
+    var a = JobsWatch.state.armed;
+    if (!a) { if (bar.style.display !== 'none') { bar.style.display = 'none'; bar.innerHTML = ''; } return; }
+    var left = JobsWatch.secondsLeft();
+    var line = 'ARMED RESTART' + (a.dryRun ? ' (DRY RUN)' : '') + ' - <b>' + esc(String(a.hostCount)) + '</b> host(s) '
+             + (a.dryRun ? 'preview' : 'WILL REBOOT') + ' in <b>' + esc(hms(left)) + '</b>'
+             + ' (armed by ' + esc(a.operator || 'operator') + '). The server fires this wave even if you close the browser.';
+    // Rebuild only the text each tick; keep the button so a click is never eaten.
+    if (bar.dataset.armId !== a.armId) {
+      bar.innerHTML = '';
+      bar.dataset.armId = a.armId;
+      var dot = el('span', 'j-dot j-dot-bad j-dot-pulse');
+      bar._txt = el('span');
+      var sp = el('div'); sp.style.flex = '1';
+      var dis = Janet.ui.button('DISARM', { variant: 'danger', size: 'sm', title: 'Stand the armed restart down now. Nothing is dispatched.' });
+      dis.onclick = function () {
+        dis.disabled = true;
+        JobsWatch.disarm().catch(function () {}).then(function () { dis.disabled = false; });
+      };
+      bar.appendChild(dot); bar.appendChild(bar._txt); bar.appendChild(sp); bar.appendChild(dis);
+    }
+    bar._txt.innerHTML = line;
+    bar.style.display = 'flex';
+  }
+
+  // Reattach bar. Shows runs the SERVER still has that this page is not already
+  // following. STATUS ONLY for destructive runs: Reattach opens the existing
+  // event stream, it never re-runs the action - and Cancel is right there.
+  var _reDismissed = {};
+  function renderReattachBar() {
+    var bar = dom.reBar; if (!bar) return;
+    var orphans = JobsWatch.activeJobs().filter(function (j) {
+      return !RunController.tracking(j.jobId) && !_reDismissed[j.jobId];
+    });
+    if (!orphans.length) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+    bar.innerHTML = '';
+    var anyDestructive = orphans.some(function (j) { return actionIsDestructive(j.tool, j.action); });
+    var head = el('span');
+    head.innerHTML = '<b>' + orphans.length + '</b> run' + (orphans.length === 1 ? '' : 's')
+      + ' still active on the server' + (anyDestructive ? ' - <b class="st-bad">one of them changes machines</b>' : '') + '.';
+    bar.appendChild(head);
+    orphans.slice(0, 4).forEach(function (j) {
+      var destructive = actionIsDestructive(j.tool, j.action);
+      var wrap = el('span'); wrap.style.cssText = 'display:inline-flex;align-items:center;gap:6px';
+      var lbl = el('span', destructive ? 'st-bad' : 'muted', j.tool + ' / ' + j.action + ' (' + j.status + ')');
+      wrap.appendChild(lbl);
+      var re = Janet.ui.ghostButton('Reattach', { size: 'sm', title: destructive
+        ? 'Open this run’s live status. It is ALREADY running on the server - reattaching only watches it, it never re-runs the action.'
+        : 'Open this run’s live status.' });
+      re.onclick = function () {
+        // Same destructive classification the run would have had if this page had
+        // started it, so cancel-on-egress / the unload beacon behave identically.
+        RunController.attach(j.tool, j.action, j.jobId, { destructive: destructive });
+        _reDismissed[j.jobId] = true;
+        var t = (TOOLS || []).filter(function (x) { return x.id === j.tool; })[0];
+        if (t) openTool(t);
+        renderReattachBar();
+      };
+      wrap.appendChild(re);
+      var can = Janet.ui.button('Cancel run', { variant: destructive ? 'danger' : 'gold', size: 'sm', title: 'Stop this run on the server now.' });
+      can.onclick = function () {
+        can.disabled = true;
+        api('POST', '/job/' + encodeURIComponent(j.jobId) + '/cancel').catch(function () {}).then(function () { JobsWatch.refresh(); });
+      };
+      wrap.appendChild(can);
+      bar.appendChild(wrap);
+    });
+    var sp = el('div'); sp.style.flex = '1'; bar.appendChild(sp);
+    var dsm = Janet.ui.ghostButton('Dismiss', { size: 'sm', title: 'Hide this notice. The runs keep going on the server.' });
+    dsm.onclick = function () { orphans.forEach(function (j) { _reDismissed[j.jobId] = true; }); renderReattachBar(); };
+    bar.appendChild(dsm);
+    bar.style.display = 'flex';
   }
 
   // The SINGLE, universal credential control for the whole app (top-right of the
@@ -1133,6 +1340,24 @@
       },
       confirm: function (opts) { return Janet.components.ConfirmDialog(opts); },
       arm: function (opts) { return Janet.components.ArmingDialog(opts); },
+      // Server-side work this page is not driving: the armed restart + the live
+      // job list (see JobsWatch). A view uses it to arm a delayed wave and to
+      // notice one firing; the shell uses it for the armed bar + reattach bar.
+      jobs: JobsWatch,
+      // Re-attach to a run of THIS tool that is already going on the server (page
+      // reload, second tab, or a wave an arm fired while the browser was closed).
+      // Returns a run handle, or null when there is nothing to attach to. It NEVER
+      // POSTs the action: a destructive run can be watched and cancelled through
+      // the returned handle, never re-fired. Subscribe to it exactly like ctx.run().
+      adopt: function (actionId, opts) {
+        opts = opts || {};
+        var key = opts.key || (tool.id + '/' + actionId);
+        var rs = RunController.get(key);
+        if (rs && rs.jobId && rs.active) return RunController.handle(key);
+        var j = JobsWatch.findJob(tool.id, actionId);
+        if (!j) return null;
+        return RunController.attach(tool.id, actionId, j.jobId, { keyOf: opts.keyOf, key: opts.key, destructive: actionIsDestructive(tool.id, actionId) });
+      },
       // Cross-tool handoff: a view hands its work to another tool by id (e.g. the
       // Reports Remediation Router loads a route's hosts into shared targets then
       // opens the mapped acas/upr tool). Same registry lookup the palette uses; an
@@ -1256,6 +1481,13 @@
     renderHub();
     renderNav('');
     if (Janet.palette) Janet.palette.setProvider(paletteItems);
+    // Find out what the SERVER is still doing before the operator sees anything:
+    // an armed restart wave or a run that outlived the last page load must be on
+    // screen from first paint, not discovered by luck. (TOOLS is already loaded,
+    // so actionIsDestructive can classify each run for the reattach bar.)
+    await JobsWatch.refresh();
+    renderArmBar(); renderReattachBar();
+    JobsWatch.start();
     buildGate();
   }
 

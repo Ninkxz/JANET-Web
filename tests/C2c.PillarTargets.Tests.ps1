@@ -234,20 +234,24 @@ Describe 'C2C run-all - MANUAL mode (no import) trusts the client plan verbatim'
 }
 
 # -----------------------------------------------------------------------------
-Describe 'C2C reachability probes WinRM HTTPS 5986 + auto -UseSSL (all three workers)' {
+Describe 'C2C reachability probes WinRM HTTPS 5986 + auto -UseSSL (every worker)' {
     # v1.12.0: the scan, fix and version workers each probe 5985 -> 5986 -> 445 and switch
     # that host's session to -UseSSL when only 5986 answered. The decision is inline in each
     # pool-runspace scriptblock (no live listener to unit-test), so guard the wiring at source.
+    # v1.17.0 adds a FOURTH worker - the read-only BitLocker escrow audit
+    # ($script:C2cEscrowAuditBlock) - which carries the same ladder, so the pins are 4.
+    # (These counts must be bumped by any commit that adds a worker: that is the point -
+    # a new fan-out that quietly shipped the old 5985/445-only ladder turns this red.)
     $src = Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
 
-    It 'every worker probes the 5985,5986,445 ladder (3 sites)' {
-        ([regex]::Matches($src, '5985,5986,445')).Count | Should Be 3
+    It 'every worker probes the 5985,5986,445 ladder (4 sites)' {
+        ([regex]::Matches($src, '5985,5986,445')).Count | Should Be 4
     }
-    It 'every worker arms -UseSSL for a 5986-only host (3 sites)' {
-        ([regex]::Matches($src, "splat\['UseSSL'\]")).Count | Should Be 3
+    It 'every worker arms -UseSSL for a 5986-only host (4 sites)' {
+        ([regex]::Matches($src, "splat\['UseSSL'\]")).Count | Should Be 4
     }
-    It 'every SSL session skips CA/CN validation for self-signed WinRM HTTPS (3 sites)' {
-        ([regex]::Matches($src, "SkipCACheck")).Count | Should Be 3
+    It 'every SSL session skips CA/CN validation for self-signed WinRM HTTPS (4 sites)' {
+        ([regex]::Matches($src, "SkipCACheck")).Count | Should Be 4
     }
     It 'no worker still uses the old 5985,445-only ladder' {
         ([regex]::Matches($src, '5985,445')).Count | Should Be 0

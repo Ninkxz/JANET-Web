@@ -33,9 +33,17 @@ function Invoke-SbeScan {
 # -----------------------------------------------------------------------------
 Describe 'Secure Boot scan - verdict derivation matrix (Get-SbeScanVerdict)' {
 
+    # v1.7.0 (capability audit #3): Get-SbeScanVerdict also weighs the BitLocker / TPM /
+    # escrow posture and FAILS CLOSED on an unread one - an omitted reading normalises to
+    # 'Unknown' -> CHECK ERROR, never to a permissive default. This matrix is about the
+    # Secure Boot / firmware / disk / OEM axes, so the helper supplies a known-good, fully
+    # READ posture and every case below keeps its original meaning and strength. The
+    # fail-closed behaviour of an omitted posture is pinned in
+    # Secureboot.ScanEnableParity.Tests.ps1.
     function Get-Verdict {
-        param([string]$Sb, [string]$Fw, [string]$Disk, [string]$Mfr)
-        & $script:SbeMod { param($a,$b,$c,$d) Get-SbeScanVerdict -SecureBoot $a -Firmware $b -Disk $c -Manufacturer $d } $Sb $Fw $Disk $Mfr
+        param([string]$Sb, [string]$Fw, [string]$Disk, [string]$Mfr,
+              [string]$Bl = 'Off', [string]$Tpm = 'Ready', [string]$Esc = 'n/a')
+        & $script:SbeMod { param($a,$b,$c,$d,$e,$f,$g) Get-SbeScanVerdict -SecureBoot $a -Firmware $b -Disk $c -Manufacturer $d -BitLocker $e -Tpm $f -Escrow $g } $Sb $Fw $Disk $Mfr $Bl $Tpm $Esc
     }
 
     It 'Secure Boot ON -> ENABLED (regardless of the rest)' {
@@ -116,7 +124,10 @@ Describe 'Secure Boot scan - manifest contract' {
     }
 
     It 'scan advertises the specified columns and the scan inputs' {
-        ($scan.columns -join ',') | Should Be 'Host,Ping,Verdict,SecureBoot,Firmware,Disk,Manufacturer,Model,Detail'
+        # v1.7.0 (capability audit #3): BitLocker / TPM / Escrow joined the contract. The
+        # scan used to say READY TO ENABLE for hosts the enable path refuses at firmware-write
+        # time because it never read BitLocker at all. Exact pin, same strength as before.
+        ($scan.columns -join ',') | Should Be 'Host,Ping,Verdict,SecureBoot,Firmware,Disk,BitLocker,TPM,Escrow,Manufacturer,Model,Detail'
         @($scan.inputs | Where-Object { $_.name -eq 'targets' }).Count | Should Be 1
         @($scan.inputs | Where-Object { $_.name -eq 'threads' }).Count | Should Be 1
         @($scan.inputs | Where-Object { $_.name -eq 'attemptOffline' }).Count | Should Be 1

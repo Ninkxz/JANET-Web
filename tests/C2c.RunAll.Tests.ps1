@@ -488,9 +488,13 @@ Describe 'C2C run-all manifest - every input the view posts and the engine reads
 Describe 'c2c 1.16.0 - run-all prunePki/fixRdp/pushDisallowed declaration + the AntiMalware unreadable-sig fail-close' {
     # audit 2026-07-25 (fable re-audit follow-up): 1.15.13 -> 1.16.0 (trust-anchor guard on the
     # fix-pki push, the pushDisallowed distrust gate, the IN PROGRESS rollup state, the Java label).
-    It 'manifest version is exactly 1.16.0 (newest bump holds the exact pin)' {
+    # NOTE: the exact pin has MOVED to C2c.EscrowAudit.Tests.ps1 with the 1.17.0 bump
+    # (PkiRoots derived baseline + the read-only BitLocker escrow audit). Only ONE test
+    # should hold the exact version, or every bump breaks N files; this one keeps the
+    # floor that guarantees the 1.16.0 behaviours below are present.
+    It 'manifest version is at or above 1.16.0 (floor; the exact pin lives in the newest bump test)' {
         $man = & $cm { Get-JanetToolManifest }
-        [string]$man.version | Should Be '1.16.0'
+        ([version][string]$man.version -ge [version]'1.16.0') | Should Be $true
     }
     It 'run-all declares pushDisallowed as a bool input defaulting to OFF (parity with fix-pki / certdeploy)' {
         $man = & $cm { Get-JanetToolManifest }

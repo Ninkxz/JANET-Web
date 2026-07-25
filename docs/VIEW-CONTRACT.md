@@ -31,11 +31,15 @@ Vanilla JS, no build step, no frameworks.
     `Host`/server value (e.g. one row per scope/app/vuln), pass `keyOf` so RunController keys rows by
     the real per-row id (else all rows collapse into one). Default key is `_rk || Host || host || id`.
   - `opts.destructive` - defaults from the manifest action's `destructive` flag.
-  - handle: `{ key, jobId, state, subscribe(handlers) -> unsubscribe, cancel() }`
+  - handle: `{ key, state, subscribe(handlers) -> unsubscribe, cancel() }`
+    (audit 2026-07-25: this used to document a `jobId` ON THE HANDLE. There is none -
+    `makeHandle` never exposed it. The job id lives on the run-state: `handle.state.jobId`.)
   - `handle.state` = the live run-state `{ rows:{}, order:[], log:[], status, progress, done, total, active, ... }`
   - `handle.subscribe(handlers)` replays current state immediately, then streams. Handlers (all optional):
     `reset(rs)`, `status(text)`, `progress({done,total,pct})`, `row(rowData)`, `log({text,level})`,
-    `audit(ev)`, `error({text})`, `final(result)`, `active(bool)`.
+    `error({text})`, `final(result)`, `active(bool)`.
+    (audit 2026-07-25: an `audit(ev)` handler was documented here but is dispatched NOWHERE -
+    `reduce()` has no `audit` case. A view that registered one would simply never be called.)
 - `ctx.confirm(opts) -> Promise<bool>` - themed modal. `{ title, body (HTML ok), list:[lines], okText, cancelText, danger }`.
   `cancelText:null` => one-button notice (resolves true on OK). Use for validation notices + Yes/No confirms.
 - `ctx.arm(opts) -> Promise<bool>` - danger ArmingDialog. `{ title, body, banner, preflight:[{label,ok}], confirmWord, okText, cancelText }`.
@@ -43,7 +47,10 @@ Vanilla JS, no build step, no frameworks.
 
 ## `ctx.util`
 
-`el(tag,cls,txt)`, `qs(sel,root)`, `sleep(ms)`, `clickable(node,fn,opts)`, `fileStamp()`, `clockStr()`,
+`el(tag,cls,txt)`, `qs(sel,root)`, `sleep(ms)`, `fileStamp()`, `clockStr()`,
+<!-- audit 2026-07-25: `clickable(node,fn,opts)` was listed here and does not exist anywhere in
+     web/js. The only occurrences of the word are comments and the `is-clickable` CSS class. -->
+
 `parseHosts(text)->[]` (dedup), `targetModel(initial)` (a DOM-free host-list model),
 `downloadBlob(name,mime,content)`, `buildXlsx(headers,rows,sheet)->Uint8Array`,
 `downloadXlsx(filename,headers,rows,sheet)`.
@@ -61,7 +68,9 @@ Vanilla JS, no build step, no frameworks.
 ## `ctx.components` - the kit (compose these; do not reinvent)
 
 - **ResultsGrid**`({ columns, keyMode, selectable, rowClass(row), onRowClick(row), title, popOut, toolbarButtons:[btn] })`
-  -> `{ el, upsert(row), clear(), rows(), order(), getChecked(), selectAll(on), selectWhere(fn), setSort(key,dir) }`.
+  -> `{ el, upsert(row), clear(), rows(), order(), getChecked(), selectAll(on), selectWhere(fn) }`.
+  (audit 2026-07-25: `setSort(key,dir)` was documented here and has never existed. Sorting is
+  driven by the clickable column header only.)
   - column: `{ key, label, width, type:'text'|'bool'|'status', render(row)->cell, colorRule(value,row)->cssClass, sortVal(row), title }`
   - cell: `{ text, cls:'st-ok'|'st-bad'|'st-warn'|'st-info'|'cell-dim', title, bar:{pct,cls} }`. Colour is HAND-WRITTEN per column (colorRule/render), never regex-on-name.
   - keyMode: `{ rk:true }` (use `_rk`) | `{ hostCol:'Host' }` | a `function(row)->key`. **Match the keyOf you pass to ctx.run.**
@@ -73,7 +82,9 @@ Vanilla JS, no build step, no frameworks.
 - **TargetManager**`({ model, hint, placeholder, importLabel, importAccept, pingAll, onPingAll, onImport(n,name), onClear, countNoun, max })`
   -> `{ el, model, hosts(), count(), getText(), setText(t), focus(), setPingEnabled(on), setPingLabel(txt) }`. Pass `ctx.util.targetModel('')` for a tool-owned list.
 - **RunBar**`({ label, cancelLabel, morphToCancel, title, guards:[()->msgOrNull], onGuardFail(msg), onRun, onCancel, secondary:[btn], cta:bool })`
-  -> `{ el, cta, secondary, setActive(on), setLabel(txt), setStatus(txt,cls), attach(handle) }`. Guards run before onRun; return a message string to block (the view shows it via onGuardFail).
+  -> `{ el, cta, setActive(on), setStatus(txt,cls) }`. Guards run before onRun; return a message string to block (the view shows it via onGuardFail).
+  (audit 2026-07-25: `secondary`, `setLabel(txt)` and `attach(handle)` were all documented as
+  returned members. `runbar.js` returns four members and never has returned those three.)
 - **ConfirmDialog** / **ArmingDialog** - usually via `ctx.confirm` / `ctx.arm`.
 - **TabHost**`({ rail:'left'|'top', tabs:[{ id, label, build(panelEl, tabApi), locked }], onTab(id) })`
   -> `{ el, select(id), setLocked(id,on), setBadge(id,text), activeId() }`. Panels build lazily on first open and KEEP ALIVE (DOM + live runs survive tab switches). Use for multi-tab/multi-screen tools.

@@ -624,6 +624,20 @@
         title: 'Windows Upgrade results',
         emptyText: 'No results yet — pick hosts and an operation, then RUN.',
         keyMode: opsGridKeyOf, popOut: true,
+        // Cross-tool harvest: stage a scope for the tool that owns the follow-up
+        // (a blocked/failed upgrade set -> WPT, a needs-reboot set -> Restart).
+        // Staging only; every gate in the destination is untouched.
+        useHosts: {
+          ctx: ctx, source: 'Windows Upgrade results',
+          flagged: {
+            label: 'Hosts that FAILED / were BLOCKED',
+            test: function (r) {
+              if (r.Severity != null && String(r.Severity) === 'BLOCK') return true;
+              var s = String(r.Status == null ? '' : r.Status);
+              return /^(FAILED|FAIL|InstallFailed|BLOCKED|HW INCOMPAT|MEMORY|ERRORS|PARTIAL|InstalledWithErrors)$/.test(s);
+            }
+          }
+        },
         columns: [
           { key: 'Host', label: 'COMPUTER', width: 170 },
           { key: 'Ping', label: 'PING', width: 90, render: function (r) { return { text: r.Ping == null ? '' : String(r.Ping), cls: pingCellCls(r.Ping) }; } },
@@ -1088,7 +1102,18 @@
         fResults.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
         var fGrid = C.ResultsGrid({
           title: 'Fleet Status', emptyText: 'No results yet - add computers and Scan Fleet.',
-          keyMode: { hostCol: 'Host' }, popOut: true, selectable: false,
+          keyMode: { hostCol: 'Host' }, popOut: true, selectable: true,
+          // Generic cross-tool harvest alongside the purpose-built "Clean Up (low
+          // disk)" button above: pick any scope and stage it for any target-taking
+          // tool. Staging only - the destination shows a Load banner the operator
+          // clicks, and every gate there is untouched.
+          useHosts: {
+            ctx: ctx, source: 'Windows Upgrade fleet scan',
+            flagged: {
+              label: 'Hosts pending a reboot',
+              test: function (r) { return r.PendingReboot === true || String(r.PendingReboot) === 'true'; }
+            }
+          },
           columns: [
             { key: 'Host', label: 'COMPUTER', width: 160 },
             { key: 'Online', label: 'ONLINE', width: 78, render: function (r) { return yesNoDim(r.Online, false); } },

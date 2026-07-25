@@ -47,6 +47,40 @@
 #              NO CHANGE -> audit Skipped while the scan would still FAIL the box).
 #            * 'Java|NOCHANGE' no longer claims 'NO OLD JAVA' - after the vendor gate a NOCHANGE
 #              can mean "found N OLD item(s), removed NOTHING".
+#  v1.17.0 (capability audit 2026-07-25) - two additions, both READ-ONLY:
+#            * PKIROOTS SHIPS LIVE. dodRootThumbprints defaulted to @(), so the PkiRoots scan
+#              check emitted EXT "configure DoD root thumbprints in c2c-baseline.json" on every
+#              stock install - an inert check - while certdeploy already computed the ACCURATE
+#              missing-anchor set from the SHIPPED bundle (Packages\DoD-Certs). When (and only
+#              when) the baseline array is EMPTY, Get-C2cBundleRootThumbprints now DERIVES the
+#              expected Root-store anchor set from that bundle, so the operator gets a real
+#              PASS/FAIL with no JSON to edit. An explicitly-configured baseline STILL WINS.
+#              If the bundle is missing/unreadable the check keeps the old EXT behaviour -
+#              a derivation that could not be made NEVER becomes a false PASS. The derivation
+#              logic is COPIED from certdeploy (Get-C2cCertBundle, itself the certdeploy copy):
+#              cross-module import is not this repo's pattern - duplication is by design,
+#              divergence is the defect.
+#            * NEW ACTION audit-encryption (BitLocker escrow audit, read-only, no confirm word).
+#              "escrow-first, fail-closed" only ever bound volumes JANET CHANGES: a volume
+#              already On short-circuits to ALREADY ENCRYPTED and its key protectors were never
+#              enumerated, so every box encrypted by MECM / imaging / a tech before JANET existed
+#              was unaudited - and a TPM-ONLY volume with no escrowed key hits the recovery
+#              prompt on the next firmware change with NO KEY TO TYPE. Per host ONE consolidated
+#              read-only Invoke-Command collects, per FIXED volume (removable/USB/network/optical
+#              are NEVER touched - same filter as the Encryption pillar), MountPoint /
+#              ProtectionStatus / VolumeStatus / EncryptionMethod / the KeyProtectorType set /
+#              each RecoveryPassword protector's KeyProtectorId GUID, plus Get-Tpm. Admin-side,
+#              ONE DirectorySearcher per computer (base = the computer DN, filter
+#              (objectClass=msFVE-RecoveryInformation), PropertiesToLoad msFVE-RecoveryGuid +
+#              whenCreated + name, ReferralChasing None, ClientTimeout/ServerTimeLimit, Dispose
+#              in a finally - adsearch hygiene) reconciles endpoint protector GUIDs against the
+#              AD escrow. Verdicts ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK /
+#              ESCROW UNKNOWN / NOT ENCRYPTED / OFFLINE. FAIL-CLOSED: an unreadable protector
+#              list, an ACL-denied AD search or an absent computer object is ESCROW UNKNOWN,
+#              never ESCROWED, and the summary buckets notEscrowed and unknown SEPARATELY (they
+#              are different operator actions). NON-NEGOTIABLE: msFVE-RecoveryPassword is NEVER
+#              loaded and the endpoint recovery password is NEVER read - no row, log line,
+#              summary or CSV can carry a key. A fix for a key-visibility gap must not leak keys.
 #
 #  Verdict (computed admin-side, quarantine-tier only):
 #    QUARANTINE RISK  = >= 1 quarantine-tier FAIL   (Detail lists the failing pillars)
@@ -70,17 +104,30 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.16.0'
+        version  = '1.17.0'
         category = 'Remediation'
-        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
+        summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all. (8) READ-ONLY BITLOCKER ESCROW AUDIT - per host, one consolidated WinRM round-trip enumerates the key protectors of every FIXED volume (removable/USB/network/optical never touched) and reconciles each RecoveryPassword protector''s KeyProtectorId GUID against the AD msFVE-RecoveryInformation escrow, flagging ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed (an unreadable protector list or AD search is UNKNOWN, never ESCROWED) and the recovery password is NEVER read or emitted anywhere.'
         actions  = @(
             @{
                 id          = 'scan'
                 label       = 'C2C Readiness Scan'
-                description = 'Read-only prediction of Comply-to-Connect quarantine, aligned to the C2C TASKORD 26-0822 dashboard. Per host, one consolidated WinRM probe runs 11 checks, each tiered: QUARANTINE pillars (the only ones that predict quarantine) = Firewall, AntiMalware (Defender installed + signatures <7 days + MDE Org ID), Patches (security updates past a 7-day grace), Encryption (C: Protection ON), Vuln (EXT, AQC server-side); AUDIT pillars (shown, never quarantine) = PKI Trust Roots, OS Version (Win11/24H2+/Enterprise); INFO pillars (advisory) = AppWhitelist, Agents, COAMS; ATTEST = Monitoring (Tanium). Verdict: QUARANTINE RISK (>=1 quarantine FAIL), NOT ATTESTING (only Tanium down - box invisible to the dashboard), CHECK ERRORS, READY (audit/info findings shown as advisory), or OFFLINE. The full colour-tagged report streams to the activity log. Changes NOTHING and needs no admin session.'
+                description = 'Read-only prediction of Comply-to-Connect quarantine, aligned to the C2C TASKORD 26-0822 dashboard. Per host, one consolidated WinRM probe runs 11 checks, each tiered: QUARANTINE pillars (the only ones that predict quarantine) = Firewall, AntiMalware (Defender installed + signatures <7 days + MDE Org ID), Patches (security updates past a 7-day grace), Encryption (C: Protection ON), Vuln (EXT, AQC server-side); AUDIT pillars (shown, never quarantine) = PKI Trust Roots, OS Version (Win11/24H2+/Enterprise); INFO pillars (advisory) = AppWhitelist, Agents, COAMS; ATTEST = Monitoring (Tanium). PKI Trust Roots compares LocalMachine\Root against the baseline dodRootThumbprints when one is configured, and otherwise against the anchor set DERIVED from the SHIPPED DoD trust bundle (Packages\DoD-Certs, root\*.cer + loose *.cer - the same bundle certdeploy checks against), so the check yields a real PASS/FAIL with no JSON to edit; if the bundle is missing or unreadable the check stays EXT (unscored) rather than reporting a false PASS. Verdict: QUARANTINE RISK (>=1 quarantine FAIL), NOT ATTESTING (only Tanium down - box invisible to the dashboard), CHECK ERRORS, READY (audit/info findings shown as advisory), or OFFLINE. The full colour-tagged report streams to the activity log. Changes NOTHING and needs no admin session.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','Status','Detail')
+                inputs      = @(
+                    @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
+                    @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
+                    @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=16 }
+                )
+            }
+            @{
+                id          = 'audit-encryption'
+                label       = 'BitLocker Escrow Audit (read-only)'
+                description = 'READ-ONLY census that reconciles each host''s BitLocker key protectors against the AD-side recovery escrow. Closes the gap that "escrow-first, fail-closed" only ever bound volumes JANET CHANGES: a volume already On short-circuits to ALREADY ENCRYPTED and its protectors were never enumerated, so every box encrypted by MECM, by imaging, or by a tech before JANET existed is unaudited - and a TPM-ONLY volume with no escrowed key hits the recovery prompt on the next firmware change with NO KEY TO TYPE. Per host, ONE consolidated WinRM round-trip collects, for each FIXED volume only (removable / BitLocker To Go / network / optical volumes are NEVER touched - the same fixed-volume filter the Encryption pillar uses): MountPoint, ProtectionStatus, VolumeStatus, EncryptionMethod, the KeyProtectorType set, and each RecoveryPassword protector''s KeyProtectorId GUID - plus Get-Tpm (TpmPresent / TpmReady / TpmOwned). Admin-side, ONE DirectorySearcher per computer (base = the computer DN, filter (objectClass=msFVE-RecoveryInformation), loading ONLY msFVE-RecoveryGuid / whenCreated / name) reads the AD escrow, and the endpoint protector GUIDs are matched against it. Verdict per host: ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED / OFFLINE. FAIL-CLOSED: an unreadable protector list, an ACL-denied or failed AD search, or a computer object absent from AD reports ESCROW UNKNOWN - NEVER ESCROWED - and the summary buckets notEscrowed and unknown SEPARATELY because they are different operator actions. THE RECOVERY PASSWORD IS NEVER READ AND NEVER EMITTED: msFVE-RecoveryPassword is never loaded from AD, the endpoint KeyProtector.RecoveryPassword property is never touched, and no row, log line, summary field or exported CSV cell can carry a key. Changes NOTHING, needs no admin session and no confirm word.'
+                kind        = 'stream-table'
+                destructive = $false
+                columns     = @('Host','Ping','Volumes','Escrowed','Tpm','Status','Detail')
                 inputs      = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='attemptOffline'; label='Attempt even if offline (host unreachable)'; type='bool'; required=$false; default=$false },
@@ -862,6 +909,9 @@ $script:C2cProbeBlock = {
     $mdeOrgId      = [string]$Config['mdeOrgId']
     $secAgents     = @($Config['securityAgentServices'])
     $dodRoots      = @($Config['dodRootThumbprints'])
+    # v1.17.0: provenance of the required-anchor set ('baseline ...' vs 'derived from the
+    # shipped ... bundle'), so the PkiRoots detail says WHERE its verdict came from.
+    $dodRootSrc    = [string]$Config['dodRootSource']
 
     # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is common on
     # AFNET, so skip CA/CN validation - the transport stays encrypted; port 5986 is implicit).
@@ -876,7 +926,7 @@ $script:C2cProbeBlock = {
 
     # ---- The consolidated read-only probe: all 10 C2C checks in one round-trip. ----
     $probeSb = {
-        param($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $taniumInstalledSrc)
+        param($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $taniumInstalledSrc, $dodRootSrc)
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
         if ($taniumInstalledSrc) { try { . ([scriptblock]::Create($taniumInstalledSrc)) } catch {} }
         # Normalize the array args: an empty collection can cross the WinRM ArgumentList
@@ -1188,11 +1238,16 @@ $script:C2cProbeBlock = {
         } catch { & $mk 'Agents' 'ERROR' $_.Exception.Message }
 
         # 9. PkiRoots - required DoD root thumbprints present in LocalMachine\Root.
-        #    Empty baseline -> EXT (do NOT fail - operator must configure it).
+        #    v1.17.0: the required set is the baseline's dodRootThumbprints when the operator
+        #    configured one, else the set DERIVED admin-side from the SHIPPED DoD trust bundle
+        #    (certdeploy parity - it has always used the bundle). $dodRootSrc names which.
+        #    An EMPTY set still means "nothing to compare against" -> EXT, never a false PASS:
+        #    that is now reachable only when the bundle is ALSO missing/unreadable.
         try {
             $req = @($dodRoots)
+            $srcTxt = if ($dodRootSrc) { " [source: $dodRootSrc]" } else { '' }
             if ($req.Count -eq 0) {
-                & $mk 'PkiRoots' 'EXT' 'configure DoD root thumbprints in c2c-baseline.json'
+                & $mk 'PkiRoots' 'EXT' 'no required DoD root set: baseline dodRootThumbprints is empty AND no anchors could be derived from the shipped DoD trust bundle (Packages\DoD-Certs) - not scored'
             } else {
                 $present = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
                 foreach ($c in (Get-ChildItem -Path 'Cert:\LocalMachine\Root' -ErrorAction Stop)) {
@@ -1204,10 +1259,10 @@ $script:C2cProbeBlock = {
                     if ($tt -and -not $present.Contains($tt)) { [void]$missing.Add($tt) }
                 }
                 if ($missing.Count -eq 0) {
-                    & $mk 'PkiRoots' 'PASS' "all $($req.Count) required DoD root(s) present"
+                    & $mk 'PkiRoots' 'PASS' "all $($req.Count) required DoD root(s) present in LocalMachine\Root$srcTxt"
                 } else {
                     $shorts = @($missing | ForEach-Object { $_.Substring(0, [Math]::Min(8, $_.Length)) })
-                    & $mk 'PkiRoots' 'FAIL' "$($missing.Count)/$($req.Count) required root(s) missing: $($shorts -join ', ')"
+                    & $mk 'PkiRoots' 'FAIL' "$($missing.Count)/$($req.Count) required root(s) missing from LocalMachine\Root: $($shorts -join ', ')$srcTxt"
                 }
             }
         } catch { & $mk 'PkiRoots' 'ERROR' $_.Exception.Message }
@@ -1244,7 +1299,7 @@ $script:C2cProbeBlock = {
     }
 
     try {
-        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $TaniumInstalledSrc) -ErrorAction Stop
+        $probe = Invoke-Command -Session $sess -ScriptBlock $probeSb -ArgumentList @($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $TaniumInstalledSrc, $dodRootSrc) -ErrorAction Stop
     } catch {
         $r.Status = 'ERROR'; $r.Detail = "Probe: $($_.Exception.Message)"
         Remove-PSSession $sess -ErrorAction SilentlyContinue
@@ -2860,6 +2915,62 @@ function Resolve-C2cCertBundleFolder {
     return @{ Folder = ''; Source = '' }
 }
 
+# --- PkiRoots expected-anchor derivation (certdeploy parity, v1.17.0) --------
+# The PkiRoots scan check compares LocalMachine\Root against a REQUIRED thumbprint
+# set. That set came ONLY from the baseline's dodRootThumbprints, which ships EMPTY -
+# so on a stock install the check emitted EXT "configure this in c2c-baseline.json"
+# and never produced a verdict, while certdeploy's read-only check already computed
+# the ACCURATE missing-anchor set from the SHIPPED bundle (Packages\DoD-Certs).
+#
+# This derives the same answer HERE. The logic is COPIED from certdeploy's bundle
+# read (Get-C2cCertBundle is itself that copy) - cross-module import is not this
+# repo's pattern: duplication across modules is by DESIGN, divergence is the defect.
+#
+# Only the bundle's ROOT group is used. root\*.cer + loose *.cer are the certs
+# certdeploy pushes into the LocalMachine\Root store, which is the ONLY store the
+# PkiRoots check reads; the Intermediate\ group lands in \CA and the Untrusted\
+# group in \Disallowed, so counting either here would manufacture a FALSE FAIL.
+# Expired anchors are already dropped by Get-C2cCertBundle (a dead trust anchor is
+# never pushed, so it must never be required either) EXCEPT the four allowlisted
+# legacy intermediates - which live in the CA group and so are out of scope here.
+#
+# Returns @{ Ok; Thumbprints; Source; Error }. Ok=$false means DO NOT SCORE: the
+# caller leaves the baseline empty and the check keeps its EXT behaviour. A bundle
+# we could not read must NEVER become a PASS.
+function Get-C2cBundleRootThumbprints {
+    param([string]$Folder = '')
+    $out = @{ Ok = $false; Thumbprints = @(); Source = ''; Error = '' }
+    $resolved = $null
+    try { $resolved = Resolve-C2cCertBundleFolder $Folder } catch { $resolved = $null }
+    $f = if ($resolved) { [string]$resolved.Folder } else { '' }
+    if (-not $f) {
+        $out.Error = 'no DoD trust bundle available (Packages\DoD-Certs missing or holds no .cer)'
+        return $out
+    }
+    $bundle = $null
+    try { $bundle = Get-C2cCertBundle -Folder $f } catch { $bundle = $null }
+    if (-not $bundle) { $out.Error = "trust bundle unreadable at $f"; return $out }
+    if (-not $bundle.Ok) {
+        $be = [string]$bundle.Error; if (-not $be) { $be = 'unknown bundle error' }
+        $out.Error = "trust bundle unusable at ${f}: $be"
+        return $out
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $tps  = New-Object System.Collections.ArrayList
+    foreach ($c in @($bundle.Root)) {
+        $t = (([string]$c.Thumbprint) -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+        if ($t -and $seen.Add($t)) { [void]$tps.Add($t) }
+    }
+    if ($tps.Count -eq 0) {
+        $out.Error = "trust bundle at $f carries no usable (non-expired) Root anchors"
+        return $out
+    }
+    $out.Thumbprints = @($tps.ToArray())
+    $out.Source = "derived from the $([string]$resolved.Source) DoD trust bundle ($f): $($tps.Count) Root anchor(s)"
+    $out.Ok = $true
+    return $out
+}
+
 # --- Offline Defender definition package (Defender-ScanFix v2.1 LAST rung) -------
 # The operator stages Microsoft's full offline installer (mpam-fe.exe) in
 # Packages\DefenderDefinitions (shipped EMPTY apart from a README - the folder is the
@@ -3634,6 +3745,585 @@ function Invoke-C2cVersionCheckAction {
     return @{ rows=@($rows); summary=@{ total=$targets.Count; upToDate=$counts['UP TO DATE']; outdated=$counts['OUTDATED']; newer=$counts['NEWER']; installed=$counts['INSTALLED']; notInstalled=$counts['NOT INSTALLED']; dnsMismatch=$counts['DNS MISMATCH']; offline=$counts['OFFLINE'] } }
 }
 
+# =============================================================================
+#  BitLocker escrow audit (READ-ONLY) - action 'audit-encryption', v1.17.0
+#
+#  WHY: "escrow-first, fail-closed" only ever bound volumes JANET CHANGES. A volume
+#  already On short-circuits to ALREADY ENCRYPTED in the Encryption fixer and its key
+#  protectors are never enumerated, so the whole installed base - every box encrypted
+#  by MECM, by imaging, or by a tech before this tool existed - has never been checked
+#  for an AD-side recovery key. A TPM-ONLY volume with no escrowed key hits the
+#  recovery prompt on the next firmware/boot-config change with NO KEY TO TYPE.
+#
+#  THE ONE NON-NEGOTIABLE: the recovery PASSWORD must never reach a row, a log line, a
+#  summary field or the exported CSV. Endpoint-side only KeyProtectorType and the
+#  KeyProtectorId GUID are copied out of a KeyProtector (never .RecoveryPassword);
+#  AD-side PropertiesToLoad is msFVE-RecoveryGuid / whenCreated / name and NEVER
+#  msFVE-RecoveryPassword. A fix for a key-visibility gap must not itself leak keys.
+# =============================================================================
+
+# --- Endpoint probe source (dot-sourced at module scope so it is unit-testable, and
+#     shipped as a STRING into the remote runspace like $script:C2cTaniumInstalledSrc). -
+$script:C2cEscrowProbeSrc = @'
+function Get-C2cEscrowFacts {
+    # READ-ONLY. Runs ON the target inside ONE consolidated Invoke-Command.
+    $out = [pscustomobject]@{ RemoteName=[string]$env:COMPUTERNAME; Volumes=@(); VolErr=''; Tpm=''; TpmErr='' }
+    if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
+        $out.VolErr = 'Get-BitLockerVolume unavailable on the target (BitLocker module absent) - key protectors could NOT be enumerated'
+        return $out
+    }
+    # FIXED volumes ONLY. Removable / BitLocker To Go / network / optical are never read.
+    # Byte-for-byte the filter the Encryption scan pillar uses (Get-Volume DriveType Fixed,
+    # else Win32_Volume DriveType=3), so the two surfaces can never disagree about scope.
+    $fixedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $haveFixedSrc = $false
+    try {
+        if (Get-Command Get-Volume -ErrorAction SilentlyContinue) {
+            foreach ($v in @(Get-Volume -ErrorAction Stop)) {
+                if (([string]$v.DriveType -eq 'Fixed') -and [string]$v.DriveLetter) { [void]$fixedSet.Add((([string]$v.DriveLetter).Substring(0,1) + ':')) }
+            }
+            $haveFixedSrc = $true
+        }
+    } catch {}
+    if (-not $haveFixedSrc) {
+        try {
+            foreach ($v in @(Get-CimInstance -ClassName Win32_Volume -ErrorAction Stop)) {
+                if (([int]$v.DriveType -eq 3) -and [string]$v.DriveLetter) { [void]$fixedSet.Add((([string]$v.DriveLetter).Substring(0,1) + ':')) }
+            }
+            $haveFixedSrc = $true
+        } catch {}
+    }
+    $allBl = @()
+    try { $allBl = @(Get-BitLockerVolume -ErrorAction Stop) }
+    catch { $out.VolErr = "Get-BitLockerVolume failed: $($_.Exception.Message)"; return $out }
+    $fixedVols = New-Object System.Collections.ArrayList
+    foreach ($b in $allBl) {
+        $mpB = ([string]$b.MountPoint).TrimEnd('\')
+        $isLetter = ($mpB -match '^[A-Za-z]:$')
+        if ([string]$b.VolumeType -eq 'OperatingSystem') { [void]$fixedVols.Add($b); continue }
+        if (-not $isLetter) { continue }                       # letterless (EFI/recovery) - skip
+        if ($haveFixedSrc -and $fixedSet.Contains($mpB)) { [void]$fixedVols.Add($b) }
+    }
+    if ($fixedVols.Count -eq 0) {
+        $blSys = $null
+        try { $blSys = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop } catch {}
+        if ($blSys) { [void]$fixedVols.Add($blSys) }
+    }
+    if ($fixedVols.Count -eq 0) { $out.VolErr = 'no FIXED BitLocker volume could be enumerated'; return $out }
+
+    $recs = New-Object System.Collections.ArrayList
+    foreach ($b in $fixedVols) {
+        $mp = ([string]$b.MountPoint).TrimEnd('\'); if (-not $mp) { $mp = '(no letter)' }
+        $types = New-Object System.Collections.ArrayList
+        $ids   = New-Object System.Collections.ArrayList
+        $kpErr = ''
+        try {
+            # A KeyProtector object CARRIES a .RecoveryPassword. It is never touched here:
+            # only .KeyProtectorType and the .KeyProtectorId GUID are copied out. Any other
+            # read of this collection would put a recovery key on the wire.
+            $kps = @($b.KeyProtector)
+            foreach ($kp in $kps) {
+                $t = [string]$kp.KeyProtectorType
+                if ($t) { [void]$types.Add($t) }
+                if ($t -match '(?i)RecoveryPassword') {
+                    $kid = [string]$kp.KeyProtectorId
+                    if ($kid) { [void]$ids.Add($kid) }
+                }
+            }
+        } catch { $kpErr = "key protectors unreadable: $($_.Exception.Message)" }
+        [void]$recs.Add([pscustomobject]@{
+            MountPoint        = $mp
+            VolumeType        = [string]$b.VolumeType
+            ProtectionStatus  = [string]$b.ProtectionStatus
+            VolumeStatus      = [string]$b.VolumeStatus
+            EncryptionMethod  = [string]$b.EncryptionMethod
+            KeyProtectorTypes = @($types.ToArray())
+            RecoveryIds       = @($ids.ToArray())
+            Err               = $kpErr
+        })
+    }
+    $out.Volumes = @($recs.ToArray())
+
+    try {
+        if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
+            $t = Get-Tpm -ErrorAction Stop
+            $out.Tpm = "Present=$([bool]$t.TpmPresent) Ready=$([bool]$t.TpmReady) Owned=$([bool]$t.TpmOwned)"
+        } else { $out.TpmErr = 'Get-Tpm unavailable on the target' }
+    } catch { $out.TpmErr = [string]$_.Exception.Message }
+    return $out
+}
+'@
+try { . ([scriptblock]::Create($script:C2cEscrowProbeSrc)) } catch {}
+
+# --- Pure verdict engine (dot-sourced at module scope AND injected into the pool
+#     runspace, which has no module scope - the $C2cVerdictSrc idiom). ------------
+$script:C2cEscrowVerdictSrc = @'
+# Normalize a protector id / AD recovery GUID to a bare lower-case GUID string, so
+# "{4E9E...}" from the endpoint and the AD octet-string GUID compare equal.
+function ConvertTo-C2cEscrowGuid {
+    param($Value)
+    $s = ([string]$Value).Trim().Trim('{','}').Trim()
+    if ($s -match '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$') { return $s.ToLowerInvariant() }
+    return ''
+}
+
+# Severity ladder for the host rollup - WORST wins. TPM-ONLY is the most actionable
+# (definite: no recovery protector exists at all, so no AD answer can change it), then
+# NOT ESCROWED (a key exists but the directory does not have it). ESCROW UNKNOWN sits
+# ABOVE ESCROWED (AD) so a host we could not fully read can never roll up green.
+function Get-C2cEscrowRank {
+    param([string]$Verdict)
+    switch ([string]$Verdict) {
+        'TPM-ONLY - LOCKOUT RISK' { return 5 }
+        'NOT ESCROWED'            { return 4 }
+        'ESCROW UNKNOWN'          { return 3 }
+        'ESCROWED (AD)'           { return 2 }
+        'NOT ENCRYPTED'           { return 1 }
+    }
+    return 3
+}
+
+# PURE per-volume verdict. $Vol = { MountPoint; ProtectionStatus; VolumeStatus;
+# EncryptionMethod; KeyProtectorTypes[]; RecoveryIds[]; Err }. $AdGuids = the AD
+# msFVE-RecoveryGuid set; $AdOk=$false means the directory side could NOT be read.
+# Emits ONLY a verdict + a detail built from GUIDs and status words - never a key.
+function Get-C2cVolumeEscrowVerdict {
+    param($Vol, [string[]]$AdGuids = @(), [bool]$AdOk = $false, [string]$AdError = '')
+    $mp = [string]$Vol.MountPoint; if (-not $mp) { $mp = '(no letter)' }
+    $ps = [string]$Vol.ProtectionStatus
+    $vs = [string]$Vol.VolumeStatus
+    $em = [string]$Vol.EncryptionMethod
+    $stateTxt = "$ps/$vs" + $(if ($em) { " $em" } else { '' })
+
+    # FAIL CLOSED: a protector list we could not read tells us nothing about escrow.
+    if ([string]$Vol.Err) {
+        return [pscustomobject]@{ MountPoint=$mp; Verdict='ESCROW UNKNOWN'; Detail="$mp $stateTxt - $([string]$Vol.Err)" }
+    }
+    $encrypted = ($ps -eq 'On') -or ($vs -match '(?i)FullyEncrypted|EncryptionInProgress')
+    if (-not $encrypted) {
+        return [pscustomobject]@{ MountPoint=$mp; Verdict='NOT ENCRYPTED'; Detail="$mp $stateTxt - no BitLocker protection to escrow" }
+    }
+    $types = @(@($Vol.KeyProtectorTypes) | ForEach-Object { [string]$_ } | Where-Object { $_ })
+    $ids   = @(@($Vol.RecoveryIds) | ForEach-Object { ConvertTo-C2cEscrowGuid $_ } | Where-Object { $_ })
+    $typeTxt = if ($types.Count -gt 0) { $types -join ',' } else { '(none)' }
+
+    if ($ids.Count -eq 0) {
+        if ($types.Count -eq 0) {
+            # Encrypted with NO readable protector at all - we cannot claim TPM-only either.
+            return [pscustomobject]@{ MountPoint=$mp; Verdict='ESCROW UNKNOWN'; Detail="$mp $stateTxt - encrypted but NO key protectors were returned (insufficient rights or a policy block); escrow NOT determined" }
+        }
+        return [pscustomobject]@{ MountPoint=$mp; Verdict='TPM-ONLY - LOCKOUT RISK'; Detail="$mp $stateTxt - protectors [$typeTxt] include NO RecoveryPassword: there is no recovery key to type at the prompt after a firmware/boot-config change" }
+    }
+    if (-not $AdOk) {
+        $why = if ($AdError) { $AdError } else { 'AD escrow not read' }
+        return [pscustomobject]@{ MountPoint=$mp; Verdict='ESCROW UNKNOWN'; Detail="$mp $stateTxt - $($ids.Count) RecoveryPassword protector(s) [$($ids -join ', ')] but the AD escrow could not be read: $why" }
+    }
+    $adSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($g in @($AdGuids)) { $n = ConvertTo-C2cEscrowGuid $g; if ($n) { [void]$adSet.Add($n) } }
+    $hit = New-Object System.Collections.ArrayList
+    foreach ($i in $ids) { if ($adSet.Contains($i)) { [void]$hit.Add($i) } }
+    if ($hit.Count -gt 0) {
+        return [pscustomobject]@{ MountPoint=$mp; Verdict='ESCROWED (AD)'; Detail="$mp $stateTxt - $($hit.Count) of $($ids.Count) RecoveryPassword protector(s) found in AD (msFVE-RecoveryGuid $($hit -join ', '))" }
+    }
+    return [pscustomobject]@{ MountPoint=$mp; Verdict='NOT ESCROWED'; Detail="$mp $stateTxt - $($ids.Count) RecoveryPassword protector(s) [$($ids -join ', ')] but NONE match any msFVE-RecoveryInformation object under the computer in AD" }
+}
+
+# PURE host rollup. Returns the display row fields + the per-volume report streamed to
+# the activity log. NOTHING here can carry a recovery password: every field is built
+# from mount points, status words and GUIDs.
+function Get-C2cEscrowHostResult {
+    param($Volumes, [string]$VolErr = '', [string[]]$AdGuids = @(), [bool]$AdOk = $false,
+          [string]$AdError = '', [string]$Tpm = '', [string]$TpmErr = '', [int]$AdObjectCount = 0)
+    $tpmTxt = if ($Tpm) { $Tpm } elseif ($TpmErr) { "unknown ($TpmErr)" } else { 'unknown' }
+    if ($VolErr) {
+        return @{ Status='ESCROW UNKNOWN'; Volumes=0; Escrowed='0/0'; Tpm=$tpmTxt; PerVolume=@()
+                  Detail="fixed volumes could not be enumerated: $VolErr"
+                  Report="[ESCROW UNKNOWN] $VolErr" }
+    }
+    # An EMPTY collection can cross the WinRM ArgumentList/return boundary as $null, and
+    # @($null) is a ONE-element array holding $null. Left in, that stray element would be
+    # read as a blank volume -> "NOT ENCRYPTED" (fail OPEN) for a host whose volumes were
+    # never actually returned. Drop nulls so an empty set lands on ESCROW UNKNOWN below.
+    $vols = @(@($Volumes) | Where-Object { $null -ne $_ })
+    if ($vols.Count -eq 0) {
+        return @{ Status='ESCROW UNKNOWN'; Volumes=0; Escrowed='0/0'; Tpm=$tpmTxt; PerVolume=@()
+                  Detail='no FIXED volume was returned by the probe - escrow NOT determined'
+                  Report='[ESCROW UNKNOWN] no FIXED volume returned by the probe' }
+    }
+    $per = New-Object System.Collections.ArrayList
+    foreach ($v in $vols) { [void]$per.Add((Get-C2cVolumeEscrowVerdict -Vol $v -AdGuids $AdGuids -AdOk $AdOk -AdError $AdError)) }
+    $worst = 'NOT ENCRYPTED'; $worstRank = 0
+    foreach ($p in $per) {
+        $rk = Get-C2cEscrowRank ([string]$p.Verdict)
+        if ($rk -gt $worstRank) { $worstRank = $rk; $worst = [string]$p.Verdict }
+    }
+    $encVols = @($per | Where-Object { [string]$_.Verdict -ne 'NOT ENCRYPTED' })
+    $escVols = @($per | Where-Object { [string]$_.Verdict -eq 'ESCROWED (AD)' })
+    $adTxt = if ($AdOk) { "AD escrow objects: $AdObjectCount" } else { "AD escrow UNREADABLE ($AdError)" }
+    $lines = New-Object System.Collections.ArrayList
+    foreach ($p in $per) { [void]$lines.Add("[$([string]$p.Verdict)] $([string]$p.Detail)") }
+    [void]$lines.Add("[INFO] TPM: $tpmTxt | $adTxt")
+    return @{
+        Status    = $worst
+        Volumes   = $vols.Count
+        Escrowed  = "$($escVols.Count)/$($encVols.Count)"
+        Tpm       = $tpmTxt
+        PerVolume = @($per.ToArray())
+        Detail    = (@($per | ForEach-Object { "$([string]$_.MountPoint) $([string]$_.Verdict)" }) -join '; ') + " | $adTxt"
+        Report    = ($lines -join "`n")
+    }
+}
+'@
+try { . ([scriptblock]::Create($script:C2cEscrowVerdictSrc)) } catch {}
+
+# --- AD side: ONE DirectorySearcher per computer -----------------------------
+# Searcher hygiene COPIED from JanetWeb.adsearch.psm1 (ReferralChasing None so a
+# directory-returned external referral is never auto-followed; ServerTimeLimit +
+# ClientTimeout so a wedged DC cannot block FindAll forever; every IDisposable
+# closed in a finally). Duplication across modules is by design in this repo.
+#
+# PropertiesToLoad is msFVE-RecoveryGuid / whenCreated / name and NEVER
+# msFVE-RecoveryPassword - the audit reconciles GUIDs, it never fetches a key.
+#
+# FAIL CLOSED: any bind/search failure, an ACL-denied read, or a computer object that
+# is not in the directory returns Ok=$false. The caller must then report ESCROW
+# UNKNOWN for the host - never ESCROWED.
+$script:C2cEscrowAdSrc = @'
+function Get-C2cAdEscrowInfo {
+    param(
+        [string]$ComputerName,
+        $Cred,
+        [scriptblock]$SearcherFactory   # param($Path) -> DirectorySearcher (injectable for tests)
+    )
+    $out = @{ Ok = $false; Guids = @(); Dn = ''; Count = 0; Error = '' }
+    $short = ([string]$ComputerName).Trim()
+    if ($short -match '^\d{1,3}(\.\d{1,3}){3}$') { $out.Error = 'IP-literal target has no AD computer object to search'; return $out }
+    $short = ($short -split '\.')[0]
+    if (-not $short) { $out.Error = 'no host name to resolve in AD'; return $out }
+
+    # RFC-4515 escaping (copied from adsearch's Escape-LdapFilterValue) - the name is
+    # operator-typed, so it never goes into a filter raw.
+    $esc = ([string]$short) -replace '\\', '\5c'
+    $esc = $esc -replace '\*', '\2a'
+    $esc = $esc -replace '\(', '\28'
+    $esc = $esc -replace '\)', '\29'
+    $esc = $esc -replace "`0", '\00'
+
+    if (-not $SearcherFactory) {
+        $SearcherFactory = {
+            param([string]$Path)
+            $entry = $null
+            $hasCred = ($null -ne $Cred -and $Cred -is [System.Management.Automation.PSCredential])
+            if ($hasCred) {
+                $u = $Cred.UserName; $p = $Cred.GetNetworkCredential().Password
+                if ([string]::IsNullOrEmpty($Path)) {
+                    $rd  = New-Object System.DirectoryServices.DirectoryEntry('LDAP://RootDSE', $u, $p)
+                    $dnc = "$($rd.Properties['defaultNamingContext'].Value)"
+                    if ($dnc -eq '') { $dnc = "$($rd.defaultNamingContext)" }
+                    $entry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$dnc", $u, $p)
+                } else {
+                    $entry = New-Object System.DirectoryServices.DirectoryEntry($Path, $u, $p)
+                }
+            } else {
+                if ([string]::IsNullOrEmpty($Path)) { $entry = [ADSI]'' } else { $entry = [ADSI]$Path }
+            }
+            return (New-Object System.DirectoryServices.DirectorySearcher $entry)
+        }.GetNewClosure()
+    }
+
+    # ---- 1. Resolve the computer DN (one searcher, disposed in a finally). ----
+    $s1 = $null; $c1 = $null
+    try {
+        $s1 = & $SearcherFactory ''
+        try { $s1.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None } catch {}
+        try { $s1.ServerTimeLimit = [TimeSpan]::FromSeconds(90)  } catch {}
+        try { $s1.ClientTimeout   = [TimeSpan]::FromSeconds(120) } catch {}
+        try { $s1.SizeLimit = 5 } catch {}
+        $s1.Filter = "(&(objectCategory=computer)(|(cn=$esc)(sAMAccountName=$esc`$)(dNSHostName=$esc.*)))"
+        try { $s1.PropertiesToLoad.Clear() } catch {}
+        try { [void]$s1.PropertiesToLoad.Add('distinguishedName') } catch {}
+        $c1 = $s1.FindAll()
+        foreach ($hit in $c1) {
+            $dn = ''
+            try { $dn = [string]$hit.Properties['distinguishedname'][0] } catch { $dn = '' }
+            if (-not $dn) { try { $dn = ([string]$hit.Path) -replace '^LDAP://[^/]*/', '' } catch { $dn = '' } }
+            if ($dn) { $out.Dn = $dn; break }
+        }
+    } catch {
+        $out.Error = "AD computer lookup failed: $($_.Exception.Message)"
+        try { if ($c1) { $c1.Dispose() } } catch {}
+        try { if ($s1) { $s1.Dispose() } } catch {}
+        return $out
+    } finally {
+        try { if ($c1) { $c1.Dispose() } } catch {}
+        try { if ($s1) { $s1.Dispose() } } catch {}
+    }
+    if (-not $out.Dn) { $out.Error = "computer object '$short' not found in AD - escrow cannot be confirmed"; return $out }
+
+    # ---- 2. Enumerate the msFVE-RecoveryInformation children of that computer. ----
+    # A DN may legally contain '/', which ADSI reads as a path separator in an LDAP://
+    # URL - escape it. The DN came from the directory itself, never operator input.
+    $s2 = $null; $c2 = $null
+    $guids = New-Object System.Collections.ArrayList
+    try {
+        $s2 = & $SearcherFactory ('LDAP://' + (([string]$out.Dn) -replace '/', '\/'))
+        try { $s2.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None } catch {}
+        try { $s2.ServerTimeLimit = [TimeSpan]::FromSeconds(90)  } catch {}
+        try { $s2.ClientTimeout   = [TimeSpan]::FromSeconds(120) } catch {}
+        try { $s2.SearchScope = [System.DirectoryServices.SearchScope]::OneLevel } catch {}
+        try { $s2.PageSize = 500 } catch {}
+        $s2.Filter = '(objectClass=msFVE-RecoveryInformation)'
+        try { $s2.PropertiesToLoad.Clear() } catch {}
+        # NEVER 'msFVE-RecoveryPassword'. Loading it would put recovery keys in memory
+        # one careless ConvertTo-Json away from a row, a log line or the audit CSV.
+        foreach ($a in @('msFVE-RecoveryGuid', 'whenCreated', 'name')) {
+            try { [void]$s2.PropertiesToLoad.Add($a) } catch {}
+        }
+        $c2 = $s2.FindAll()
+        foreach ($hit in $c2) {
+            $g = ''
+            try {
+                $key = $null
+                foreach ($k in $hit.Properties.PropertyNames) { if ("$k" -ieq 'msfve-recoveryguid') { $key = "$k"; break } }
+                if ($key) {
+                    $raw = $hit.Properties[$key][0]
+                    if ($raw -is [byte[]]) { $g = (New-Object System.Guid (,[byte[]]$raw)).ToString() }
+                    else { $g = [string]$raw }
+                }
+            } catch { $g = '' }
+            if (-not $g) {
+                # Fall back to the object name, which is '<timestamp>{<guid>}'.
+                try {
+                    $nm = ''
+                    foreach ($k in $hit.Properties.PropertyNames) { if ("$k" -ieq 'name') { $nm = [string]$hit.Properties[$k][0]; break } }
+                    if ($nm -match '\{([0-9A-Fa-f-]{36})\}') { $g = $Matches[1] }
+                } catch {}
+            }
+            if ($g) { [void]$guids.Add($g) }
+        }
+    } catch {
+        $out.Error = "AD msFVE-RecoveryInformation search failed (ACL-denied or directory error): $($_.Exception.Message)"
+        try { if ($c2) { $c2.Dispose() } } catch {}
+        try { if ($s2) { $s2.Dispose() } } catch {}
+        return $out
+    } finally {
+        try { if ($c2) { $c2.Dispose() } } catch {}
+        try { if ($s2) { $s2.Dispose() } } catch {}
+    }
+    $out.Guids = @($guids.ToArray())
+    $out.Count = $guids.Count
+    $out.Ok    = $true
+    return $out
+}
+'@
+try { . ([scriptblock]::Create($script:C2cEscrowAdSrc)) } catch {}
+
+# --- Per-host worker (pool runspace; NO module scope) -------------------------
+$script:C2cEscrowAuditBlock = {
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$ProbeSrc, [string]$VerdictSrc, [string]$AdSrc)
+
+    $r = @{ Host=$Computer; Ping=''; Volumes=''; Escrowed=''; Tpm=''; Status=''; Detail=''; Ok=$false; Report='' }
+    if ($VerdictSrc) { try { . ([scriptblock]::Create($VerdictSrc)) } catch {} }
+    if ($AdSrc)      { try { . ([scriptblock]::Create($AdSrc)) } catch {} }
+    if (-not (Get-Command Get-C2cEscrowHostResult -ErrorAction SilentlyContinue)) {
+        $r.Status = 'ESCROW UNKNOWN'; $r.Detail = 'verdict helper unavailable in the worker runspace'; return $r
+    }
+
+    # Reachability: pure-TCP (AFNET-safe; ICMP is GPO-blocked so Test-Connection is never
+    # used). WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445, 1.5s, break on connect.
+    $reachable = $false; $useSsl = $false
+    foreach ($port in 5985,5986,445) {
+        $tc = $null
+        try {
+            $tc = New-Object System.Net.Sockets.TcpClient
+            $iar = $tc.BeginConnect($Computer, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $reachable = $true; $r.Ping = "TCP $port"; if ($port -eq 5986) { $useSsl = $true } }
+        } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+        if ($reachable) { break }
+    }
+    if (-not $reachable) {
+        $r.Ping = 'Unreachable'
+        if (-not $AttemptOffline) {
+            $r.Status = 'OFFLINE'; $r.Detail = 'No TCP on 5985/5986/445 (1.5s timeouts). Enable "Attempt even if offline" to force.'
+            return $r
+        }
+    }
+
+    $soP = @{ OperationTimeout=180000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=60000 }
+    if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
+    $wsOpt = New-PSSessionOption @soP
+    $splat = @{ ComputerName=$Computer; SessionOption=$wsOpt; ErrorAction='Stop' }
+    if ($useSsl) { $splat['UseSSL']=$true }
+    if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
+    $sess = $null
+    try { $sess = New-PSSession @splat }
+    catch { $r.Status = 'ESCROW UNKNOWN'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
+
+    # ONE consolidated read-only round-trip.
+    $auditSb = {
+        param([string]$ProbeSrc)
+        if ($ProbeSrc) { try { . ([scriptblock]::Create($ProbeSrc)) } catch {} }
+        if (-not (Get-Command Get-C2cEscrowFacts -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ RemoteName=[string]$env:COMPUTERNAME; Volumes=@(); VolErr='escrow probe helper unavailable on target (WDAC / constrained language?)'; Tpm=''; TpmErr='' }
+        }
+        return (Get-C2cEscrowFacts)
+    }
+    $facts = $null
+    try { $facts = Invoke-Command -Session $sess -ScriptBlock $auditSb -ArgumentList $ProbeSrc -ErrorAction Stop }
+    catch {
+        $r.Status = 'ESCROW UNKNOWN'; $r.Detail = "Probe: $($_.Exception.Message)"
+        Remove-PSSession $sess -ErrorAction SilentlyContinue
+        return $r
+    } finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
+    if ($null -eq $facts) { $r.Status = 'ESCROW UNKNOWN'; $r.Detail = 'probe returned no result'; return $r }
+
+    # Wrong-box guard (read-only, so a soft skip): reporting the WRONG machine's escrow
+    # state is worse than reporting none. IP literals have no name to compare.
+    $actualName  = ([string]$facts.RemoteName).Trim()
+    $targetShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
+    if ($targetShort -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+        $r.Status = 'ESCROW UNKNOWN'
+        $r.Detail = "DNS MISMATCH: dialed '$targetShort' but remote is '$actualName' - soft-skipped, nothing reported"
+        return $r
+    }
+
+    # AD side: ONE DirectorySearcher per computer. Any failure stays fail-closed.
+    $ad = @{ Ok=$false; Guids=@(); Count=0; Error='AD escrow lookup helper unavailable' }
+    if (Get-Command Get-C2cAdEscrowInfo -ErrorAction SilentlyContinue) {
+        try { $ad = Get-C2cAdEscrowInfo -ComputerName $Computer -Cred $Cred }
+        catch { $ad = @{ Ok=$false; Guids=@(); Count=0; Error="AD escrow lookup threw: $($_.Exception.Message)" } }
+    }
+
+    $res = Get-C2cEscrowHostResult -Volumes @($facts.Volumes) -VolErr ([string]$facts.VolErr) `
+            -AdGuids @($ad.Guids) -AdOk ([bool]$ad.Ok) -AdError ([string]$ad.Error) `
+            -Tpm ([string]$facts.Tpm) -TpmErr ([string]$facts.TpmErr) -AdObjectCount ([int]$ad.Count)
+    $r.Status   = [string]$res.Status
+    $r.Volumes  = [string]$res.Volumes
+    $r.Escrowed = [string]$res.Escrowed
+    $r.Tpm      = [string]$res.Tpm
+    $r.Detail   = [string]$res.Detail
+    $r.Report   = [string]$res.Report
+    $r.Ok       = ($r.Status -eq 'ESCROWED (AD)' -or $r.Status -eq 'NOT ENCRYPTED')
+    return $r
+}
+
+# --- Action: audit-encryption (READ-ONLY) ------------------------------------
+function Invoke-C2cEncryptionAuditAction {
+    param([hashtable]$Params, [System.Management.Automation.PSCredential]$Credential, [scriptblock]$Emit, [scriptblock]$CancelCheck)
+    $send = { param($e) if ($Emit) { & $Emit $e } }
+
+    $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+    if ($targets.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text='No valid targets.' }
+        return @{ rows=@(); summary=@{ total=0 } }
+    }
+    $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
+    $threads = 16
+    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    $threads = [Math]::Max(1, [Math]::Min(32, $threads))
+    $perHostTimeout = 200
+    $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
+    $authLabel = if ($Credential) { "as $($Credential.UserName)" } else { 'current session' }
+
+    & $send @{ type='status'; text="BitLocker escrow audit on $($targets.Count) host(s) with $threads thread(s)..." }
+    & $send @{ type='log'; level='info'; text="[$(Get-Date -Format 'HH:mm:ss')] START BitLocker escrow audit on $($targets.Count) host(s) ($authLabel), $threads thread(s). READ-ONLY - no key protector is added, removed or read for its password; msFVE-RecoveryPassword is never loaded from AD." }
+
+    $iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
+    $pool.Open()
+    foreach ($h in $targets) { & $send (@{ type='row' } + @{ Host=$h; Ping=''; Volumes=''; Escrowed=''; Tpm=''; Status='Queued'; Detail='waiting for a runspace...' }) }
+    $jobs = New-Object System.Collections.ArrayList
+    foreach ($h in $targets) {
+        $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+        [void]$ps.AddScript($script:C2cEscrowAuditBlock)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline)
+        [void]$ps.AddArgument($script:C2cEscrowProbeSrc); [void]$ps.AddArgument($script:C2cEscrowVerdictSrc); [void]$ps.AddArgument($script:C2cEscrowAdSrc)
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    $emitResult = {
+        param($res)
+        $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Volumes=[string]$res.Volumes; Escrowed=[string]$res.Escrowed; Tpm=[string]$res.Tpm; Status=[string]$res.Status; Detail=[string]$res.Detail }
+        [void]$rows.Add($row)
+        & $send (@{ type='row' } + $row)
+        $rpt = ''
+        try { $rpt = [string]$res.Report } catch { $rpt = '' }
+        if ($rpt) {
+            & $send @{ type='log'; level='info'; text="----- $([string]$res.Host) : $([string]$res.Status) -----" }
+            foreach ($ln in ($rpt -split "`r?`n")) {
+                if ([string]::IsNullOrWhiteSpace($ln)) { continue }
+                $lvl = 'info'
+                if     ($ln -match '^\s*\[ESCROWED \(AD\)\]')      { $lvl = 'ok' }
+                elseif ($ln -match '^\s*\[TPM-ONLY')               { $lvl = 'error' }
+                elseif ($ln -match '^\s*\[NOT ESCROWED\]')         { $lvl = 'error' }
+                elseif ($ln -match '^\s*\[ESCROW UNKNOWN\]')       { $lvl = 'warn' }
+                & $send @{ type='log'; level=$lvl; text=$ln }
+            }
+        }
+    }
+
+    $done = 0
+    try {
+        while ($done -lt $jobs.Count) {
+            $activeCount = @($jobs | Where-Object { $_.PS -and $_.StartedAt }).Count
+            foreach ($j in $jobs) {
+                if ($j.PS -and -not $j.StartedAt -and $activeCount -lt $pool.GetMaxRunspaces()) { $j.StartedAt = Get-Date; $activeCount++ }
+                if ($j.PS -and $j.Async.IsCompleted) {
+                    $res = $null
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
+                    catch { $res = @{ Host=$j.Host; Ping=''; Volumes=''; Escrowed=''; Tpm=''; Status='ESCROW UNKNOWN'; Detail="worker error: $($_.Exception.Message)"; Report='' } }
+                    try { $j.PS.Dispose() } catch {}; $j.PS = $null
+                    if ($null -eq $res) { $res = @{ Host=$j.Host; Ping=''; Volumes=''; Escrowed=''; Tpm=''; Status='ESCROW UNKNOWN'; Detail='worker returned no result'; Report='' } }
+                    & $emitResult $res
+                    $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                $nowPh = Get-Date
+                foreach ($j in $jobs) {
+                    if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
+                        try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                        & $emitResult @{ Host=$j.Host; Ping=''; Volumes=''; Escrowed=''; Tpm=''; Status='ESCROW UNKNOWN'; Detail="per-host timeout (${perHostTimeout}s) - possible remote read hang"; Report='' }
+                        $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                    }
+                }
+            }
+            if ($done -lt $jobs.Count) {
+                if ($CancelCheck -and (& $CancelCheck)) {
+                    foreach ($j in $jobs) {
+                        if ($j.PS) {
+                            try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
+                            & $emitResult @{ Host=$j.Host; Ping=''; Volumes=''; Escrowed=''; Tpm=''; Status='Cancelled'; Detail='cancelled by operator'; Report='' }
+                            $done++
+                        }
+                    }
+                    & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight escrow reads stopped.' }
+                    break
+                }
+                Start-Sleep -Milliseconds 150
+            }
+        }
+    } finally { try { $pool.Close(); $pool.Dispose() } catch {} }
+
+    # notEscrowed and unknown are bucketed SEPARATELY on purpose - they are different
+    # operator actions. NOT ESCROWED / TPM-ONLY = go escrow (or add) a recovery key.
+    # ESCROW UNKNOWN = go find out why the box or the directory could not be read.
+    $escrowed    = @($rows | Where-Object { $_.Status -eq 'ESCROWED (AD)' }).Count
+    $notEscrowed = @($rows | Where-Object { $_.Status -eq 'NOT ESCROWED' }).Count
+    $tpmOnly     = @($rows | Where-Object { $_.Status -eq 'TPM-ONLY - LOCKOUT RISK' }).Count
+    $unknown     = @($rows | Where-Object { $_.Status -eq 'ESCROW UNKNOWN' }).Count
+    $notEnc      = @($rows | Where-Object { $_.Status -eq 'NOT ENCRYPTED' }).Count
+    $offline     = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
+    $cancelled   = @($rows | Where-Object { $_.Status -eq 'Cancelled' }).Count
+    $other       = $targets.Count - $escrowed - $notEscrowed - $tpmOnly - $unknown - $notEnc - $offline - $cancelled
+
+    $lvl = if (($notEscrowed + $tpmOnly + $unknown) -gt 0) { 'warn' } else { 'ok' }
+    & $send @{ type='log'; level=$lvl; text="BitLocker escrow audit - ESCROWED (AD): $escrowed, NOT ESCROWED: $notEscrowed, TPM-ONLY (LOCKOUT RISK): $tpmOnly, ESCROW UNKNOWN: $unknown, NOT ENCRYPTED: $notEnc, OFFLINE: $offline$(if ($cancelled) { ", Cancelled: $cancelled" } else { '' })$(if ($other -gt 0) { ", Other: $other" } else { '' }) of $($targets.Count). NOT ESCROWED/TPM-ONLY = escrow a key; ESCROW UNKNOWN = find out why the read failed (never assume escrowed)." }
+    & $send @{ type='status'; text="Done. $escrowed escrowed, $notEscrowed not-escrowed, $tpmOnly tpm-only, $unknown unknown, $notEnc not-encrypted, $offline offline of $($targets.Count)." }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; escrowed=$escrowed; notEscrowed=$notEscrowed; tpmOnly=$tpmOnly; unknown=$unknown; notEncrypted=$notEnc; offline=$offline; cancelled=$cancelled; other=$other } }
+}
+
 function Invoke-JanetToolAction {
     param(
         [string]$ActionId,
@@ -3650,6 +4340,8 @@ function Invoke-JanetToolAction {
 
     if ($ActionId -eq 'import') { return (Invoke-C2cImportAction -Params $Params -Emit $Emit) }
     if ($ActionId -eq 'version-check') { return (Invoke-C2cVersionCheckAction -Params $Params -Credential $Credential -Emit $Emit) }
+    # v1.17.0 READ-ONLY escrow census. No arm gate and no confirm word - it changes nothing.
+    if ($ActionId -eq 'audit-encryption') { return (Invoke-C2cEncryptionAuditAction -Params $Params -Credential $Credential -Emit $Emit -CancelCheck $cancelCheck) }
     if ($ActionId -eq 'run-all' -or $script:C2cPillarByAction.ContainsKey($ActionId)) {
         return (Invoke-C2cFixAction -ActionId $ActionId -Params $Params -Credential $Credential -Emit $Emit)
     }
@@ -3664,6 +4356,25 @@ function Invoke-JanetToolAction {
     $config   = $baseline.Config
     # Inject the hardcoded TASKORD MDE Org ID (module scope here; the probe runspace has none).
     $config['mdeOrgId'] = $script:C2cMdeOrgId
+
+    # v1.17.0: PkiRoots derived-baseline fallback. An EXPLICITLY-CONFIGURED baseline always
+    # wins; only an EMPTY dodRootThumbprints falls back to the shipped bundle (which is what
+    # certdeploy's read-only check has always used). If nothing can be derived the array stays
+    # empty and the remote check keeps emitting EXT - a bundle we could not read is NEVER a PASS.
+    $dodRootSrc = ''
+    if (@($config['dodRootThumbprints']).Count -gt 0) {
+        $dodRootSrc = 'baseline dodRootThumbprints (operator-configured)'
+    } else {
+        $derivedRoots = Get-C2cBundleRootThumbprints ''
+        if ($derivedRoots.Ok) {
+            $config['dodRootThumbprints'] = @($derivedRoots.Thumbprints)
+            $dodRootSrc = [string]$derivedRoots.Source
+            & $send @{ type='log'; level='info'; text="PkiRoots: baseline dodRootThumbprints is empty - $dodRootSrc." }
+        } else {
+            & $send @{ type='log'; level='warn'; text="PkiRoots: baseline dodRootThumbprints is empty and no anchor set could be derived ($([string]$derivedRoots.Error)) - the check reports EXT (unscored), never a false PASS." }
+        }
+    }
+    $config['dodRootSource'] = $dodRootSrc
 
     # Targets: accept only bare host/IPv4 tokens; drop UNC/URL/junk before any WinRM call.
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
@@ -3790,7 +4501,7 @@ function Invoke-JanetToolAction {
 
     & $send @{ type='log'; level='ok'; text="C2C readiness - $pct% READY ($ready/$($targets.Count)). QUARANTINE RISK: $risk, NOT ATTESTING: $notAttest, CHECK ERRORS: $chkErr, OFFLINE: $offline, Other: $other. (EXT pillars Vuln/COAMS scored server-side.)" }
     & $send @{ type='status'; text="Done. $ready ready, $risk quarantine-risk, $notAttest not-attesting, $chkErr check-errors, $offline offline of $($targets.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; ready=$ready; risk=$risk; notAttesting=$notAttest; checkErrors=$chkErr; offline=$offline; other=$other; readyPct=$pct; source=$baseline.Source } }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; ready=$ready; risk=$risk; notAttesting=$notAttest; checkErrors=$chkErr; offline=$offline; other=$other; readyPct=$pct; source=$baseline.Source; pkiRootSource=$dodRootSrc } }
 }
 
 Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction

@@ -85,6 +85,25 @@
       history: '<b>Read-only</b> audit trail of every uninstall outcome (OK / WARN / FAIL / Skipped) from dry runs and live uninstalls - last 200 rows this session.'
     },
 
+    sysadmin: {
+      _overview: '<b>Read-only</b> WinRM fleet sweeps for the findings you are already on the box for - Local Admins, Cert Expiry, Reboot Pending. Each sweep fans one worker per host (TCP reachability &rarr; session &rarr; one read-only Invoke-Command) and <b>changes nothing</b>. Tick rows and use <b>Use hosts</b> to hand the result straight to the tool that fixes it.',
+      localadmin: '<b>Read-only</b>: the members of the local Administrators group per host, resolved by the well-known SID <b>S-1-5-32-544</b> (locale-independent). One row per host - Host / Online / Admins / AdminCount / Error. Changes nothing.',
+      certexpiry: '<b>Read-only</b>: certificates in <b>Cert:\\LocalMachine\\My</b> expiring within N days (default 90). One row <b>per certificate</b>; already-expired certs are included with a negative DaysLeft. Changes nothing - renewal is done elsewhere.',
+      rebootpending: '<b>Read-only</b>: reboot-pending per host from the three standard signals (Component Based Servicing, Windows Update RebootRequired, PendingFileRenameOperations). Tick the pending hosts and <b>Use hosts &rarr; Restart Scheduler</b> - it stages them there behind a Load banner; the reboot itself still arms in Restart Scheduler.'
+    },
+
+    patchlib: {
+      _overview: '<b>Read-only</b> offline patch-content library. Inventories what is already staged for air-gapped use (repo <b>Packages</b>, the work share when reachable, plus an optional extra folder) and cross-references it against the KBs you still need. <b>Touches no hosts</b> and needs no admin session.',
+      inventory: '<b>Read-only</b>: scan the content roots and list every staged item - PSADT package folder / MSI / MSU / CAB / EXE - with name, size, date and any KB id parsed from the filename. Add an <b>Extra content folder</b> (UNC or local) to include an operator stash.',
+      crossref: '<b>Read-only</b>: paste needed KBs / product names (and / or upload an ACAS CSV) and each is marked <b>ON HAND</b>, <b>MISSING</b>, or <b>UNKNOWN</b>. <b>UNKNOWN means a content root could not be scanned</b>, so this run cannot prove the item is absent - never read it as MISSING.'
+    },
+
+    kev: {
+      _overview: 'Cross-reference a machine ACAS / ARAD CVE export against the CISA <b>Known Exploited Vulnerabilities</b> catalog shipped inside JANET (<b>JanetLocal\\KevCatalog.txt</b>). <b>Read-only</b> to every machine - it touches no hosts. Only <b>Add to KEV</b> writes anything, and it writes to that local file.',
+      xref: '<b>Read-only</b>: paste or import the ARAD / ACAS CVE export and <b>Cross-Reference</b> it - every CVE that is ALSO on the KEV catalog is flagged (present AND known-exploited), and badged with its IAVA / bulletin id from JanetLocal\\IavmMap.csv. Double-click a CVE for Google / NVD / CVE.org / CISA KEV / IAVM lookups.',
+      catalog: 'View every CVE currently in the KEV catalog and where it loaded from. <b>Add to KEV</b> appends validated, de-duped CVEs and <b>saves them to JanetLocal\\KevCatalog.txt</b> - a persisted write, so it needs an admin session (a plain Add / Cancel confirm; there is no typed confirm word). No machine is touched.'
+    },
+
     /* ---- single-flow tools (one box each) -------------------------------- */
 
     pkginstall: 'Stage a <b>PSADT package</b> (with Deploy-Application.ps1) or an <b>MSI bundle</b>, set Credentials (ADW cert), load <b>Targets</b>, pick the package, then <b>Deploy</b> - it copies to each host\'s C:\\Temp and installs silently. <b>Destructive</b>; test on one host first.',
@@ -92,6 +111,14 @@
     winupgrade: 'Pick an operation - <b>Pin</b> (hold at a feature version) / <b>Unpin</b> (remove the hold) / <b>Install CAB</b> (upgrade via DISM) - load <b>Targets</b>, tick <b>Dry-run</b> to preview, then <b>Run</b>. <b>Destructive</b>; Unpin before pushing a CAB past a pin.',
 
     message: 'Type a Title + Message, set the dismissal timeout (default 5 min, 0 = until clicked), load <b>Targets</b>, then <b>Send</b> a popup to every logged-on user. <b>Read-only</b> to the system; <b>Ping</b> first to see who is online.',
+
+    c2c: 'Load <b>Target Computers</b>, then <b>C2C Readiness Scan</b> (<b>Read-only</b>, 11 tiered checks, verdict READY / QUARANTINE RISK / NOT ATTESTING) or <b>Version Check</b> (<b>Read-only</b>). Every pillar card <b>Fix</b> button and <b>RUN ALL</b> are <b>Destructive</b>: they need a live admin session and the exact word <b>FIX</b> typed in the <b>Confirm</b> box, then an arming dialog. Import the Tanium C2C Compliance CSV to switch fixes to import-scoped (dials ONLY the flagged hosts); with no import the fixes dial exactly your Target Computers. Every fixer is verify-first - an already-compliant host reports NO CHANGE.',
+
+    adto: 'Set an OU / base-DN (blank = the whole domain) and <b>Scan</b> - <b>Read-only</b>, one row per AD object with COMPLIANT / NON-COMPLIANT + the exact reason and fix. <b>Fix Selected</b> applies the auto-remediable userAccountControl flips: <b>Destructive</b>, needs an admin session and the word <b>FIX</b> typed in Confirm. <b>IAO Validate</b> stamps TO-VALIDATED into the recert attribute: needs the word <b>VALIDATE</b> and is refused server-side unless you are on the baseline <b>iaoValidators</b> allow-list. Description / manager / SPN are never auto-guessed.',
+
+    certdeploy: 'Load <b>Targets</b> (or <b>Import C2C export</b> to load every PKI-tagged host), then <b>Check Trust Certs</b> - <b>Read-only</b>, reports which DoD/LTMA roots each host is missing per store. <b>Deploy Trust Certs</b> is <b>Destructive</b> (certificate stores): admin session + the word <b>DEPLOY</b> typed to confirm. Deploy is purely ADDITIVE - it adds only-missing thumbprints to LocalMachine Root/CA and <b>never removes</b>. Ticking <b>Also BLACKLIST the bundle Untrusted certs</b> (default OFF) additionally pushes them to <b>Disallowed</b>, which <b>DISTRUSTS them fleet-wide</b>. <b>Scan Cert Management</b> is <b>Read-only</b> - it tells you whether InstallRoot / GPO will reconcile a manual push away.',
+
+    winrmbridge: 'Stand up a <b>TEMPORARY, self-reverting</b> WinRM-over-HTTPS (5986) channel on hosts whose WinRM is GPO-blocked. <b>Check Bridge State</b> is <b>Read-only</b> and surfaces LEFTOVER / REVIEW hosts. <b>Enable WinRM Bridge</b> is <b>Destructive</b>: admin session + the word <b>ENABLE</b> typed in Confirm. <b>Revert WinRM Bridge (force)</b> is <b>Destructive</b>: type <b>REVERT</b>. Both bootstrap over DCOM (135/445), so the <b>service account needs local admin</b> on the targets. The bridge arms its own revert FIRST (after N minutes AND at every startup); GPO stays authoritative - this is a documented stopgap.',
 
     adsearch: 'Pick a <b>search mode</b> (Users / Computers / Groups / Org Boxes / Email / Manager / Bulk / Base Export / Last PC), fill the fields, and run. <b>Read-only</b> Active Directory queries - changes nothing; double-click a result for detail.',
 
@@ -1150,7 +1177,7 @@
   },
   "secureboot": {
     "overview": {
-      "what": "<b>Secure Boot Enabler</b> is a two-stage tool. Stage 1 is a READ-ONLY fleet SCAN (action 'scan-secure-boot', no host cap) that fans out one WinRM probe per host and derives a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so you know exactly which hosts are safe to harden. Stage 2 ENABLES UEFI Secure Boot on up to 50 targets via OEM WMI under SYSTEM context (a scheduled task) with a UEFI+GPT brick-safety precheck. A left TARGET MACHINES card feeds both stages; the SCAN SECURE BOOT (FLEET) card sits above the enable Settings, Action bar, and RESULTS grid.",
+      "what": "<b>Secure Boot Enabler</b> is a two-stage tool. Stage 1 is a READ-ONLY fleet SCAN (action 'scan-secure-boot', no host cap) that fans out one WinRM probe per host and derives a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, BLOCKED - LEGACY/MBR, and since v1.7.0 the two BitLocker pre-flight verdicts BLOCKED - BITLOCKER UNSUSPENDABLE and RISK - NO ESCROWED KEY - so you know exactly which hosts are safe to harden. The scan and the enable path now share ONE detection helper, so the scan can no longer say READY for a host the enable path will refuse. Stage 2 ENABLES UEFI Secure Boot on up to 50 targets via OEM WMI under SYSTEM context (a scheduled task) with a UEFI+GPT brick-safety precheck. A left TARGET MACHINES card feeds both stages; the SCAN SECURE BOOT (FLEET) card sits above the enable Settings, Action bar, and RESULTS grid.",
       "steps": [
         "SCAN FIRST: enter hostnames in TARGET MACHINES (no cap for the scan) and click SCAN SECURE BOOT (FLEET) - read-only, no admin session needed. Read the VERDICT column.",
         "Click 'Load READY-TO-ENABLE hosts -> Targets (N)' to fill the target list with just the hosts the enabler can harden (or Copy READY list / Export CSV). If N > 50, slice into waves.",
@@ -1168,7 +1195,7 @@
         "This is a firmware change (destructive) \u2014 targets are rebooted ONLY if the firmware write succeeds AND the tool detects a successful change (not automatic; manual reboot may be needed for full effect).",
         "BIOS password is required if the BIOS is password-protected; blank password works only if the BIOS has no password set (tool will ask for confirmation).",
         "The SCAN stage is read-only (no firmware write, no admin session, no host cap) - it just reports posture. Only the ENABLE stage changes firmware and is capped at 50 hosts per wave.",
-        "Scan verdicts: ENABLED (already on), READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo - safe to enable), OFF - UNSUPPORTED OEM (manual/desk-side), BLOCKED - LEGACY/MBR (run MBR2GPT or reimage first - do NOT feed to the enabler), CHECK ERROR / OFFLINE / DNS MISMATCH (host skipped).",
+        "Scan verdicts: ENABLED (already on), READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo - safe to enable), OFF - UNSUPPORTED OEM (manual/desk-side), BLOCKED - LEGACY/MBR (run MBR2GPT or reimage first - do NOT feed to the enabler), BLOCKED - BITLOCKER UNSUSPENDABLE (v1.7.0: BitLocker is on and cannot be suspended - the enable path would refuse this host at firmware-write time, so it is caught here instead), RISK - NO ESCROWED KEY (v1.7.0: protection is suspendable but no recovery-password protector is escrowed - a Secure Boot firmware write re-measures the boot PCRs, so this host can stop at the BitLocker recovery prompt with no key to type; check it with C2C > Audit Encryption first), CHECK ERROR / OFFLINE / DNS MISMATCH (host skipped).",
         "Max 50 hosts per ENABLE run (safety guard for firmware operations); the scan has no cap.",
         "Manufacturer detection is automatic (reads SMBIOS/DMI); the tool knows Dell, HP/Lenovo/Supermicro and can attempt generic WMI, but older/unknown OEMs may fail with 'Unsupported manufacturer'.",
         "Admin session (Set Credentials) is REQUIRED for real enable; Dry-run does not require credential.",
@@ -1232,6 +1259,288 @@
           "This is deliberately separate from the WPT App Updater 'Custom Command', which is scoped to the App Updater flow; Run Script is a general-purpose remote console."
         ],
         "flag": "destructive"
+      }
+    }
+  },
+  "c2c": {
+    "overview": {
+      "what": "<b>C2C Nemesis</b> predicts and remediates Comply-to-Connect (AFI/MPTO rule 3.B.2.B) quarantine. The <b>C2C Readiness Scan</b> is read-only: one consolidated WinRM probe per host runs 11 tiered checks - 5 QUARANTINE pillars (Firewall, AntiMalware, Patches, Encryption, Vuln), 2 AUDIT (PKI Trust Roots, OS Version), 3 INFO (AppWhitelist, Agents, COAMS) and Monitoring (ATTEST) - and returns READY / QUARANTINE RISK / NOT ATTESTING / CHECK ERRORS / OFFLINE. The <b>FIX PILLARS</b> panel is the destructive half: one card per fixable pillar (Monitoring, Firewall, Encryption, AntiMalware, Patches, PKI Trust Roots), plus opt-in utility fixes (Lockscreen / Wallpaper cache, Java cleanup) and a <b>RUN ALL</b> that fixes each host for exactly the pillars its card is checked under. Baseline is the editable JanetLocal\\c2c-baseline.json.",
+      "steps": [
+        "Load hosts into TARGET COMPUTERS (paste, Import TXT, a saved group, or a handoff banner from another tool).",
+        "Run C2C Readiness Scan (read-only, no admin session) to see which pillars fail where - or Version Check for an installed-product version census.",
+        "OPTIONAL but recommended before any Secure Boot or BIOS work: run AUDIT ENCRYPTION (v1.17.0, read-only, no admin session, no confirm word). The Readiness Scan's Encryption pillar PASSes any volume that is simply 'On'; this audit goes further and asks whether a recovery key actually EXISTS anywhere, reconciling each volume's key protectors against the AD msFVE-RecoveryInformation objects. Verdicts: ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED / OFFLINE. A TPM-only volume with no escrowed key will stop at the recovery prompt on the next firmware or Secure Boot change with no key to type in - and because the fixers book an already-encrypted volume as ALREADY ENCRYPTED without inspecting it, this audit is the only thing in the suite that looks. Recovery passwords are never read, emitted, logged or exported - only protector GUIDs.",
+        "OPTIONAL: Import the Tanium 'C2C Compliance Status' CSV. That switches fixes to IMPORT-SCOPED - each pillar card badges 'N flagged by import' and its Fix dials ONLY those hosts, never the whole target list. With no import the cards run in MANUAL mode against exactly your Target Computers.",
+        "Set Credentials and start an admin session - every Fix is server-side destructive and 403s without one.",
+        "Type FIX (exactly, uppercase) in the Confirm box. It arms every per-card Fix and RUN ALL; nothing runs without it.",
+        "Set Max concurrent (1-16) and, if you need them, the opt-in boxes: Attempt even if offline, and Recover WinRM via RPC.",
+        "Click a single pillar's Fix, or check several cards and click RUN ALL. Read the arming dialog - it restates the host count, the mode (MANUAL vs import-scoped), and any extra-risk opt-in you armed.",
+        "Watch the grid (Host / Ping / Status / Detail) and the colour-tagged activity log; export CSV when done."
+      ],
+      "patch": "Every fixer is <b>verify-first</b>: it re-reads the pillar and reports NO CHANGE on a host that is already compliant, so a re-run is safe. Each fix self-guards the JANET dispatcher host out of the run and HARD-aborts a host whose DNS resolves to a different box. Per pillar: Monitoring sets the Tanium client service Automatic + started (it never creates a missing service - that routes to Software Center); Firewall enables any disabled profile and re-reads all three; AntiMalware heals WinDefend/Sense and refreshes signatures through a source chain, and never forces Real-Time Protection on a Passive / EDR Block Mode box; Patches triggers the MECM software-updates scan + evaluation cycle; Encryption resumes suspended BitLocker and, ONLY when 'ENABLE BitLocker' is ticked, starts XtsAes256 encryption escrow-first and fail-closed (if escrow fails the volume is never encrypted and any protector JANET added is removed); PKI Trust Roots installs the bundle additively into Root/CA. Verify by re-running the C2C Readiness Scan - the fixed pillars should now PASS - and by the Tanium dashboard on its next scan.",
+      "notes": [
+        "<b>Confirm word: FIX</b> (exact, uppercase). It is enforced client-side AND server-side; there is no way to run a fix without it.",
+        "A live admin session is required for every Fix and for RUN ALL. Scan and Version Check need neither.",
+        "The recovery password is never emitted to a row, a log line or the audit CSV.",
+        "PKI Trust Roots is ADDITIVE by default and never removes a certificate. 'Also BLACKLIST the bundle Untrusted certs' (default OFF) pushes them to the Disallowed store, which DISTRUSTS them fleet-wide - the opposite direction to the roots being installed. It is armed separately and named in the arming dialog.",
+        "A trust-anchor guard REFUSES any certificate without BasicConstraints CA=true from Root/CA, so a chosen bundle folder cannot push a leaf certificate as a fleet-wide trust anchor.",
+        "'ENABLE BitLocker' starts encryption on EVERY FullyDecrypted FIXED volume - the OS volume AND fixed data volumes. Removable / USB drives are never touched. It runs for hours in the background.",
+        "Lockscreen / Wallpaper and Java Cleanup are opt-in utility fixes, NOT scored C2C pillars, and are never part of RUN ALL.",
+        "Vuln / OSVersion / STIG findings are not fixable here - the import logs where they route (ACAS Nemesis, Windows Upgrade, Reports)."
+      ],
+      "flag": "destructive"
+    }
+  },
+  "adto": {
+    "overview": {
+      "what": "<b>AD Nemesis</b> reviews every Active Directory object against the account-management Technical Order. It enumerates users and computers (whole domain or one base-DN), splits them into User / Admin / Service / Computer / Server, and flags each COMPLIANT or NON-COMPLIANT with the EXACT reason and how to fix it (e.g. 'password set to never expire -> clear DONT_EXPIRE_PASSWORD'). It then bulk-remediates the auto-fixable findings - userAccountControl flips only - and offers IAO Validate to clear a recertification finding. The rule set is the editable JanetLocal\\adto-baseline.json (starter AF/DISA defaults - validate them against your real TO).",
+      "steps": [
+        "Optionally set 'Limit to OU / base-DN'. Leaving it blank enumerates EVERY user and computer in the domain; the view asks you to confirm that first.",
+        "Optionally narrow Categories, or tick 'Only show NON-COMPLIANT objects'.",
+        "Click the scan. It is read-only and runs under your current Kerberos identity (or the session credential) - no admin session needed.",
+        "Read the StatCards and the per-category chips; each row's Detail column names the reason and the fix.",
+        "To remediate: check the auto-fix boxes you want (the userAccountControl flips), set Credentials and start an admin session, type FIX in the Confirm box, then run the fix and confirm the arming dialog.",
+        "To clear a recert finding as an IAO: type VALIDATE in Confirm and run IAO Validate.",
+        "Re-run the scan afterwards - the affected objects should read COMPLIANT and the category counts refresh."
+      ],
+      "patch": "The fix is <b>verify-first</b> and touches ONLY userAccountControl: disable inactive/stale accounts, clear DONT_EXPIRE_PASSWORD / PASSWD_NOTREQD / reversible encryption, and set smartcard-required. Description, manager, SPN and recertification are NEVER auto-guessed - they route to manual work or to the IAO. IAO Validate writes ONLY the recert stamp (TO-VALIDATED:&lt;date&gt;) into the baseline's recert attribute, nothing else, and re-reads to confirm the stamp actually landed. Verify by re-running the scan: fixed objects flip to COMPLIANT.",
+      "notes": [
+        "<b>Confirm word for the fix: FIX</b> (exact, uppercase) - enforced in the view AND server-side.",
+        "<b>Confirm word for IAO Validate: VALIDATE</b> (exact, uppercase).",
+        "IAO Validate is additionally refused server-side unless your operator name is on the baseline <b>iaoValidators</b> allow-list. That allow-list is the express-permission set - being an admin is not enough.",
+        "Both writes need a live admin session; the scan needs none.",
+        "An unreadable userAccountControl fails CLOSED - the object is reported as 'UAC compliance NOT confirmed', never as compliant.",
+        "The plan sent to the server is intersected with what is actually shown/non-compliant; adjust the category filter before fixing if you want a narrower blast radius."
+      ],
+      "flag": "destructive"
+    }
+  },
+  "certdeploy": {
+    "overview": {
+      "what": "<b>Cert Deploy</b> proactively pushes the DoD/LTMA trust-root bundle (defaults to the shipped Packages\\DoD-Certs) to ANY host list, to get AHEAD of PKI Trust Roots non-compliance - including a host that is not failing yet but carries the PKI tag. <b>Check Trust Certs</b> is the read-only, accurate needs-certs signal (unlike the C2C audit tag): it reports which bundle anchors each host is missing, per store. <b>Deploy Trust Certs</b> installs them additively over WinRM. <b>Scan Cert Management</b> tells you whether the DISA InstallRoot agent or a GPO is reconciling the trust store, i.e. whether a scripted push will actually persist.",
+      "steps": [
+        "Load Targets (paste / Import TXT), or click 'Import C2C export' and pick the Tanium C2C Compliance CSV to load EVERY PKI-tagged host - audit or failed, compliant or not.",
+        "Leave the bundle folder blank to use the shipped Packages\\DoD-Certs, or point it at a server-readable folder with root\\*.cer, Intermediate\\*.cer and Untrusted\\*.cer subfolders.",
+        "Run CHECK TRUST CERTS first (read-only, no admin session, no confirm word). Read Status and the per-store Missing counts.",
+        "OPTIONAL but recommended: run SCAN CERT MANAGEMENT. If it says InstallRoot or GPO, a manual push may be pruned on reboot - align with the reconciler instead.",
+        "To deploy: Set Credentials and start an admin session, then click DEPLOY TRUST CERTS and type DEPLOY in the arming dialog.",
+        "Only tick the opt-in boxes you actually want: BLACKLIST Untrusted certs, prune expired retired intermediates, repair a broken RDP listener. All three default OFF.",
+        "Re-run CHECK afterwards to confirm ALL PRESENT, and export CSV for the record."
+      ],
+      "patch": "Deploy reads the bundle ADMIN-SIDE once and aborts without dialling anything if the folder is missing or yields zero certs. Per host it does a TCP reachability probe, a DNS wrong-box HARD abort and the dispatcher self-guard, then ONE WinRM round-trip that opens each LocalMachine store ReadWrite and adds ONLY thumbprints that are not already present - <b>nothing is ever removed</b> by the bundle install. A certificate without BasicConstraints CA=true is REJECTED from Root/CA and never installed. Success rows read ROOTS INSTALLED (added N of M) or ROOTS ALREADY PRESENT. Verify with a second CHECK run: every host should read ALL PRESENT.",
+      "notes": [
+        "<b>Confirm word: DEPLOY</b> (exact, uppercase) - enforced in the arming dialog AND server-side. Check and Scan Cert Management need no confirm word and no admin session.",
+        "'Also BLACKLIST the bundle Untrusted certs into the Disallowed store' (default OFF) is the one change that goes the OTHER way: it DISTRUSTS those certs fleet-wide. It is armed separately, named in the confirm text, and its rows are labelled DISTRUSTED - never 'trusted'.",
+        "With the blacklist unticked, a host with every anchor present reads <b>BLACKLIST NOT ARMED N</b> - its own state, not MISSING and not ALL PRESENT.",
+        "The Legacy column reports the four allowlisted legacy DoD intermediates (DOD EMAIL/ID CA-59, SW CA-60/61) - expired but required for legacy chain validation, so they are intentionally pushed and never pruned.",
+        "'Prune expired retired DoD intermediates' only touches the CA store, only certs matching the retired DOD EMAIL/ID/SW/DERILITY allowlist, and never the four legacy keeps.",
+        "'Repair broken RDP listener' locates the replacement certificate BEFORE clearing anything - no candidate means the listener is left untouched, and a healthy CA-issued listener is never touched.",
+        "A store that cannot be opened (ACL, WDAC, corrupt store) reads CHECK ERROR - it is never counted as missing roots."
+      ],
+      "flag": "destructive"
+    }
+  },
+  "winrmbridge": {
+    "overview": {
+      "what": "<b>WinRM Bridge</b> stands up a TEMPORARY, self-reverting WinRM-over-HTTPS (5986) channel on hosts whose WinRM (5985) is GPO-blocked, so the rest of JANET can push patches without waiting on a GPO refresh. It bootstraps over DCOM - no WinRM needed - as a SYSTEM scheduled task that arms its own revert FIRST (after N minutes AND at every startup), then opens the listener and a firewall rule scoped to the JANET dispatcher on the Domain profile. It is designed to run server-side under a SERVICE ACCOUNT with local admin on the targets. GPO stays authoritative; this is a documented stopgap.",
+      "steps": [
+        "Load Target Hosts (one per line). Enable/Revert bootstrap over DCOM (135/445), so the service account must have LOCAL ADMIN on the targets.",
+        "Run CHECK BRIDGE STATE first - read-only, no admin session, no confirm word. It probes 5985/5986 and reports any JANET bridge task and when it reverts.",
+        "Read the states: LEFTOVER (5986 still listening past its revert window) and REVIEW (5986 listening with NO JANET task - unattributable) both need attention. NO-DCOM / UNKNOWN mean nothing was measured, not that the host is clean.",
+        "To open a bridge: set the Auto-revert minutes (default 90, floor 5), Set Credentials and start an admin session, type ENABLE in the Confirm box, then run Enable.",
+        "Do the patching work in the other JANET tools while the bridge is up.",
+        "To close early or clean up a leftover: type REVERT in the Confirm box and run Revert - it force-removes the listener, firewall rule, temp certificate and tasks now, without waiting for the timer.",
+        "Re-run CHECK to confirm the host reads clean."
+      ],
+      "patch": "Enable pushes a SYSTEM scheduled task over DCOM that arms the self-revert BEFORE it opens anything, so a host that loses contact still closes its own bridge: it reverts on the minute timer AND at every startup. Everything it creates is tagged 'JANET-WinRMBridge' so Check and Revert can find leftovers. The DCOM loop is deliberately SERIAL - there is no parallel-hosts knob, because one would not be honoured. Verify with Check Bridge State: an active host reads ACTIVE/BRIDGING with a Reverts timestamp, and a cleaned host reads none.",
+      "notes": [
+        "<b>Confirm word to open a bridge: ENABLE</b> (exact, uppercase). <b>Confirm word to force cleanup: REVERT</b> (exact, uppercase). Both are enforced in the view AND server-side.",
+        "Both Enable and Revert are destructive and need a live admin session. Check needs neither.",
+        "The service account needs LOCAL ADMIN on the targets - DCOM is the bootstrap path precisely because WinRM is unavailable.",
+        "This is architecturally web-only: it runs server-side under a service account, which a CAC desktop identity cannot bootstrap.",
+        "GPO remains authoritative. The bridge is a stopgap to unblock a patch wave, not a configuration change to leave in place - keep the auto-revert window short.",
+        "A REVIEW row (5986 answering with no JANET task) may be a legitimate production listener; investigate before forcing a Revert on it."
+      ],
+      "flag": "destructive"
+    }
+  },
+  "kev": {
+    "overview": {
+      "what": "<b>KEV Cross-Check</b> compares a machine's ACAS / ARAD CVE export against the CISA <b>Known Exploited Vulnerabilities</b> catalog stored inside JANET (JanetLocal\\KevCatalog.txt) and flags the overlap - the CVEs that are both PRESENT on the box and KNOWN-EXPLOITED, i.e. the ones to fix first. It also badges each CVE with its IAVA / bulletin id from JanetLocal\\IavmMap.csv, opens per-CVE lookups (Google / NVD / CVE.org / CISA KEV / IAVM), and lets you add new KEV CVEs that persist to the catalog file (which ships in take-to-work).",
+      "steps": [
+        "Go to Cross-Reference and paste (or import) the ARAD / ACAS CVE export.",
+        "Run the cross-reference. Rows flagged InKEV are present AND known-exploited - triage those first.",
+        "Double-click any CVE row to open the lookup panel (Google / NVD / CVE.org / CISA KEV / IAVM search).",
+        "Export the rows to CSV for the finding write-up.",
+        "Go to KEV Catalog to see the current list and where it loaded from.",
+        "To add CVEs: enter them (one per line, or comma/space separated) and click Add - they are validated, de-duped, sorted and saved to JanetLocal\\KevCatalog.txt."
+      ],
+      "patch": "There is no patching here - this is triage. The cross-reference is a pure local data join between your export and the shipped catalog; no host is contacted and no credential is used. The only write in the whole tool is Add to KEV, which rewrites JanetLocal\\KevCatalog.txt. Verify an add by re-opening the KEV Catalog tab: the new CVEs appear in the sorted list.",
+      "notes": [
+        "No machine is ever touched by this tool - neither tab contacts a host.",
+        "Add to KEV is admin-session-gated because it PERSISTS to a shipped file; there is <b>no typed confirm word</b>, just an Add / Cancel dialog listing what will be added.",
+        "The catalog is a SNAPSHOT. CISA adds CVEs most weeks, so a stale KevCatalog.txt can render a false all-clear - the tool logs a STALE warning once the file is more than 30 days old, and reports Updated / AgeDays alongside the results.",
+        "The catalog and the IAVM map are plain files in JanetLocal: they can be edited by hand as well as in-app, and they ship with take-to-work."
+      ],
+      "flag": "read-only"
+    },
+    "tabs": {
+      "xref": {
+        "what": "<b>Cross-reference a machine's CVE export against the KEV catalog.</b> Parses the pasted / imported ARAD (or ACAS) export, flags every CVE that is ALSO on the KEV list, and badges each with its IAVA / bulletin id when it is on the IAVM map. Read-only - no hosts, no credentials.",
+        "steps": [
+          "Paste the ARAD / ACAS CVE export into the box (or import the CSV).",
+          "Run the cross-reference.",
+          "Sort or scan the InKEV column - those are present AND known-exploited.",
+          "Double-click a CVE for the Google / NVD / CVE.org / CISA KEV / IAVM lookups.",
+          "Export CSV for the write-up."
+        ],
+        "patch": "Pure local parse and set-intersection against JanetLocal\\KevCatalog.txt, plus a lookup into JanetLocal\\IavmMap.csv for the IAVA badge. Nothing is contacted and nothing is written. Columns are CVE / Year / Severity / Score / IAVA / InKEV.",
+        "notes": [
+          "The answer is only as fresh as the catalog file - a snapshot older than 30 days logs a STALE warning, and a clean result off a stale catalog is exactly the false all-clear this tool exists to prevent.",
+          "A CVE absent from the KEV catalog is not 'safe', only 'not on CISA's known-exploited list'.",
+          "The lookup links open in a new browser tab and are the only outbound thing in this tool - on an air-gapped network they will not resolve."
+        ],
+        "flag": "read-only"
+      },
+      "catalog": {
+        "what": "<b>View the KEV catalog and add CVEs to it.</b> Lists every CVE currently in JanetLocal\\KevCatalog.txt and where it loaded from. Adding CVEs validates, de-dupes and sorts them, then SAVES the file. It changes no machine anywhere - the 'destructive' flag here means a persisted state change, which is why it rides the admin-session gate.",
+        "steps": [
+          "Open the KEV Catalog tab to list the current CVEs.",
+          "Type the CVE(s) to add - one per line, or comma/space separated.",
+          "Click Add and confirm the dialog, which lists what will be added.",
+          "The catalog re-lists with the new entries sorted in."
+        ],
+        "patch": "Add to KEV validates each token against the CVE-YYYY-NNNN pattern, drops duplicates, sorts, and rewrites JanetLocal\\KevCatalog.txt. Verify by re-listing the catalog. The file ships in take-to-work, so an addition made here travels with the payload.",
+        "notes": [
+          "<b>No typed confirm word</b> - the gate is the admin session plus an Add / Cancel dialog that lists the CVEs.",
+          "Server-side the action is marked destructive because it persists to a file, NOT because it touches a host. Nothing on any machine changes.",
+          "The file is plain text and can also be edited by hand."
+        ],
+        "flag": "destructive"
+      }
+    }
+  },
+  "patchlib": {
+    "overview": {
+      "what": "<b>Patch Content</b> is the offline patch-content library. It inventories the remediation content already staged for air-gapped use - the repo Packages folder, the work share when it is reachable, and an optional operator extra path - classifying PSADT package folders, MSI / MSU / CAB / EXE bundles and pulling KB ids out of filenames. It then cross-references that inventory against the KBs you still need (pasted, or from an uploaded ACAS CSV) so you know what can be pushed today and what is genuinely MISSING. Read-only: it touches no hosts and needs no admin session.",
+      "steps": [
+        "Open Inventory. Optionally add an Extra content folder (UNC or local path) to include a stash outside the standard roots.",
+        "Run the inventory and read the rows: Name / ItemType / KB / Size / Modified / Location.",
+        "Switch to Cross-Reference. Paste the KBs or product names you need, one per line, and / or upload an ACAS CSV.",
+        "Run the cross-reference and read the Status column: ON HAND, MISSING, or UNKNOWN.",
+        "Export CSV and take the MISSING list to whoever stages content."
+      ],
+      "patch": "No patching happens here - it answers 'can I push this today?'. Content roots are the repo .\\Packages folder, the work share \\\\dm-tn-01\\sh-usafe-automation$\\JANET\\Packages when it answers on 445, and any extra path you supply; each root is de-duped on its canonical path so the same package is never counted twice. Matching is by KB id parsed from the filename and by product-name substring. Hand the ON HAND items to Package Installer or WPT to actually deploy them.",
+      "notes": [
+        "Read-only and host-free: nothing is contacted, nothing is written, no admin session is needed.",
+        "<b>UNKNOWN is not MISSING.</b> It means a content root could not be scanned on this run, so absence could not be proven - never report an UNKNOWN as missing content.",
+        "If the work share is unreachable on 445 it is skipped; that is exactly the case that produces UNKNOWN rows.",
+        "When the server is launched with an explicit -PackagesRoot, that resolved folder is the one scanned - so the inventory matches what Package Installer actually pushes from."
+      ],
+      "flag": "read-only"
+    },
+    "tabs": {
+      "inventory": {
+        "what": "<b>List everything staged for offline use.</b> Scans the content roots and returns one row per staged item - PSADT package folder / MSI / MSU / CAB / EXE / other - with name, size, modified date, the KB id parsed from the filename, and which root it came from.",
+        "steps": [
+          "Optionally type an Extra content folder (UNC or local path).",
+          "Run the inventory.",
+          "Sort by KB or ItemType to find what you have; export CSV for the record."
+        ],
+        "patch": "Read-only enumeration of the repo Packages folder, the work share (when reachable on 445) and your extra path. No host is contacted and nothing is written.",
+        "notes": [
+          "A root that cannot be reached is skipped rather than failing the run - check the Location column to see which roots actually contributed.",
+          "KB ids come from the filename, so a package whose filename omits the KB shows a blank KB but is still listed."
+        ],
+        "flag": "read-only"
+      },
+      "crossref": {
+        "what": "<b>Match what you need against what is staged.</b> Takes a list of needed KBs / product names (pasted and/or from an uploaded ACAS CSV) and marks each ON HAND, MISSING, or UNKNOWN, with the matching content items named.",
+        "steps": [
+          "Paste the needed KBs / product names, one per line, and/or upload an ACAS CSV.",
+          "Optionally add the same Extra content folder used on Inventory.",
+          "Run the cross-reference and read Needed / Kind / Status / Matches.",
+          "Export the MISSING rows and hand them to whoever stages content."
+        ],
+        "patch": "Read-only. Each needed item is matched against the inventory by KB id and by product-name substring. Nothing is pushed from here - take the ON HAND items to Package Installer or WPT.",
+        "notes": [
+          "<b>UNKNOWN means a content root could not be scanned</b>, so this run cannot prove the item is absent. Do not treat it as MISSING.",
+          "The uploaded ACAS CSV is parsed by JANET itself - it is never sent anywhere and no host is contacted."
+        ],
+        "flag": "read-only"
+      }
+    }
+  },
+  "sysadmin": {
+    "overview": {
+      "what": "<b>Sysadmin Sweeps</b> is three read-only WinRM fleet sweeps for the AFNET findings you are already on the box for: <b>Local Administrators</b> membership, <b>certificate expiry</b> in Cert:\\LocalMachine\\My, and <b>reboot-pending</b> status. Each sweep fans one worker per host - TCP reachability probe, then a session, then ONE read-only Invoke-Command - streams a per-host summary to the shared activity log, and CHANGES NOTHING. Software inventory / EOL is deliberately not here: the WPT Software Manager and UPR own that.",
+      "steps": [
+        "Pick a tab: Local Admins, Cert Expiry, or Reboot Pending.",
+        "Load hosts into TARGETS (paste, Import TXT, a saved group, or a handoff banner from another tool).",
+        "Set the options: Cert Expiry has an 'Expiring within (days)' box (default 90); all three have 'Attempt even if offline' and Max concurrent (1-32).",
+        "Run the sweep. Rows stream in as each host finishes; the StatCards and the status line reconcile at the end.",
+        "Tick the rows you care about (or use the Use hosts scope picker) and hand them to the tool that fixes them.",
+        "Export CSV for the finding write-up."
+      ],
+      "patch": "Nothing is patched or changed - all three actions are read-only. Local Admins resolves the group by the well-known SID S-1-5-32-544 so it is locale-independent. Cert Expiry computes DaysLeft server-side from NotAfter and emits one row PER expiring certificate (a host with nothing expiring emits a single note row). Reboot Pending reads the three standard signals - Component Based Servicing RebootPending, Windows Update RebootRequired, and PendingFileRenameOperations - and names which ones fired in the Reasons column. The follow-up work happens in another tool: reboot-pending hosts go to Restart Scheduler, expiring/expired certs to Cert Deploy or the issuing CA, an over-populated Administrators group to your account-management process.",
+      "notes": [
+        "All three sweeps are read-only. No confirm word, and no admin session is required for the sweep itself (a credential is still used for the WinRM session where you have set one).",
+        "Reachability is TCP-only (5985/5986/445) because ICMP is dropped on AFNET. 'Attempt even if offline' proceeds anyway when you know the probe lies.",
+        "Cert Expiry returns one row per certificate, so a host can appear several times; already-expired certs are included with a NEGATIVE DaysLeft.",
+        "The <b>Use hosts</b> button stages a host set for another tool: the destination shows a 'from another tool' banner and YOU click Load there. It fills nothing by itself, and every action in the destination still needs its own credentials, guards and typed confirm word.",
+        "Only rows you can currently see are ever staged or selected - a quick-filtered-out row can never ride along into another tool."
+      ],
+      "flag": "read-only"
+    },
+    "tabs": {
+      "localadmin": {
+        "what": "<b>Who is a local administrator on each host.</b> Enumerates the members of the local Administrators group, resolved by the well-known SID S-1-5-32-544 (locale-independent), and emits one row per host: Host / Online / Admins / AdminCount / Error.",
+        "steps": [
+          "Load hosts into TARGETS.",
+          "Set Max concurrent and, if the TCP probe is unreliable in your enclave, tick 'Attempt even if offline'.",
+          "Run the Local Admins sweep.",
+          "Sort by COUNT to find the outliers; double-click a row for the full member list.",
+          "Export CSV."
+        ],
+        "patch": "Read-only - it changes no group and no membership. Resolving by SID means a localised or renamed Administrators group is still found. Remediation is an account-management action outside this tool.",
+        "notes": [
+          "A host that errors reports the reason in the Error column - use the 'Hosts that errored' scope on Use hosts to hand those to WPT Repair WinRM.",
+          "AdminCount includes every member returned, groups as well as users."
+        ],
+        "flag": "read-only"
+      },
+      "certexpiry": {
+        "what": "<b>Which machine certificates are about to expire.</b> Reads Cert:\\LocalMachine\\My on each host and reports certificates expiring within N days (default 90) - one row PER certificate, with Subject / Issuer / Expires / DaysLeft / Thumbprint. Already-expired certificates are included with a negative DaysLeft.",
+        "steps": [
+          "Load hosts into TARGETS.",
+          "Set 'Expiring within (days)' - 90 is the default; raise it for a longer horizon.",
+          "Run the Cert Expiry sweep.",
+          "Red rows are already expired, amber are due within 30 days.",
+          "Export CSV, and use Use hosts to stage the affected machines for Cert Deploy or your renewal process."
+        ],
+        "patch": "Read-only - no certificate is installed, renewed or removed. DaysLeft is computed on the server from NotAfter, so it is consistent across hosts regardless of target clock drift. A host with nothing expiring emits a single note row rather than disappearing from the results.",
+        "notes": [
+          "One row per certificate means a host can appear several times - the Use hosts scopes de-duplicate the host list for you.",
+          "This reads the machine's OWN certificates (LocalMachine\\My). It is not the trust-root check - that is Cert Deploy's Check Trust Certs.",
+          "Negative DaysLeft = already expired."
+        ],
+        "flag": "read-only"
+      },
+      "rebootpending": {
+        "what": "<b>Which hosts are waiting on a reboot.</b> Reports reboot-pending per host from the three standard signals - Component Based Servicing (CBS\\RebootPending), Windows Update (Auto Update\\RebootRequired) and PendingFileRenameOperations (Session Manager) - and names which ones fired in the Reasons column.",
+        "steps": [
+          "Load hosts into TARGETS.",
+          "Run the Reboot Pending sweep.",
+          "Red rows are pending; the Reasons column says which signal fired.",
+          "Tick the pending rows (or pick the 'Hosts pending a reboot' scope) and click Use hosts &rarr; Restart Scheduler.",
+          "In Restart Scheduler, click Load on the banner, then configure and arm the reboot there."
+        ],
+        "patch": "Read-only - it reboots nothing and clears no flag. The handoff to Restart Scheduler only STAGES the host list behind a Load banner; the reboot itself is armed in Restart Scheduler, with its own targets panel, gates and confirmation. A stale staged list can never start a reboot on its own.",
+        "notes": [
+          "Any one of the three signals is enough to mark a host pending - Reasons tells you which, which matters when deciding urgency.",
+          "PendingFileRenameOperations often survives a failed install; pair a pending host with the WPT Health tab if it keeps coming back.",
+          "The Use hosts handoff is append-via-banner by design: nothing is auto-filled and no gate in the destination is bypassed."
+        ],
+        "flag": "read-only"
       }
     }
   }

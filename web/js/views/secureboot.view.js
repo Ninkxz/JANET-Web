@@ -29,12 +29,18 @@
   }
 
   // Read-only scan verdicts (engine action 'scan-secure-boot').
+  // v1.7.0 (capability audit #3): two pre-flight verdicts joined the set. Both come from
+  // the SAME BitLocker posture helper the enable payload calls, so a host painted
+  // BLOCKED - BITLOCKER UNSUSPENDABLE here is exactly a host the ENABLE action would
+  // report 'Refused' for after the operator armed the wave. Neither may ever read green.
   function verdictCellCls(v) {
     switch (String(v)) {
       case 'ENABLED': return 'st-ok';
       case 'READY TO ENABLE': return 'st-ok';
+      case 'RISK - NO ESCROWED KEY': return 'st-warn';
       case 'OFF - UNSUPPORTED OEM': return 'st-warn';
       case 'BLOCKED - LEGACY/MBR': return 'st-warn';
+      case 'BLOCKED - BITLOCKER UNSUSPENDABLE': return 'st-bad';
       case 'OFFLINE': return 'st-warn';
       case 'DNS MISMATCH': return 'st-warn';
       case 'CHECK ERROR': return 'st-bad';
@@ -46,12 +52,27 @@
   function verdictRowCls(v) {
     var s = String(v);
     if (s === 'ENABLED' || s === 'READY TO ENABLE') return 'row-ok';
-    if (s === 'CHECK ERROR' || s === 'Cancelled') return 'row-bad';
-    if (s === 'OFF - UNSUPPORTED OEM' || s === 'BLOCKED - LEGACY/MBR' || s === 'OFFLINE' || s === 'DNS MISMATCH') return 'row-warn';
+    if (s === 'CHECK ERROR' || s === 'Cancelled' || s === 'BLOCKED - BITLOCKER UNSUSPENDABLE') return 'row-bad';
+    if (s === 'OFF - UNSUPPORTED OEM' || s === 'BLOCKED - LEGACY/MBR' || s === 'OFFLINE' || s === 'DNS MISMATCH' || s === 'RISK - NO ESCROWED KEY') return 'row-warn';
+    return '';
+  }
+  // The BITLOCKER / ESCROW scan cells carry the pre-flight risk, so they get their own
+  // colour rather than sitting as plain text next to a green verdict.
+  function blCellCls(v) {
+    var s = String(v == null ? '' : v);
+    if (s.indexOf('UNSUSPENDABLE') >= 0 || s === 'Unknown') return 'st-bad';
+    if (s.indexOf('On') === 0) return 'st-warn';
+    if (s === 'Off') return 'st-ok';
+    return '';
+  }
+  function escrowCellCls(v) {
+    var s = String(v == null ? '' : v);
+    if (s === 'NONE' || s === 'Unknown') return 'st-bad';
+    if (s === 'RecoveryPassword') return 'st-ok';
     return '';
   }
   // engine scan row events -> CSV columns.
-  var SCAN_COLS = [['Host', 'Computer'], ['Ping', 'Ping'], ['Verdict', 'Verdict'], ['SecureBoot', 'SecureBoot'], ['Firmware', 'Firmware'], ['Disk', 'Disk'], ['Manufacturer', 'Manufacturer'], ['Model', 'Model'], ['Detail', 'Detail']];
+  var SCAN_COLS = [['Host', 'Computer'], ['Ping', 'Ping'], ['Verdict', 'Verdict'], ['SecureBoot', 'SecureBoot'], ['Firmware', 'Firmware'], ['Disk', 'Disk'], ['BitLocker', 'BitLocker'], ['TPM', 'TPM'], ['Escrow', 'Escrow'], ['Manufacturer', 'Manufacturer'], ['Model', 'Model'], ['Detail', 'Detail']];
 
   JanetViews.register('secureboot', {
     mount: function (host, ctx) {
@@ -78,7 +99,7 @@
       var right = el('div'); right.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;min-height:0';
 
       // ===== STAGE 1: read-only fleet SCAN =====
-      var scanCard = card('SCAN SECURE BOOT (FLEET)', 'Read-only posture scan - no firmware write, no host cap. Run this first, then load the READY hosts into Targets and Enable in waves of 50 or fewer.');
+      var scanCard = card('SCAN SECURE BOOT (FLEET)', 'Read-only pre-flight scan - no firmware write, no BitLocker suspend, no host cap. Reports Secure Boot / firmware / disk plus the BitLocker, TPM and recovery-key-escrow posture, using the same detection the Enable path uses - so a host shown BLOCKED here is a host Enable would Refuse. Run this first, then load the READY hosts into Targets and Enable in waves of 50 or fewer.');
       scanCard.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
       var scanBar = el('div'); scanBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:8px';
       // parallel hosts (1-32)
@@ -123,6 +144,11 @@
           { key: 'SecureBoot', label: 'SECURE BOOT', width: 95 },
           { key: 'Firmware', label: 'FIRMWARE', width: 80 },
           { key: 'Disk', label: 'DISK', width: 70 },
+          // v1.7.0 pre-flight columns - read-only, and computed by the same helper the
+          // enable path uses to decide whether it can suspend BitLocker.
+          { key: 'BitLocker', label: 'BITLOCKER', width: 150, render: function (r) { return { text: r.BitLocker == null ? '' : String(r.BitLocker), cls: blCellCls(r.BitLocker) }; } },
+          { key: 'TPM', label: 'TPM', width: 100 },
+          { key: 'Escrow', label: 'ESCROW', width: 110, render: function (r) { return { text: r.Escrow == null ? '' : String(r.Escrow), cls: escrowCellCls(r.Escrow) }; } },
           { key: 'Manufacturer', label: 'MANUFACTURER', width: 110 },
           { key: 'Model', label: 'MODEL', width: 120 },
           { key: 'Detail', label: 'DETAIL' }
@@ -314,16 +340,25 @@
             copyReadyBtn.disabled = (ready === 0);
             loadReadyBtn.textContent = 'Load READY-TO-ENABLE hosts -> Targets (' + ready + ')';
             var anyErr = (c['CHECK ERROR'] || 0) > 0;
-            setScanStatus('Scan complete - ' + ready + ' ready, ' + (c['ENABLED'] || 0) + ' enabled, ' + (c['BLOCKED - LEGACY/MBR'] || 0) + ' blocked.', anyErr ? 'st-warn' : 'st-ok');
+            // v1.7.0: the two pre-flight buckets get their own lines. A host that would be
+            // REFUSED at firmware-write time, or that has no recovery key to fall back on,
+            // was previously counted as READY and only surfaced after the wave was armed.
+            var blBlocked = c['BLOCKED - BITLOCKER UNSUSPENDABLE'] || 0;
+            var noEscrow = c['RISK - NO ESCROWED KEY'] || 0;
+            setScanStatus('Scan complete - ' + ready + ' ready, ' + (c['ENABLED'] || 0) + ' enabled, ' + noEscrow + ' no escrowed key, ' + ((c['BLOCKED - LEGACY/MBR'] || 0) + blBlocked) + ' blocked.', (anyErr || blBlocked) ? 'st-warn' : 'st-ok');
             ctx.confirm({
               title: 'Secure Boot Scan - Complete',
               body: 'READY to enable: <b>' + ready + '</b><br>'
                 + 'Already enabled: <b>' + (c['ENABLED'] || 0) + '</b><br>'
+                + 'RISK - no escrowed recovery key: <b>' + noEscrow + '</b><br>'
                 + 'Unsupported OEM: <b>' + (c['OFF - UNSUPPORTED OEM'] || 0) + '</b><br>'
                 + 'Blocked (Legacy/MBR): <b>' + (c['BLOCKED - LEGACY/MBR'] || 0) + '</b><br>'
+                + 'Blocked (BitLocker unsuspendable): <b>' + blBlocked + '</b><br>'
                 + 'Check errors: <b>' + (c['CHECK ERROR'] || 0) + '</b><br>'
                 + 'Offline: <b>' + (c['OFFLINE'] || 0) + '</b><br>'
                 + 'Total: <b>' + scanGrid.rows().length + '</b>'
+                + (blBlocked ? '<br><br><b>' + blBlocked + '</b> host(s) would be <b>Refused</b> by Enable Secure Boot at firmware-write time - BitLocker protection is ON and JANET cannot suspend it. Fix BitLocker on those hosts first.' : '')
+                + (noEscrow ? '<br><br><b>' + noEscrow + '</b> host(s) are TPM-sealed with <b>no escrowed recovery password</b>. The firmware write re-measures the boot PCRs; if that boot asks for a key, there is none to type. Escrow one before enabling.' : '')
                 + (ready ? '<br><br>Use <b>Load READY-TO-ENABLE hosts</b> to fill the Targets list, then Enable in waves of &le;50.' : ''),
               okText: 'OK', cancelText: null
             });

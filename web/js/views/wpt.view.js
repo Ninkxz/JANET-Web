@@ -306,6 +306,11 @@
           rowClass: spec.rowClass,
           onRowClick: spec.onRowClick,
           popOut: true,
+          // OPT-IN cross-tool harvest (a spec sets useHosts; every other tab is
+          // unchanged). Staging only: it hands a host list to another tool's Load
+          // banner. It fills nothing, arms nothing, and leaves every WPT confirm
+          // and credential gate exactly where it was.
+          useHosts: spec.useHosts || null,
           toolbarButtons: spec.toolbarButtons ? spec.toolbarButtons(function () { return grid; }, { getRun: function () { return run; } }) : null
         });
         var gridHolder = el('div'); gridHolder.style.cssText = 'flex:1;min-height:0;display:flex'; gridHolder.appendChild(grid.el);
@@ -588,6 +593,13 @@
           columns: bulkScanColumns(),
           keyMode: { hostCol: 'Host' },   // 1 row per host (default Host key)
           selectable: true,
+          useHosts: {
+            ctx: ctx, source: 'Bulk scan',
+            flagged: {
+              label: 'Hosts reboot-pending or offline',
+              test: function (r) { return asBool(r.RebootPending) || r.Online === false; }
+            }
+          },
           settings: function (h) {
             var t = threadsInput(h, 24);
             // saveSnapshot checkbox: the manifest input does not auto-render here (this
@@ -1797,6 +1809,13 @@
             } }
           ],
           rowClass: function (r) { var s = String(r.OverallHealth || ''); return /(healthy|ok|good)/i.test(s) ? 'row-ok' : /(critical|bad|error|fail|broken|offline)/i.test(s) ? 'row-bad' : (s ? 'row-warn' : ''); },
+          useHosts: {
+            ctx: ctx, source: 'Health scan',
+            flagged: {
+              label: 'Hosts NOT healthy',
+              test: function (r) { var s = String(r.OverallHealth || ''); return !!s && !/(healthy|ok|good)/i.test(s); }
+            }
+          },
           settings: function (h) { var t = threadsInput(h, 24); return function () { return { threads: t() }; }; },
           params: function (api) { return { threads: api.getSettings().threads }; },
           onFinal: function (log, grid) { log.banner('Health scan complete: ' + grid.rows().length + ' host(s)'); },

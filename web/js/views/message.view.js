@@ -190,6 +190,16 @@
           if (SKIP_STATUS.test(s)) return 'row-warn';
           return s ? 'row-bad' : '';
         },
+        // Cross-tool harvest: the hosts that took the warning are the reboot wave,
+        // and the ones that did NOT are the follow-up list. Staging only - the
+        // destination shows a Load banner and keeps every gate it already has.
+        useHosts: {
+          ctx: ctx, source: 'Remote Message results',
+          flagged: {
+            label: 'Hosts the message did NOT reach',
+            test: function (r) { var s = String(r.Status || ''); return !!s && s !== 'Delivered'; }
+          }
+        },
         toolbarButtons: [csvBtn]
       });
       var gridCard = ui.card({}); gridCard.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column;padding:8px';

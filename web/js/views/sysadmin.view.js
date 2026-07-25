@@ -153,9 +153,16 @@
 
           var results = ui.namedCard(spec.gridTitle, spec.gridDesc);
           results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
+          // selectable: a sweep produces exactly the host list the NEXT tool wants
+          // (reboot-pending -> Restart Scheduler, expiring certs -> Cert Deploy,
+          // errored hosts -> WPT Repair WinRM). Ticking rows + "Use hosts" replaces
+          // Export CSV -> Downloads -> Import in the destination. Staging only: the
+          // destination shows a Load banner, and every action there keeps its own
+          // credential check and typed confirm word.
           var grid = C.ResultsGrid({
-            title: spec.gridTitle, keyMode: { rk: true }, popOut: true, selectable: false,
-            columns: spec.columns, rowClass: spec.rowClass
+            title: spec.gridTitle, keyMode: { rk: true }, popOut: true, selectable: true,
+            columns: spec.columns, rowClass: spec.rowClass,
+            useHosts: { ctx: ctx, source: spec.gridTitle, flagged: spec.flagged }
           });
           var gh = el('div'); gh.style.cssText = 'flex:1;min-height:0;display:flex'; gh.appendChild(grid.el);
           results.appendChild(gh); right.appendChild(results);
@@ -210,6 +217,7 @@
           { key: 'Error', label: 'ERROR', width: 200, render: function (r) { return errCell(r.Error); } }
         ],
         exportCols: [['Host', 'Host'], ['Online', 'Online'], ['Admins', 'Admins'], ['AdminCount', 'AdminCount'], ['Error', 'Error']],
+        flagged: { label: 'Hosts that errored', test: function (r) { return !!(r.Error && String(r.Error).trim()); } },
         cards: [ { key: 'hosts', label: 'HOSTS', color: 'cyan' }, { key: 'online', label: 'ONLINE', color: 'ok' }, { key: 'errors', label: 'ERRORS', color: 'bad' } ],
         onRow: markHost,
         snapshot: function (c, s) { return { hosts: s && s.total != null ? s.total : hostCount(c), online: s && s.hostsOnline != null ? s.hostsOnline : onlineCount(c), errors: s && s.hostsWithError != null ? s.hostsWithError : errCount(c) }; },
@@ -231,6 +239,7 @@
           { key: 'Error', label: 'ERROR', width: 160, render: function (r) { return errCell(r.Error); } }
         ],
         exportCols: [['Host', 'Host'], ['Online', 'Online'], ['Subject', 'Subject'], ['Issuer', 'Issuer'], ['Expires', 'Expires'], ['DaysLeft', 'DaysLeft'], ['Thumbprint', 'Thumbprint'], ['Error', 'Error']],
+        flagged: { label: 'Hosts with a cert expired or due within 30 days', test: function (r) { var n = parseInt(r.DaysLeft, 10); return !isNaN(n) && n <= 30; } },
         cards: [ { key: 'hosts', label: 'HOSTS', color: 'cyan' }, { key: 'expiring', label: 'EXPIRING CERTS', color: 'gold' }, { key: 'expired', label: 'EXPIRED', color: 'bad' }, { key: 'errors', label: 'ERRORS', color: 'accent' } ],
         rowClass: function (r) { var n = parseInt(r.DaysLeft, 10); if (!isNaN(n) && n < 0) return 'row-bad'; if (!isNaN(n) && n <= 30) return 'row-warn'; return ''; },
         onRow: function (c, r) {
@@ -254,6 +263,7 @@
           { key: 'Error', label: 'ERROR', width: 200, render: function (r) { return errCell(r.Error); } }
         ],
         exportCols: [['Host', 'Host'], ['Online', 'Online'], ['RebootPending', 'RebootPending'], ['Reasons', 'Reasons'], ['Error', 'Error']],
+        flagged: { label: 'Hosts pending a reboot', test: function (r) { return r.RebootPending === true || String(r.RebootPending) === 'true'; } },
         cards: [ { key: 'hosts', label: 'HOSTS', color: 'cyan' }, { key: 'pending', label: 'REBOOT PENDING', color: 'bad' }, { key: 'errors', label: 'ERRORS', color: 'accent' } ],
         rowClass: function (r) { return (r.RebootPending === true || String(r.RebootPending) === 'true') ? 'row-bad' : ''; },
         onRow: function (c, r) { markHost(c, r); if (r.RebootPending === true || String(r.RebootPending) === 'true') c.a++; },

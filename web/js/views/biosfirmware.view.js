@@ -91,7 +91,14 @@
       var grid = C.ResultsGrid({
         title: 'BIOS firmware results',
         emptyText: 'No results yet — pick a host set, then Scan BIOS Firmware.',
-        keyMode: { hostCol: 'Host' }, popOut: true,
+        keyMode: { hostCol: 'Host' }, popOut: true, selectable: true,
+        // Cross-tool harvest: an Outdated set is the list Package Installer / WPT
+        // wants. Staging only - the destination shows a Load banner and keeps its
+        // own confirm gates; nothing is armed from here.
+        useHosts: {
+          ctx: ctx, source: 'BIOS firmware scan',
+          flagged: { label: 'Hosts with an OUTDATED BIOS', test: function (r) { return String(r.Status) === 'Outdated'; } }
+        },
         columns: [
           { key: 'Host', label: 'COMPUTER', width: 130 },
           { key: 'Manufacturer', label: 'MAKE', width: 90 },

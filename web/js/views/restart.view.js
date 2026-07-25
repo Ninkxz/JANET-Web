@@ -93,7 +93,11 @@
       var bootRun = null, bootUnsub = null;
       var abortRun = null, abortUnsub = null;
       var pingUnsub = null, testUnsub = null;   // read-only side-runs (Ping All / Test Single)
-      var armTimer = null;   // delayed-start ("begin at scheduled time") countdown interval
+      // Delayed start ("begin at the scheduled time") is held BY THE SERVER now.
+      // armTimer only paints a smooth 1 s countdown between the shell's 5 s polls
+      // of /api/jobs; armWatchUnsub listens for the arm firing or being stood down.
+      // Neither one owns the wave: closing this tab loses nothing.
+      var armTimer = null, armWatchUnsub = null;
 
       // tab + control refs filled by the lazy panel builders
       var refs = {};
@@ -342,7 +346,12 @@
         // delayed-start arming + auto-monitor (desktop "Begin at the scheduled time"
         // + the auto-opening Reboot Verification Monitor).
         cfg.appendChild((function () { var h = ui.eyebrow('DELAYED START / MONITOR'); h.style.marginTop = '12px'; return h; })());
-        var beginAtCb = ui.checkbox('Begin at the scheduled time - Start Dispatch arms a live countdown and auto-fires when the clock reaches Restart time', { color: 'var(--cyan)', title: 'Leave the tool open; Start Dispatch holds a "Starts in HH:MM:SS" countdown to the Restart time and fires automatically at zero. Cancel any time before it fires. Ignored in rolling mode.' });
+        // audit 2026-07-25 (C1): this used to be a browser setInterval, so the tooltip
+        // had to beg operators not to close the tab - a stray F5 silently lost the
+        // wave. The countdown now lives on the SERVER (in memory, never on disk): the
+        // browser can close, and the wave is stood down automatically if the admin
+        // session ends before it fires.
+        var beginAtCb = ui.checkbox('Begin at the scheduled time - Start Dispatch arms the wave ON THE SERVER and it fires when the clock reaches Restart time', { color: 'var(--cyan)', title: 'Start Dispatch hands the confirmed wave to the server, which holds it in memory and fires it at the Restart time. You can close this browser tab. The armed wave shows in a red bar across the bottom of the window and can be disarmed from there at any time. It is discarded (never fired) if the admin session ends or the server restarts. Ignored in rolling mode.' });
         refs.beginAt = beginAtCb;
         cfg.appendChild(beginAtCb);
         var autoMonCb = ui.checkbox('Auto-open the Reboot Verification Monitor when the dispatch completes', { checked: true, color: 'var(--gold)', title: 'On a real run with at least one host dispatched, switch to the monitor and start pinging the dispatched hosts.' });
@@ -684,12 +693,13 @@
         // is only demanded when live); dry-run needs no word server-side either.
         if (!p.dryRun) p.confirm = 'RESTART';
 
-        // delayed-start arming: "Begin at the scheduled time" holds a live countdown
-        // to the Restart time (non-rolling) and auto-fires at zero - the desktop's
-        // Start-button "Starts in HH:MM:SS". Already confirmed above, so the fire is
-        // unattended; Cancel stands the arm down before it launches.
+        // Delayed start: "Begin at the scheduled time" hands the wave to the SERVER,
+        // which holds it (in memory only) until the Restart time and fires it there.
+        // The operator has just confirmed the whole thing - host count, mode, and the
+        // typed RESTART word - so the fire itself is unattended; the server re-checks
+        // the word and refuses to fire at all if the admin session ended meanwhile.
         var fireAt = (refs.beginAt && refs.beginAt._cb.checked && !p.rollingMode) ? parseRestartTime(p.restartTime) : null;
-        if (fireAt && fireAt.getTime() > Date.now() + 1500) { armDispatchCountdown(fireAt, p, hosts, modeLabel); return; }
+        if (fireAt && fireAt.getTime() > Date.now() + 1500) { armDispatchServerSide(fireAt, p, hosts, modeLabel); return; }
         launchDispatch(p, hosts, modeLabel);
       }
 
@@ -706,37 +716,126 @@
         return isNaN(iso.getTime()) ? null : iso;
       }
 
-      // arm a live countdown that fires launchDispatch() at the scheduled time.
-      function armDispatchCountdown(fireAt, p, hosts, modeLabel) {
+      function pad2(n) { return (n < 10 ? '0' : '') + n; }
+      function hms(total) {
+        total = Math.max(0, Math.round(total || 0));
+        var h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+        return (h > 0 ? pad2(h) + ':' : '') + pad2(m) + ':' + pad2(s);
+      }
+      // Local wall-clock 'YYYY-MM-DDTHH:mm:ss' - no zone suffix, because the server
+      // parses it in ITS local time and both processes are on the same box.
+      function isoLocal(d) {
+        return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' +
+               pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+      }
+
+      // ---- ARM the wave ON THE SERVER (was a browser setInterval) --------------
+      // audit 2026-07-25 (convergence C1): the delayed start used to be a
+      // setInterval in this file. It died with the tab, so a stray F5 lost a 2 AM
+      // reboot wave and the checkbox tooltip had to beg operators to leave the tool
+      // open. The already-confirmed param set now goes to the server, which holds it
+      // IN MEMORY ONLY (never on disk, no credential in it) and fires it through the
+      // normal dispatch path at the scheduled time. What did NOT change: the
+      // ArmingDialog above, the typed RESTART word (it rides in p.confirm and the
+      // engine re-checks it at fire time), the admin-session gate, and every
+      // engine-side guard. The gate simply happens EARLIER.
+      function armDispatchServerSide(fireAt, p, hosts, modeLabel) {
         if (armTimer) { clearInterval(armTimer); armTimer = null; }
         refs.dispatchGrid.clear(); refs.dispatchProg.reset(); recomputeStats();
-        refs.dispatchLog.banner('Delayed start ARMED: ' + hosts.length + ' host(s), ' + modeLabel);
-        refs.dispatchLog.append({ text: 'Auto-dispatch at ' + fireAt.toLocaleTimeString() + '. Cancel any time before it fires.', level: 'mode' });
-        refs.runbar.setActive(true);            // morph the CTA to Cancel
-        refs.cancelBtn.disabled = false;
-        function tick() {
-          var remain = Math.round((fireAt.getTime() - Date.now()) / 1000);
-          if (remain <= 0) {
-            clearInterval(armTimer); armTimer = null;
-            refs.runbar.setActive(false);
-            refs.dispatchLog.banner('Delayed start fired - dispatching now.');
-            launchDispatch(p, hosts, modeLabel);
-            return;
-          }
-          var hh = Math.floor(remain / 3600), mm = Math.floor((remain % 3600) / 60), ss = remain % 60;
-          var pad = function (n) { return (n < 10 ? '0' : '') + n; };
-          refs.runbar.setStatus('Starts in ' + (hh > 0 ? pad(hh) + ':' : '') + pad(mm) + ':' + pad(ss), 'st-info');
-        }
-        tick(); armTimer = setInterval(tick, 1000);
+        refs.dispatchLog.banner('Arming on the server: ' + hosts.length + ' host(s), ' + modeLabel);
+        refs.runbar.setStatus('Arming...', 'st-info');
+        var payload = {};
+        Object.keys(p).forEach(function (k) { if (k !== '_mode') payload[k] = p[k]; });
+        ctx.jobs.armRestart(isoLocal(fireAt), payload, modeLabel).then(function () {
+          refs.dispatchLog.append({ text: 'ARMED on the server - fires at ' + fireAt.toLocaleString() + '. You can close this tab; the server holds the wave. Disarm from the red bar across the bottom of the window, or Cancel here.', level: 'mode' });
+          refs.dispatchLog.append({ text: 'The arm is held in server memory only: it is discarded (never fired) if the admin session ends or the server restarts.', level: 'dim' });
+          refs.runbar.setActive(true);            // morph the CTA to Cancel
+          refs.cancelBtn.disabled = false;
+          watchArm();
+        }).catch(function (e) {
+          var msg = (e && e.status === 403) ? 'the server refused the arm: an admin session is required.'
+                  : (e && e.status === 409) ? 'a restart wave is already armed on the server - disarm it first.'
+                  : ('the server refused the arm (' + ((e && e.message) || 'error') + ').');
+          refs.runbar.setActive(false);
+          refs.runbar.setStatus('Arm refused.', 'st-bad');
+          refs.dispatchLog.append({ text: 'NOT armed - ' + msg + ' Nothing is scheduled and nothing will reboot.', level: 'err' });
+        });
       }
-      // cancel a pending delayed-start arm; returns true if one was armed.
+
+      // Follow the server-held arm: paint the countdown, and notice the moment it
+      // leaves the server (it fired, or somebody disarmed it from any tab).
+      function watchArm() {
+        if (armWatchUnsub) { armWatchUnsub(); armWatchUnsub = null; }
+        if (armTimer) { clearInterval(armTimer); armTimer = null; }
+        armTimer = setInterval(function () {
+          var s = ctx.jobs.secondsLeft();
+          if (s == null || !refs.runbar) return;
+          refs.runbar.setStatus('ARMED on the server - starts in ' + hms(s), 'st-info');
+        }, 1000);
+        armWatchUnsub = ctx.jobs.onChange(function (st) {
+          if (st.armed) return;                       // still waiting
+          if (armWatchUnsub) { armWatchUnsub(); armWatchUnsub = null; }
+          if (armTimer) { clearInterval(armTimer); armTimer = null; }
+          // The arm is gone. Either the server fired it (a dispatch job exists now -
+          // adopt its stream, which never re-runs anything) or it was stood down.
+          var h = ctx.adopt('dispatch-restart', { keyOf: function (ev) { return ev.Host; } });
+          if (h) {
+            refs.dispatchLog.banner('Armed dispatch FIRED on the server - streaming results.');
+            dispatchRun = h;
+            if (dispatchUnsub) dispatchUnsub();
+            dispatchUnsub = h.subscribe(dispatchHandlers(null));
+          } else {
+            refs.runbar.setActive(false);
+            refs.runbar.setStatus('Armed dispatch stood down.', 'st-warn');
+            if (refs.cancelBtn) refs.cancelBtn.disabled = true;
+            refs.dispatchLog.append({ text: 'The armed dispatch is no longer held by the server (disarmed, expired, or the server restarted). Nothing was dispatched.', level: 'warn' });
+          }
+        });
+      }
+
+      // Stand a server-held arm down; returns true if there was one to stand down.
+      // Any tab can do this, and so can the red DISARM button in the shell bar.
       function cancelArm() {
-        if (!armTimer) return false;
-        clearInterval(armTimer); armTimer = null;
-        if (refs.runbar) { refs.runbar.setActive(false); refs.runbar.setStatus('Delayed start cancelled.', 'st-warn'); }
-        if (refs.cancelBtn) refs.cancelBtn.disabled = true;
-        if (refs.dispatchLog) refs.dispatchLog.append({ text: 'Delayed start cancelled before it fired.', level: 'warn' });
+        // A LIVE dispatch always wins the Cancel button: never let "Cancel Pending"
+        // silently disarm some other armed wave while a wave is actually running.
+        if (dispatchRun && dispatchRun.state && dispatchRun.state.active) return false;
+        if (!ctx.jobs || !ctx.jobs.state.armed) return false;
+        if (armTimer) { clearInterval(armTimer); armTimer = null; }
+        if (refs.runbar) refs.runbar.setStatus('Disarming...', 'st-warn');
+        ctx.jobs.disarm().then(function () {
+          if (armWatchUnsub) { armWatchUnsub(); armWatchUnsub = null; }
+          if (refs.runbar) { refs.runbar.setActive(false); refs.runbar.setStatus('Delayed start disarmed.', 'st-warn'); }
+          if (refs.cancelBtn) refs.cancelBtn.disabled = true;
+          if (refs.dispatchLog) refs.dispatchLog.append({ text: 'Armed dispatch disarmed before it fired - nothing was dispatched.', level: 'warn' });
+        }).catch(function () {
+          if (refs.dispatchLog) refs.dispatchLog.append({ text: 'Could not reach the server to disarm - check the JANET Web console window and retry.', level: 'err' });
+        });
         return true;
+      }
+
+      // Re-attach to a dispatch this server is ALREADY running: the page was
+      // reloaded, this is a second tab, or an armed wave fired while the browser
+      // was closed. Status only - ctx.adopt subscribes to the existing event
+      // stream and never re-POSTs the action, so nothing can be double-dispatched.
+      function reattachOrWatchArm() {
+        if (!ctx.jobs) return;
+        if (ctx.jobs.state.armed) {
+          tabs.select('dispatch');                       // builds the panel so the refs exist
+          if (refs.runbar) refs.runbar.setActive(true);  // CTA morphs to Cancel (= disarm)
+          if (refs.cancelBtn) refs.cancelBtn.disabled = false;
+          if (refs.dispatchLog) refs.dispatchLog.banner('A restart wave is ARMED on this server - see the red bar across the bottom of the window.');
+          watchArm();
+          return;
+        }
+        if (!ctx.jobs.findJob('restart', 'dispatch-restart')) return;
+        tabs.select('dispatch');   // builds the panel so the grid/log refs exist
+        var h = ctx.adopt('dispatch-restart', { keyOf: function (ev) { return ev.Host; } });
+        if (!h) return;
+        dispatchRun = h;
+        if (dispatchUnsub) dispatchUnsub();
+        dispatchUnsub = h.subscribe(dispatchHandlers(null));
+        refs.dispatchLog.banner('Re-attached to a dispatch already running on this server.');
+        refs.dispatchLog.append({ text: 'This is the live status of a run that is already going - nothing was re-dispatched. Use Cancel to stop it.', level: 'mode' });
       }
 
       function launchDispatch(p, hosts, modeLabel) {
@@ -749,7 +848,15 @@
 
         dispatchRun = ctx.run('dispatch-restart', p, { keyOf: function (ev) { return ev.Host; } });
         if (dispatchUnsub) dispatchUnsub();
-        dispatchUnsub = dispatchRun.subscribe({
+        dispatchUnsub = dispatchRun.subscribe(dispatchHandlers(p));
+      }
+
+      // The dispatch stream handlers, shared by a run this tab STARTED (p = the
+      // params) and one it merely ADOPTED - a server-fired armed wave or a run that
+      // outlived a page reload (p = null, so the post-run auto-monitor, which needs
+      // to know whether the run was a dry run, stays off).
+      function dispatchHandlers(p) {
+        return {
           status: function (t) { refs.dispatchProg.setPhase(t); },
           progress: function (pp) { refs.dispatchProg.setProgress(pp.done, pp.total); },
           row: function (r) {
@@ -767,12 +874,14 @@
             refreshDispatchButtons();
             // auto-open the Reboot Verification Monitor on a real run that dispatched at least one host
             var dispatched = refs.dispatchGrid.rows().filter(function (r) { var s = String(r.Status); return s === 'Dispatched' || s === 'Already-Scheduled'; }).map(function (r) { return r.Host; });
-            if (!p.dryRun && dispatched.length && refs.autoMonitor && refs.autoMonitor._cb.checked) {
+            if (p && !p.dryRun && dispatched.length && refs.autoMonitor && refs.autoMonitor._cb.checked) {
               refs.dispatchLog.append({ text: 'Auto-opening Reboot Verification Monitor for ' + dispatched.length + ' dispatched host(s)...', level: 'accent' });
               tabs.select('verify');
               doVerify(dispatched);
-            } else if (!p.dryRun && (sm.sent || 0) > 0) {
+            } else if (p && !p.dryRun && (sm.sent || 0) > 0) {
               refs.dispatchLog.append({ text: 'Tip: open Reboot Verification to confirm the fleet actually went down and came back.', level: 'accent' });
+            } else if (!p && dispatched.length) {
+              refs.dispatchLog.append({ text: 'Tip: open Reboot Verification to confirm these ' + dispatched.length + ' host(s) went down and came back.', level: 'accent' });
             }
           },
           active: function (a) {
@@ -780,7 +889,7 @@
             refs.cancelBtn.disabled = !a;
             refreshDispatchButtons();
           }
-        });
+        };
       }
 
       function logDispatchRow(r) {
@@ -930,8 +1039,18 @@
 
       // =====================================================================
       host.appendChild(root);
+
+      // On mount, ask the server what it is already doing for this tool: a wave
+      // armed earlier (possibly from another tab / before a reload) or a dispatch
+      // still streaming. Neither one starts anything - see reattachOrWatchArm.
+      if (ctx.jobs) { ctx.jobs.refresh().then(reattachOrWatchArm).catch(function () {}); }
+
       this._root = root;
       this._unsub = function () {
+        // Only the local countdown paint and the arm listener are torn down here.
+        // The ARM ITSELF lives on the server and deliberately survives this view
+        // being unmounted, the tab being closed, and the browser being shut.
+        try { if (armWatchUnsub) { armWatchUnsub(); armWatchUnsub = null; } } catch (e) {}
         try { if (armTimer) { clearInterval(armTimer); armTimer = null; } } catch (e) {}
         try { if (dispatchUnsub) dispatchUnsub(); } catch (e) {}
         try { if (verifyUnsub) verifyUnsub(); } catch (e) {}

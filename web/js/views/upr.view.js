@@ -452,6 +452,17 @@
         // results grid (one row per host x matched install, keyed by _rk)
         var grid = C.ResultsGrid({
           title: 'Uninstall candidates', keyMode: { rk: true }, selectable: true, popOut: true,
+          // Cross-tool harvest: stage the hosts behind the checked/failed rows for
+          // another tool (a FAILED uninstall set -> WPT Software Manager, a proven
+          // set -> Restart). Staging only - the destination shows a Load banner and
+          // keeps its own confirm gates; UPR's own uninstall arming is untouched.
+          useHosts: {
+            ctx: ctx, source: 'UPR uninstall candidates',
+            flagged: {
+              label: 'Hosts whose uninstall FAILED / errored',
+              test: function (r) { return String(r.Decision) === 'Error' || String(r.Result == null ? '' : r.Result).indexOf('FAIL') === 0; }
+            }
+          },
           columns: [
             { key: 'Host', label: 'HOST', width: 150 },
             { key: 'Plugin', label: 'PLUGIN', width: 70 },
@@ -792,6 +803,13 @@
 
         var grid = C.ResultsGrid({
           title: 'Targeted matches', keyMode: { rk: true }, selectable: true, popOut: true,
+          useHosts: {
+            ctx: ctx, source: 'UPR targeted matches',
+            flagged: {
+              label: 'Hosts whose uninstall FAILED / errored',
+              test: function (r) { return String(r.Decision) === 'Error' || String(r.Result == null ? '' : r.Result).indexOf('FAIL') === 0; }
+            }
+          },
           columns: [
             { key: 'Host', label: 'HOST', width: 150 },
             { key: 'Product', label: 'DISPLAY NAME' },
@@ -1058,7 +1076,18 @@
         panel.appendChild(bar);
 
         var grid = C.ResultsGrid({
-          title: 'OS findings', keyMode: { rk: true }, popOut: true,
+          title: 'OS findings', keyMode: { rk: true }, popOut: true, selectable: true,
+          // The unsupported-OS list is a rebuild queue: stage it for AD Search /
+          // Patch History rather than exporting a CSV. The host lives in NetBIOS /
+          // DNS here, so hostOf overrides the grid's default Host-column lookup.
+          // UPR never changes the OS - this only hands the list on.
+          useHosts: {
+            ctx: ctx, source: 'UPR unsupported-OS findings',
+            hostOf: function (r) {
+              var v = r.NetBIOS || r.DNS || r.IP;
+              return (v == null || String(v).trim() === '') ? null : String(v).trim();
+            }
+          },
           columns: [
             { key: 'Plugin', label: 'PLUGIN', width: 75 },
             { key: 'PluginName', label: 'FINDING' },

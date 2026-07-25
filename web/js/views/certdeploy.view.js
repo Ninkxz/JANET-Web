@@ -232,7 +232,18 @@
       var grid = C.ResultsGrid({
         title: 'Cert Deploy results',
         emptyText: 'No results yet - add hosts, then Check or Deploy.',
-        keyMode: { hostCol: 'Host' }, popOut: true, selectable: false,
+        keyMode: { hostCol: 'Host' }, popOut: true, selectable: true,
+        // Cross-tool harvest. A Check run's MISSING/FAILED set is the list the next
+        // tool needs (C2C PkiRoots, WPT, a reboot wave). Staging ONLY: the
+        // destination shows a Load banner the operator clicks; Deploy here still
+        // needs an admin session and the typed DEPLOY confirm word.
+        useHosts: {
+          ctx: ctx, source: 'Cert Deploy check',
+          flagged: {
+            label: 'Hosts MISSING roots or FAILED',
+            test: function (r) { var s = String(r.Status == null ? '' : r.Status); return /^MISSING/i.test(s) || /FAIL/i.test(s) || /REJECTED/i.test(s); }
+          }
+        },
         columns: [
           { key: 'Host', label: 'HOST', width: 150 },
           { key: 'Ping', label: 'PING', width: 90 },

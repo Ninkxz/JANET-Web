@@ -14,7 +14,9 @@
    }   cell = { text, cls?, title?, bar?:{pct,cls} }
 
    instance = ResultsGrid({
-     columns, keyMode, selectable, rowClass(row), title, onRowClick(row), popOut
+     columns, keyMode, selectable, rowClass(row), title, onRowClick(row), popOut,
+     useHosts:{ ctx, source?, label?, hostOf?(row), flagged?:{label,test(row)},
+                tools?:[{id,name}] }
    })
    keyMode: { rk:true } uses _rk; { hostCol:'Host' } keys by a column; or a fn(row).
      .el  .upsert(row)  .clear()  .rows()  .order()
@@ -25,6 +27,42 @@
   var Janet = window.Janet = window.Janet || {};
   Janet.components = Janet.components || {};
   var el = Janet.ui.el;
+
+  /* --- "Use hosts in..." cross-tool harvest ---------------------------------
+     The RECEIVING half of the handoff bus is already universal: every
+     TargetManager renders a "N host(s) from another tool -> Load" banner when
+     Janet.handoff has a pending set (targetmanager.js). Only three views ever
+     CALLED Janet.handoff.send, so a grid full of exactly the hosts the next tool
+     needs dead-ended in Export CSV -> Downloads -> Import.
+
+     This is the sending half, OPT-IN per grid via opts.useHosts. It is
+     deliberately APPEND-VIA-BANNER and nothing more: it stages a host list and
+     opens the destination tool. It never fills a target box by itself, never
+     starts a run, and never touches an arming gate - the operator still clicks
+     Load in the destination, and every action there still passes its own
+     credential check, guards and typed confirm word. A stale staged set can
+     therefore never ambush a destructive run.
+
+     Destinations are the tools that mount a TargetManager (i.e. the ones that
+     can actually show the banner); every id is verified against
+     server\tool-registry.json. A view can override with useHosts.tools. */
+  var HANDOFF_TOOLS = [
+    { id: 'wpt',          name: 'Workstation Patching' },
+    { id: 'restart',      name: 'Restart Scheduler' },
+    { id: 'sysadmin',     name: 'Sysadmin Sweeps' },
+    { id: 'c2c',          name: 'C2C Nemesis' },
+    { id: 'certdeploy',   name: 'Cert Deploy' },
+    { id: 'secureboot',   name: 'Secure Boot Enabler' },
+    { id: 'biosfirmware', name: 'BIOS Firmware' },
+    { id: 'pkginstall',   name: 'Package Installer' },
+    { id: 'winupgrade',   name: 'Windows Upgrade' },
+    { id: 'message',      name: 'Remote Message' },
+    { id: 'winrmbridge',  name: 'WinRM Bridge' },
+    { id: 'remoteadmin',  name: 'Remote Admin' },
+    { id: 'adsearch',     name: 'AD Search' },
+    { id: 'history',      name: 'Patch History' }
+  ];
+  var useHostsSeq = 0;   // unique radio-group names when several grids are mounted
 
   function defaultCell(col, row) {
     var v = row[col.key];
@@ -67,6 +105,13 @@
       toolbar.appendChild(Janet.ui.ghostButton('None', { size: 'sm', onClick: function () { selectAll(false); } }));
     } else { toolbar.appendChild(selInfo); }
     (opts.toolbarButtons || []).forEach(function (b) { toolbar.appendChild(b); });
+    var useHostsCfg = opts.useHosts || null;
+    if (useHostsCfg && window.Janet && Janet.handoff && typeof Janet.handoff.send === 'function') {
+      toolbar.appendChild(Janet.ui.ghostButton(useHostsCfg.label || 'Use hosts ▾', {
+        size: 'sm', onClick: openUseHosts,
+        title: 'Stage these hosts for another tool. The destination shows a "from another tool" banner - you still click Load there, and every action still needs its own confirm.'
+      }));
+    }
     if (opts.popOut !== false) toolbar.appendChild(Janet.ui.ghostButton('Pop-Out', { size: 'sm', onClick: popOut, title: 'Open this grid in a floating window; it keeps streaming.' }));
     root.appendChild(toolbar);
 
@@ -258,6 +303,128 @@
       var cols = ['Host', 'Hostname', 'HostName', 'Computer', 'ComputerName'];
       for (var i = 0; i < cols.length; i++) { if (row[cols[i]] != null && row[cols[i]] !== '') return String(row[cols[i]]); }
       return null;
+    }
+
+    /* --- "Use hosts in..." (opt-in; see the HANDOFF_TOOLS note above) --------
+       Scope picker (Checked / a view-supplied predicate / All visible) -> tool
+       picker -> Janet.handoff.send(hosts, label) + ctx.openTool(toolId).
+       Staging only: it fills nothing and arms nothing. */
+
+    // Rows the operator can actually SEE right now. A hidden (quick-filtered)
+    // row must never ride along into another tool - same rule getChecked /
+    // selectAll / selectWhere already enforce for destructive actions.
+    function shownRows() {
+      var out = [];
+      order.forEach(function (k) { var r = rows[k]; if (!filterFn || filterFn(r)) out.push(r); });
+      return out;
+    }
+    // rowHost() over a row list, case-insensitively de-duped, original casing kept.
+    // useHosts.hostOf(row) overrides rowHost for grids whose host lives in a column
+    // rowHost does not know (e.g. a Tenable finding's NetBIOS / DNS column).
+    function hostsFrom(list) {
+      var seen = {}, out = [];
+      var pick = (useHostsCfg && typeof useHostsCfg.hostOf === 'function') ? useHostsCfg.hostOf : rowHost;
+      (list || []).forEach(function (r) {
+        var h;
+        try { h = pick(r); } catch (e) { h = null; }
+        if (!h) return;
+        h = String(h).trim(); if (!h) return;
+        var lc = h.toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(seen, lc)) return;
+        seen[lc] = 1; out.push(h);
+      });
+      return out;
+    }
+    function safeTest(fn, row) { try { return !!fn(row); } catch (e) { return false; } }
+
+    function openUseHosts() {
+      var cfg = useHostsCfg || {};
+      var uctx = cfg.ctx || null;
+      var shown = shownRows();
+
+      var scopes = [];
+      if (selectable) scopes.push({ id: 'checked', label: 'Checked rows', hosts: hostsFrom(getChecked()) });
+      var flagged = cfg.flagged;
+      if (flagged && typeof flagged.test === 'function') {
+        scopes.push({
+          id: 'flagged',
+          label: flagged.label || 'Flagged rows',
+          hosts: hostsFrom(shown.filter(function (r) { return safeTest(flagged.test, r); }))
+        });
+      }
+      scopes.push({ id: 'all', label: 'All visible rows', hosts: hostsFrom(shown) });
+
+      var body = el('div');
+      body.style.cssText = 'display:flex;flex-direction:column;gap:10px;min-width:380px';
+      body.appendChild(el('div', 'muted',
+        'Stage this host set for another tool. Nothing is sent to any machine and no target box is filled: '
+        + 'the destination shows a "host(s) from another tool" banner and YOU click Load. Every action there '
+        + 'still needs its own admin session, guards and typed confirm word.'));
+
+      body.appendChild(el('div', 'j-section-h', 'HOSTS TO STAGE'));
+      var grp = 'j-uh' + (++useHostsSeq);
+      var radios = [];
+      scopes.forEach(function (s, i) {
+        var lab = el('label'); lab.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12.5px';
+        var rb = el('input'); rb.type = 'radio'; rb.name = grp; rb.value = s.id;
+        // Default to the first scope that actually has hosts (Checked when the
+        // operator has ticked rows, otherwise the predicate, otherwise All).
+        lab.appendChild(rb);
+        lab.appendChild(el('span', null, s.label + ' - ' + s.hosts.length + ' host(s)'));
+        if (!s.hosts.length) { rb.disabled = true; lab.style.opacity = '0.55'; }
+        body.appendChild(lab);
+        radios.push({ rb: rb, scope: s });
+        if (i === 0) rb.checked = !!s.hosts.length;
+      });
+      if (!radios.some(function (r) { return r.rb.checked; })) {
+        var firstOk = radios.filter(function (r) { return r.scope.hosts.length; })[0];
+        if (firstOk) firstOk.rb.checked = true;
+      }
+
+      var pool = (cfg.tools && cfg.tools.length) ? cfg.tools : HANDOFF_TOOLS;
+      var here = uctx && uctx.toolId;
+      var dests = pool.filter(function (t) { return t && t.id && t.id !== here; });
+
+      body.appendChild(el('div', 'j-section-h', 'DESTINATION TOOL'));
+      var sel = Janet.ui.select({
+        options: dests.map(function (t) { return { label: t.name || t.id, value: t.id }; }),
+        title: 'The tool to open. Its target panel will offer the staged hosts on a Load banner.'
+      });
+      body.appendChild(sel);
+
+      Janet.components.ConfirmDialog({
+        title: 'Use hosts in another tool',
+        body: body,
+        okText: 'Stage & open',
+        cancelText: 'Cancel'
+      }).then(function (ok) {
+        if (!ok) return;
+        var picked = radios.filter(function (r) { return r.rb.checked; })[0];
+        var hosts = picked ? picked.scope.hosts : [];
+        var toolId = sel.value;
+        var dest = dests.filter(function (t) { return t.id === toolId; })[0];
+        if (!hosts.length || !dest) {
+          Janet.components.ConfirmDialog({
+            title: 'Nothing to stage',
+            body: !hosts.length
+              ? 'That scope resolved to zero hosts. Check some rows (or run the scan) first.'
+              : 'Pick a destination tool.',
+            okText: 'OK', cancelText: null
+          });
+          return;
+        }
+        var src = (uctx && uctx.toolName) || opts.title || 'another tool';
+        var label = src + ': ' + (cfg.source || opts.title || 'results') + ' (' + picked.scope.label.toLowerCase() + ')';
+        try { Janet.handoff.send(hosts, label); } catch (e) { return; }
+        if (uctx && typeof uctx.openTool === 'function') uctx.openTool(dest.id);
+        else {
+          Janet.components.ConfirmDialog({
+            title: 'Hosts staged',
+            body: hosts.length + ' host(s) staged. Open ' + (dest.name || dest.id) + ' and click Load on its target panel.',
+            okText: 'OK', cancelText: null
+          });
+        }
+      });
     }
 
     function openRowDetail(row) {

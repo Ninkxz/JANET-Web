@@ -4,9 +4,14 @@
 
    ONE host list (TARGET COMPUTERS) drives everything:
 
-   1. READ-ONLY "C2C Readiness Scan" (action 'scan') + "Version Check"
-      (action 'version-check'): read-only probes across the Target Computers.
-      Change NOTHING and are NOT gated on an admin session.
+   1. READ-ONLY "C2C Readiness Scan" (action 'scan'), "Version Check"
+      (action 'version-check') and "BitLocker Escrow Audit"
+      (action 'audit-encryption'): read-only probes across the Target Computers.
+      Change NOTHING and are NOT gated on an admin session (no arm, no confirm word).
+      The escrow audit reconciles each host's BitLocker key protectors against the AD
+      msFVE-RecoveryInformation escrow - the only surface that inspects a box which is
+      ALREADY encrypted, which the fix path short-circuits as ALREADY ENCRYPTED. It
+      NEVER reads or emits a recovery password: only protector GUIDs are compared.
 
    2. DUAL-MODE FIX (destructive, admin-session gated): the six endpoint-fixable
       pillars (Monitoring / Firewall / Encryption / AntiMalware / Patches / PKI
@@ -35,6 +40,14 @@
 
   // engine row events are keyed 'Host'; CSV header keeps the desktop label 'Computer'.
   var EXPORT_COLS = [['Host', 'Computer'], ['Ping', 'Ping'], ['Status', 'Status'], ['Detail', 'Detail']];
+  // The BitLocker escrow audit carries three extra per-host cells the scan/fix rows do not.
+  // Kept as its OWN column set so an escrow CSV is useful without changing the shape of the
+  // long-standing scan/fix export. Every column here is a mount point, a status word, a count
+  // or a protector GUID - a recovery PASSWORD can never reach this file.
+  var ESCROW_EXPORT_COLS = [
+    ['Host', 'Computer'], ['Ping', 'Ping'], ['Volumes', 'FixedVolumes'],
+    ['Escrowed', 'EscrowedOfEncrypted'], ['Tpm', 'Tpm'], ['Status', 'Status'], ['Detail', 'Detail']
+  ];
 
   // The 11 C2C checks, tiered to the TASKORD 26-0822 dashboard. Only the QUARANTINE
   // tier predicts quarantine; AUDIT + INFO are advisory; Monitoring is ATTEST.
@@ -87,12 +100,20 @@
       case 'FIXED':
       case 'STARTED':
       case 'UP TO DATE':
+      // v1.17.0 BitLocker escrow audit: a recovery key that IS in the directory is the
+      // only green outcome - it is the one state where a locked-out box can be recovered.
+      case 'ESCROWED (AD)':
       case 'INSTALLED': return 'st-ok';
       // red: at least one scored pillar failed -> predicted quarantine; or unreachable; the fix
       // failed; or an outdated product version.
       case 'QUARANTINE RISK':
       case 'OFFLINE':
       case 'OUTDATED':
+      // Escrow audit, both RED because both are a real recovery exposure the operator must
+      // act on: TPM-ONLY means there is no recovery key AT ALL to type at the prompt, and
+      // NOT ESCROWED means one exists but the directory does not have it.
+      case 'TPM-ONLY - LOCKOUT RISK':
+      case 'NOT ESCROWED':
       case 'FAILED': return 'st-bad';
       // amber: no fail but a check errored, the host couldn't be evaluated, operator cancel,
       // a partial fix, a self/DNS skip, product not installed, or Tanium not reporting
@@ -113,11 +134,17 @@
       case 'DNS MISMATCH':
       case 'PARTIAL':
       case 'NOT INSTALLED':
+      // Escrow audit fail-closed state: we could NOT read the protectors or the AD escrow.
+      // Amber, never green - "we do not know" must never look like "we checked and it's fine".
+      case 'ESCROW UNKNOWN':
       case 'SKIPPED': return 'st-warn';
       // blue: nothing changed (fix), a newer-than-target version, or live in-progress phases
       // streamed by the engine.
       case 'NO CHANGE':
       case 'NEWER':
+      // Escrow audit: nothing to escrow because nothing is encrypted. Informational here -
+      // the Encryption pillar is what scores an unencrypted OS volume.
+      case 'NOT ENCRYPTED':
       case 'Scanning':
       case 'Probing':
       case 'Working': return 'st-info';
@@ -389,6 +416,36 @@
       verCard.appendChild(verBtn);
       left.appendChild(verCard);
 
+      // --- BITLOCKER ESCROW AUDIT (read-only; uses the Target Computers list above) ---
+      // Closes the gap that "escrow-first, fail-closed" only bound volumes JANET CHANGES:
+      // a volume already On short-circuits to ALREADY ENCRYPTED and its key protectors were
+      // never enumerated, so the whole pre-JANET installed base was unaudited. Read-only, so
+      // NO admin-session guard and NO confirm word (same gating as Scan / Version Check).
+      var escCard = sectionCard('BITLOCKER ESCROW AUDIT (read-only)', 'cyan');
+      var escIntro = el('div'); escIntro.style.cssText = 'font-size:12px;line-height:1.45;color:var(--muted);margin-bottom:8px';
+      escIntro.textContent = 'Per Target Computer, one consolidated read-only probe enumerates the key protectors of every '
+        + 'FIXED volume (removable / BitLocker To Go / network / optical are never touched) and reconciles each '
+        + 'RecoveryPassword protector GUID against the AD msFVE-RecoveryInformation escrow, plus TPM presence/readiness. '
+        + 'Answers the question the readiness scan cannot: does a box that is ALREADY encrypted actually have a recovery '
+        + 'key in the directory? Changes nothing - no protector is added, removed, or read for its password.';
+      escCard.appendChild(escIntro);
+      var escVerdicts = el('div'); escVerdicts.style.cssText = 'font-size:11.5px;line-height:1.45;color:var(--text);margin-bottom:8px';
+      escVerdicts.textContent = 'ESCROWED (AD) = a protector GUID matches an AD escrow object. '
+        + 'NOT ESCROWED = a recovery key exists on the box but the directory does not have it. '
+        + 'TPM-ONLY - LOCKOUT RISK = encrypted with NO RecoveryPassword protector at all: the next firmware or '
+        + 'boot-config change hits the recovery prompt with no key to type. '
+        + 'ESCROW UNKNOWN = the protector list or the AD search could not be read - fail-closed, never assume escrowed. '
+        + 'NOT ENCRYPTED / OFFLINE as usual.';
+      escCard.appendChild(escVerdicts);
+      var escKeyNote = el('div'); escKeyNote.style.cssText = 'font-size:11px;line-height:1.35;color:var(--muted);margin-bottom:8px;font-weight:700';
+      escKeyNote.textContent = 'The recovery PASSWORD is never read and never emitted - not to a row, a log line, the summary, or the exported CSV. Only protector GUIDs are compared.';
+      escCard.appendChild(escKeyNote);
+      var escBtn = ui.button('BITLOCKER ESCROW AUDIT', { variant: 'cyan', size: 'sm', title: 'Read-only BitLocker key-escrow census across the Target Computers list (changes nothing).' });
+      escBtn.disabled = true;
+      escBtn.onclick = function () { doEscrowAudit(); };
+      escCard.appendChild(escBtn);
+      left.appendChild(escCard);
+
       // --- Action bar (single Scan button via RunBar; read-only, NO admin-session guard) ---
       var actionCard = ui.card({}); actionCard.style.cssText += ';display:flex;flex-direction:column;gap:8px';
       var runbar = C.RunBar({
@@ -422,9 +479,9 @@
         ],
         rowClass: function (r) {
           var s = String(r.Status);
-          if (s === 'READY' || s === 'FIXED' || s === 'STARTED' || s === 'UP TO DATE' || s === 'INSTALLED') return 'row-ok';
-          if (s === 'QUARANTINE RISK' || s === 'OFFLINE' || s === 'FAILED' || s === 'OUTDATED') return 'row-bad';
-          if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH' || s === 'PARTIAL' || s === 'SKIPPED' || s === 'NOT INSTALLED') return 'row-warn';
+          if (s === 'READY' || s === 'FIXED' || s === 'STARTED' || s === 'UP TO DATE' || s === 'INSTALLED' || s === 'ESCROWED (AD)') return 'row-ok';
+          if (s === 'QUARANTINE RISK' || s === 'OFFLINE' || s === 'FAILED' || s === 'OUTDATED' || s === 'NOT ESCROWED' || s === 'TPM-ONLY - LOCKOUT RISK') return 'row-bad';
+          if (s === 'CHECK ERRORS' || s === 'Cancelled' || s === 'ERROR' || s === 'DNS MISMATCH' || s === 'PARTIAL' || s === 'SKIPPED' || s === 'NOT INSTALLED' || s === 'ESCROW UNKNOWN') return 'row-warn';
           return '';
         }
       });
@@ -487,6 +544,7 @@
         offlineCb._cb.disabled = on; threadsInput.disabled = on; clearBtn.disabled = on;
         importBtn.disabled = on; clearImportBtn.disabled = on;
         verBtn.disabled = on; verMatchInput.disabled = on; verTgtInput.disabled = on; verHeal._cb.disabled = on;
+        escBtn.disabled = on;
         fixThreads.disabled = on; fixOffline._cb.disabled = on; confirmInput.disabled = on;
         fixWinrmHeal._cb.disabled = on;
         lockArm._cb.disabled = on;
@@ -547,6 +605,9 @@
         lockBtn.disabled = locked || n === 0 || !lockArm._cb.checked;
         javaBtn.textContent = 'REMOVE OUTDATED JAVA (' + n + ' host' + (n === 1 ? '' : 's') + ')';
         javaBtn.disabled = locked || n === 0 || !javaArm._cb.checked;
+        // Read-only: gated ONLY on having targets + not already running (no arm, no confirm).
+        escBtn.textContent = 'BITLOCKER ESCROW AUDIT (' + n + ' host' + (n === 1 ? '' : 's') + ')';
+        escBtn.disabled = locked || n === 0;
       }
 
       // audit 2026-07-24: 'errors' was total-minus-the-rest, so NOT ATTESTING (Tanium down - the box
@@ -654,6 +715,65 @@
             }
           }
         });
+      }
+
+      // ---- BitLocker Escrow Audit (read-only; no admin session, no confirm word) ----
+      function doEscrowAudit() {
+        if (isRunning()) return;
+        var hosts = targets.hosts();
+        if (!hosts.length) { alertDialog('No Computers', 'Add at least one computer to the Target Computers list before the escrow audit.'); return; }
+        grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
+        hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
+        log.banner('BitLocker Escrow Audit on ' + hosts.length + ' computer(s)');
+        log.append({ text: 'READ-ONLY: no key protector is added, removed, or read for its password; msFVE-RecoveryPassword is never loaded from AD.', level: 'dim' });
+        lockInputs(true);
+        run = ctx.run('audit-encryption', {
+          targets: hosts.join('\n'),
+          attemptOffline: offlineCb._cb.checked,
+          threads: threads()
+        }, { keyOf: keyByHost, destructive: false });
+        bindEscrowRun();
+      }
+
+      function bindEscrowRun() {
+        if (unsub) unsub();
+        unsub = run.subscribe({
+          status: function (t) { prog.setPhase(t); runbar.setStatus(t, 'st-info'); },
+          progress: function (p) { prog.setProgress(p.done, p.total); countLine.textContent = p.done + ' / ' + p.total; },
+          row: function (r) { grid.upsert(r); },
+          log: function (l) { log.append(l); },
+          error: function (e) { log.append({ text: '[' + ts() + '] ' + (e && e.text ? e.text : 'error'), level: 'err' }); },
+          active: function (a) {
+            runbar.setActive(a);
+            if (!a) {
+              lockInputs(false);
+              var c = escrowTally();
+              countLine.textContent = c.total + ' / ' + c.total;
+              // notEscrowed / tpmOnly and unknown are DIFFERENT operator actions, so they are
+              // reported separately here exactly as the engine buckets them: go escrow a key vs
+              // go find out why the read failed. Either way the run does not close green.
+              var bad = c.notEscrowed + c.tpmOnly + c.unknown + c.offline;
+              log.append({ text: '[' + ts() + '] FINISHED BitLocker Escrow Audit. ESCROWED (AD)=' + c.escrowed + '  NOT ESCROWED=' + c.notEscrowed + '  TPM-ONLY (LOCKOUT RISK)=' + c.tpmOnly + '  ESCROW UNKNOWN=' + c.unknown + '  NOT ENCRYPTED=' + c.notEncrypted + '  OFFLINE=' + c.offline + (c.other ? '  OTHER=' + c.other : ''), level: bad ? 'warn' : 'ok' });
+              runbar.setStatus('Escrow audit done - Escrowed ' + c.escrowed + ' / NotEscrowed ' + c.notEscrowed + ' / TpmOnly ' + c.tpmOnly + ' / Unknown ' + c.unknown + ' / NotEncrypted ' + c.notEncrypted + ' / Offline ' + c.offline, bad ? 'st-bad' : 'st-ok');
+            }
+          }
+        });
+      }
+
+      function escrowTally() {
+        var t = { escrowed: 0, notEscrowed: 0, tpmOnly: 0, unknown: 0, notEncrypted: 0, offline: 0, other: 0, total: 0 };
+        grid.rows().forEach(function (r) {
+          var s = String(r.Status);
+          if (s === 'ESCROWED (AD)') t.escrowed++;
+          else if (s === 'NOT ESCROWED') t.notEscrowed++;
+          else if (s === 'TPM-ONLY - LOCKOUT RISK') t.tpmOnly++;
+          else if (s === 'ESCROW UNKNOWN') t.unknown++;
+          else if (s === 'NOT ENCRYPTED') t.notEncrypted++;
+          else if (s === 'OFFLINE') t.offline++;
+          else t.other++;
+        });
+        t.total = grid.rows().length;
+        return t;
       }
 
       function verTally() {
@@ -1255,6 +1375,14 @@
       function doExport() {
         var rows = grid.rows();
         if (!rows.length) { alertDialog('Nothing to export', 'Run a scan or fix first - there are no result rows yet.'); return; }
+        // Escrow-audit rows carry Volumes/Escrowed/Tpm; scan + fix rows do not. Pick the
+        // matching column set from the rows themselves rather than tracking the last action.
+        var isEscrow = rows.some(function (r) { return r && r.Escrowed != null && String(r.Escrowed) !== ''; });
+        if (isEscrow) {
+          ctx.util.exportCsv('C2CBitLockerEscrowAudit_results', ESCROW_EXPORT_COLS, rows);
+          log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' escrow-audit row(s) to CSV (protector GUIDs only - no recovery password).', level: 'info' });
+          return;
+        }
         ctx.util.exportCsv('C2CReadiness_results', EXPORT_COLS, rows);
         log.append({ text: '[' + ts() + '] Exported ' + rows.length + ' row(s) to CSV.', level: 'info' });
       }
@@ -1268,6 +1396,7 @@
 
       log.append({ text: 'C2C Nemesis ready. DUAL-mode fixes: with NO import, each pillar card fixes the hosts in Target Computers (MANUAL) - type FIX, then Fix a pillar or check cards + RUN ALL. Import the Tanium C2C Compliance CSV to switch to import-scoped targeting (one card per flagged pillar; dials ONLY the flagged hosts).', level: 'accent' });
       log.append({ text: 'Read-only side (no import needed): C2C Readiness Scan + Version Check across the Target Computers list (11 TASKORD-tiered checks: 5 QUARANTINE, 2 AUDIT, 3 INFO, Monitoring=ATTEST). The full per-check report streams here.', level: 'dim' });
+      log.append({ text: 'Also read-only: BITLOCKER ESCROW AUDIT - reconciles each fixed volume RecoveryPassword protector GUIDs against the AD msFVE-RecoveryInformation escrow. ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed: an unreadable protector list or AD search is UNKNOWN, never ESCROWED. The recovery password is never read or emitted.', level: 'dim' });
 
       host.appendChild(root);
       this._root = root; this._unsub = function () { if (unsub) unsub(); if (offTargets) offTargets(); };

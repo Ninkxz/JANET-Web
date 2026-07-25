@@ -27,6 +27,9 @@
 #    GET    /api/tool/pkginstall/msis                 -> pkginstall: list .msi files in a bundle
 #    GET    /api/tool/<id>/manifest                   -> per-tool UI manifest
 #    POST   /api/tool/<id>/action/<actionId>          -> run a tool action (session-gated if destructive)
+#    POST   /api/tool/restart/action/arm-dispatch     -> arm a delayed restart wave (in-memory only)
+#    GET    /api/jobs                                 -> live jobs + the armed restart (reattach surface)
+#    POST   /api/armed-restart/disarm                 -> stand the armed restart down
 #    GET    /api/job/<jobId>/events?since=N           -> poll job progress/events
 #    POST   /api/job/<jobId>/cancel                   -> cancel a running job
 # =============================================================================
@@ -138,6 +141,158 @@ function Test-JanetWebPathReachable {
     try { $ok = [bool](Test-JanetWebTcpPort -ComputerName $probeHost -Port 445) } catch { return $false }
     $script:JanetWebHostProbeCache[$probeHost] = @{ At = (Get-Date); Ok = $ok }
     return $ok
+}
+
+# =============================================================================
+#  ARMED RESTART  -  server-side delayed start for restart/dispatch-restart.
+#
+#  WHY: the restart tool's "begin at the scheduled time" countdown was a browser
+#  setInterval (restart.view.js), so a stray F5 or a closed tab silently lost a
+#  2 AM reboot wave - only a beforeunload prompt stood in the way. The countdown
+#  now lives on the server process, which has to stay up for the wave anyway.
+#
+#  This is deliberately NOT a scheduler. Hard boundaries, all of them load-bearing:
+#    * restart/dispatch-restart ONLY. There is no generic "arm any action" route -
+#      a generic unattended-execution path is a much larger safety problem.
+#    * IN-MEMORY ONLY. Nothing about an arm is EVER written to disk: not the
+#      params, not the credential (the credential is never in the arm at all -
+#      the fire reads $state.Cred, the same in-memory PSCredential a live POST
+#      uses), not the fire time. A server restart LOSES the arm. That is correct.
+#    * HARD-EXPIRES when the admin session ends (End Session / Clear Credentials
+#      drop AckGiven+Cred) or the log-session id changes. Refuses to fire.
+#    * REFUSES A STALE FIRE: if the fire time passed more than the grace window
+#      ago (console was suspended, laptop slept, clock jumped) the arm expires
+#      unfired rather than dumping a 2 AM wave onto a 9 AM fleet.
+#    * NO GATE IS WEAKENED. The typed RESTART word, the admin-session gate and
+#      every engine-side guard (self-guard, wrong-box guard) still run - the
+#      typed word is simply demanded EARLIER, at arm time, and rides inside the
+#      stored param set so the ENGINE re-validates it when the wave fires.
+#
+#  The three functions below are PURE (no state, no I/O) so the expiry/refusal
+#  decisions are unit-testable without a listener or a credential.
+# =============================================================================
+
+# Longest lead an arm may carry, and how late a fire may still be honored.
+$script:JanetWebArmMaxHours     = 24
+$script:JanetWebArmGraceMinutes = 10
+
+# Parse an operator-supplied arm time to a local [datetime], or $null if it is
+# not a time at all. Mirrors restart.view.js parseRestartTime so the same string
+# the operator typed into "Restart time" means the same instant on both sides:
+#   'HH:mm' / 'H:mm'  -> the NEXT occurrence (today, or tomorrow if already past)
+#   anything else     -> ISO 8601 / 'yyyy-MM-dd HH:mm' via TryParse
+function ConvertTo-JanetWebArmFireAt {
+    param([string]$Raw, [datetime]$Now = (Get-Date))
+    $s = ([string]$Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    if ($s -match '^(\d{1,2}):(\d{2})$') {
+        $hh = [int]$Matches[1]; $mm = [int]$Matches[2]
+        if ($hh -gt 23 -or $mm -gt 59) { return $null }
+        $d = Get-Date -Year $Now.Year -Month $Now.Month -Day $Now.Day -Hour $hh -Minute $mm -Second 0 -Millisecond 0
+        if ($d -le $Now) { $d = $d.AddDays(1) }
+        return $d
+    }
+    $dt = [datetime]::MinValue
+    $none = [System.Globalization.DateTimeStyles]::None
+    if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, $none, [ref]$dt)) { return $dt }
+    if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::CurrentCulture,   $none, [ref]$dt)) { return $dt }
+    return $null
+}
+
+# Validate an arm REQUEST. This is where the destructive gate moves EARLIER: the
+# typed RESTART word is demanded here, before anything is stored, exactly as the
+# engine demands it before a live dispatch. Fail-closed on the dry-run flag: only
+# a literal $true / 'true' counts as a dry run, so an odd value is treated as LIVE
+# and still needs the word. Returns @{ ok; fireAt; error }.
+function Test-JanetWebArmRequest {
+    param(
+        [hashtable]$Params,
+        [string]$FireAtRaw,
+        [datetime]$Now = (Get-Date),
+        [int]$MaxHours = 24,
+        [int]$MinLeadSeconds = 5
+    )
+    $r = @{ ok = $false; fireAt = $null; dryRun = $false; error = '' }
+    if (-not $Params) { $r.error = 'no parameters were supplied for the armed dispatch.'; return $r }
+    if ([string]::IsNullOrWhiteSpace([string]$Params['targets'])) { $r.error = 'no targets - an armed dispatch must carry the host list it will fire at.'; return $r }
+    $dry = $false
+    if ($Params.ContainsKey('dryRun')) {
+        $v = $Params['dryRun']
+        if (($v -is [bool]) -and $v) { $dry = $true }
+        elseif ("$v" -eq 'true' -or "$v" -eq 'True') { $dry = $true }
+    }
+    $r.dryRun = $dry
+    if ((-not $dry) -and (([string]$Params['confirm']).Trim() -cne 'RESTART')) {
+        $r.error = 'Refused: type RESTART (exactly) to arm a LIVE dispatch (dry run needs no confirm word). Nothing was armed.'
+        return $r
+    }
+    $fa = ConvertTo-JanetWebArmFireAt -Raw $FireAtRaw -Now $Now
+    if (-not $fa) { $r.error = "could not read '$FireAtRaw' as a restart time (use HH:mm or an ISO 8601 date-time)."; return $r }
+    if ($fa -le $Now.AddSeconds($MinLeadSeconds)) { $r.error = 'that restart time is in the past - an arm must fire in the future.'; return $r }
+    if ($fa -gt $Now.AddHours($MaxHours)) { $r.error = "an armed restart may not be more than $MaxHours hours out (the arm is in memory only and dies with the server)."; return $r }
+    $r.ok = $true; $r.fireAt = $fa
+    return $r
+}
+
+# Build THE arm record. This is the only thing that ever holds an armed wave, and
+# it is a plain in-memory hashtable: there is no serializer, no file, no registry
+# key, no scheduled task behind it. The credential is deliberately NOT a field -
+# the fire reads $state.Cred, exactly as a live POST does, so an arm can never
+# outlive (or leak) the credential that authorised it. Pure: constructs and
+# returns, touches nothing.
+function New-JanetWebArmedRestart {
+    param(
+        [hashtable]$Params,
+        [datetime]$FireAt,
+        [string]$SessionId = '',
+        [string]$Operator = '',
+        [bool]$DryRun = $false,
+        [string]$Mode = '',
+        [string]$ArmId = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($ArmId)) { $ArmId = New-JanetWebSecureToken }
+    $hosts = @()
+    try { $hosts = @(([string]$Params['targets']) -split '[\s,;]+' | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique) } catch {}
+    return @{
+        ArmId     = $ArmId
+        Params    = $Params        # in memory only - never serialized, never written to disk
+        FireAt    = $FireAt
+        ArmedAt   = Get-Date
+        SessionId = [string]$SessionId
+        Operator  = [string]$Operator
+        HostCount = $hosts.Count
+        DryRun    = [bool]$DryRun
+        Mode      = [string]$Mode
+        Status    = 'armed'
+        JobId     = $null
+        Reason    = ''
+        FiredAt   = $null
+    }
+}
+
+# Decide what the maintenance tick should do with the current arm. PURE - the
+# caller supplies "is the admin session still armed" and the live session id, so
+# the refusal paths are testable without a credential. Returns
+# @{ fire; expire; reason }. fire and expire are never both $true.
+function Test-JanetWebArmShouldFire {
+    param(
+        $Arm,
+        [datetime]$Now = (Get-Date),
+        [bool]$SessionArmed = $false,
+        [string]$SessionId = '',
+        [int]$GraceMinutes = 10
+    )
+    if (-not $Arm) { return @{ fire = $false; expire = $false; reason = 'nothing armed' } }
+    if ([string]$Arm.Status -ne 'armed') { return @{ fire = $false; expire = $true; reason = "the arm is '$([string]$Arm.Status)', not 'armed'." } }
+    # The operator ended the admin session (or cleared the credential) after arming.
+    # The consent that armed this wave is gone with it - refuse, do not fire.
+    if (-not $SessionArmed) { return @{ fire = $false; expire = $true; reason = 'the admin session ended (credential/acknowledgment cleared) after the wave was armed - REFUSING to fire.' } }
+    if ([string]$Arm.SessionId -ne [string]$SessionId) { return @{ fire = $false; expire = $true; reason = 'the logging session changed after the wave was armed - REFUSING to fire.' } }
+    if ($Now -lt [datetime]$Arm.FireAt) { return @{ fire = $false; expire = $false; reason = 'waiting for the fire time' } }
+    if ($Now -gt ([datetime]$Arm.FireAt).AddMinutes($GraceMinutes)) {
+        return @{ fire = $false; expire = $true; reason = "the fire time passed more than $GraceMinutes minute(s) ago (the server was stalled/suspended or the clock moved) - REFUSING to fire a stale wave." }
+    }
+    return @{ fire = $true; expire = $false; reason = 'fire time reached' }
 }
 
 function Start-JanetWebServer {
@@ -307,7 +462,24 @@ function Start-JanetWebServer {
         # once (deleted on read, 5-min TTL) with its own relaxed CSP. Accept-thread
         # only, so a plain hashtable is safe.
         ReportPreviews = @{}
+        # THE armed restart (at most one, restart/dispatch-restart only) or $null.
+        # Accept-thread only. IN-MEMORY ONLY - see the ARMED RESTART block above:
+        # this slot is never serialized, never written to disk, and dies with the
+        # process. Shape: @{ ArmId; Params; FireAt; ArmedAt; SessionId; Operator;
+        #                    HostCount; DryRun; Mode; Status; JobId; Reason }
+        ArmedRestart = $null
+        # The last arm that left the slot (fired / expired / disarmed), kept only so
+        # the console + a reconnecting UI can explain what happened to it. Also
+        # in-memory only.
+        LastFiredArm = $null
     }
+
+    # Armed-restart tuning, captured into LOCALS at start. The $script: defaults
+    # above are the single source of truth, but reading them once here means the
+    # arm gate can never silently degrade to 0 hours / 0 minutes of grace if this
+    # file is ever loaded into a scope where $script: resolves elsewhere.
+    $armMaxHours = [int]$script:JanetWebArmMaxHours;     if ($armMaxHours -le 0) { $armMaxHours = 24 }
+    $armGraceMin = [int]$script:JanetWebArmGraceMinutes; if ($armGraceMin -le 0) { $armGraceMin = 10 }
 
     # --- helpers ---------------------------------------------------------------
     $contentType = {
@@ -395,6 +567,286 @@ function Start-JanetWebServer {
         }
     }
 
+    # Create and START one tool-action job: mint the job record, spawn the worker
+    # runspace, and BeginInvoke it. This IS the body of POST /api/tool/<id>/action/
+    # <actionId> (extracted, byte-for-byte apart from the transport lines) so that
+    # the armed-restart tick can launch a wave through the EXACT same code path the
+    # HTTP route uses - one job-start path, one set of guards, no second copy to
+    # drift. Transport-free: it never touches $resp, it RETURNS the outcome:
+    #     @{ ok = $true;  jobId = <id> }
+    #     @{ ok = $false; code = <http status>; error = <client-safe message> }
+    $startToolJob = {
+        param([string]$toolId, [string]$actId, [hashtable]$actionParams, [string]$toolVer, $mani, [string]$mp)
+        $state.JobSeq++
+        $jobId = "j$($state.JobSeq)_$([guid]::NewGuid().ToString('N').Substring(0,6))"
+        $job = [hashtable]::Synchronized(@{
+            Id=$jobId; Tool=$toolId; Action=$actId
+            Events=([System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)))
+            Status='running'; Result=$null; PS=$null; Async=$null; StartedAt=(Get-Date); FinishedAt=$null; Cancel=$false
+        })
+        $state.Jobs[$jobId] = $job
+        # Hand the (synchronized) job to the engine so a long fan-out can poll
+        # its Cancel flag and stop in-flight WinRM children when the operator
+        # presses Cancel. Engines that don't look for '__job' just ignore it.
+        $actionParams['__job'] = $job
+
+        $worker = {
+            param($modulePath, $actionId, $prms, $cred, $job, $logScript, $logCtx, $toolId, $skipImport, $toolVer, $archivedCsvs)
+            try {
+                # Stateful tools run in a persistent runspace where the module +
+                # logging script were imported ONCE at runspace creation;
+                # re-importing would reset $script: state, so skip it for them.
+                if (-not $skipImport) {
+                    . $logScript
+                    Import-Module $modulePath -Force -ErrorAction Stop
+                }
+                # ACAS: retain a timestamped archive copy of each uploaded CSV (once
+                # per unique source) next to this operator's ACAS logs - an audit
+                # trail of exactly what was imported. Best-effort; never blocks or
+                # fails the action. audit 2026-07-23: ran on the single-threaded
+                # accept loop before - moved here so a slow share Copy-Item can't
+                # stall every request. $archivedCsvs (the server's once-per-source
+                # set) is now shared across concurrent worker runspaces: hold its
+                # monitor for the whole pass (rare + best-effort, so coarse is fine).
+                if ($toolId -eq 'acas' -and $prms['csvPaths'] -and $null -ne $archivedCsvs) {
+                    [System.Threading.Monitor]::Enter($archivedCsvs)
+                    try {
+                        $archRoot = if ($logCtx.OnShare) { $logCtx.NetRoot } else { $logCtx.JanetLocal }
+                        # The DESTINATION can be a share too - ping-gate it like the
+                        # UNC sources below. The throw lands in this block's empty
+                        # catch: archiving is skipped this pass and (since nothing
+                        # was added to $archivedCsvs) retried on the next action.
+                        if ($archRoot -match '^\\\\([^\\]+)') {
+                            if (-not (Test-JanetWebHostReachable $Matches[1])) { throw 'archive share unreachable' }
+                        }
+                        $archDir = Join-Path (Join-Path (Join-Path $archRoot (Resolve-JanetWebToolName -ToolId 'acas')) $logCtx.UserFolder) 'CsvArchive'
+                        foreach ($cp in ([string]$prms['csvPaths'] -split "`r?`n")) {
+                            $src = $cp.Trim().Trim('"'); if (-not $src) { continue }
+                            if ($archivedCsvs.Contains($src)) { continue }
+                            # Uploaded CSVs are local temp paths (fast). A manually-typed
+                            # UNC source is still ping-gated first: worker time is cheap,
+                            # but a bounded probe beats a 30s SMB stall even here.
+                            if ($src -match '^\\\\([^\\]+)') {
+                                if (-not (Test-JanetWebHostReachable $Matches[1])) { [void]$archivedCsvs.Add($src); continue }
+                            }
+                            if (-not (Test-Path -LiteralPath $src)) { continue }
+                            [void]$archivedCsvs.Add($src)
+                            if (-not (Test-Path -LiteralPath $archDir)) { New-Item -ItemType Directory -Path $archDir -Force -ErrorAction Stop | Out-Null }
+                            $dest = Join-Path $archDir ((Get-Date -Format 'yyyy-MM-dd_HHmmss') + '_' + (Split-Path -Leaf $src))
+                            Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
+                        }
+                    } catch {} finally { [System.Threading.Monitor]::Exit($archivedCsvs) }
+                }
+                # The manifest ToolVersion rides to the audit CSV only when the
+                # loaded logging bridge has the (optional) parameter, so the two
+                # changes can land in either order.
+                # Tools whose audit target IS a machine -> they get a per-host TouchedHosts
+                # CSV. Excludes reports (filenames), dhcp (scope names), adsearch (directory objects).
+                $hostTouchingTool = @('wpt','acas','pkginstall','winupgrade','upr','secureboot','restart','message','remoteadmin') -contains $toolId
+                $emit = {
+                    param($e)
+                    [void]$job.Events.Add($e)
+                    if ($e.type -eq 'audit') {
+                        if ($e.action -ne 'TouchHost' -and $e.action -ne 'VulnPatched') {
+                            # Honest: an action outside the ValidateSet would be dropped by
+                            # Write-JanetAction without a trace. Surface it (engine bug to fix).
+                            [void]$job.Events.Add(@{ type='log'; level='warn'; text="Audit NOT recorded: action '$([string]$e.action)' is outside the ValidateSet (TouchHost/VulnPatched) - Tool=$toolId Target=$([string]$e.target). Engine must emit a valid action." })
+                        } else {
+                        try {
+                            $wja = @{ Context=$logCtx; Tool=$toolId; Action=$e.action; Target=$e.target; Result=$e.result; ItemCount=([int]$e.itemCount); Detail=([string]$e.detail); ToolVersion=$toolVer }
+                            Write-JanetAction @wja
+                        } catch { [void]$job.Events.Add(@{ type='log'; level='warn'; text="Audit row write failed (Tool=$toolId Action=$([string]$e.action) Target=$([string]$e.target)): $($_.Exception.Message)" }) }
+                        }
+                        # Per-session .log transcript for EVERY tool (desktop parity:
+                        # each tool keeps a human-readable record of what it did).
+                        try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Target ([string]$e.target) -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
+                        # Per-host attribution CSV (TouchedHosts_<month>.csv) for every
+                        # host-touching tool, so a lead can pivot "which machines did op X
+                        # touch this month". Skipped for non-host targets / non-host tools.
+                        if ($hostTouchingTool) {
+                            $tgt = [string]$e.target
+                            if ($tgt -and $tgt -ne 'N/A' -and $tgt -ne '(custom command)') {
+                                $thHost = ($tgt -split '\\')[0]   # upr emits "host\product" -> keep the host
+                                try { Write-JanetWebTouchedHost -Context $logCtx -Tool $toolId -Action ([string]$e.action) -TargetHost $thHost -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
+                            }
+                        }
+                    }
+                    elseif ($e.type -eq 'run' -and $toolId -eq 'acas') {
+                        # Per-run summary -> daily ACAS-Nemesis-Runs CSV (desktop Write-NemRunSummary).
+                        try {
+                            $members = @(); if ($e.groupMembers) { $members = @($e.groupMembers) }
+                            Write-JanetWebRun -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Scope ([string]$e.scope) `
+                                -Profile ([string]$e.profile) -Mode ([string]$e.mode) -HostsTotal ([int]$e.hostsTotal) `
+                                -Success ([int]$e.success) -Failed ([int]$e.failed) -DurationSec ([int]$e.durationSec) `
+                                -GroupKey ([string]$e.groupKey) -GroupMembers $members
+                        } catch {}
+                    }
+                }.GetNewClosure()
+                # Per-action transcript backstop: log the START and END of EVERY action
+                # invocation to this tool's .log, so even an action that emits no
+                # fine-grained audit still leaves a durable trace. This is what makes
+                # "everything JANET Web does is logged" literally true.
+                $actStart = Get-Date
+                $paramKeys = ''
+                try { $paramKeys = (@($prms.Keys | Where-Object { $_ -ne '__job' }) | Sort-Object) -join ', ' } catch {}
+                try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(start)' -Result 'Started' -Detail $paramKeys } catch {}
+                $res = Invoke-JanetToolAction -ActionId $actionId -Params $prms -Credential $cred -Emit $emit
+                [void]$job.Events.Add(@{ type='final'; result=$res })
+                $job.Result = $res
+                if ($job.Status -eq 'running') { $job.Status = 'done' }                  # don't clobber a cancel
+                elseif ($job.Status -eq 'cancelling') { $job.Status = 'cancelled' }      # abandon events all emitted - now terminal
+                try {
+                    $durs = [math]::Round(((Get-Date) - $actStart).TotalSeconds, 1)
+                    Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result ([string]$job.Status) -Detail "duration=${durs}s"
+                } catch {}
+            } catch {
+                $errMsg = $_.Exception.Message
+                [void]$job.Events.Add(@{ type='error'; text=$errMsg })
+                if ($job.Status -eq 'running') { $job.Status = 'error' }
+                elseif ($job.Status -eq 'cancelling') { $job.Status = 'cancelled' }
+                # Persist the failure to the share (shared detail CSV + the .log) so a
+                # thrown action is never silently lost - it was, before this.
+                try {
+                    $wjaErr = @{ Context=$logCtx; Tool=$toolId; Action='TouchHost'; Target='N/A'; Result='Failure'; ItemCount=0; Detail="action '$actionId' failed: $errMsg"; ToolVersion=$toolVer }
+                    Write-JanetAction @wjaErr
+                } catch {}
+                try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result 'Error' -Detail $errMsg } catch {}
+            }
+            $job.FinishedAt = Get-Date   # eviction clock starts at FINISH, not start
+        }
+        # Stateful tools (those whose manifest sets statefulRunspace,
+        # currently reports) reuse ONE persistent, module-loaded runspace so
+        # their $script: parse/scan state survives across actions - serialized
+        # to one action at a time. The flag is the single source of truth.
+        $stateful = ($mani -and $mani.statefulRunspace)
+        if ($stateful) {
+            if (-not $state.ToolRunspaces.ContainsKey($toolId)) {
+                try {
+                    $trs = [runspacefactory]::CreateRunspace(); $trs.ApartmentState = 'STA'; $trs.ThreadOptions = 'ReuseThread'; $trs.Open()
+                    $initPs = [powershell]::Create(); $initPs.Runspace = $trs
+                    [void]$initPs.AddScript('param($ls,$mp) . $ls; Import-Module $mp -Force -ErrorAction Stop').AddArgument($state.LogScript).AddArgument($mp)
+                    $initPs.Invoke() | Out-Null; $initPs.Dispose()
+                    $state.ToolRunspaces[$toolId] = @{ RS = $trs; Busy = $false }
+                } catch {
+                    $ex = $_
+                    [void]$state.Jobs.Remove($jobId)
+                    try { Write-Host ("  [500] start $toolId runspace -> $($ex.Exception.Message)`r`n$($ex.ScriptStackTrace)") -ForegroundColor Red } catch {}
+                    return @{ ok = $false; code = 500; error = 'internal error - see server console' }
+                }
+            }
+            $slot = $state.ToolRunspaces[$toolId]
+            if ($slot.Busy) {
+                [void]$state.Jobs.Remove($jobId)
+                return @{ ok = $false; code = 409; error = "$toolId is busy with another action - wait for it to finish, then retry." }
+            }
+            $slot.Busy = $true
+            $ps = [powershell]::Create(); $ps.Runspace = $slot.RS
+            [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($actionParams).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($true).AddArgument($toolVer).AddArgument($state.ArchivedCsvs)
+        } else {
+            $ps = [powershell]::Create()
+            [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($actionParams).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($false).AddArgument($toolVer).AddArgument($state.ArchivedCsvs)
+        }
+        # Transactional start: if BeginInvoke throws (dead persistent
+        # runspace, OOM), free the stateful Busy slot and drop the job so
+        # the reaper isn't left a stuck 'running' job with no live Async
+        # (which would 409-block reports for the rest of the session).
+        $job.PS = $ps
+        try {
+            $job.Async = $ps.BeginInvoke()
+        } catch {
+            $ex = $_
+            try { $ps.Dispose() } catch {}
+            [void]$state.Jobs.Remove($jobId)
+            if ($stateful -and $slot) { $slot.Busy = $false }
+            try { Write-Host ("  [500] start job -> $($ex.Exception.Message)`r`n$($ex.ScriptStackTrace)") -ForegroundColor Red } catch {}
+            return @{ ok = $false; code = 500; error = 'internal error - see server console' }
+        }
+        return @{ ok = $true; jobId = $jobId }
+    }
+
+    # Client-facing view of an armed restart: identity, counts and times ONLY. The
+    # stored param set (the host list, the countdown message, the typed confirm
+    # word) is deliberately NOT echoed back - the UI needs to SHOW that a wave is
+    # armed and be able to DISARM it, nothing more. Returns $null when nothing is armed.
+    $armSummary = {
+        param($arm)
+        if (-not $arm) { return $null }
+        return @{
+            armId     = [string]$arm.ArmId
+            tool      = 'restart'
+            action    = 'dispatch-restart'
+            status    = [string]$arm.Status
+            fireAt    = ([datetime]$arm.FireAt).ToString('o')
+            armedAt   = ([datetime]$arm.ArmedAt).ToString('o')
+            hostCount = [int]$arm.HostCount
+            dryRun    = [bool]$arm.DryRun
+            mode      = [string]$arm.Mode
+            operator  = [string]$arm.Operator
+            secondsRemaining = [int][math]::Max(0, [math]::Round(((([datetime]$arm.FireAt) - (Get-Date)).TotalSeconds)))
+        }
+    }
+
+    # Armed-restart maintenance tick. Runs on EVERY accept-loop pass - each request
+    # AND each 2 s heartbeat - following the cheap-hook pattern of
+    # Write-JanetWebUsageSnapshot: no new poller, no timer, no extra thread, and it
+    # NEVER THROWS (a fault here must not take down the accept loop).
+    #
+    # Every fire/expire decision belongs to the PURE Test-JanetWebArmShouldFire
+    # above, so the refusal paths are unit-testable without a listener or a
+    # credential. This block only CARRIES OUT that decision:
+    #   expire -> drop the arm and say so loudly (console + the restart transcript)
+    #   fire   -> launch through $startToolJob, the exact same path
+    #             POST /api/tool/restart/action/dispatch-restart takes, with the
+    #             same in-memory $state.Cred. The stored param set still carries the
+    #             typed RESTART word, so the ENGINE re-validates it on the way in.
+    $tickArmedRestart = {
+        try {
+            $arm = $state.ArmedRestart
+            if (-not $arm) { return }
+            $sessionArmed = ($state.AckGiven -and $null -ne $state.Cred)
+            $d = Test-JanetWebArmShouldFire -Arm $arm -Now (Get-Date) -SessionArmed $sessionArmed `
+                    -SessionId ([string]$state.LogCtx.SessionId) -GraceMinutes $armGraceMin
+            if ($d.expire) {
+                $arm.Status = 'expired'; $arm.Reason = [string]$d.reason
+                $state.ArmedRestart = $null
+                $state.LastFiredArm = $arm
+                try { Write-Host ("  [armed restart] EXPIRED - NOT fired: $($d.reason)") -ForegroundColor Yellow } catch {}
+                try { Write-JanetWebSessionLog -Context $state.LogCtx -Tool 'restart' -Action 'ARM:expired' -Target "(armed dispatch - $([int]$arm.HostCount) host(s))" -Result 'Expired' -Detail ([string]$d.reason) } catch {}
+                return
+            }
+            if (-not $d.fire) { return }
+            $mani = $state.Manifests['restart']; $mp = $state.ModulePaths['restart']
+            if (-not $mp) {
+                $arm.Status = 'expired'; $arm.Reason = 'the restart module is not loaded on this server'
+                $state.ArmedRestart = $null; $state.LastFiredArm = $arm
+                try { Write-Host '  [armed restart] EXPIRED - NOT fired: the restart module is not loaded.' -ForegroundColor Red } catch {}
+                return
+            }
+            $armToolVer = '1.0.0'; if ($mani -and $mani.version) { $armToolVer = [string]$mani.version }
+            # Clear the slot BEFORE launching. A throw or a failed start must never
+            # leave a live arm behind for the NEXT tick to fire a second time.
+            $state.ArmedRestart = $null
+            $jr = & $startToolJob 'restart' 'dispatch-restart' $arm.Params $armToolVer $mani $mp
+            if ($jr -is [array]) { $jr = $jr[-1] }
+            if ($jr -and $jr.ok) {
+                $arm.Status = 'fired'; $arm.JobId = [string]$jr.jobId; $arm.FiredAt = Get-Date
+                $state.LastFiredArm = $arm
+                try { Write-Host ("  [armed restart] FIRING NOW - $([int]$arm.HostCount) host(s), job $([string]$jr.jobId)") -ForegroundColor Cyan } catch {}
+                try { Write-JanetWebSessionLog -Context $state.LogCtx -Tool 'restart' -Action 'ARM:fired' -Target "(armed dispatch - $([int]$arm.HostCount) host(s))" -Result 'Fired' -Detail ("job=$([string]$jr.jobId) armedAt=$(([datetime]$arm.ArmedAt).ToString('s'))") } catch {}
+            } else {
+                $arm.Status = 'failed'; $arm.Reason = [string]$jr.error
+                $state.LastFiredArm = $arm
+                try { Write-Host ("  [armed restart] FAILED to start: $([string]$jr.error)") -ForegroundColor Red } catch {}
+                try { Write-JanetWebSessionLog -Context $state.LogCtx -Tool 'restart' -Action 'ARM:failed' -Target '(armed dispatch)' -Result 'Failure' -Detail ([string]$jr.error) } catch {}
+            }
+        } catch {
+            # Fail CLOSED: an unexpected fault drops the arm rather than leaving a
+            # wave that might fire on some later, less-understood pass.
+            $state.ArmedRestart = $null
+            try { Write-Host ("  [armed restart] tick error - arm DISCARDED: $($_.Exception.Message)") -ForegroundColor Red } catch {}
+        }
+    }
+
     # Read a request body as UTF-8 text. PS 5.1's $req.ContentEncoding falls back
     # to ANSI when the charset is absent and fetch always sends UTF-8. Bounded
     # stream-copy so a chunked body (ContentLength64 = -1) can't bypass the cap.
@@ -456,6 +908,12 @@ function Start-JanetWebServer {
             # activity was tallied). Without this the dashboard sees NOTHING until a
             # clean server stop - and nothing EVER if the console is killed.
             try { Write-JanetWebUsageSnapshot -Context $state.LogCtx } catch {}
+            # Same cheap-hook shape for the armed restart: every pass (request or
+            # 2 s heartbeat) the tick decides whether the one armed wave should
+            # fire, expire, or keep waiting. No timer, no poller, no thread - and
+            # a 2 s heartbeat is plenty of resolution for a minute-granularity
+            # reboot time. NEVER THROWS (it owns its own try/catch).
+            & $tickArmedRestart
             # Heartbeat accept: one async accept stays armed; wait in 2 s slices so
             # Ctrl+C is honored promptly and the reaper runs even when no client is
             # polling. Requests are still handled strictly on this one thread.
@@ -600,7 +1058,19 @@ function Start-JanetWebServer {
                     # credential being cleared. Without this, ack + clear-cred + later
                     # re-POST /cred re-armed the destructive gate with no fresh ack
                     # (AckGiven was a one-time-per-process flag).
-                    if ($verb -eq 'DELETE') { $state.Cred = $null; $state.AckGiven = $false; & $writeJson $resp @{ ok=$true; status=(Get-JanetWebCredentialStatus -Credential $null) }; continue }
+                    # Clearing the credential HARD-EXPIRES any armed restart: the wave was
+                    # armed against that credential and that ack. (The tick would refuse it
+                    # anyway - $state.Cred is null - but drop it HERE so the UI sees the arm
+                    # disappear the instant the operator disarms, not up to 2 s later.)
+                    if ($verb -eq 'DELETE') { $state.Cred = $null; $state.AckGiven = $false;
+                        if ($state.ArmedRestart) {
+                            $state.ArmedRestart.Status = 'expired'
+                            $state.ArmedRestart.Reason = 'the credential was cleared after the wave was armed'
+                            $state.LastFiredArm = $state.ArmedRestart; $state.ArmedRestart = $null
+                            try { Write-Host '  [armed restart] EXPIRED - NOT fired: the credential was cleared.' -ForegroundColor Yellow } catch {}
+                        }
+                        & $writeJson $resp @{ ok=$true; status=(Get-JanetWebCredentialStatus -Credential $null) }; continue
+                    }
                 }
 
                 # POST /api/session/start -> record the responsibility acknowledgment.
@@ -719,6 +1189,18 @@ function Start-JanetWebServer {
                     # /api/cred + POST /api/session/start ack.
                     $state.AckGiven = $false
                     $state.Cred = $null
+                    # ...and HARD-EXPIRES any armed restart with it. "End Session" must
+                    # mean the box is quiet: an armed wave that outlived the session that
+                    # armed it would be exactly the unattended execution this design
+                    # refuses to create. The tick would refuse it on the next pass anyway
+                    # (fail-closed in two places); this makes it immediate and visible.
+                    if ($state.ArmedRestart) {
+                        $state.ArmedRestart.Status = 'expired'
+                        $state.ArmedRestart.Reason = 'the operator ended the admin session after the wave was armed'
+                        $state.LastFiredArm = $state.ArmedRestart; $state.ArmedRestart = $null
+                        try { Write-Host '  [armed restart] EXPIRED - NOT fired: the admin session was ended.' -ForegroundColor Yellow } catch {}
+                        try { Write-JanetWebSessionLog -Context $state.LogCtx -Tool 'restart' -Action 'ARM:expired' -Target '(armed dispatch)' -Result 'Expired' -Detail 'the operator ended the admin session after the wave was armed' } catch {}
+                    }
                     & $writeJson $resp @{ ok=$true; disarmed=$true; hostsTouched=$state.LogCtx.Hosts.Count; vulnsPatched=$state.LogCtx.Vulns; runCount=$state.LogCtx.RunCount; failures=$state.LogCtx.Failures }
                     continue
                 }
@@ -917,6 +1399,108 @@ function Start-JanetWebServer {
                     continue
                 }
 
+                # GET /api/jobs -> every job this server still knows about, plus the
+                # armed restart (if any) and the server's clock.
+                #
+                # This is the REATTACH surface. Before it, a browser reload lost all
+                # sight of work the server was still doing: run-state lived only in the
+                # page. Now a reloaded (or second) tab can see that a wave is still
+                # running and re-attach to its event stream, and an armed wave is
+                # visible in the shell strip instead of hiding inside a browser timer.
+                # STRICTLY read-only: it starts nothing, resumes nothing, and returns
+                # no parameters - the reattach UI offers status + Cancel, never a
+                # re-run. Same token gate as every other /api route (it sits after it).
+                if ($verb -eq 'GET' -and $path -eq '/api/jobs') {
+                    & $reapJobs ''
+                    $jobList = New-Object System.Collections.ArrayList
+                    foreach ($jk in @($state.Jobs.Keys | Sort-Object)) {
+                        $jj = $state.Jobs[$jk]
+                        if (-not $jj) { continue }
+                        [void]$jobList.Add(@{
+                            jobId      = [string]$jj.Id
+                            tool       = [string]$jj.Tool
+                            action     = [string]$jj.Action
+                            status     = [string]$jj.Status
+                            startedAt  = $(if ($jj.StartedAt)  { ([datetime]$jj.StartedAt).ToString('o') }  else { $null })
+                            finishedAt = $(if ($jj.FinishedAt) { ([datetime]$jj.FinishedAt).ToString('o') } else { $null })
+                        })
+                    }
+                    & $writeJson $resp @{ jobs = @($jobList); armed = (& $armSummary $state.ArmedRestart); now = (Get-Date).ToString('o') }
+                    continue
+                }
+
+                # POST /api/armed-restart/disarm -> stand down the armed wave.
+                # An armed restart must be cancellable AT ANY TIME, from any tab, with
+                # no ceremony: this is that. Idempotent (disarmed=false when nothing
+                # was armed) so a double-click or a stale tab can't error.
+                if ($verb -eq 'POST' -and $path -eq '/api/armed-restart/disarm') {
+                    $oldArm = $state.ArmedRestart
+                    $state.ArmedRestart = $null
+                    if ($oldArm) {
+                        $oldArm.Status = 'disarmed'
+                        $state.LastFiredArm = $oldArm
+                        try { Write-Host ("  [armed restart] DISARMED by the operator - $([int]$oldArm.HostCount) host(s) will NOT be restarted.") -ForegroundColor Yellow } catch {}
+                        try { Write-JanetWebSessionLog -Context $state.LogCtx -Tool 'restart' -Action 'ARM:disarmed' -Target "(armed dispatch - $([int]$oldArm.HostCount) host(s))" -Result 'Disarmed' -Detail 'operator stood the armed wave down before it fired' } catch {}
+                    }
+                    & $writeJson $resp @{ ok = $true; disarmed = [bool]$oldArm }
+                    continue
+                }
+
+                # POST /api/tool/restart/action/arm-dispatch -> hold a FULLY CONFIRMED
+                # dispatch-restart param set in memory and fire it at the scheduled time.
+                #
+                # This route exists because the delayed start used to be a browser
+                # setInterval (restart.view.js): a stray F5 silently lost a 2 AM reboot
+                # wave, and the tooltip had to say "Leave the tool open". The countdown
+                # moves to the server, which must stay up for the wave anyway.
+                #
+                # NOTHING IS WEAKENED - the gate moves EARLIER:
+                #   * the admin-session gate (ack + credential) is enforced HERE, at arm
+                #     time, exactly as the dispatch route enforces it;
+                #   * the typed RESTART word is demanded HERE by Test-JanetWebArmRequest
+                #     (live only, dry-run exempt - identical to the engine's rule) and it
+                #     stays inside the stored param set, so the ENGINE re-validates it
+                #     when the wave actually fires;
+                #   * the engine's self-guard / wrong-box guard / ping gate / consent
+                #     flow all run untouched at fire time - this route only defers WHEN.
+                # It is restart-only ON PURPOSE. There is no generic "arm any action"
+                # facility: an unattended-execution path for arbitrary tools is a much
+                # larger safety problem. Any other tool asking for 'arm-dispatch' falls
+                # through to the action route below and 404s as an unknown action.
+                if ($verb -eq 'POST' -and $path -eq '/api/tool/restart/action/arm-dispatch') {
+                    if (-not ($state.AckGiven -and $null -ne $state.Cred)) {
+                        & $writeJson $resp @{ error = 'Admin session required: set ADW credentials and accept responsibility (Start Admin Session) before arming a restart wave.' } 403; continue
+                    }
+                    if ($state.ArmedRestart) {
+                        & $writeJson $resp @{ error = 'a restart wave is already armed on this server - disarm it before arming another.' } 409; continue
+                    }
+                    if ($req.ContentLength64 -gt 26214400) { & $writeJson $resp @{ error='request body too large (25 MB cap)' } 413; continue }
+                    $armRaw = ''
+                    if ($req.HasEntityBody) {
+                        try { $armRaw = & $readBody $req 26214400 } catch { & $writeJson $resp @{ error = $_.Exception.Message } 413; continue }
+                    }
+                    $armBody = $null
+                    if ($armRaw) { try { $armBody = ConvertFrom-Json $armRaw } catch { $armBody = $null } }
+                    if (-not $armBody) { & $writeJson $resp @{ error = 'invalid JSON body (expected { fireAt, params })' } 400; continue }
+                    $armParams = @{}
+                    if ($armBody.params) { foreach ($ap in $armBody.params.PSObject.Properties) { $armParams[$ap.Name] = $ap.Value } }
+                    # '__job' is the server's own injection slot (the cancel bridge); a
+                    # client must never be able to seed it.
+                    if ($armParams.ContainsKey('__job')) { [void]$armParams.Remove('__job') }
+                    $fireRaw = [string]$armBody.fireAt
+                    if ([string]::IsNullOrWhiteSpace($fireRaw)) { $fireRaw = [string]$armParams['restartTime'] }
+                    $chk = Test-JanetWebArmRequest -Params $armParams -FireAtRaw $fireRaw -Now (Get-Date) -MaxHours $armMaxHours
+                    if (-not $chk.ok) { & $writeJson $resp @{ error = [string]$chk.error } 400; continue }
+                    $newArm = New-JanetWebArmedRestart -Params $armParams -FireAt ([datetime]$chk.fireAt) `
+                                -SessionId ([string]$state.LogCtx.SessionId) -Operator ([string]$state.LogCtx.Operator) `
+                                -DryRun ([bool]$chk.dryRun) -Mode ([string]$armBody.mode)
+                    $state.ArmedRestart = $newArm
+                    try { Write-Host ("  [armed restart] ARMED by $($newArm.Operator): $($newArm.HostCount) host(s) fire at $(([datetime]$newArm.FireAt).ToString('yyyy-MM-dd HH:mm:ss'))$(if ($newArm.DryRun) { ' (DRY RUN)' })") -ForegroundColor Cyan } catch {}
+                    try { Write-JanetWebSessionLog -Context $state.LogCtx -Tool 'restart' -Action 'ARM:armed' -Target "(armed dispatch - $($newArm.HostCount) host(s))" -Result 'Armed' -Detail ("fireAt=$(([datetime]$newArm.FireAt).ToString('s')) dryRun=$($newArm.DryRun) mode=$($newArm.Mode)") } catch {}
+                    & $writeJson $resp @{ ok = $true; armed = (& $armSummary $newArm) }
+                    continue
+                }
+
                 # POST /api/tool/<id>/action/<actionId>
                 if ($verb -eq 'POST' -and $seg.Count -eq 5 -and $seg[1] -eq 'tool' -and $seg[3] -eq 'action') {
                     # Sweep finished jobs FIRST so a freed stateful Busy slot is seen
@@ -974,192 +1558,12 @@ function Start-JanetWebServer {
                     # accept thread into the spawned worker below - a slow share Copy-Item
                     # stalled every request while it ran.)
 
-                    $state.JobSeq++
-                    $jobId = "j$($state.JobSeq)_$([guid]::NewGuid().ToString('N').Substring(0,6))"
-                    $job = [hashtable]::Synchronized(@{
-                        Id=$jobId; Tool=$toolId; Action=$actId
-                        Events=([System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)))
-                        Status='running'; Result=$null; PS=$null; Async=$null; StartedAt=(Get-Date); FinishedAt=$null; Cancel=$false
-                    })
-                    $state.Jobs[$jobId] = $job
-                    # Hand the (synchronized) job to the engine so a long fan-out can poll
-                    # its Cancel flag and stop in-flight WinRM children when the operator
-                    # presses Cancel. Engines that don't look for '__job' just ignore it.
-                    $params['__job'] = $job
-
-                    $worker = {
-                        param($modulePath, $actionId, $prms, $cred, $job, $logScript, $logCtx, $toolId, $skipImport, $toolVer, $archivedCsvs)
-                        try {
-                            # Stateful tools run in a persistent runspace where the module +
-                            # logging script were imported ONCE at runspace creation;
-                            # re-importing would reset $script: state, so skip it for them.
-                            if (-not $skipImport) {
-                                . $logScript
-                                Import-Module $modulePath -Force -ErrorAction Stop
-                            }
-                            # ACAS: retain a timestamped archive copy of each uploaded CSV (once
-                            # per unique source) next to this operator's ACAS logs - an audit
-                            # trail of exactly what was imported. Best-effort; never blocks or
-                            # fails the action. audit 2026-07-23: ran on the single-threaded
-                            # accept loop before - moved here so a slow share Copy-Item can't
-                            # stall every request. $archivedCsvs (the server's once-per-source
-                            # set) is now shared across concurrent worker runspaces: hold its
-                            # monitor for the whole pass (rare + best-effort, so coarse is fine).
-                            if ($toolId -eq 'acas' -and $prms['csvPaths'] -and $null -ne $archivedCsvs) {
-                                [System.Threading.Monitor]::Enter($archivedCsvs)
-                                try {
-                                    $archRoot = if ($logCtx.OnShare) { $logCtx.NetRoot } else { $logCtx.JanetLocal }
-                                    # The DESTINATION can be a share too - ping-gate it like the
-                                    # UNC sources below. The throw lands in this block's empty
-                                    # catch: archiving is skipped this pass and (since nothing
-                                    # was added to $archivedCsvs) retried on the next action.
-                                    if ($archRoot -match '^\\\\([^\\]+)') {
-                                        if (-not (Test-JanetWebHostReachable $Matches[1])) { throw 'archive share unreachable' }
-                                    }
-                                    $archDir = Join-Path (Join-Path (Join-Path $archRoot (Resolve-JanetWebToolName -ToolId 'acas')) $logCtx.UserFolder) 'CsvArchive'
-                                    foreach ($cp in ([string]$prms['csvPaths'] -split "`r?`n")) {
-                                        $src = $cp.Trim().Trim('"'); if (-not $src) { continue }
-                                        if ($archivedCsvs.Contains($src)) { continue }
-                                        # Uploaded CSVs are local temp paths (fast). A manually-typed
-                                        # UNC source is still ping-gated first: worker time is cheap,
-                                        # but a bounded probe beats a 30s SMB stall even here.
-                                        if ($src -match '^\\\\([^\\]+)') {
-                                            if (-not (Test-JanetWebHostReachable $Matches[1])) { [void]$archivedCsvs.Add($src); continue }
-                                        }
-                                        if (-not (Test-Path -LiteralPath $src)) { continue }
-                                        [void]$archivedCsvs.Add($src)
-                                        if (-not (Test-Path -LiteralPath $archDir)) { New-Item -ItemType Directory -Path $archDir -Force -ErrorAction Stop | Out-Null }
-                                        $dest = Join-Path $archDir ((Get-Date -Format 'yyyy-MM-dd_HHmmss') + '_' + (Split-Path -Leaf $src))
-                                        Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
-                                    }
-                                } catch {} finally { [System.Threading.Monitor]::Exit($archivedCsvs) }
-                            }
-                            # The manifest ToolVersion rides to the audit CSV only when the
-                            # loaded logging bridge has the (optional) parameter, so the two
-                            # changes can land in either order.
-                            # Tools whose audit target IS a machine -> they get a per-host TouchedHosts
-                            # CSV. Excludes reports (filenames), dhcp (scope names), adsearch (directory objects).
-                            $hostTouchingTool = @('wpt','acas','pkginstall','winupgrade','upr','secureboot','restart','message','remoteadmin') -contains $toolId
-                            $emit = {
-                                param($e)
-                                [void]$job.Events.Add($e)
-                                if ($e.type -eq 'audit') {
-                                    if ($e.action -ne 'TouchHost' -and $e.action -ne 'VulnPatched') {
-                                        # Honest: an action outside the ValidateSet would be dropped by
-                                        # Write-JanetAction without a trace. Surface it (engine bug to fix).
-                                        [void]$job.Events.Add(@{ type='log'; level='warn'; text="Audit NOT recorded: action '$([string]$e.action)' is outside the ValidateSet (TouchHost/VulnPatched) - Tool=$toolId Target=$([string]$e.target). Engine must emit a valid action." })
-                                    } else {
-                                    try {
-                                        $wja = @{ Context=$logCtx; Tool=$toolId; Action=$e.action; Target=$e.target; Result=$e.result; ItemCount=([int]$e.itemCount); Detail=([string]$e.detail); ToolVersion=$toolVer }
-                                        Write-JanetAction @wja
-                                    } catch { [void]$job.Events.Add(@{ type='log'; level='warn'; text="Audit row write failed (Tool=$toolId Action=$([string]$e.action) Target=$([string]$e.target)): $($_.Exception.Message)" }) }
-                                    }
-                                    # Per-session .log transcript for EVERY tool (desktop parity:
-                                    # each tool keeps a human-readable record of what it did).
-                                    try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Target ([string]$e.target) -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
-                                    # Per-host attribution CSV (TouchedHosts_<month>.csv) for every
-                                    # host-touching tool, so a lead can pivot "which machines did op X
-                                    # touch this month". Skipped for non-host targets / non-host tools.
-                                    if ($hostTouchingTool) {
-                                        $tgt = [string]$e.target
-                                        if ($tgt -and $tgt -ne 'N/A' -and $tgt -ne '(custom command)') {
-                                            $thHost = ($tgt -split '\\')[0]   # upr emits "host\product" -> keep the host
-                                            try { Write-JanetWebTouchedHost -Context $logCtx -Tool $toolId -Action ([string]$e.action) -TargetHost $thHost -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
-                                        }
-                                    }
-                                }
-                                elseif ($e.type -eq 'run' -and $toolId -eq 'acas') {
-                                    # Per-run summary -> daily ACAS-Nemesis-Runs CSV (desktop Write-NemRunSummary).
-                                    try {
-                                        $members = @(); if ($e.groupMembers) { $members = @($e.groupMembers) }
-                                        Write-JanetWebRun -Context $logCtx -Tool $toolId -Action ([string]$e.action) -Scope ([string]$e.scope) `
-                                            -Profile ([string]$e.profile) -Mode ([string]$e.mode) -HostsTotal ([int]$e.hostsTotal) `
-                                            -Success ([int]$e.success) -Failed ([int]$e.failed) -DurationSec ([int]$e.durationSec) `
-                                            -GroupKey ([string]$e.groupKey) -GroupMembers $members
-                                    } catch {}
-                                }
-                            }.GetNewClosure()
-                            # Per-action transcript backstop: log the START and END of EVERY action
-                            # invocation to this tool's .log, so even an action that emits no
-                            # fine-grained audit still leaves a durable trace. This is what makes
-                            # "everything JANET Web does is logged" literally true.
-                            $actStart = Get-Date
-                            $paramKeys = ''
-                            try { $paramKeys = (@($prms.Keys | Where-Object { $_ -ne '__job' }) | Sort-Object) -join ', ' } catch {}
-                            try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(start)' -Result 'Started' -Detail $paramKeys } catch {}
-                            $res = Invoke-JanetToolAction -ActionId $actionId -Params $prms -Credential $cred -Emit $emit
-                            [void]$job.Events.Add(@{ type='final'; result=$res })
-                            $job.Result = $res
-                            if ($job.Status -eq 'running') { $job.Status = 'done' }                  # don't clobber a cancel
-                            elseif ($job.Status -eq 'cancelling') { $job.Status = 'cancelled' }      # abandon events all emitted - now terminal
-                            try {
-                                $durs = [math]::Round(((Get-Date) - $actStart).TotalSeconds, 1)
-                                Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result ([string]$job.Status) -Detail "duration=${durs}s"
-                            } catch {}
-                        } catch {
-                            $errMsg = $_.Exception.Message
-                            [void]$job.Events.Add(@{ type='error'; text=$errMsg })
-                            if ($job.Status -eq 'running') { $job.Status = 'error' }
-                            elseif ($job.Status -eq 'cancelling') { $job.Status = 'cancelled' }
-                            # Persist the failure to the share (shared detail CSV + the .log) so a
-                            # thrown action is never silently lost - it was, before this.
-                            try {
-                                $wjaErr = @{ Context=$logCtx; Tool=$toolId; Action='TouchHost'; Target='N/A'; Result='Failure'; ItemCount=0; Detail="action '$actionId' failed: $errMsg"; ToolVersion=$toolVer }
-                                Write-JanetAction @wjaErr
-                            } catch {}
-                            try { Write-JanetWebSessionLog -Context $logCtx -Tool $toolId -Action "ACTION:$actionId" -Target '(end)' -Result 'Error' -Detail $errMsg } catch {}
-                        }
-                        $job.FinishedAt = Get-Date   # eviction clock starts at FINISH, not start
-                    }
-                    # Stateful tools (those whose manifest sets statefulRunspace,
-                    # currently reports) reuse ONE persistent, module-loaded runspace so
-                    # their $script: parse/scan state survives across actions - serialized
-                    # to one action at a time. The flag is the single source of truth.
-                    $stateful = ($mani -and $mani.statefulRunspace)
-                    if ($stateful) {
-                        if (-not $state.ToolRunspaces.ContainsKey($toolId)) {
-                            try {
-                                $trs = [runspacefactory]::CreateRunspace(); $trs.ApartmentState = 'STA'; $trs.ThreadOptions = 'ReuseThread'; $trs.Open()
-                                $initPs = [powershell]::Create(); $initPs.Runspace = $trs
-                                [void]$initPs.AddScript('param($ls,$mp) . $ls; Import-Module $mp -Force -ErrorAction Stop').AddArgument($state.LogScript).AddArgument($mp)
-                                $initPs.Invoke() | Out-Null; $initPs.Dispose()
-                                $state.ToolRunspaces[$toolId] = @{ RS = $trs; Busy = $false }
-                            } catch {
-                                $ex = $_
-                                [void]$state.Jobs.Remove($jobId)
-                                try { Write-Host ("  [500] start $toolId runspace -> $($ex.Exception.Message)`r`n$($ex.ScriptStackTrace)") -ForegroundColor Red } catch {}
-                                & $writeJson $resp @{ error = 'internal error - see server console' } 500; continue
-                            }
-                        }
-                        $slot = $state.ToolRunspaces[$toolId]
-                        if ($slot.Busy) {
-                            [void]$state.Jobs.Remove($jobId)
-                            & $writeJson $resp @{ error = "$toolId is busy with another action - wait for it to finish, then retry." } 409; continue
-                        }
-                        $slot.Busy = $true
-                        $ps = [powershell]::Create(); $ps.Runspace = $slot.RS
-                        [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($params).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($true).AddArgument($toolVer).AddArgument($state.ArchivedCsvs)
-                    } else {
-                        $ps = [powershell]::Create()
-                        [void]$ps.AddScript($worker).AddArgument($mp).AddArgument($actId).AddArgument($params).AddArgument($state.Cred).AddArgument($job).AddArgument($state.LogScript).AddArgument($state.LogCtx).AddArgument($toolId).AddArgument($false).AddArgument($toolVer).AddArgument($state.ArchivedCsvs)
-                    }
-                    # Transactional start: if BeginInvoke throws (dead persistent
-                    # runspace, OOM), free the stateful Busy slot and drop the job so
-                    # the reaper isn't left a stuck 'running' job with no live Async
-                    # (which would 409-block reports for the rest of the session).
-                    $job.PS = $ps
-                    try {
-                        $job.Async = $ps.BeginInvoke()
-                    } catch {
-                        $ex = $_
-                        try { $ps.Dispose() } catch {}
-                        [void]$state.Jobs.Remove($jobId)
-                        if ($stateful -and $slot) { $slot.Busy = $false }
-                        try { Write-Host ("  [500] start job -> $($ex.Exception.Message)`r`n$($ex.ScriptStackTrace)") -ForegroundColor Red } catch {}
-                        & $writeJson $resp @{ error = 'internal error - see server console' } 500
-                        continue
-                    }
-                    & $writeJson $resp @{ jobId = $jobId }
+                    # Create + start the job through the shared launcher. The armed-restart
+                    # tick fires the SAME way, so there is exactly ONE job-start code path.
+                    $jr = & $startToolJob $toolId $actId $params $toolVer $mani $mp
+                    if ($jr -is [array]) { $jr = $jr[-1] }
+                    if (-not $jr.ok) { & $writeJson $resp @{ error = [string]$jr.error } ([int]$jr.code); continue }
+                    & $writeJson $resp @{ jobId = [string]$jr.jobId }
                     continue
                 }
 

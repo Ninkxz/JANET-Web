@@ -227,7 +227,19 @@
           { key: 'ExitCode', label: 'EXIT', width: 70 },
           { key: 'Time', label: 'TIME', width: 90 }
         ],
-        rowClass: function (r) { return rowClassFor(r.Status); }
+        rowClass: function (r) { return rowClassFor(r.Status); },
+        // Cross-tool harvest: hand the failed set to another tool (WinRM Bridge,
+        // WPT repair, Restart) without an Export CSV round-trip. Staging only -
+        // the destination shows a Load banner; nothing is armed from here.
+        useHosts: {
+          ctx: ctx, source: 'Package deployment results',
+          flagged: {
+            // Only the TERMINAL non-success states - an in-flight phase (Queued /
+            // Probing / Copying / Deploying) is not a failure.
+            label: 'Hosts the deployment did NOT succeed on',
+            test: function (r) { return /^(Failed|Rejected|Deferred)$/.test(String(r.Status == null ? '' : r.Status)); }
+          }
+        }
       });
       var gridHolder = el('div'); gridHolder.style.cssText = 'flex:1;min-height:0;display:flex'; gridHolder.appendChild(grid.el);
       resultsCard.appendChild(gridHolder);
