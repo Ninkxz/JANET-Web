@@ -146,8 +146,8 @@ Describe 'upr 1.2.8 - the row-event emit does NOT collide on a candidate Type ke
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.8 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.8'
+    It 'manifest version is at or past 1.2.8 (P0 row-emit fix; exact pin migrated to newest bump)' {
+        ([version][string]$mani.version -ge [version]'1.2.8') | Should Be $true
     }
     It 'New-UprRowEvent does NOT throw on a Type-bearing row and keeps BOTH type + Type (case-sensitive)' {
         $row = @{ Host='WS01'; Product='OldJava'; Type='MSI'; Result='FAIL (setup exit 1603)' }
@@ -169,5 +169,54 @@ Describe 'upr 1.2.8 - the row-event emit does NOT collide on a candidate Type ke
     }
     It 'New-UprRowEvent uses a case-SENSITIVE Hashtable (a plain @{} would re-introduce the collision)' {
         ($src -match 'New-Object System\.Collections\.Hashtable') | Should Be $true
+    }
+}
+
+# audit 2026-07-24: over-removal + staging-safety pass. Behavioural coverage for the
+# two headline findings lives in Upr.M365Scope.Tests.ps1 (M365 scoping) and
+# Upr.RelaxedAttribution.Tests.ps1 (host attribution); these are the source-wire pins
+# for the fixes that only exist inside the remote scriptblock / temp-file paths.
+Describe 'upr 1.2.9 - scoped M365 removal + staging hardening (audit 2026-07-24)' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+
+    It 'manifest version is exactly 1.2.10 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.10'
+    }
+    # audit 2026-07-25 (fable re-audit follow-up): pkginstall creates its staging root
+    # WITHOUT -Force so a squatted directory fails the host; upr used
+    # '-Force -EA SilentlyContinue', i.e. the opposite decision about the same threat.
+    It 'the staging directory is created EXCLUSIVELY (no -Force, failure not swallowed)' {
+        ($src -match 'New-Item -Path \$cfgDir -ItemType Directory -EA Stop') | Should Be $true
+        ($src -match 'New-Item -Path \$cfgDir -ItemType Directory -Force')   | Should Be $false
+    }
+    It 'only a staging directory this run created is cleaned up' {
+        ($src -match 'if \(\$dirOk\) \{ Remove-Item -LiteralPath \$cfgDir -Recurse -Force') | Should Be $true
+    }
+    It 'the fleet-wide <Remove All="TRUE"/> Office config is GONE from the CODE' {
+        # The phrase survives in the header + inline comments that explain the fix,
+        # so only non-comment lines count here.
+        $code = @(($src -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' })
+        (@($code | Where-Object { $_ -match '(?i)<Remove\s+All=' }).Count) | Should Be 0
+    }
+    It 'the Office config XML is built around the SELECTED C2R product ID' {
+        ($src -match '<Remove><Product ID=') | Should Be $true
+    }
+    It 'the staged config directory gets an explicit, NON-inherited DACL' {
+        ($src -match 'SetAccessRuleProtection\(\$true, \$false\)') | Should Be $true
+        # LocalSystem + BUILTIN\Administrators only
+        ($src -match "'S-1-5-18',\s*'S-1-5-32-544'")              | Should Be $true
+    }
+    It 'the staged config is hash-verified before setup.exe consumes it' {
+        ($src -match 'SHA256\]::Create\(\)')        | Should Be $true
+        ($src -match '\$want -ne \$got')            | Should Be $true
+    }
+    It 'the Adobe candidate key is re-read with -LiteralPath (no GUID globbing)' {
+        ($src -match 'Get-ItemProperty -LiteralPath \(Join-Path \$hive \$childName\)') | Should Be $true
+    }
+    It 'the pdftotext temp files are cleaned up on EVERY exit path (finally, not post-return)' {
+        $fn = [regex]::Match($src, '(?s)function Parse-PdfFinding.*?\n\}').Value
+        ($fn -match '(?s)\}\s*finally\s*\{[^}]*Remove-Item -LiteralPath \$tmpTxt') | Should Be $true
+        ($fn -match '\$tmpErr')                                                    | Should Be $true
     }
 }

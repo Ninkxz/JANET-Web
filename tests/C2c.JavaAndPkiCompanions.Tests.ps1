@@ -28,11 +28,19 @@ Describe 'C2C v1.14.0 - Java verdict classifier (Get-C2cJavaVerdict, 1.8.0_491 b
         & $cm { Get-C2cJavaVerdict '8.0.2810.9' } | Should Be 'OLD'   # 8u281
         & $cm { Get-C2cJavaVerdict '8.0.4910.9' } | Should Be 'OK'    # 8u491
     }
-    It 'modern JDKs are OK; the 2.x auto-updater is OLD' {
+    It 'modern JDKs are OK; the 2.x auto-updater is UNKNOWN (never auto-removed)' {
         & $cm { Get-C2cJavaVerdict '11.0.2' }    | Should Be 'OK'
         & $cm { Get-C2cJavaVerdict '17' }        | Should Be 'OK'
         & $cm { Get-C2cJavaVerdict '21' }        | Should Be 'OK'
-        & $cm { Get-C2cJavaVerdict '2.8.281.9' } | Should Be 'OLD'
+        # audit 2026-07-24: this line used to assert 'OLD', which PINNED A REAL BUG in
+        # place - it is why the bug survived every prior review loop. '2.8.281.9' is
+        # Oracle's "Java Auto Updater", a companion utility, NOT a Java runtime. The
+        # old blanket "any dotted version that is not major 8 or 9+ is OLD" verdict
+        # meant javafix msiexec-REMOVED the auto-updater off hosts that were fully
+        # compliant. Get-JanetJavaVerdict now judges only real runtime majors (6/7/8
+        # and 9+); 2.x-5.x are UNKNOWN, and UNKNOWN is never auto-removed.
+        # Do not "restore" this to OLD - see docs/janet-audit-2026-07-24.md.
+        & $cm { Get-C2cJavaVerdict '2.8.281.9' } | Should Be 'UNKNOWN'
     }
     It 'unparseable / empty versions are UNKNOWN (never auto-removed)' {
         & $cm { Get-C2cJavaVerdict '' }        | Should Be 'UNKNOWN'
@@ -71,7 +79,10 @@ Describe 'C2C v1.14.0 - new pillar-flavoured labels (shared map + inline fallbac
 
     It 'Java / PkiExpired / PkiRdp / MdeOnboard labels resolve from the shared map' {
         & $cm { Get-C2cPillarLabel 'Java' 'FIXED' }       | Should Be 'JAVA CLEANED'
-        & $cm { Get-C2cPillarLabel 'Java' 'NOCHANGE' }    | Should Be 'NO OLD JAVA'
+        # audit 2026-07-25 (fable re-audit follow-up): the label was 'NO OLD JAVA', which after the
+        # javafix vendor gate can contradict its own Detail (a NOCHANGE now also covers "found N OLD
+        # item(s), removed NOTHING - non-Oracle/Sun publisher"). It states only what is known.
+        & $cm { Get-C2cPillarLabel 'Java' 'NOCHANGE' }    | Should Be 'NO JAVA REMOVED'
         & $cm { Get-C2cPillarLabel 'PkiExpired' 'FIXED' } | Should Be 'EXPIRED PRUNED'
         & $cm { Get-C2cPillarLabel 'PkiRdp' 'FIXED' }     | Should Be 'RDP CERT REBOUND'
         & $cm { Get-C2cPillarLabel 'MdeOnboard' 'FIXED' } | Should Be 'MDE ONBOARDED'

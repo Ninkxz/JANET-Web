@@ -13,7 +13,40 @@
 #  Run:  Invoke-Pester -Path .\tests\Dhcp.IpValidation.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $mod = Import-Module (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Force -PassThru
+Add-ShimGuard $mod
 
 function Ipv4([string]$t) { & $mod { param($x) Test-JanetIpv4 $x } $t }
 
@@ -81,6 +114,7 @@ Describe 'dhcp 1.1.9 - a bulk ReadError scope is a Failure, never a laundered Su
         $send = { param($e) [void]$events.Add($e) }
         $res = & $mod {
             param($snd)
+            $__shims = Save-ShimState @('Invoke-JanetOnDhcpCancelable')
             function script:Invoke-JanetOnDhcpCancelable {
                 param($Server, $Script, $Arguments, $Credential, $CancelCheck, $UseSsl)
                 @{ Cancelled = $false; Result = @(
@@ -89,7 +123,7 @@ Describe 'dhcp 1.1.9 - a bulk ReadError scope is a Failure, never a laundered Su
             }
             try {
                 Invoke-JanetDhcpBulk -Server 'DHCP01' -ScopeIds @('192.168.1.0') -OptionId 6 -Ips @('10.0.0.1') -Mode 'Append' -Credential $null -Send $snd -CancelCheck { $false } -DryRun $false
-            } finally { Remove-Item function:script:Invoke-JanetOnDhcpCancelable -ErrorAction SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $send
 
         [int]$res.summary.failed | Should Be 1
@@ -197,6 +231,7 @@ Describe 'dhcp 1.1.12 - an apply that returns NO result is a Failure, not a fals
         $send = { param($e) [void]$events.Add($e) }
         $res = & $mod {
             param($snd)
+            $__shims = Save-ShimState @('Test-JanetWsmanReachable','Invoke-JanetOnDhcp','Invoke-JanetOnDhcpCancelable')
             function script:Test-JanetWsmanReachable { param($Server, $TimeoutMs = 3000) @{ Reachable = $true; UseSsl = $false } }
             function script:Invoke-JanetOnDhcp {
                 [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $UseSsl)
@@ -208,7 +243,7 @@ Describe 'dhcp 1.1.12 - an apply that returns NO result is a Failure, not a fals
             }
             try {
                 Invoke-JanetDhcpApply -Server 'TESTSRV' -ScopeId '10.0.0.0' -OptionId 6 -NewValues @('10.0.0.1','10.0.0.2') -Credential $null -Send $snd
-            } finally { Remove-Item function:script:Invoke-JanetOnDhcp, function:script:Invoke-JanetOnDhcpCancelable, function:script:Test-JanetWsmanReachable -EA SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $send
 
         [string]$res.summary.status | Should Be 'Error'
@@ -252,8 +287,8 @@ Describe 'dhcp 1.1.13 - a non-numeric optionId aborts a destructive write (no si
 Describe 'dhcp 1.1.14 - failure hints upgraded from thin auth-only to the shared troubleshoot engine' {
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
 
-    It 'manifest version is exactly 1.1.14 (newest bump holds the exact pin)' {
-        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.14'
+    It 'manifest version is at least 1.1.14 (floor; newest exact pin = audit 2026-07-25 Describe, v1.1.16)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.14') | Should Be $true
     }
     It 'dhcp imports the shared troubleshoot engine' {
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
@@ -264,5 +299,207 @@ Describe 'dhcp 1.1.14 - failure hints upgraded from thin auth-only to the shared
     It 'the dead thin Get-JanetWsmanAuthHint FUNCTION and its calls are gone' {
         ($src -match 'function Get-JanetWsmanAuthHint')       | Should Be $false
         ($src -match '=\s*Get-JanetWsmanAuthHint\s*-Message') | Should Be $false
+    }
+}
+
+# audit 2026-07-24 - three defects that between them made the destructive half of dhcp
+# unusable and its one multi-scope success path unreadable:
+#   [P1] the view never sent the `confirm` param the server-side typed-APPLY gate demands
+#        (and used ctx.confirm, which silently ignores confirmWord), so EVERY apply/bulk-*
+#        was refused server-side - the write half of the tool had presumably never worked;
+#   [P1] the remote bulk script's `,$out.ToArray()` self-guard survives the [powershell]
+#        handle, so @($bulkCall.Result) unrolled only the outer collection and a successful
+#        N-scope write booked 0 changed + 1 "unexpected status" failure on one junk row;
+#   [P4] expectedOld - the entire optimistic-concurrency guard - was undeclared in the
+#        manifest, so the action contract hid its only anti-clobber input.
+Describe 'dhcp 1.1.15 - confirm-param wiring, multi-scope bulk unwrapping, declared expectedOld' {
+    $viewPath = Join-Path $script:Root 'web\js\views\dhcp.view.js'
+    $view     = Get-Content $viewPath -Raw
+
+    It 'manifest version is at least 1.1.15 (floor; the exact pin moved to the 1.1.16 Describe)' {
+        ([version][string](& $mod { Get-JanetToolManifest }).version -ge [version]'1.1.15') | Should Be $true
+    }
+
+    # --- [P1] the view <-> gate wiring contract (static: this is a wiring contract, and
+    # the params object is built inline at the ctx.run call site). ---
+    It 'the view SENDS confirm=APPLY on both destructive run calls (the gate requires the typed word)' {
+        ($view -match "ctx\.run\('apply',[^\r\n]*confirm:\s*'APPLY'")           | Should Be $true
+        ($view -match "ctx\.run\('bulk-' \+ mode,[^\r\n]*confirm:\s*'APPLY'")   | Should Be $true
+    }
+    It 'the word the view sends is the word the engine gate demands, CASE-EXACTLY' {
+        # audit 2026-07-24 (fable re-audit F3): the gate was `-ne`, which is case-INSENSITIVE,
+        # so 'apply' passed a gate whose own error text says "exactly". Standardised to -cne
+        # across all eight server-side confirm gates.
+        $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+        ($src -match "\`$Params\['confirm'\]\s*-cne\s*'APPLY'") | Should Be $true
+    }
+    It 'both destructive dialogs use ctx.arm with confirmWord APPLY (ctx.confirm IGNORES confirmWord)' {
+        # >=2 arming dialogs (apply + bulk) and a typed word on each LIVE path.
+        ([regex]::Matches($view, 'ctx\.arm\(').Count -ge 2)                              | Should Be $true
+        ([regex]::Matches($view, "confirmWord:\s*dry \? null : 'APPLY'").Count -ge 2)     | Should Be $true
+    }
+    It 'no destructive dialog is left on ctx.confirm (the silent-drop failure mode)' {
+        # ctx.confirm survives ONLY for the informational OK-boxes (invalid IP, no scopes
+        # checked, ...); neither APPLY nor BULK confirmation may sit on it.
+        ($view -match "ctx\.confirm\(\{[^\r\n]*title:\s*'Confirm APPLY")      | Should Be $false
+        ($view -match "ctx\.confirm\(\{[^\r\n]*title:\s*'Confirm BULK")       | Should Be $false
+    }
+
+    # --- [P2] Remove option must post an EMPTY new-values list (the engine refuses
+    # removeOption together with supplied values, so the dialog's promise was unreachable). ---
+    It "the view posts an empty newValues when 'Remove option' is checked" {
+        ($view -match "newValues:\s*removeOpt \? '' :") | Should Be $true
+    }
+    It 'the engine still refuses the values+removeOption combination (the guard we are now honouring)' {
+        $evs = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$evs.Add($e) }
+        $res = & $mod { param($pp,$em) Invoke-JanetToolAction -ActionId 'apply' -Params $pp -Credential $null -Emit $em } `
+                 @{ targets='DHCP-REMOTE-1'; scopeId='10.0.0.0'; newValues='10.0.0.1'; removeOption='true'; confirm='APPLY' } $emit
+        [int]$res.summary.total | Should Be 0
+        @($evs | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'Clear one or the other' }).Count | Should BeGreaterThan 0
+    }
+
+    # --- [P4] the view must not silently retarget a different DHCP server. ---
+    It 'load / apply / bulk target the CONNECTED server, not the live field value' {
+        ($view -match 'function activeServer\(')                       | Should Be $true
+        ($view -match "ctx\.run\('load',\s*\{\s*targets:\s*srv")       | Should Be $true
+        ($view -match "ctx\.run\('apply',\s*\{\s*targets:\s*srv")      | Should Be $true
+        ($view -match "ctx\.run\('bulk-' \+ mode,\s*\{\s*targets:\s*srv") | Should Be $true
+        ($view -match "targets:\s*serverInput\.value")                 | Should Be $false
+    }
+
+    # --- [P1] one row PER SCOPE out of a multi-scope bulk run. ---
+    function Invoke-BulkWithResult($resultValue, $scopeIds) {
+        $events = New-Object System.Collections.ArrayList
+        $send = { param($e) [void]$events.Add($e) }
+        $res = & $mod {
+            param($snd, $rv, $sids)
+            $__shims = Save-ShimState @('Test-JanetWsmanReachable','Invoke-JanetOnDhcpCancelable')
+            function script:Test-JanetWsmanReachable { param($Server, $TimeoutMs = 3000) @{ Reachable = $true; UseSsl = $false } }
+            function script:Invoke-JanetOnDhcpCancelable {
+                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $CancelCheck, $UseSsl)
+                @{ Cancelled = $false; Result = $rv }
+            }
+            try {
+                Invoke-JanetDhcpBulk -Server 'DHCP01' -ScopeIds $sids -OptionId 6 -Ips @('10.0.0.1') -Mode 'Append' -Credential $null -Send $snd -CancelCheck { $false } -DryRun $false
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
+        } $send $resultValue $scopeIds
+        @{ Result = $res; Events = @($events) }
+    }
+    $threeRecs = @(
+        [pscustomobject]@{ ScopeId='10.0.1.0'; Status='Changed';  Before=@('10.0.0.9'); After=@('10.0.0.9','10.0.0.1'); Error=$null }
+        [pscustomobject]@{ ScopeId='10.0.2.0'; Status='Changed';  Before=@();           After=@('10.0.0.1');            Error=$null }
+        [pscustomobject]@{ ScopeId='10.0.3.0'; Status='NoChange'; Before=@('10.0.0.1'); After=@('10.0.0.1');            Error=$null }
+    )
+    $threeScopes = @('10.0.1.0','10.0.2.0','10.0.3.0')
+
+    It 'a NESTED result (the real seam shape) yields one row per scope, not one junk row' {
+        # (,$recs) reproduces exactly what the live call returns: ONE output object that
+        # IS the record array, because the remote ,$out.ToArray() survived the handle.
+        # Old behaviour: 1 row, Status = a space-joined member-enumeration blob, 0 changed,
+        # 1 "unexpected status" failure.
+        $o = Invoke-BulkWithResult (,$threeRecs) $threeScopes
+        @($o.Result.rows).Count       | Should Be 3
+        [int]$o.Result.summary.ok     | Should Be 2
+        [int]$o.Result.summary.noChange | Should Be 1
+        [int]$o.Result.summary.failed | Should Be 0
+        (@($o.Result.rows | ForEach-Object { [string]$_.ScopeId }) -join ',') | Should Be '10.0.1.0,10.0.2.0,10.0.3.0'
+        (@($o.Result.rows | ForEach-Object { [string]$_.Status })  -join ',') | Should Be 'Changed,Changed,NoChange'
+        @($o.Events | Where-Object { $_.type -eq 'row' }).Count | Should Be 3
+        @($o.Events | Where-Object { $_.type -eq 'audit' -and $_.detail -match 'unexpected status' }).Count | Should Be 0
+    }
+    It 'an ALREADY-FLAT result set is unchanged by the deeper unwrap (shape-tolerant)' {
+        $o = Invoke-BulkWithResult $threeRecs $threeScopes
+        @($o.Result.rows).Count   | Should Be 3
+        [int]$o.Result.summary.ok | Should Be 2
+    }
+
+    # --- [P4] expectedOld declared in the action contract. ---
+    It "apply declares expectedOld (optional: ABSENT means no staleness check)" {
+        $a  = @((& $mod { Get-JanetToolManifest }).actions | Where-Object { $_.id -eq 'apply' })[0]
+        $eo = @($a.inputs | Where-Object { $_.name -eq 'expectedOld' })[0]
+        $eo                 | Should Not BeNullOrEmpty
+        [bool]$eo.required  | Should Be $false
+        ([string]$eo.label -match '(?i)concurrency') | Should Be $true
+    }
+    It 'the declared expectedOld is the one the dispatcher actually reads' {
+        $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+        ($src -match "\`$Params\.ContainsKey\('expectedOld'\)") | Should Be $true
+    }
+
+    # --- [P3] dry run must preview what the live path would book. ---
+    It 'a dry-run remove of an ALREADY-UNSET option previews NoChange, not a phantom WouldRemove' {
+        $events = New-Object System.Collections.ArrayList
+        $send = { param($e) [void]$events.Add($e) }
+        $res = & $mod {
+            param($snd)
+            $__shims = Save-ShimState @('Test-JanetWsmanReachable','Invoke-JanetOnDhcp')
+            function script:Test-JanetWsmanReachable { param($Server, $TimeoutMs = 3000) @{ Reachable = $true; UseSsl = $false } }
+            function script:Invoke-JanetOnDhcp {
+                [CmdletBinding()] param($Server, $Script, $Arguments, $Credential, $UseSsl)
+                [pscustomobject]@{ Ok = $true; Values = @(); NotSet = $true; Err = $null }   # option is NOT set
+            }
+            try {
+                Invoke-JanetDhcpApply -Server 'TESTSRV' -ScopeId '10.0.0.0' -OptionId 6 -NewValues @() -Credential $null -Send $snd -DryRun $true
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
+        } $send
+        [string]$res.summary.status | Should Be 'NoChange'
+        [string](@($events | Where-Object { $_.type -eq 'row' })[0].Status) | Should Be 'NoChange'
+    }
+}
+
+# audit 2026-07-25 (fable re-audit follow-up) - two residuals:
+#   [P4] editing the CUSTOM option ID after a Load did not invalidate the loaded state, so an
+#        APPLY could pair the newly-typed ID with the PREVIOUS option's expectedOld (only
+#        caught by the divergence guard when the two options hold different values - two unset
+#        options do not diverge);
+#   [P4] dry runs auto-send confirm='APPLY' with no typed word. Decision: KEEP the server-side
+#        gate unconditional (an exemption would make the one unbypassable refusal depend on the
+#        request-controlled dryRun flag) and document the trade-off at the gate + both call
+#        sites. These pin the decision so a later pass does not silently flip it.
+Describe 'dhcp 1.1.16 - option-ID edits invalidate the loaded state; the APPLY gate stays unconditional' {
+    $viewPath = Join-Path $script:Root 'web\js\views\dhcp.view.js'
+    $view     = Get-Content $viewPath -Raw
+    $src      = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+
+    It 'manifest version is exactly 1.1.16 (newest bump holds the exact pin)' {
+        [string](& $mod { Get-JanetToolManifest }).version | Should Be '1.1.16'
+    }
+
+    # --- [P4] the option-ID box now behaves like the dropdown. ---
+    It 'the view tracks WHICH option ID the loaded before-state belongs to' {
+        ($view -match 'var loadedOptionId = null;')                | Should Be $true
+        ($view -match 'function optionLoaded\(\)')                 | Should Be $true
+        ($view -match 'loadedOptionId = opt;')                     | Should Be $true
+    }
+    It 'typing in the custom-ID box invalidates the loaded state (it was updateBulk alone)' {
+        ($view -match "optIdInput\.addEventListener\('input'[^\r\n]*invalidateLoadedOption\(\)") | Should Be $true
+        ($view -match "optIdInput\.addEventListener\('input', function \(\) \{ updateBulk\(\); \}\)") | Should Be $false
+    }
+    It 'committing the typed ID reloads, exactly like the dropdown change does' {
+        ($view -match "optIdInput\.addEventListener\('change'[^\r\n]*doLoad\(true\)") | Should Be $true
+        ($view -match "optSelect\.addEventListener\('change'[^\r\n]*doLoad\(true\)")  | Should Be $true
+    }
+    It 'APPLY is gated on a load that matches the current ID (button + hard guard in doApply)' {
+        ($view -match 'applyBtn\.disabled = writeActive \|\| !optionLoaded\(\)') | Should Be $true
+        ($view -match 'if \(!optionLoaded\(\)\) \{ ctx\.confirm')                | Should Be $true
+    }
+    It 'an in-flight or failed load leaves nothing armed' {
+        ($view -match 'loadedOptionId = null;\r?\n\s*readRun = ctx\.run\(.load.') | Should Be $true
+    }
+
+    # --- [P4] the dry-run/confirm trade-off is a recorded decision, not an oversight. ---
+    It 'the engine gate is still unconditional (no dryRun exemption)' {
+        ($src -match "\`$Params\['confirm'\]\s*-cne\s*'APPLY'")             | Should Be $true
+        ($src -match "dryRun[^\r\n]*-and[^\r\n]*confirm")                   | Should Be $false
+        ($src -match '(?s)\$isDestructive = \$ActionId -in[^\r\n]*\r?\n\s*if \(\$isDestructive\) \{\s*\r?\n\s*if \(\[string\]\$Params\[.confirm.\]') | Should Be $true
+    }
+    It 'the trade-off is documented at the gate and at BOTH view call sites' {
+        ($src -match '(?i)deliberately NOT exempted for')                        | Should Be $true
+        ([regex]::Matches($view, '(?i)trade-off').Count -ge 2)                   | Should Be $true
+    }
+    It 'the live path still types the word (dry runs still pass through a real arm dialog)' {
+        ([regex]::Matches($view, "confirmWord:\s*dry \? null : 'APPLY'").Count -ge 2) | Should Be $true
+        ([regex]::Matches($view, 'ctx\.arm\(').Count -ge 2)                           | Should Be $true
     }
 }

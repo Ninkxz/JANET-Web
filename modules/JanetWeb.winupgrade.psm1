@@ -40,6 +40,45 @@
 #  transports, and the JANET_WUA SYSTEM task + driver.ps1/result.json are removed
 #  after harvest (best-effort; a cleanup failure never flips a real result).
 #
+#  v0.5.7 (audit 2026-07-24): safety + honesty pass.
+#    - WRONG-BOX ABORT on every destructive remote block, not just the reboot step:
+#      auto-fix (policy write / driver removal / $WINDOWS.~BT delete), repair-health
+#      (DISM + sfc) and install-updates (JANET_WUA SYSTEM task, both the WinRM and the
+#      WMI/DCOM bootstrap) now compare $env:COMPUTERNAME against the DIALED short name
+#      INSIDE the remote block and abort before touching anything.
+#    - Supported-CPU pattern accepts 4-digit 10th-14th gen MOBILE model numbers
+#      (i5-1135G7 / i7-1255U / i5-1335U) - they were read as HW INCOMPAT, which both
+#      blocked upgrade-drive and made auto-fix write the MoSetup bypass on SUPPORTED
+#      hardware.
+#    - The free-disk gate is 25 GB (Win11's 64 GB is a TOTAL-storage minimum, not free
+#      space; the module's own fix text already said 25+ GB).
+#    - A no-op result (NO CHANGES / ALREADY ON TARGET / CLEAN) audits Skipped/0, never
+#      VulnPatched Success - nothing was patched.
+#    - An unrecognised target version is REFUSED (it used to be silently rewritten to
+#      24H2 and then pinned/driven to it).
+#    - Get-WinUpgradeDrivePlan takes -MinBuild/-Version instead of hardcoding 26100.
+#    - The repair watchdog is 7200 s (DISM + sfc are each advertised at 15-45 min, so
+#      3600 s produced a false FAILED and never issued the reboot).
+#
+#  v0.5.8 (audit 2026-07-25 (fable re-audit follow-up)): the wrong-box residuals the
+#  v0.5.7 pass left behind - every one of them MUTATED a mis-resolved host before its
+#  own guard could fire:
+#    - InstallCab created C:\Temp and copied the multi-GB CAB onto whatever box
+#      answered; only DISM itself was guarded. The staging step is now the shared
+#      $script:WinUpgradeCabStageBlock, which compares $env:COMPUTERNAME FIRST and
+#      creates nothing on a mismatch (no directory, no copy).
+#    - The install-updates WMI/DCOM bootstrap created %ProgramData%\JANET\WUA and
+#      DELETED result.json before its $exp check - i.e. it could destroy a CONCURRENT
+#      legitimate run's result on the wrongly-reached host. It is now the shared
+#      $script:WinUpgradeWuaBootstrapBlock: guard first, and a wrong box only ever
+#      writes a NONCE-NAMED side marker (never the shared result.json, never a new
+#      directory), which the poller reads to raise the WrongBox row.
+#    - The WMI/DCOM cleanup bootstrap was UNGUARDED and unregistered JANET_WUA on
+#      whatever box answered - which kills a concurrent legitimate install. It is now
+#      $script:WinUpgradeWuaCleanupBlock (guarded), and the admin-share deletes are
+#      skipped outright once the row is WrongBox.
+#  Tests: tests\WinUpgrade.WrongBoxMutations.Tests.ps1 (behavioural).
+#
 #  Contract:
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -58,7 +97,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.6'
+        version  = '0.5.8'
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -79,7 +118,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fleet-status'
                 label       = 'Fleet Status (24H2 board)'
-                description  = 'Read-only fleet posture board for the 23H2 -> 24H2 journey (changes NOTHING). Runs the SAME per-host readiness scan as Run Diagnostic Scan across the targets and rolls each host up to a single Win24H2Status: Already 24H2+ (build 26100+); Pending reboot (a feature update is staged / the box is pending-reboot, i.e. mid-upgrade); Ready (on 23H2 / build 22631 or older AND CPU/TPM/disk all pass); Blocked: <reason> (on <=23H2 but a hardware check fails - CPU unsupported / no TPM 2.0 / disk <64GB, joined). Pinned is shown as a secondary flag with the pinned version. Returns per-host rows plus a rollup summary (already24h2 / ready / blocked / pendingReboot counts + block-reason breakdown). Read-only registry / CIM reads only - no policy writes, no reboots.'
+                description  = 'Read-only fleet posture board for the 23H2 -> 24H2 journey (changes NOTHING). Runs the SAME per-host readiness scan as Run Diagnostic Scan across the targets and rolls each host up to a single Win24H2Status: Already 24H2+ (build 26100+); Pending reboot (a feature update is staged / the box is pending-reboot, i.e. mid-upgrade); Ready (on 23H2 / build 22631 or older AND CPU/TPM/disk all pass); Blocked: <reason> (on <=23H2 but a hardware check fails - CPU unsupported / no TPM 2.0 / low free disk, joined). Pinned is shown as a secondary flag with the pinned version. Returns per-host rows plus a rollup summary (already24h2 / ready / blocked / pendingReboot counts + block-reason breakdown). Read-only registry / CIM reads only - no policy writes, no reboots.'
                 kind         = 'stream-table'
                 destructive  = $false
                 columns      = @('Host','Online','DisplayVersion','OsBuild','FreeGB','Win24H2Status','Eligible','BlockReason','Pinned','PinnedVersion','PendingReboot','Error')
@@ -393,7 +432,7 @@ function Get-WinUpgradeLocalIdentity {
     # The set of names/addresses that ARE this dispatcher box, so an 'upgrade-drive'
     # wave that reboots staged hosts never reboots the machine running JANET Web.
     # Copied from the Restart tool's Get-JanetLocalIdentity (audit#10 self-guard).
-    if ($script:WinUpgradeLocalIdentity) { return $script:WinUpgradeLocalIdentity }
+    if ($script:WinUpgradeLocalIdentity) { return ,$script:WinUpgradeLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -414,7 +453,7 @@ function Get-WinUpgradeLocalIdentity {
         }
     } catch {}
     $script:WinUpgradeLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 function Test-WinUpgradeHostIsSelf {
@@ -439,7 +478,7 @@ function Get-WinUpgradeDrivePlan {
     # runspace and therefore cannot call a module function). Keep the two in sync.
     #
     #   Skip precedence (report, NEVER act):
-    #     OsBuild >= 26100              -> Skipped='already 24H2+'   (no pin/trigger/reboot)
+    #     OsBuild >= MinBuild           -> Skipped='already <Version>+' (no pin/trigger/reboot)
     #     not Eligible AND not Bypass   -> Skipped='blocked (<reason>)'  (never drive an
     #                                      ineligible host silently; operator must opt into bypass)
     #   Otherwise: WouldPin + WouldTrigger.
@@ -457,13 +496,20 @@ function Get-WinUpgradeDrivePlan {
         [bool]$Staged = $false,
         [int]$CountdownSeconds = 300,
         [string]$ExpectedName = '',   # dialed short hostname ('' for an IP target -> guard skipped)
-        [string]$LocalName = ''       # the host's own $env:COMPUTERNAME (as read on the box)
+        [string]$LocalName = '',      # the host's own $env:COMPUTERNAME (as read on the box)
+        # audit 2026-07-24: the build gate was HARDCODED 26100 while the worker this helper
+        # certifies gates on $MinBuild - so for a 25H2 (26200) run the "authority" declared a
+        # 26100 box 'already 25H2+' while the worker correctly drove it (25H2 drift, and the
+        # helper stopped being the source of truth). Parameterized, defaulting to 24H2/26100
+        # so every existing caller/test is byte-for-byte identical.
+        [int]$MinBuild = 26100,
+        [string]$Version = '24H2'
     )
     $plan = [ordered]@{
         Skipped = ''; WouldPin = $false; WouldTrigger = $false
         ShouldReboot = $false; RebootAborted = $false; RebootAbortReason = ''; CountdownSec = $CountdownSeconds
     }
-    if ($OsBuild -ge 26100) { $plan.Skipped = 'already 24H2+'; return $plan }
+    if ($OsBuild -ge $MinBuild) { $plan.Skipped = "already $Version+"; return $plan }
     if ((-not $Eligible) -and (-not $Bypass)) {
         $reason = if ($BlockReason) { $BlockReason } else { 'ineligible' }
         $plan.Skipped = "blocked ($reason)"; return $plan
@@ -493,12 +539,25 @@ $script:WinUpgradeCycles = @(
 
 # --- WINDOWS 11 24H2 MINIMUM REQUIREMENTS (reference lines 36-52) ---
 $script:WinUpgradeMinRAMGB      = 4
-$script:WinUpgradeMinDiskGB     = 64
+# audit 2026-07-24: this is the FREE-space gate, and it was carrying Windows 11's 64 GB
+# *total storage* minimum. A normally-loaded 256 GB workstation never has 64 GB free, so
+# every such host failed "[FAIL] Disk", was reported Blocked (disk) forever, and
+# upgrade-drive skipped it - while the module's OWN fix text ("Free disk to 25+ GB") and
+# Setup's real free-space need said 25 GB. Gate on the number we actually advertise.
+$script:WinUpgradeMinDiskGB     = 25
 $script:WinUpgradeMinTPMVersion = "2.0"
 $script:WinUpgradeCpuPatterns = @(
     'i[3579]-[89]\d{3}',
-    'i[3579]-10\d{3}',
-    'i[3579]-1[1-4]\d{3}',
+    # audit 2026-07-24: 10th-14th gen model numbers are 4 OR 5 digits - MOBILE parts are
+    # 4-digit (i5-1135G7, i7-1255U, i5-1335U), desktop parts 5-digit (i5-10210U, i7-11700,
+    # i5-13600K). The old '10\d{3}' / '1[1-4]\d{3}' pair demanded 5 digits, so every
+    # 11th-13th gen LAPTOP - supported hardware - was read HW INCOMPAT / Blocked, and
+    # auto-fix then wrote the MoSetup CPU/TPM bypass on a SUPPORTED box. '\d{2,3}' accepts
+    # both widths. It cannot pull in an unsupported older part: a leading model digit '1'
+    # with a 4- or 5-digit number only exists on 10th-14th gen (all Win11-supported); the
+    # genuinely unsupported Core parts are 4-digit starting 2-7 (i7-2600 .. i7-7700) or
+    # 3-digit (1st gen, i5-750), and neither can match 'i[3579]-1[0-4]...'.
+    'i[3579]-1[0-4]\d{2,3}',
     'Core\s*Ultra',
     'Xeon\s*W-1[2-3]\d{2}',
     'Ryzen\s*[3579]\s*[3-9]\d{3}',
@@ -718,7 +777,7 @@ function Get-WinUpgradeErrorRowSet {
         [int]$MinBuild = 26100,
         [string]$Version = '24H2',
         [double]$FreeGB = 999,
-        [int]$MinDisk = 64,
+        [int]$MinDisk = 25,   # audit 2026-07-24: FREE-space gate (was 64, Win11's TOTAL-storage minimum)
         [string[]]$FailedDrivers = @(),
         $Signatures = @(),           # Get-WinUpgradeSetupErrSignatures output (Code/Message/Rec)
         [bool]$PauseActive = $false,
@@ -1029,6 +1088,86 @@ $script:WinUpgradeRebootBlock = {
     return $o
 }
 
+# Shared guarded CAB-staging block (audit 2026-07-25 (fable re-audit follow-up)).
+# InstallCab used to create C:\Temp and push the (multi-GB) feature-update package
+# BEFORE any identity check - only the DISM step downstream was guarded - so a stale
+# DNS / reused IP dial filled a stranger's system drive. Nothing may touch the target
+# until $env:COMPUTERNAME has been matched against the DIALED short name, so the mkdir
+# lives behind the guard in the SAME remote round-trip that answers "who are you?".
+# $root is a parameter purely so the guard is provable locally in a test without
+# creating C:\Temp; the worker always passes 'C:\Temp'.
+$script:WinUpgradeCabStageBlock = {
+    param($expected, $root)
+    if (-not $root) { $root = 'C:\Temp' }
+    $o = @{ Ok = $false; Created = $false; Error = '' }
+    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+        $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, nothing staged"
+        return $o
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $root)) {
+            New-Item -Path $root -ItemType Directory -ErrorAction Stop | Out-Null
+            $o.Created = $true
+        }
+        $o.Ok = $true
+    } catch { $o.Error = $_.Exception.Message }
+    return $o
+}
+
+# Shared install-updates WMI/DCOM bootstrap (audit 2026-07-25 (fable re-audit follow-up)).
+# Runs DETACHED on the target via Win32_Process.Create, so it cannot answer the caller -
+# it can only refuse to act and leave a marker. The pre-fix here-string created
+# %ProgramData%\JANET\WUA and DELETED result.json BEFORE its $exp check, which on a
+# mis-resolved host destroys the result of a CONCURRENT legitimate install-updates run.
+# Order is now: identity, then anything else. A wrong box writes ONLY a nonce-named side
+# marker (result.wrongbox.<nonce>.json under %ProgramData%, which always exists) - never
+# the shared result.json, never a new directory, never the task - and the poller picks
+# that marker up so the operator still gets an immediate WrongBox row.
+# $base/$markerRoot are parameters so the abort is provable locally in a test.
+$script:WinUpgradeWuaBootstrapBlock = {
+    param($expected, $nonce, $driver64, $base, $markerRoot)
+    if (-not $base)       { $base = Join-Path $env:ProgramData 'JANET\WUA' }
+    if (-not $markerRoot) { $markerRoot = $env:ProgramData }
+    $o = @{ Aborted = $false; Registered = $false; Error = '' }
+    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+        $o.Aborted = $true
+        $o.Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, nothing written"
+        try {
+            Set-Content -Path (Join-Path $markerRoot "JANET_WUA.wrongbox.$nonce.json") `
+                        -Value ('{"Status":"WrongBox","Nonce":"' + $nonce + '","Host":"' + $env:COMPUTERNAME + '"}') -Encoding UTF8
+        } catch {}
+        return $o
+    }
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    Remove-Item (Join-Path $base 'result.json') -ErrorAction SilentlyContinue
+    Set-Content -Path (Join-Path $base 'driver.ps1') -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($driver64))) -Encoding UTF8
+    $act  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $base + '\driver.ps1"')
+    $prin = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName 'JANET_WUA' -Action $act -Principal $prin -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Force | Out-Null
+    Start-ScheduledTask -TaskName 'JANET_WUA'
+    $o.Registered = $true
+    return $o
+}
+
+# Shared install-updates WMI/DCOM cleanup (audit 2026-07-25 (fable re-audit follow-up)).
+# This one was completely UNGUARDED: it unregistered JANET_WUA and deleted the driver /
+# result on whatever box answered, so a wrong-box dial could kill a CONCURRENT legitimate
+# install-updates run mid-flight on that host. Same rule as every other destructive block -
+# identity first, and on a mismatch it touches nothing at all.
+$script:WinUpgradeWuaCleanupBlock = {
+    param($expected, $base)
+    if (-not $base) { $base = Join-Path $env:ProgramData 'JANET\WUA' }
+    $o = @{ Aborted = $false; Unregistered = $false }
+    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+        $o.Aborted = $true
+        return $o
+    }
+    try { Unregister-ScheduledTask -TaskName 'JANET_WUA' -Confirm:$false -ErrorAction SilentlyContinue; $o.Unregistered = $true } catch {}
+    Remove-Item (Join-Path $base 'driver.ps1')  -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $base 'result.json') -Force -ErrorAction SilentlyContinue
+    return $o
+}
+
 # loop32 (F6): CANONICAL Diagnose one-word verdict from the report markers. The verdict is the
 # operator's GO/NO-GO signal, and it used to check ONLY CPU/TPM/[BLOCK]/policy - it IGNORED the
 # [FAIL] Disk / [FAIL] RAM / [FAIL] Secure Boot lines its own scan reported, so a disk-short host
@@ -1079,7 +1218,7 @@ $script:WinUpgradeWorker = {
         [bool]$RemoveBypass,    # Unpin: also remove the MoSetup CPU/TPM bypass value
         $CpuPatterns,           # Diagnose: supported-CPU regex array (reference lines 40-52)
         [int]$MinRAM,           # Diagnose: minimum RAM GB (4)
-        [int]$MinDisk,          # Diagnose: minimum free disk GB (64)
+        [int]$MinDisk,          # Diagnose: minimum FREE disk GB (25 - audit 2026-07-24)
         [string]$MinTPM,        # Diagnose: minimum TPM version ("2.0")
         $Cycles,                # ForceDiscovery/Pin SCCM refresh: SCCM client schedule GUID array
         # --- upgrade-drive appended params (kept at the END so existing positional args are unshifted) ---
@@ -1106,7 +1245,13 @@ $script:WinUpgradeWorker = {
         $WuaDriver = '',             # InstallUpdates: the SYSTEM WUA driver text (#__INCLUDEMU__# unreplaced)
         # --- audit 2026-07-23 appended param (kept at the END so existing positional args are
         #     unshifted; DEFAULTS matter: the shimmed worker tests drive the worker without it) ---
-        $RebootBlock = $null         # shared guarded-reboot scriptblock ($script:WinUpgradeRebootBlock)
+        $RebootBlock = $null,        # shared guarded-reboot scriptblock ($script:WinUpgradeRebootBlock)
+        # --- audit 2026-07-25 (fable re-audit follow-up) appended params (kept at the END so
+        #     existing positional args are unshifted; DEFAULTS matter for the same reason the
+        #     $RebootBlock default does - the shimmed worker tests drive the worker without them) ---
+        $CabStageBlock = $null,      # shared guarded C:\Temp staging block ($script:WinUpgradeCabStageBlock)
+        $WuaBootstrapBlock = $null,  # shared guarded WMI/DCOM bootstrap ($script:WinUpgradeWuaBootstrapBlock)
+        $WuaCleanupBlock = $null     # shared guarded WMI/DCOM cleanup ($script:WinUpgradeWuaCleanupBlock)
     )
 
     $r = [ordered]@{ Host = $Computer; Ping = ''; Status = ''; Detail = ''; Ok = $false; Report = '' }
@@ -1115,6 +1260,10 @@ $script:WinUpgradeWorker = {
     # without the appended $RebootBlock arg - fall back to the module-scope block there (a
     # bare pool runspace always receives it via the ArgFactory tail).
     if ($null -eq $RebootBlock) { $RebootBlock = $script:WinUpgradeRebootBlock }
+    # Same fallback for the three wrong-box guarded blocks hoisted by the 2026-07-25 pass.
+    if ($null -eq $CabStageBlock)     { $CabStageBlock     = $script:WinUpgradeCabStageBlock }
+    if ($null -eq $WuaBootstrapBlock) { $WuaBootstrapBlock = $script:WinUpgradeWuaBootstrapBlock }
+    if ($null -eq $WuaCleanupBlock)   { $WuaCleanupBlock   = $script:WinUpgradeWuaCleanupBlock }
     # Wrong-box guard input, computed ONCE for every destructive dial below (audit 2026-07-23):
     # the shortname we DIALED; an IPv4-literal target has no DNS indirection -> '' skips the
     # remote-side $env:COMPUTERNAME compare (exactly like the Restart tool).
@@ -1379,8 +1528,18 @@ $script:WinUpgradeWorker = {
                 $session = New-PSSession @sp
                 try {
                     & $pushStep 'Copying' "Copying $CabName to C:\Temp on the target..."
-                    Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
-                        if (-not (Test-Path -Path 'C:\Temp')) { New-Item -Path 'C:\Temp' -ItemType Directory -ErrorAction Stop | Out-Null }
+                    # WRONG-BOX ABORT *before* anything lands (audit 2026-07-25 (fable re-audit
+                    # follow-up)): the guard used to sit at the DISM step, so a stale-DNS / reused-IP
+                    # dial still created C:\Temp and pushed the multi-GB package onto a stranger's
+                    # system drive - nothing was installed, but the host was mutated. The shared
+                    # $CabStageBlock answers "who are you?" and creates the directory in the SAME
+                    # round-trip, so a mismatch means no directory AND no copy.
+                    $stage = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock $CabStageBlock -ArgumentList $expectedName, 'C:\Temp'
+                    if ($null -eq $stage -or -not $stage.Ok) {
+                        $emsg = if ($stage) { [string]$stage.Error } else { 'no response from the staging block' }
+                        $r.Status = 'FAILED'; $r.Ok = $false
+                        $r.Detail = "Staging ABORTED - nothing copied: $emsg"
+                        break
                     }
                     # When the operator typed a UNC share path, have the TARGET pull the package
                     # from the share inside the session (operator credential) instead of base64-
@@ -2198,7 +2357,9 @@ $script:WinUpgradeWorker = {
                     $reasons = New-Object System.Collections.ArrayList
                     if ($cpuFail)  { [void]$reasons.Add('CPU unsupported') }
                     if ($tpmFail)  { [void]$reasons.Add('no TPM 2.0') }
-                    if ($diskFail) { [void]$reasons.Add('disk <64GB') }
+                    # audit 2026-07-24: quote the REAL gate ($MinDisk, now 25 GB free) instead of
+                    # the hardcoded '<64GB' text that came from the total-storage minimum.
+                    if ($diskFail) { [void]$reasons.Add("disk <${MinDisk}GB free") }
                     $blockReason = ($reasons -join '; ')
                     $stagedNow = [bool]$diag.PendingReboot
 
@@ -2382,7 +2543,8 @@ $script:WinUpgradeWorker = {
                     $reasons = New-Object System.Collections.ArrayList
                     if ($cpuFail)  { [void]$reasons.Add('CPU unsupported') }
                     if ($tpmFail)  { [void]$reasons.Add('no TPM 2.0') }
-                    if ($diskFail) { [void]$reasons.Add('disk <64GB') }
+                    # audit 2026-07-24: quote the REAL free-space gate ($MinDisk), not '<64GB'.
+                    if ($diskFail) { [void]$reasons.Add("disk <${MinDisk}GB free") }
                     $r.Online         = $true
                     $r.OsBuild        = [int]$diag.OsBuild
                     $r.DisplayVersion = [string]$diag.DisplayVersion
@@ -2678,7 +2840,18 @@ $script:WinUpgradeWorker = {
 
                     & $pushStep 'DISM' 'DISM /Online /Cleanup-Image /RestoreHealth (15-45 min)...'
                     $dismSb = {
-                        $o = @{ ExitCode=$null; Output=''; Error='' }
+                        param($expected)
+                        $o = @{ ExitCode=$null; Output=''; Error=''; WrongBox=$false }
+                        # audit 2026-07-24 (P2): WRONG-BOX ABORT before servicing the component
+                        # store. DISM /RestoreHealth + sfc are heavy, reboot-provoking writes and
+                        # ran with NO identity check - only the reboot dial below was guarded, so a
+                        # stale-DNS dial serviced (and could reboot-flag) the wrong machine. Same
+                        # idiom as $script:WinUpgradeRebootBlock; '' expected = IP target -> skipped.
+                        if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                            $o.WrongBox = $true
+                            $o.Error = "WRONG BOX: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, DISM not run"
+                            return $o
+                        }
                         try {
                             $psi = New-Object System.Diagnostics.ProcessStartInfo
                             $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'
@@ -2690,12 +2863,28 @@ $script:WinUpgradeWorker = {
                         return $o
                     }
                     $dismRes=$null; $dismErr=$false
-                    try { $icD=$baseIc.Clone(); $icD.ScriptBlock=$dismSb; $dismRes=Invoke-Command @icD } catch { $dismErr=$true; $dismRes=@{ ExitCode=$null; Output=''; Error=$_.Exception.Message } }
+                    try { $icD=$baseIc.Clone(); $icD.ScriptBlock=$dismSb; $icD.ArgumentList=@($expectedName); $dismRes=Invoke-Command @icD } catch { $dismErr=$true; $dismRes=@{ ExitCode=$null; Output=''; Error=$_.Exception.Message } }
+                    # audit 2026-07-24: the guard fired -> stop here (do NOT run sfc on that box)
+                    # and surface an explicit WRONG BOX row rather than a generic FAILED.
+                    if ($dismRes.WrongBox) {
+                        $r.Status='WRONG BOX'; $r.Ok=$false
+                        $r.Detail="WRONG BOX: dialed '$expectedName' but that host answered as a different machine - DISM/sfc ABORTED, nothing was changed. Check DNS / a reused IP."
+                        $r.Report="[FAIL] $([string]$dismRes.Error)"
+                        return $r
+                    }
                     if ($dismRes.Error) { $dismErr=$true }
 
                     & $pushStep 'sfc' 'sfc /scannow...'
                     $sfcSb = {
-                        $o = @{ ExitCode=$null; Text=''; Error='' }
+                        param($expected)
+                        $o = @{ ExitCode=$null; Text=''; Error=''; WrongBox=$false }
+                        # audit 2026-07-24: same wrong-box abort as $dismSb (defence in depth - the
+                        # DISM guard already returned, but every destructive block guards itself).
+                        if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                            $o.WrongBox = $true
+                            $o.Error = "WRONG BOX: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, sfc not run"
+                            return $o
+                        }
                         try {
                             $psi = New-Object System.Diagnostics.ProcessStartInfo
                             $psi.FileName='sfc.exe'; $psi.Arguments='/scannow'
@@ -2707,7 +2896,13 @@ $script:WinUpgradeWorker = {
                         return $o
                     }
                     $sfcRes=$null; $sfcErr=$false
-                    try { $icS=$baseIc.Clone(); $icS.ScriptBlock=$sfcSb; $sfcRes=Invoke-Command @icS } catch { $sfcErr=$true; $sfcRes=@{ ExitCode=$null; Text=''; Error=$_.Exception.Message } }
+                    try { $icS=$baseIc.Clone(); $icS.ScriptBlock=$sfcSb; $icS.ArgumentList=@($expectedName); $sfcRes=Invoke-Command @icS } catch { $sfcErr=$true; $sfcRes=@{ ExitCode=$null; Text=''; Error=$_.Exception.Message } }
+                    if ($sfcRes.WrongBox) {
+                        $r.Status='WRONG BOX'; $r.Ok=$false
+                        $r.Detail="WRONG BOX: dialed '$expectedName' but that host answered as a different machine - sfc ABORTED. Check DNS / a reused IP."
+                        $r.Report="[FAIL] $([string]$sfcRes.Error)"
+                        return $r
+                    }
                     if ($sfcRes.Error) { $sfcErr=$true }
 
                     # verdict: MIRROR of Get-WinUpgradeRepairVerdict (keep in sync).
@@ -2798,6 +2993,17 @@ $script:WinUpgradeWorker = {
                     $report=New-Object System.Collections.ArrayList
                     $fixes =New-Object System.Collections.ArrayList
                     $rebootNeeded=$false
+                    # audit 2026-07-24 (P1): WRONG-BOX ABORT - this block WRITES policy, REMOVES
+                    # drivers and DELETES $WINDOWS.~BT, yet the only $env:COMPUTERNAME check was
+                    # down at the reboot step, so a stale-DNS / reused-IP dial silently remediated
+                    # the WRONG machine and merely declined to reboot it. Same guard, same idiom as
+                    # the reboot branch below, but FIRST - the box that answered runs this, so
+                    # $env:COMPUTERNAME is the real machine; if it is not the one we dialed, return
+                    # before touching anything ('' expected = IP-literal target -> guard skipped).
+                    if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                        [void]$report.Add("[FAIL] WRONG BOX: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, nothing was changed")
+                        return [pscustomobject]@{ Build=0; Status='WRONG BOX'; Fixes=@(); RebootNeeded=$false; ActiveUser=''; Rebooted=$false; RebootDeferred=$false; Report=@($report) }
+                    }
                     $os=Get-CimInstance Win32_OperatingSystem; $build=[int]$os.BuildNumber
                     [void]$report.Add("[INFO] Build $build")
                     if ($build -ge $minBuild) {
@@ -2976,6 +3182,8 @@ $script:WinUpgradeWorker = {
                 $r.RebootNeeded = [bool]$af.RebootNeeded
                 $r.Status = [string]$af.Status
                 $r.Detail = switch ([string]$af.Status) {
+                    # audit 2026-07-24: the in-block wrong-box abort surfaces as its own row.
+                    'WRONG BOX'         { "WRONG BOX: dialed '$expectedName' but that host answered as a different machine - auto-fix ABORTED, nothing was changed. Check DNS / a reused IP." }
                     'ALREADY ON TARGET' { "Already on $Version+ (build $([int]$af.Build)) - no changes." }
                     'NO CHANGES'        { 'Analysed - no fixes were necessary on this device.' }
                     'DRY-RUN'           { if ($fixList.Count -gt 0) { "DRY-RUN: would apply $($fixList.Count) fix(es): $($fixList -join '; ')." } else { 'DRY-RUN: no fixes needed.' } }
@@ -2983,7 +3191,9 @@ $script:WinUpgradeWorker = {
                     default             { 'Auto-fix complete.' }
                 }
                 $r.Report = (@($af.Report) -join "`n")
-                $r.Ok = $true
+                # audit 2026-07-24: a wrong-box abort is NOT a success - fail the row so it is
+                # audited Failure and cannot read green.
+                $r.Ok = ([string]$af.Status -ne 'WRONG BOX')
             }
 
             'ErrorReport' {
@@ -3173,7 +3383,16 @@ $script:WinUpgradeWorker = {
                 # In-session runner: register+start the SYSTEM task, poll result.json, return json.
                 # Ported VERBATIM from HTTPS_Installer.ps1 lines 235-253.
                 $remoteTaskRunner = {
-                    param($DriverText, $TimeoutSec, $RunNonce)
+                    param($DriverText, $TimeoutSec, $RunNonce, $ExpectedName)
+                    # audit 2026-07-24 (P2): WRONG-BOX ABORT before REGISTERING the SYSTEM task.
+                    # The host gate below only ever ran on a result.json the task had ALREADY been
+                    # registered and run to produce - i.e. the wrong box was patched and rebooted
+                    # first, and only then called out. Abort up front instead, and hand back a
+                    # this-nonce result.json shape so the shared $shapeRow host gate turns it into
+                    # the explicit WrongBox row (Ok=$false) and the transport cascade stops.
+                    if ($ExpectedName -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$ExpectedName).Trim().ToUpper())) {
+                        return '{"Status":"WrongBox","Nonce":"' + $RunNonce + '","Host":"' + $env:COMPUTERNAME + '"}'
+                    }
                     $base = Join-Path $env:ProgramData "JANET\WUA"
                     New-Item -ItemType Directory -Force -Path $base | Out-Null
                     $log = Join-Path $base "result.json"
@@ -3258,7 +3477,7 @@ $script:WinUpgradeWorker = {
                     try {
                         $idleMs = [int][Math]::Min(2147483, ($timeoutSec + 900)) * 1000
                         $so = New-PSSessionOption -OpenTimeout 25000 -OperationTimeout 0 -IdleTimeout $idleMs -CancelTimeout 5000 -SkipCACheck:$att.UseSSL -SkipCNCheck:$att.UseSSL
-                        $ic = @{ ComputerName=$Computer; ScriptBlock=$remoteTaskRunner; ArgumentList=@($driver,$timeoutSec,$runNonce); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop'; Port=$att.Port }
+                        $ic = @{ ComputerName=$Computer; ScriptBlock=$remoteTaskRunner; ArgumentList=@($driver,$timeoutSec,$runNonce,$expectedName); Authentication='Negotiate'; SessionOption=$so; ErrorAction='Stop'; Port=$att.Port }
                         if ($credSet) { $ic.Credential = $Cred }
                         if ($att.UseSSL) { $ic['UseSSL'] = $true }
                         $json = Invoke-Command @ic
@@ -3283,16 +3502,13 @@ $script:WinUpgradeWorker = {
                     & $pushStep 'Working' 'WinRM failed; bootstrapping SYSTEM task over WMI/DCOM...'
                     try {
                         $driver64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($driver))
-                        $bootstrap = @"
-`$base = Join-Path `$env:ProgramData 'JANET\WUA'
-New-Item -ItemType Directory -Force -Path `$base | Out-Null
-Remove-Item (Join-Path `$base 'result.json') -ErrorAction SilentlyContinue
-Set-Content -Path (Join-Path `$base 'driver.ps1') -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$driver64'))) -Encoding UTF8
-`$act  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + `$base + '\driver.ps1"')
-`$prin = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName 'JANET_WUA' -Action `$act -Principal `$prin -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Force | Out-Null
-Start-ScheduledTask -TaskName 'JANET_WUA'
-"@
+                        # audit 2026-07-25 (fable re-audit follow-up): the bootstrap is the shared
+                        # $WuaBootstrapBlock now, wrapped as text for -EncodedCommand (Win32_Process
+                        # .Create takes a command line, not a scriptblock). The pre-fix here-string
+                        # created %ProgramData%\JANET\WUA and DELETED result.json BEFORE its $exp
+                        # check, so a mis-resolved host lost a CONCURRENT run's result; the block
+                        # checks identity first and a wrong box writes only the nonce-named marker.
+                        $bootstrap = '& {' + $WuaBootstrapBlock.ToString() + "} '$expectedName' '$runNonce' '$driver64'"
                         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
                         $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
                         $cso = New-CimSessionOption -Protocol Dcom
@@ -3305,6 +3521,12 @@ Start-ScheduledTask -TaskName 'JANET_WUA'
                         } else {
                             $unc    = "\\$Computer\C`$\ProgramData\JANET\WUA\result.json"
                             $uncDrv = "\\$Computer\C`$\ProgramData\JANET\WUA\driver.ps1"
+                            # audit 2026-07-25 (fable re-audit follow-up): a wrong box now refuses to
+                            # write the SHARED result.json (that would clobber a concurrent run) and
+                            # leaves this nonce-named marker instead - poll it alongside result.json so
+                            # the operator still gets the WrongBox row immediately instead of waiting
+                            # out the full timeout.
+                            $uncWrong = "\\$Computer\C`$\ProgramData\JANET_WUA.wrongbox.$runNonce.json"
                             $useDrive = $credSet
                             if ($useDrive) { New-PSDrive -Name JWUA -PSProvider FileSystem -Root "\\$Computer\C`$" -Credential $Cred -ErrorAction SilentlyContinue | Out-Null }
                             # Poll for a result.json that carries THIS run's nonce. A stale/prior-run
@@ -3313,13 +3535,16 @@ Start-ScheduledTask -TaskName 'JANET_WUA'
                             $deadline = (Get-Date).AddSeconds($timeoutSec); $shaped = $null
                             while ((Get-Date) -lt $deadline) {
                                 if (& $isCancelled) { break }
-                                if (Test-Path $unc) {
-                                    $polled = $null; try { $polled = Get-Content $unc -Raw } catch {}
-                                    if ($polled) {
-                                        $cand = & $shapeRow $polled $runNonce $targetShort $targetIsIp
-                                        if ($cand.Got) { $shaped = $cand; break }   # matching nonce (real status or WrongBox)
+                                foreach ($pollPath in @($unc, $uncWrong)) {
+                                    if (Test-Path $pollPath) {
+                                        $polled = $null; try { $polled = Get-Content $pollPath -Raw } catch {}
+                                        if ($polled) {
+                                            $cand = & $shapeRow $polled $runNonce $targetShort $targetIsIp
+                                            if ($cand.Got) { $shaped = $cand; break }   # matching nonce (real status or WrongBox)
+                                        }
                                     }
                                 }
+                                if ($shaped) { break }
                                 Start-Sleep 8
                             }
                             if ($null -eq $shaped) { $shaped = & $shapeRow $null $runNonce $targetShort $targetIsIp }
@@ -3335,18 +3560,25 @@ Start-ScheduledTask -TaskName 'JANET_WUA'
                             # fire a follow-up bootstrap to Unregister the task + delete the files, and
                             # also remove them over the admin share. A cleanup failure must NOT flip a
                             # real Installed result to a failure.
-                            try {
-                                $cleanup = @"
-try { Unregister-ScheduledTask -TaskName 'JANET_WUA' -Confirm:`$false -ErrorAction SilentlyContinue } catch {}
-`$b = Join-Path `$env:ProgramData 'JANET\WUA'
-Remove-Item (Join-Path `$b 'driver.ps1')   -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path `$b 'result.json')  -Force -ErrorAction SilentlyContinue
-"@
-                                $encC = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanup))
-                                Invoke-CimMethod -CimSession $cim -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encC" } -ErrorAction SilentlyContinue | Out-Null
-                            } catch {}
-                            try { if (Test-Path $unc)    { Remove-Item $unc    -Force -ErrorAction SilentlyContinue } } catch {}
-                            try { if (Test-Path $uncDrv) { Remove-Item $uncDrv -Force -ErrorAction SilentlyContinue } } catch {}
+                            # audit 2026-07-25 (fable re-audit follow-up): the cleanup was the LAST
+                            # unguarded destructive block on this path - it unregistered JANET_WUA and
+                            # deleted the driver/result on whatever box answered, which kills a
+                            # CONCURRENT legitimate install-updates run on a wrongly-reached host.
+                            # Two layers now: nothing of ours is on a WrongBox host, so skip the whole
+                            # cleanup there, and the block itself re-checks $env:COMPUTERNAME.
+                            $wrongBox = ([string]$shaped.Status -eq 'WrongBox')
+                            if (-not $wrongBox) {
+                                try {
+                                    $cleanup = '& {' + $WuaCleanupBlock.ToString() + "} '$expectedName'"
+                                    $encC = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanup))
+                                    Invoke-CimMethod -CimSession $cim -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encC" } -ErrorAction SilentlyContinue | Out-Null
+                                } catch {}
+                                try { if (Test-Path $unc)    { Remove-Item $unc    -Force -ErrorAction SilentlyContinue } } catch {}
+                                try { if (Test-Path $uncDrv) { Remove-Item $uncDrv -Force -ErrorAction SilentlyContinue } } catch {}
+                            }
+                            # Our own nonce-named marker is ALWAYS ours to remove (it can collide with
+                            # nothing), so it is swept on both paths - no residue on a wrong box either.
+                            try { if (Test-Path $uncWrong) { Remove-Item $uncWrong -Force -ErrorAction SilentlyContinue } } catch {}
                             if ($useDrive) { Remove-PSDrive -Name JWUA -ErrorAction SilentlyContinue }
                             Remove-CimSession $cim -ErrorAction SilentlyContinue
                         }
@@ -3488,6 +3720,12 @@ function Invoke-JanetToolAction {
     # Shared guarded-reboot block threaded to the worker (audit 2026-07-23: reused by
     # InstallCab / SetPageFile / UpgradeDrive / RepairHealth).
     $rebootBlock    = $script:WinUpgradeRebootBlock
+    # Shared wrong-box guarded blocks threaded to the worker (audit 2026-07-25 (fable
+    # re-audit follow-up)): CAB staging, and the install-updates WMI/DCOM bootstrap +
+    # cleanup - each one used to mutate a mis-resolved host before its guard could fire.
+    $cabStageBlock     = $script:WinUpgradeCabStageBlock
+    $wuaBootstrapBlock = $script:WinUpgradeWuaBootstrapBlock
+    $wuaCleanupBlock   = $script:WinUpgradeWuaCleanupBlock
     # Diagnose constants + SCCM cycle GUIDs (defined once at module scope, copied EXACTLY
     # from the reference) threaded to the worker via the ArgFactory tail.
     $cpuPatterns    = $script:WinUpgradeCpuPatterns
@@ -3499,16 +3737,20 @@ function Invoke-JanetToolAction {
     $version        = if ($Params['version']) { ([string]$Params['version']).Trim() } else { '24H2' }
     # v0.4.0 target-version -> MinBuild gate. fleet-status / diagnose / upgrade-drive / auto-fix /
     # error-report pass a 'version' key resolved against $script:WinUpgradeTargets; default 24H2 /
-    # 26100 keeps every existing behaviour identical. An unknown key on a version-select op falls
-    # back to 24H2 (with a warning); pin / unpin / forcediscovery keep their free-text version.
+    # 26100 keeps every existing behaviour identical. pin / unpin / forcediscovery keep their
+    # free-text version (they only write it into the policy, they do not gate on a build).
+    # audit 2026-07-24: an UNRECOGNISED key used to be silently rewritten to 24H2 - so a typo
+    # ('24H3', '23H2') on upgrade-drive PINNED and DROVE the whole target list to a release the
+    # operator never asked for, with only a warning line in the log to show for it. Refuse it:
+    # a version-gated op with an unknown version runs NOTHING.
     $minBuild       = 26100
     $versionKey     = $version.ToUpperInvariant()
     if ($script:WinUpgradeTargets.Contains($versionKey)) {
         $minBuild = [int]$script:WinUpgradeTargets[$versionKey].MinBuild
         $version  = [string]$script:WinUpgradeTargets[$versionKey].Version
     } elseif (@('FleetStatus','Diagnose','UpgradeDrive','AutoFix','ErrorReport') -contains $op) {
-        & $send @{ type='log'; level='warn'; text="Unknown target version '$version' - defaulting to 24H2 (build 26100). Valid: $([string]::Join(', ', @($script:WinUpgradeTargets.Keys)))." }
-        $version = '24H2'; $minBuild = 26100
+        & $send @{ type='error'; text="Unknown target version '$version' - nothing was run. Valid: $([string]::Join(', ', @($script:WinUpgradeTargets.Keys))). (Refusing to substitute a version: this action pins/drives toward it.)" }
+        return @{ rows=@(); summary=@{ total=0; badVersion=1 } }
     }
     # SetPageFile size: default 16 GB, clamped 1-128 GB (worker re-clamps as a backstop).
     $sizeMb         = 16384
@@ -3538,8 +3780,12 @@ function Invoke-JanetToolAction {
     # reboot); low fan-out + a wide watchdog.
     if ($op -eq 'UpgradeDrive')   { $defThreads = 8; $maxJobSeconds = 600 }
     # RepairHealth (DISM+SFC) + AutoFix-with-repair can run 15-45 min -> a wide watchdog.
-    if ($op -eq 'RepairHealth')   { $defThreads = 4;  $maxJobSeconds = 3600 }
-    if ($op -eq 'AutoFix')        { $defThreads = 8;  $maxJobSeconds = if ($fixRepair) { 3600 } else { 900 } }
+    # audit 2026-07-24: 3600 s was SHORTER than the runtime this very tool advertises - DISM
+    # RestoreHealth and sfc /scannow are EACH 15-45 min, so a slow-but-healthy host was killed
+    # at 60 min, rowed FAILED, audited Failure, and (worst) never reached the reboot that
+    # finishes the repair. 7200 s covers the advertised worst case (45+45 + overhead).
+    if ($op -eq 'RepairHealth')   { $defThreads = 4;  $maxJobSeconds = 7200 }
+    if ($op -eq 'AutoFix')        { $defThreads = 8;  $maxJobSeconds = if ($fixRepair) { 7200 } else { 900 } }
     if ($op -eq 'ErrorReport')    { $defThreads = 16; $maxJobSeconds = 300 }
     # OsAudit: light read-only registry read -> wide fan-out. InstallUpdates: the SYSTEM task
     # can run for many minutes, so the watchdog must exceed the per-host poll timeout.
@@ -3615,7 +3861,7 @@ function Invoke-JanetToolAction {
     # in the SAME order as the worker param() tail (a mismatch silently corrupts every argument).
     # audit 2026-07-23 arg ($rebootBlock) appended at the END in the SAME order as the worker
     # param() tail (a mismatch silently corrupts every argument).
-    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging, $includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver, $rebootBlock) }
+    $argFactory  = { param($h) ,@($h, $op, $Credential, $product, $version, $cabPath, $cabName, $cabFromShare, $reboot, $attemptOffline, $dryRun, $runWu, $sizeMb, $cancelJob, $stepQueue, $aggressive, $bypass, $sccmRefresh, $removeBypass, $cpuPatterns, $minRAM, $minDisk, $minTPM, $cycles, $rebootWhenStaged, $countdownSeconds, $pinBlock, $minBuild, $fixPolicy, $fixBypass, $fixDrivers, $driverSafe, $fixPause, $fixRepair, $clearStaging, $includeMU, $allowHttp, $allowWmi, $timeoutMin, $wuaDriver, $rebootBlock, $cabStageBlock, $wuaBootstrapBlock, $wuaCleanupBlock) }
     $rowOf       = {
         param($res)
         # Null-safe field getter, defined ONCE for every per-op branch below (audit 2026-07-23:
@@ -3861,7 +4107,15 @@ function Invoke-JanetToolAction {
                     # OR 'NEEDS REBOOT' - package staged, reboot pending) audits Success/1;
                     # everything else is a Failure/0.
                     if ($auditAction) {
-                        $auditResult = if ('DRY-RUN','Skipped','Cancelled' -contains [string]$res.Status) { 'Skipped' } elseif ($ok) { 'Success' } else { 'Failure' }
+                        # audit 2026-07-24: a NO-OP is not a patched vulnerability. RepairHealth
+                        # 'CLEAN' (DISM+sfc found nothing to fix) and AutoFix 'NO CHANGES' /
+                        # 'ALREADY ON TARGET' set Ok=$true but change NOTHING, and were booking a
+                        # VulnPatched/Success/1 - inflating the remediation record with hosts that
+                        # were never remediated. They join the skip-set (Skipped/0), exactly like
+                        # DRY-RUN. NOT included: UpgradeDrive 'DRIVEN'/'STAGED' - those DID write
+                        # the pin policy and trigger WU, so they remain real Success rows.
+                        $noOpStatuses = @('DRY-RUN','Skipped','Cancelled','CLEAN','NO CHANGES','ALREADY ON TARGET')
+                        $auditResult = if ($noOpStatuses -contains [string]$res.Status) { 'Skipped' } elseif ($ok) { 'Success' } else { 'Failure' }
                         $auditItems  = if ($auditResult -eq 'Success') { 1 } else { 0 }
                         & $send @{ type='audit'; action=$auditAction; target=$res.Host; result=$auditResult; itemCount=$auditItems; detail=([string]$res.Detail) }
                     }

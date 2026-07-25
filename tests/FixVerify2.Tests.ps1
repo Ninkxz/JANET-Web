@@ -18,12 +18,46 @@
 #  Run:  Invoke-Pester -Path .\tests\FixVerify2.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)' {
 
     $wm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1')  -Force -PassThru
+    Add-ShimGuard $wm
     $am = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Force -PassThru
+    Add-ShimGuard $am
 
     # Drive the REAL kb-install worker with Invoke-Command shadowed so the inner MECM
     # scriptblock (the one that now captures .ReturnValue) EXECUTES locally against a
@@ -34,6 +68,8 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
         & $wm {
             param($Rv)
             $script:__rv = $Rv
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Get-WmiObject','Invoke-WmiMethod',
+                'Invoke-Command')
             function script:New-PSSession { param($ComputerName,$SessionOption,$ErrorAction,$Credential,$Authentication) [pscustomobject]@{ Id=1; Name='shim' } }
             function script:Remove-PSSession { [CmdletBinding()] param($Session) }
             function script:Get-WmiObject { [CmdletBinding()] param($Namespace,$Query,$Class,$Name,$ArgumentList) [pscustomobject]@{ Name='KB5031234 Security Update'; ArticleID='5031234' } }
@@ -49,7 +85,9 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
                 $out = & $script:WptKbInstallBlock -Computer $env:COMPUTERNAME -Cred $null -Auth 'Negotiate' -KBs @('KB5031234') -MsuPath '' -NoReboot $true
                 [pscustomobject]@{ MECMFound=[int]$out.MECMFound; MECMInstalled=[int]$out.MECMInstalled; Errors=(@($out.Errors) -join ' | ') }
             } finally {
-                Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Get-WmiObject, function:script:Invoke-WmiMethod, function:script:Invoke-Command -EA SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $Rv
     }
@@ -59,6 +97,8 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
         & $am {
             param($Rv)
             $script:__rv = $Rv
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Get-WmiObject','Invoke-WmiMethod',
+                'Invoke-Command')
             function script:New-PSSession { param($ComputerName,$SessionOption,$ErrorAction,$Credential,$Authentication) [pscustomobject]@{ Id=1; Name='shim' } }
             function script:Remove-PSSession { [CmdletBinding()] param($Session) }
             function script:Get-WmiObject { [CmdletBinding()] param($Namespace,$Query,$Class,$Name,$ArgumentList) [pscustomobject]@{ Name='KB5031234 Security Update'; ArticleID='5031234' } }
@@ -73,7 +113,9 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
             try {
                 [string](& $script:AcasKbInstallBlock -Computer $env:COMPUTERNAME -Cred $null -Auth 'Negotiate' -KBs @('KB5031234') -MsuPath '' -NoReboot $true -Method 'mecm')
             } finally {
-                Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Get-WmiObject, function:script:Invoke-WmiMethod, function:script:Invoke-Command -EA SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $Rv
     }
@@ -135,6 +177,7 @@ Describe 'FIX 1 - MECM InstallUpdates ReturnValue gates "Triggered" (kb-install)
 Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (JanetWeb.winupgrade.psm1)' {
 
     $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.winupgrade.psm1') -Force -PassThru
+    Add-ShimGuard $m
 
     # Drive the REAL worker with Invoke-Command shadowed. The write/removal call returns
     # a canned string; the read-back call (marker PINREAD) returns a canned policy state
@@ -144,6 +187,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
         & $m {
             param($ReadBack, $Bypass)
             $script:__rb = $ReadBack
+            $__shims = Save-ShimState @('Invoke-Command','New-PSSession','Remove-PSSession')
             function script:Invoke-Command {
                 [CmdletBinding()] param($ComputerName,$ScriptBlock,$ArgumentList,$Authentication,$SessionOption,$Credential,$Session)
                 $t = [string]$ScriptBlock
@@ -168,7 +212,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 [pscustomobject]@{ Status=[string]$row.Status; Ok=[bool]$row.Ok; Detail=[string]$row.Detail }
-            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -EA SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $ReadBack $Bypass
     }
 
@@ -177,6 +221,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
         & $m {
             param($ReadBack, $RemoveBypass)
             $script:__rb = $ReadBack
+            $__shims = Save-ShimState @('Invoke-Command','New-PSSession','Remove-PSSession')
             function script:Invoke-Command {
                 [CmdletBinding()] param($ComputerName,$ScriptBlock,$ArgumentList,$Authentication,$SessionOption,$Credential,$Session)
                 $t = [string]$ScriptBlock
@@ -201,7 +246,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
                 )
                 $row = & $script:WinUpgradeWorker @argl
                 [pscustomobject]@{ Status=[string]$row.Status; Ok=[bool]$row.Ok; Detail=[string]$row.Detail }
-            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -EA SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $ReadBack $RemoveBypass
     }
 
@@ -274,6 +319,7 @@ Describe 'FIX 2 - WinUpgrade Pin/Unpin gate success on a policy read-back (Janet
 Describe 'FIX 3 - Secure Boot Lenovo gates success on the post-write read-back (JanetWeb.secureboot.psm1)' {
 
     $sbm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Force -PassThru
+    Add-ShimGuard $sbm
 
     # The Lenovo enable logic lives in the remote payload here-string. Extract just the
     # New-Result + Enable-LenovoSecureBoot function definitions via the PS parser and run

@@ -160,16 +160,53 @@
   /* ========================================================================
      api  (the ONLY fetch in the app, besides RunController which calls it)
      ===================================================================== */
+  // Hard deadline on EVERY api() request. Without one, a stalled server (half-open
+  // socket, wedged runspace, sleeping laptop) leaves fetch pending forever: the
+  // RunController poll loop parks in its `await` and the run just stops updating -
+  // no retry, no loss message, no way for the operator to tell a hung server from a
+  // slow one. The loop's retry/abandon path only runs when a request REJECTS, so
+  // the abort below is what makes it reachable. 30s is well below an operator's
+  // patience and above every handler the SERVER completes on its own. (audit 2026-07-24 P3)
+  //
+  // CORRECTION (fable re-audit): the original version of this comment claimed 30s was "well
+  // above the server's slowest synchronous handler (credential prompt / manifest load)". That
+  // was FACTUALLY WRONG for the credential prompt. POST /api/cred blocks the accept thread on
+  // a console Get-Credential that is OPERATOR-PACED - the server deliberately extends its
+  // IdleConnection timeout to 20 minutes for exactly this. A 30s client abort turned any
+  // slower-than-30s credential pick into a silent failure: the error is swallowed by
+  // setCred().catch(function(){}), there is no periodic refreshCred, so the UI showed "no
+  // credential" while the credential had actually been set server-side. Excluded, same
+  // rationale as uploadFile below: never abort a request whose duration is a HUMAN's to decide.
+  var API_TIMEOUT_MS = 30000;
+  // Paths whose completion time is bounded by a person, not by the server.
+  var API_NO_TIMEOUT = ['/cred'];
   async function api(method, path, body) {
     var opt = { method: method, headers: { 'X-Janet-Token': TOKEN } };
     if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
-    var r;
-    try { r = await fetch('/api' + path, opt); }
-    catch (netErr) { var e = new Error('network error'); e.status = 0; throw e; }
-    if (!r.ok) { var e2 = new Error('HTTP ' + r.status + ' ' + path); e2.status = r.status; throw e2; }
-    return r.json();
+    var untimed = API_NO_TIMEOUT.some(function (p) { return String(path).indexOf(p) === 0; });
+    var ctl = (!untimed && typeof AbortController === 'function') ? new AbortController() : null;
+    var timedOut = false, timer = null;
+    if (ctl) {
+      opt.signal = ctl.signal;
+      timer = setTimeout(function () { timedOut = true; try { ctl.abort(); } catch (e) {} }, API_TIMEOUT_MS);
+    }
+    try {
+      var r = await fetch('/api' + path, opt);
+      if (!r.ok) { var e2 = new Error('HTTP ' + r.status + ' ' + path); e2.status = r.status; throw e2; }
+      // json() is INSIDE the deadline too - a server that sends headers then stalls
+      // mid-body would otherwise hang exactly like the no-timeout case.
+      return await r.json();
+    } catch (err) {
+      if (err && err.status != null) throw err;           // already-shaped HTTP error - pass through
+      // network drop, abort, or a truncated/malformed body: all transport-level, all status 0.
+      var e = new Error(timedOut ? ('no response in ' + Math.round(API_TIMEOUT_MS / 1000) + 's') : 'network error');
+      e.status = 0; e.timeout = timedOut; throw e;
+    } finally { if (timer) clearTimeout(timer); }
   }
   // Upload a file via the binary-safe /api/upload; returns the server-side temp path.
+  // Deliberately NOT on the api() deadline above: a multi-hundred-MB PSADT package or
+  // .cab over a slow share legitimately takes minutes, and aborting it mid-body would
+  // turn a working upload into a mystery failure. (audit 2026-07-24 P3)
   async function uploadFile(file, subdir) {
     var headers = { 'X-Janet-Token': TOKEN, 'X-Janet-Filename': encodeURIComponent(file.name) };
     if (subdir) headers['X-Janet-Subdir'] = String(subdir);   // co-locate related files in one host folder
@@ -185,6 +222,10 @@
   }
   function pollLossMsg(e) {
     var s = e && e.status;
+    // A timed-out request is NOT the same story as a refused one: the server is up
+    // but not answering, so say so instead of "not responding - check the console".
+    // (audit 2026-07-24 P3: without this the abort would be silent to the operator.)
+    if (e && e.timeout) return 'server stopped responding (no reply in ' + Math.round(API_TIMEOUT_MS / 1000) + 's) - the run may still be going server-side; reload to reconnect';
     if (s === 401 || s === 403) return 'server was restarted - reload the page to reconnect';
     if (s === 404) return 'run is no longer on the server (it finished, was evicted, or the server restarted)';
     return 'server not responding - check the JANET Web console window';
@@ -529,7 +570,8 @@
   /* ========================================================================
      AppShell  -  builds the whole frame in JS (index.html stays minimal)
      ===================================================================== */
-  var TOOLS = [], SUITE = 'JANET Web';
+  var TOOLS = [];   // (audit 2026-07-24 P4: the `SUITE` companion was write-only - the
+                    // brand text is built literally in buildShell - so it is gone.)
   var dom = {};   // cached element refs
 
   function buildShell(root) {
@@ -943,6 +985,30 @@
   /* --- tool routing --- */
   var current = null;   // { tool, view, ctx }
   var openGen = 0;      // bumped per openTool call; guards against out-of-order async mounts
+
+  // Manifest fetch, FAIL CLOSED. This used to be `.catch(-> null)` inline in
+  // openTool, which meant one dropped request silently opened the tool with every
+  // manifest-derived safety gate removed: ctx.run's destructive default collapses to
+  // false (so no cancel-on-egress and no unload guard for a wave that IS destructive),
+  // and views that gate their confirm on the manifest action - wpt followOnFleet /
+  // kbFleet / runHealer read `act && act.destructive` - skip the confirm dialog AND the
+  // credential check ENTIRELY. A network hiccup must never quietly remove a safety
+  // gate, so: retry once (a single dropped request is the common case), then let the
+  // error propagate to openTool's catch, which shows it + a Retry instead of the tool.
+  // A tool whose manifest is genuinely 404 is unusable anyway - the server rejects its
+  // /action posts with the same 'tool manifest unavailable'. (audit 2026-07-24 P2)
+  async function fetchManifest(toolId) {
+    var path = '/tool/' + toolId + '/manifest';
+    try { return await api('GET', path); }
+    catch (e1) {
+      await sleep(400);
+      try { return await api('GET', path); }
+      catch (e2) {
+        var e = new Error('its safety manifest did not load (' + e2.message + '). Refusing to open the tool without its guards - retry when the server responds.');
+        e.status = e2.status; throw e;
+      }
+    }
+  }
   async function openTool(tool, pendingTab) {
     // Re-clicking the tool that is already open (sidebar row / command palette) must
     // NOT tear down its in-flight destructive run. No-op unless a deep-link tab was
@@ -980,13 +1046,20 @@
     dom.viewHost.appendChild(loading);
     var view, manifest = null;
     try {
-      var pair = await Promise.all([loadView(tool.id), api('GET', '/tool/' + tool.id + '/manifest').catch(function () { return null; })]);
+      var pair = await Promise.all([loadView(tool.id), fetchManifest(tool.id)]);
       view = pair[0]; manifest = pair[1];
     } catch (e) {
       dom.viewHost.innerHTML = '';
-      var err = el('div'); err.style.padding = '24px'; err.className = 'st-bad';
+      var errBox = el('div'); errBox.style.padding = '24px';
+      var err = el('div', 'st-bad');
       err.textContent = 'Could not open ' + tool.name + ': ' + e.message;
-      dom.viewHost.appendChild(err);
+      errBox.appendChild(err);
+      // The manifest arm fails CLOSED (see fetchManifest), so the operator needs a
+      // way back in once the hiccup passes - without a retry the only recovery is
+      // an F5 that also drops every in-flight run. (audit 2026-07-24 P2)
+      var retry = Janet.ui.ghostButton('Retry', { onClick: function () { openTool(tool, pendingTab); } });
+      retry.style.marginTop = '12px'; errBox.appendChild(retry);
+      dom.viewHost.appendChild(errBox);
       return;
     }
     // A newer openTool() superseded this one while we awaited the view/manifest
@@ -1047,7 +1120,15 @@
       run: function (actionId, params, opts) {
         opts = opts || {};
         var act = findAction(manifest, actionId);
-        var o = { destructive: (opts.destructive != null) ? opts.destructive : !!(act && act.destructive), keyOf: opts.keyOf };
+        // Fail closed on a MISSING manifest: with no manifest we cannot know whether
+        // this action is destructive, and "unknown" must never resolve to "safe" (it
+        // would drop cancel-on-egress + the unload guard from a real destructive wave).
+        // Belt-and-braces behind fetchManifest, which no longer opens a tool without
+        // one. An action absent from a PRESENT manifest keeps the old default: those
+        // are the server's by-id actions, which it gates itself. (audit 2026-07-24 P2)
+        var destructive = (opts.destructive != null) ? opts.destructive
+          : (manifest ? !!(act && act.destructive) : true);
+        var o = { destructive: destructive, keyOf: opts.keyOf };
         return RunController.start(tool.id, actionId, params || {}, o);
       },
       confirm: function (opts) { return Janet.components.ConfirmDialog(opts); },
@@ -1165,7 +1246,7 @@
     updateStrip();
     try {
       var cat = await api('GET', '/tools');
-      SUITE = cat.suite || SUITE; TOOLS = cat.tools || [];
+      TOOLS = cat.tools || [];   // cat.suite is deliberately ignored: nothing renders it
     } catch (e) {
       TOOLS = [];
       var warn = el('div'); warn.style.padding = '24px'; warn.className = 'st-bad';

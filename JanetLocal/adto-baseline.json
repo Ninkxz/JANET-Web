@@ -1,0 +1,27 @@
+{
+  "_note": "AD Nemesis (TO compliance) baseline. STARTER DEFAULTS - VALIDATE against the actual Technical Order before trusting the verdicts. Edit by hand and re-run; the tool never writes this file. Thresholds in DAYS. Patterns are case-insensitive regex matched against sAMAccountName / DN.",
+  "inactiveDays": 45,
+  "staleComputerDays": 90,
+  "recertifyDays": 365,
+  "recertifyAttribute": "info",
+  "recertifyStampPrefix": "TO-VALIDATED:",
+  "serverOsPattern": "Server",
+  "_iaoNote": "iaoValidators = sAMAccountNames allowed to run the IAO validate-iao action (the express permission set). EMPTY = nobody is an IAO yet (fail closed - validation is refused for everyone). Add the IAOs' account names.",
+  "iaoValidators": [],
+  "adminSamPatterns": ["\\.adm$", "^adm[-_]", "[-_]adm$", "^da[-_]", "^ea[-_]", "admin"],
+  "serviceSamPatterns": ["^svc[-_]?", "[-_]svc$", "^sa[-_]", "^s-", "service"],
+  "serviceOuPatterns": ["Service Accounts", "ServiceAccounts", "OU=Svc"],
+  "adminOuPatterns": ["Admin", "Privileged", "PAW", "Tier0", "Tier 0"],
+  "rules": {
+    "inactiveEnabled":     { "enabled": true, "appliesTo": ["User", "Admin", "Service"], "requiresIao": false },
+    "passwordNeverExpires": { "enabled": true, "appliesTo": ["User", "Admin"],           "requiresIao": false },
+    "passwordNotRequired":  { "enabled": true, "appliesTo": ["User", "Admin", "Service"], "requiresIao": false },
+    "reversibleEncryption": { "enabled": true, "appliesTo": ["User", "Admin", "Service"], "requiresIao": false },
+    "descriptionMissing":   { "enabled": true, "appliesTo": ["Admin", "Service"],         "requiresIao": false },
+    "managerMissing":       { "enabled": true, "appliesTo": ["User"],                     "requiresIao": false },
+    "smartcardNotRequired": { "enabled": true, "appliesTo": ["User", "Admin"],            "requiresIao": false },
+    "adminHasSpn":          { "enabled": true, "appliesTo": ["Admin"],                    "requiresIao": false },
+    "recertifyOverdue":     { "enabled": true, "appliesTo": ["User", "Admin", "Service"], "requiresIao": true },
+    "staleObject":          { "enabled": true, "appliesTo": ["Computer", "Server"],       "requiresIao": false }
+  }
+}

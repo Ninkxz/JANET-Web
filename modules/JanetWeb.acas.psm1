@@ -1168,7 +1168,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.18'   # audit 2026-07-23 fix pass; Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.11.20'   # audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1386,7 +1386,7 @@ function Test-AcasHostToken {
 function Get-AcasLocalIdentity {
     # Every identity that names THIS dispatcher host: shortname, FQDN, all NIC IPs,
     # loopback. Case-insensitive HashSet, computed once and cached.
-    if ($script:AcasLocalIdentity) { return $script:AcasLocalIdentity }
+    if ($script:AcasLocalIdentity) { return ,$script:AcasLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -1395,8 +1395,21 @@ function Get-AcasLocalIdentity {
         if ($fqdn) { [void]$set.Add($fqdn); [void]$set.Add(($fqdn -split '\.')[0]) }
     } catch {}
     try { foreach ($ip in [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)) { [void]$set.Add($ip.IPAddressToString) } } catch {}
+    # Also add every locally-BOUND unicast IPv4 (mgmt/OOB NICs, lagging DNS): a bound IP
+    # not registered under this box's own name would otherwise be missed by the DNS lookup
+    # above, letting a pasted IP-literal target slip past the self-guard (audit 2026-07-24:
+    # acas was the ONLY one of 13 identity sets missing this - block copied verbatim from
+    # JanetWeb.restart.psm1's Get-JanetLocalIdentity for exact parity).
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { [void]$set.Add($ua.Address.IPAddressToString) }
+            }
+        }
+    } catch {}
     $script:AcasLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 function Test-AcasHostIsSelf {
@@ -2329,7 +2342,15 @@ $script:AcasRebootWorker = {
             return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent <<EXIT=>>"
         }
     }
-    $shutArgs = @('/m', "\\$Target", '/r', '/t', '300', '/c', $warn)
+    # audit 2026-07-25 (fable re-audit follow-up): PS 5.1 joins an -ArgumentList ARRAY with
+    # spaces and quotes NOTHING, so a multi-word warning splintered shutdown.exe's /c value
+    # into stray tokens ('/c' 'Patch' 'window' 'tonight') and the reboot failed. Same class
+    # as the wusa/shutdown quoting bugs already fixed elsewhere in this suite (wpt ~:3116):
+    # build ONE argument string with /c's value explicitly double-quoted. Embedded '"' and
+    # newlines are already stripped from $warn above, so the quoting cannot be broken out of.
+    # (This ambient branch is currently unreachable - every reboot dispatch is gated on a set
+    #  credential, which takes the Invoke-Command path above - but it is fixed all the same.)
+    $shutArgs = "/m \\$Target /r /t 300 /c `"$warn`""
     try {
         $proc = Start-Process -FilePath $shutdown -ArgumentList $shutArgs -Wait -PassThru -NoNewWindow
         if ($proc.ExitCode -eq 0)        { return "OK (reboot scheduled [ambient token], 300s warning) <<EXIT=0>>" }
@@ -2661,6 +2682,26 @@ $script:AcasRunVulnRowOf = {
         Mode             = $ctx.Mode
         Timestamp        = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         Detail           = (Remove-AcasMarkers $res)
+    }
+}
+
+# $script:AcasKbInstallRowOf -- kb-install row.
+# audit 2026-07-24 (P2): this rowOf had no UNCONFIRMED branch, so the worker's honest
+# 'UNCONFIRMED ...' (loop25: a MECM InstallUpdates / UsoClient trigger is an ACCEPTED
+# REQUEST, not a confirmed install) fell into the else and shipped Result='OK' - green
+# in the grid - while $script:AcasOkOf correctly booked the SAME result as not-ok and
+# the audit recorded a Failure. Row and audit now agree on the honest pending state.
+# Hoisted out of the switch arm beside the other rowOf constants so it is unit-testable.
+$script:AcasKbInstallRowOf = {
+    param($res, $hostName, $ctxObj)
+    @{
+        Host    = $hostName
+        KBs     = (Get-AcasMarker $res 'KBS')
+        MECM    = [int](Get-AcasMarker $res 'MECM')
+        MSU     = [int](Get-AcasMarker $res 'MSU')
+        Skipped = [int](Get-AcasMarker $res 'SKIP')
+        Result  = $(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'UNCONFIRMED*') { 'UNCONFIRMED' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' })
+        Detail  = (Remove-AcasMarkers $res)
     }
 }
 
@@ -3017,12 +3058,18 @@ $script:AcasKbInstallBlock = {
                     $msuName = Split-Path $MsuPath -Leaf
                     try {
                         Copy-Item -LiteralPath $MsuPath -Destination "C:\Temp\$msuName" -ToSession $sess -Force -EA Stop
-                        $wusaArgs = "C:\Temp\$msuName /quiet"; if ($NoReboot) { $wusaArgs += ' /norestart' }
+                        # audit 2026-07-24: quote the package path (parity with the same fix in
+                        # WptKbInstallBlock ~:3096). An MSU whose filename contains a space (e.g.
+                        # 'Windows11 24H2 KB####.msu') otherwise splits the wusa command line and
+                        # fails package-not-found on EVERY host in the wave.
+                        $wusaArgs = "`"C:\Temp\$msuName`" /quiet"; if ($NoReboot) { $wusaArgs += ' /norestart' }
                         $exit = Invoke-Command -Session $sess -ArgumentList $wusaArgs -EA Stop -ScriptBlock { param($a) (Start-Process -FilePath 'wusa.exe' -ArgumentList $a -Wait -PassThru -NoNewWindow -EA Stop).ExitCode }
                         if ($exit -eq 0 -or $exit -eq 3010) { $msuInstalled++; [void]$details.Add("MSU $($msuName): installed (exit $exit)") }
                         elseif ($exit -eq 2359302) { $skipped++; [void]$details.Add("MSU $($msuName): already installed") }
                         else { [void]$errors.Add("MSU $msuName exit $exit") }
-                        Invoke-Command -Session $sess -ArgumentList $msuName -EA SilentlyContinue -ScriptBlock { param($n) Remove-Item "C:\Temp\$n" -Force -EA SilentlyContinue }
+                        # audit 2026-07-24: -LiteralPath so a filename carrying [ ] / other wildcard
+                        # metacharacters is deleted, not silently left behind (wpt parity).
+                        Invoke-Command -Session $sess -ArgumentList $msuName -EA SilentlyContinue -ScriptBlock { param($n) Remove-Item -LiteralPath "C:\Temp\$n" -Force -EA SilentlyContinue }
                     } catch { [void]$errors.Add("MSU copy/install: $($_.Exception.Message)") }
                 }
             } elseif ($remaining.Count -gt 0) { foreach ($kb in $remaining) { $skipped++; [void]$details.Add("$kb not in MECM, no MSU path - skipped") } }
@@ -3045,22 +3092,55 @@ $script:AcasKbInstallBlock = {
 # Read the CISA KEV catalog flat file (JanetLocal\KevCatalog.txt) into a case-
 # insensitive CVE set. acas.psm1 loads in its own runspace and can't import
 # JanetWeb.kev.psm1, so it reads the same flat file directly (same source the KEV
-# tool uses). Missing/empty file -> empty set (no KEV badging,
-# never an error). Used to badge which remediation groups carry a known-exploited CVE.
+# tool uses). Used to badge which remediation groups carry a known-exploited CVE.
+#
+# audit 2026-07-24 (P1): a missing / unreadable / empty catalog used to yield an empty
+# set INDISTINGUISHABLE from "no group carries a known-exploited CVE" - every card
+# rendered un-badged, the analyze summary said nothing, and an operator reads that green
+# as "nothing here is being actively exploited". The read now RECORDS why the set is
+# empty in $script:AcasKevCatalogStatus ('ok' | 'missing' | 'unreadable' | 'empty'), so
+# the caller can surface "catalog unavailable" as its own visible state. Still never
+# throws. -Path is injectable so the states are unit-testable.
 function Read-AcasKevSet {
+    param([string]$Path)
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $script:AcasKevCatalogStatus = 'unreadable'   # fail-closed: ONLY a good parse below sets 'ok'
     try {
-        $p = Join-Path $PSScriptRoot '..\JanetLocal\KevCatalog.txt'
-        if (-not (Test-Path -LiteralPath $p)) { return $set }
-        $raw = Get-Content -LiteralPath $p -Raw -ErrorAction Stop
-        if ($null -eq $raw) { return $set }
-        if ($raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-        foreach ($tok in ($raw -split '[\r\n,;\t ]+')) {
-            $c = ([string]$tok).Trim()
-            if ($c -match '^(?i:CVE-\d{4}-\d{4,})$') { [void]$set.Add($c) }
-        }
-    } catch {}
+        $p = if ([string]::IsNullOrWhiteSpace($Path)) { Join-Path $PSScriptRoot '..\JanetLocal\KevCatalog.txt' } else { $Path }
+        if (Test-Path -LiteralPath $p) {
+            $raw = Get-Content -LiteralPath $p -Raw -ErrorAction Stop
+            if ($null -ne $raw) {
+                if ($raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+                foreach ($tok in ($raw -split '[\r\n,;\t ]+')) {
+                    $c = ([string]$tok).Trim()
+                    if ($c -match '^(?i:CVE-\d{4}-\d{4,})$') { [void]$set.Add($c) }
+                }
+            }
+            # A catalog that parsed to ZERO CVEs (truncated / garbage / placeholder) cannot
+            # badge anything either - that is 'empty', not a clean catalog.
+            $script:AcasKevCatalogStatus = $(if ($set.Count -gt 0) { 'ok' } else { 'empty' })
+        } else { $script:AcasKevCatalogStatus = 'missing' }
+    } catch { $script:AcasKevCatalogStatus = 'unreadable' }
     return ,$set   # comma stops PowerShell unrolling the HashSet to an array on assignment
+}
+
+# audit 2026-07-24 (P1): the last Read-AcasKevSet's catalog state, for the caller that
+# has to tell "no group is known-exploited" apart from "we could not check". 'unread'
+# until a read happens; 'ok' ONLY when a catalog with at least one CVE was parsed.
+function Get-AcasKevCatalogStatus {
+    if ($script:AcasKevCatalogStatus) { return [string]$script:AcasKevCatalogStatus }
+    return 'unread'
+}
+
+# audit 2026-07-24 (P1): CANONICAL analyze-time KEV state, used for the summary line,
+# the KEV row cell and the card badge. 'unavailable' whenever the catalog could not be
+# read - NEVER 'clear', because a clear KEV badge is read as "nothing here is being
+# actively exploited". Pure - tested by Acas.Kev.Tests.ps1.
+function Get-AcasKevSummaryState {
+    param([string]$CatalogStatus, [int]$KevGroups)
+    if ($CatalogStatus -ne 'ok') { return 'unavailable' }
+    if ($KevGroups -gt 0) { return 'hits' }
+    return 'clear'
 }
 
 # True if any CVE in the comma/space-separated cell is in the KEV set.
@@ -3291,6 +3371,11 @@ function Invoke-JanetToolAction {
 
             $groups = @(Get-AcasCachedRemediationGroups -Parsed $parsed)   # rolled up: one card per product/profile, latest version (audit 2026-07-23: cached beside the parse memo)
             $kevSet = Read-AcasKevSet   # KEV-first badging at the point of remediation (audit USEFUL)
+            # audit 2026-07-24 (P1): an un-badged card is only an all-clear when the catalog
+            # actually loaded. Carry the read's state through to the rows, the cards and the
+            # summary so "we could not check" never renders as "not exploited".
+            $kevStatus = Get-AcasKevCatalogStatus
+            $kevKnown  = ($kevStatus -eq 'ok')
             $kevGroups = 0
             $rows = New-Object System.Collections.ArrayList
             $cardGroups = New-Object System.Collections.ArrayList   # compact, host-arrays omitted (re-derived server-side at patch time)
@@ -3314,7 +3399,7 @@ function Invoke-JanetToolAction {
                     Category          = $g.Category
                     Plugin            = $g.DisplayName
                     Severity          = $(if ($g.Severity) { $g.Severity } else { 'n/a' })
-                    KEV               = $(if ($inKev) { 'KEV' } else { '' })
+                    KEV               = $(if ($inKev) { 'KEV' } elseif (-not $kevKnown) { '?' } else { '' })   # audit 2026-07-24 (P1): '?' = catalog unavailable, NOT "not exploited"
                     Hosts             = $g.HostCount
                     'Matched Profile' = $(if ($prof) { $prof } else { '(none)' })
                     'Auto-Runnable'   = $(if ($runnable) { 'yes' } elseif ($g.Category -eq 'Patchable' -or $g.Category -eq 'Experimental') { 'needs staging' } else { 'no' })
@@ -3343,6 +3428,7 @@ function Invoke-JanetToolAction {
                     memberNames = @($g.MemberNames | Select-Object -First 40)
                     cves      = @($g.Cves | Select-Object -First 8)
                     inKev     = $inKev
+                    kevKnown  = $kevKnown   # audit 2026-07-24 (P1): false -> the card renders a "KEV ?" badge, never a silent all-clear
                     solution  = $solPreview
                 })
                 & $send (@{ type='row' } + $row)
@@ -3353,12 +3439,22 @@ function Invoke-JanetToolAction {
             & $send @{ type='log'; level='info'; text="Auto-Patch would run $autoRunnable matched group(s) across $($patchableHosts.Count) host(s). Reboot/Unpatchable/staged groups are listed above as coverage gaps." }
             $uniqueHosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($f in $parsed.Findings) { if ($f.Host) { [void]$uniqueHosts.Add([string]$f.Host) } }
-            if ($kevGroups -gt 0) { & $send @{ type='log'; level='warn'; text="KEV: $kevGroups group(s) carry a CISA known-exploited CVE - remediate these FIRST (shorter BOD-mandated SLA)." } }
+            # audit 2026-07-24 (P1): three DISTINCT states, one of which is "we could not
+            # check". Silence used to mean both "no known-exploited group" and "no catalog".
+            $kevState = Get-AcasKevSummaryState -CatalogStatus $kevStatus -KevGroups $kevGroups
+            if ($kevState -eq 'unavailable') {
+                & $send @{ type='log'; level='warn'; text="KEV catalog UNAVAILABLE ($kevStatus) - known-exploited badging is OFF for this analyze. An un-badged card is NOT evidence the vulnerability is un-exploited; refresh JanetLocal\KevCatalog.txt (KEV tool) and re-run Analyze." }
+            } elseif ($kevState -eq 'hits') {
+                & $send @{ type='log'; level='warn'; text="KEV: $kevGroups group(s) carry a CISA known-exploited CVE - remediate these FIRST (shorter BOD-mandated SLA)." }
+            } else {
+                & $send @{ type='log'; level='info'; text="KEV: catalog loaded ($($kevSet.Count) CVE(s)); no group in this CSV carries a known-exploited CVE." }
+            }
             return @{ rows=@($rows); groups=@($cardGroups); summary=@{
                 total=$groups.Count; ok=$autoRunnable; failed=0;
                 patchable=$counts.Patchable; experimental=$counts.Experimental; reboot=$counts.Reboot;
                 unpatchable=$counts.Unpatchable; notUpdatable=$counts.NotUpdatable;
                 autoRunnableHosts=$patchableHosts.Count; kevGroups=$kevGroups;
+                kevCatalog=$kevStatus; kevState=$kevState;   # audit 2026-07-24 (P1): the view banners 'unavailable' instead of showing a clean KEV column
                 findings=$parsed.Findings.Count; uniqueHosts=$uniqueHosts.Count;
                 serversSkipped=$parsed.ServersSkipped; importStamp=(& $stamp) } }
         }
@@ -3832,9 +3928,7 @@ function Invoke-JanetToolAction {
                 $kbArr = @($byHost[$h])
                 [void]$jobs.Add(@{ Host=$h; Args=@($h, $Credential, 'Negotiate', $kbArr, $msuPath, [bool]$noReboot, $method); Context=@{ KBs=($kbArr -join ',') } })
             }
-            $rowOf = { param($res, $hostName, $ctxObj)
-                @{ Host=$hostName; KBs=(Get-AcasMarker $res 'KBS'); MECM=[int](Get-AcasMarker $res 'MECM'); MSU=[int](Get-AcasMarker $res 'MSU'); Skipped=[int](Get-AcasMarker $res 'SKIP');
-                   Result=$(if ($res -like 'FAIL*') { 'FAIL' } elseif ($res -like 'SKIP*') { 'SKIP' } else { 'OK' }); Detail=(Remove-AcasMarkers $res) } }
+            $rowOf = $script:AcasKbInstallRowOf   # audit 2026-07-24 (P2): hoisted; carries the UNCONFIRMED branch so the row agrees with AcasOkOf / the audit
             $okOf  = $script:AcasOkOf
             $detOf = $script:AcasDetOfPlain
             $fan = Invoke-AcasFanOut -Jobs $jobs -Work $script:AcasKbInstallBlock -Threads $threads `

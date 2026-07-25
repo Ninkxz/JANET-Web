@@ -17,11 +17,23 @@
 #                       then per host open each LocalMachine store READ-ONLY and
 #                       report which roots are MISSING per store. This is the
 #                       ACCURATE needs-certs signal (unlike the C2C audit tag).
+#                       audit 2026-07-25: MISSING counts TRUST ANCHORS ONLY (Root+CA).
+#                       Since the Untrusted\ -> Disallowed push became a default-OFF
+#                       opt-in, a fleet fully deployed Root/CA-only would otherwise
+#                       read MISSING n FOREVER with no way to tell "needs roots" from
+#                       "blacklist never armed" - that shortfall is now its own state
+#                       (BLACKLIST NOT ARMED n). A store that cannot be READ is
+#                       CHECK ERROR, never a missing-roots verdict.
 #    deploy             (DESTRUCTIVE -> admin-session gate + type DEPLOY) - per host
-#                       ADDITIVELY install the bundle into Root/CA/Disallowed over
-#                       WinRM. Adds ONLY thumbprints not already present; NEVER
-#                       removes anything. Self-guard + wrong-box HARD abort + per-
-#                       host watchdog + operator cancel bridge.
+#                       ADDITIVELY install the bundle into Root/CA over WinRM. Adds
+#                       ONLY thumbprints not already present; NEVER removes anything.
+#                       audit 2026-07-24: the bundle's Untrusted\ group is NOT a trust
+#                       add - it BLACKLISTS certs into LocalMachine\Disallowed (a
+#                       fleet-wide DISTRUST, the opposite direction of the rest of the
+#                       push), so it is its own opt-in (pushDisallowed, default OFF)
+#                       and is labelled DISTRUSTED - never "trusted" - in the row
+#                       detail. Self-guard + wrong-box HARD abort + per-host watchdog
+#                       + operator cancel bridge.
 #    import-pki-hosts   (read-only, local parse, no WinRM) - parse the Tanium
 #                       "C2C Compliance Status" CSV and return EVERY host whose
 #                       Compliance cell mentions "PKI Trust Roots" in ANY line
@@ -51,14 +63,21 @@ function Get-JanetToolManifest {
     @{
         id       = 'certdeploy'
         name     = 'Cert Deploy'
-        version  = '1.4.4'
+        # audit 2026-07-24: 1.4.4 -> 1.5.0 (new deploy input pushDisallowed - the blacklist
+        # push is now an explicit, guarded, honestly-labelled opt-in).
+        # audit 2026-07-25 (fable re-audit follow-up): 1.5.0 -> 1.6.0. CHECK can read green again
+        # under the default-OFF blacklist gate - the Disallowed shortfall is its own distinct
+        # BLACKLIST NOT ARMED state instead of being counted as MISSING roots; a check store-open
+        # failure reads CHECK ERROR instead of silently counting every wanted thumbprint missing;
+        # and the check done-line counts an operator Cancelled row.
+        version  = '1.6.0'
         category = 'Hardening'
-        summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA/Disallowed stores over WinRM (adds only-missing by thumbprint, NEVER removes); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
+        summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA stores over WinRM (adds only-missing by thumbprint, NEVER removes) and, ONLY when the separate pushDisallowed opt-in is ticked, also BLACKLISTS the bundle Untrusted\ certs into the LocalMachine Disallowed store (a fleet-wide DISTRUST, not a trust add); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
             @{
                 id          = 'check'
                 label       = 'Check Trust Certs (read-only)'
-                description = 'READ-ONLY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (root\*.cer -> Root, Intermediate\*.cer -> CA, Untrusted\*.cer -> Disallowed, loose *.cer -> Root; blank folder = the shipped Packages\DoD-Certs), then per host open each LocalMachine store READ-ONLY and compute which bundle roots are MISSING per store. Status ALL PRESENT (0 missing) / MISSING N / OFFLINE / CHECK ERROR. Detail lists the per-store missing counts (Root x / CA y / Disallowed z) plus a few example missing subjects. The Legacy column reports present/total for the four allowlisted legacy DoD intermediates (DOD EMAIL/ID CA-59, SW CA-60/61) in LocalMachine\CA - expired-but-required for legacy chain validation - and names any that are missing. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes to a store on this path; needs no admin session and no confirm word.'
+                description = 'READ-ONLY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (root\*.cer -> Root, Intermediate\*.cer -> CA, Untrusted\*.cer -> Disallowed, loose *.cer -> Root; blank folder = the shipped Packages\DoD-Certs), then per host open each LocalMachine store READ-ONLY and compute which bundle roots are MISSING per store. Status ALL PRESENT (0 missing) / MISSING N / BLACKLIST NOT ARMED N / OFFLINE / CHECK ERROR / Cancelled. MISSING counts ONLY the TRUST ANCHORS (Root + CA) - the ones Deploy pushes by default. The bundle Untrusted\ certs are a fleet-wide BLACKLIST that Deploy pushes ONLY when its separate pushDisallowed opt-in is armed (default OFF), so their absence is NOT a missing root: a host with every anchor present but no blacklist reads BLACKLIST NOT ARMED N (its own clearly-labelled state), never MISSING and never ALL PRESENT. Detail lists the per-store missing anchor counts (Root x / CA y) plus a few example missing subjects, and names the Disallowed shortfall separately when there is one. A store that cannot be OPENED/read (ACL, WDAC, corrupt store) is CHECK ERROR - never counted as missing roots. The Legacy column reports present/total for the four allowlisted legacy DoD intermediates (DOD EMAIL/ID CA-59, SW CA-60/61) in LocalMachine\CA - expired-but-required for legacy chain validation - and names any that are missing. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes to a store on this path; needs no admin session and no confirm word.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','Status','Missing','Legacy','Detail')
@@ -72,16 +91,21 @@ function Get-JanetToolManifest {
             @{
                 id          = 'deploy'
                 label       = 'Deploy Trust Certs'
-                description = 'DESTRUCTIVE (certificate store) - requires a live admin session and the exact confirm word DEPLOY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (blank folder = the shipped Packages\DoD-Certs); abort and dial nothing if it is missing/empty. Per host: TCP reachability, a DNS wrong-box HARD abort, and the dispatcher self-guard (the JANET host is never targeted), then ONE WinRM round-trip that ADDITIVELY installs each store group - each LocalMachine store is opened ReadWrite and ONLY certs whose thumbprint is not already present are added; nothing is EVER removed. Result ROOTS INSTALLED (added N of M across Root/CA/Disallowed) / ROOTS ALREADY PRESENT / FAILED / OFFLINE. Per-host watchdog + operator cancel bridge. TWO INDEPENDENT OPT-IN companions (default OFF - the deploy stays purely additive unless ticked) run the PKI-Fix-ScanFix v1.9 fixes on each host in the SAME WinRM round-trip, after the install, each armable on its own: prunePki prunes EXPIRED retired DOD EMAIL/ID/SW/DERILITY intermediates from the CA store ONLY (the four legacy-keep intermediates this tool intentionally pushes are never touched, nor is any other expired cert); fixRdp rebinds a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) to the newest valid CA-issued My-store cert for the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched), a healthy CA-issued listener is never touched. Companion outcomes ride in the row Detail; they never change the row Status.'
+                description = 'DESTRUCTIVE (certificate store) - requires a live admin session and the exact confirm word DEPLOY. Read the DoD/LTMA trust bundle ADMIN-SIDE once (blank folder = the shipped Packages\DoD-Certs); abort and dial nothing if it is missing/empty. Per host: TCP reachability, a DNS wrong-box HARD abort, and the dispatcher self-guard (the JANET host is never targeted), then ONE WinRM round-trip that ADDITIVELY installs each store group - each LocalMachine store is opened ReadWrite and ONLY certs whose thumbprint is not already present are added; nothing is EVER removed. THIRD INDEPENDENT OPT-IN (default OFF): pushDisallowed also pushes the bundle Untrusted\ group into the LocalMachine Disallowed store - that is a fleet-wide BLACKLIST (DISTRUST) of those certs, NOT a trust add and NOT covered by "never removes anything", so it is armed separately and the row detail labels those adds DISTRUSTED (never "trusted"). Unticked, Root/CA only are pushed and the read-only Check reports that shortfall as its OWN state (BLACKLIST NOT ARMED N) - never as missing roots (audit 2026-07-25). Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT / REJECTED (non-CA) / FAILED / OFFLINE. Per-host watchdog + operator cancel bridge. TWO INDEPENDENT OPT-IN companions (default OFF - the deploy stays purely additive unless ticked) run the PKI-Fix-ScanFix v1.9 fixes on each host in the SAME WinRM round-trip, after the install, each armable on its own: prunePki prunes EXPIRED retired DOD EMAIL/ID/SW/DERILITY intermediates from the CA store ONLY (the four legacy-keep intermediates this tool intentionally pushes are never touched, nor is any other expired cert); fixRdp rebinds a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) to the newest valid CA-issued My-store cert for the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched), a healthy CA-issued listener is never touched. Companion outcomes ride in the row Detail; they never change the row Status.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Deploy the DoD/LTMA trust-root bundle to the target host(s)? This ADDITIVELY installs the DoD roots into LocalMachine Root/CA/Disallowed (never removes anything). Proceed?'
+                # audit 2026-07-24: the old confirm promised "never removes anything" while the
+                # Disallowed push silently BLACKLISTED certs. The promise now names both directions.
+                confirm     = 'Deploy the DoD/LTMA trust-root bundle to the target host(s)? This ADDITIVELY installs the DoD roots into LocalMachine Root/CA (never removes anything). If "Also BLACKLIST the bundle Untrusted certs" is ticked it ALSO adds those certs to the LocalMachine Disallowed store, which DISTRUSTS them fleet-wide. Proceed?'
                 columns     = @('Host','Ping','Status','Missing','Detail')
                 inputs      = @(
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='certBundleFolder'; label='DoD/LTMA trust bundle folder (blank = shipped Packages\DoD-Certs)'; type='text'; required=$false },
                     @{ name='confirm'; label='Type DEPLOY to confirm'; type='text'; required=$true },
                     @{ name='includeExpired'; label='Include EXPIRED certs (dead trust anchors - default OFF)'; type='bool'; required=$false; default=$false },
+                    # audit 2026-07-24: the Disallowed (Untrusted\) push is a fleet-wide DISTRUST, so it
+                    # is armed like the other trust-changing extras - explicit, default OFF.
+                    @{ name='pushDisallowed'; label='Also BLACKLIST the bundle Untrusted certs into the Disallowed store (DISTRUST - default OFF)'; type='bool'; required=$false; default=$false },
                     @{ name='prunePki'; label='Prune expired retired DoD intermediates (CA store; the 4 legacy-keeps never touched)'; type='bool'; required=$false; default=$false },
                     @{ name='fixRdp'; label='Repair broken RDP listener (self-signed/expired/missing -> rebind CA-issued; healthy untouched)'; type='bool'; required=$false; default=$false },
                     @{ name='threads'; label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
@@ -91,7 +115,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'scan-cert-management'
                 label       = 'SCAN CERT MANAGEMENT (what manages trust)'
-                description = 'READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip that inspects WHAT MANAGES the LocalMachine trust store so you know whether a scripted .Default push will actually persist. Detects the DISA InstallRoot agent (uninstall registry DisplayName, a scheduled task, and the %ProgramFiles%\DoD-PKE path), counts the GPO physical Root/CA store (HKLM Policies SystemCertificates), and reads the LocalMachine Root store count for context. Reconciler verdict InstallRoot / GPO / InstallRoot+GPO / None detected / OFFLINE / CHECK ERROR - when a reconciler is present a scripted push may be pruned on reboot (align with InstallRoot/GPO instead); None detected means a manual .Default push WILL persist. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes anything.'
+                description = 'READ-ONLY (no admin session, no confirm). Per host, one WinRM round-trip that inspects WHAT MANAGES the LocalMachine trust store so you know whether a scripted .Default push will actually persist. Detects the DISA InstallRoot agent (uninstall registry DisplayName, a scheduled task, and the %ProgramFiles%\DoD-PKE path), counts the GPO physical Root/CA store (HKLM Policies SystemCertificates), and reads the LocalMachine Root store count for context. Reconciler verdict InstallRoot / GPO / InstallRoot+GPO / None detected / OFFLINE / Cancelled (operator cancel, not a probe failure) / CHECK ERROR - when a reconciler is present a scripted push may be pruned on reboot (align with InstallRoot/GPO instead); None detected means a manual .Default push WILL persist. Reachability is TCP-only (5985/5986/445); a DNS wrong-box is soft-skipped as CHECK ERROR. NEVER writes anything.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Host','Ping','InstallRoot','GPRoots','Reconciler','Detail')
@@ -275,12 +299,16 @@ function Select-CertDeployPushableCerts {
 # b64 per store). @()-wrapped so ConvertFrom-Json single-element arrays round-trip.
 # SHARED CONTRACT: when -IncludeExpired is $false (default) expired certs (NotAfter
 # in the past) are EXCLUDED from the pushed set; $true includes them (dead anchors).
+# audit 2026-07-24 (P2 Disallowed gate): the Untrusted\ -> Disallowed group is a fleet-wide
+# BLACKLIST (distrust), not a trust add, so it is FAIL-CLOSED here - the group is delivered
+# to the worker ONLY when the caller passes -IncludeDisallowed (the deploy pushDisallowed
+# opt-in). The worker re-asserts the same gate before it opens a store.
 function Convert-CertDeployBundleToJson {
-    param($Bundle, [bool]$IncludeExpired = $false)
+    param($Bundle, [bool]$IncludeExpired = $false, [bool]$IncludeDisallowed = $false)
     $payload = @{
         Root       = @(Select-CertDeployPushableCerts $Bundle.Root       $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
         CA         = @(Select-CertDeployPushableCerts $Bundle.CA         $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
-        Disallowed = @(Select-CertDeployPushableCerts $Bundle.Disallowed $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        Disallowed = @(if ($IncludeDisallowed) { Select-CertDeployPushableCerts $Bundle.Disallowed $IncludeExpired | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } } })
     }
     return ($payload | ConvertTo-Json -Depth 5 -Compress)
 }
@@ -365,6 +393,11 @@ function Add-CertDeployBundleToStores {
     $rejected = 0; $rejectDetail = ''
     $notVerified = New-Object System.Collections.ArrayList
     $addedCerts  = New-Object System.Collections.ArrayList   # Subject(CN) + thumbprint of each cert WE added (anchor + Disallowed)
+    # audit 2026-07-24 (P2 honest labelling): a Root/CA add TRUSTS a CA; a Disallowed add
+    # DISTRUSTS a cert (blacklist) - the opposite direction. Report them in SEPARATE lists so
+    # the row detail can never label a blacklist entry "trusted:" again.
+    $addedAnchors  = New-Object System.Collections.ArrayList
+    $addedDistrust = New-Object System.Collections.ArrayList
     $perStore = New-Object System.Collections.ArrayList
     # Anchor=$true marks a TRUST-ANCHOR store (Root, CA/Intermediate): only actual CA certs
     # may land there. Disallowed is the Untrusted blacklist (Anchor=$false) - a non-CA cert
@@ -404,7 +437,9 @@ function Add-CertDeployBundleToStores {
                     $sAdd++; $added++
                     $asubj = [string]$cert.Subject
                     $am = [regex]::Match($asubj, '(?i)CN=([^,]+)'); if ($am.Success) { $asubj = $am.Groups[1].Value.Trim() }
-                    [void]$addedCerts.Add("$asubj [$tp] -> $($sm.Store)")
+                    $entry = "$asubj [$tp] -> $($sm.Store)"
+                    [void]$addedCerts.Add($entry)
+                    if ($sm.Anchor) { [void]$addedAnchors.Add($entry) } else { [void]$addedDistrust.Add($entry) }
                 } catch { $failDetail += "add failed in $($sm.Store): $($_.Exception.Message); " }
             }
             [void]$perStore.Add("$($sm.Store) +$sAdd/$($items.Count)")
@@ -428,7 +463,7 @@ function Add-CertDeployBundleToStores {
             foreach ($tp in $addedTps) { [void]$notVerified.Add($tp) }
         } finally { if ($rst) { try { $rst.Close() } catch {} } }
     }
-    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified.ToArray()); Rejected=$rejected; RejectDetail=$rejectDetail; AddedCerts=@($addedCerts.ToArray()) }
+    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified.ToArray()); Rejected=$rejected; RejectDetail=$rejectDetail; AddedCerts=@($addedCerts.ToArray()); AddedAnchors=@($addedAnchors.ToArray()); AddedDistrust=@($addedDistrust.ToArray()) }
 }
 # Classify an Add-CertDeployBundleToStores result into the raw deploy token: any
 # .Add/open error -> FAIL; else added-but-stripped-on-re-read -> NOT VERIFIED; else
@@ -592,10 +627,19 @@ function Get-CertDeployStoreMissing {
         if ($wantTps.Count -eq 0) { continue }
         $present = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $st = $null
+        $openErr = ''
         try {
             $st = & $StoreOpener $sm.Store
             foreach ($ec in $st.Certificates) { [void]$present.Add((([string]$ec.Thumbprint) -replace '[^0-9A-Fa-f]','')) }
-        } catch {} finally { if ($st) { try { $st.Close() } catch {} } }
+        } catch { $openErr = [string]$_.Exception.Message } finally { if ($st) { try { $st.Close() } catch {} } }
+        # audit 2026-07-25 (fable re-audit follow-up): this catch used to be EMPTY, leaving $present
+        # empty - so a store we could not open (ACL, WDAC, corrupt store) reported every wanted
+        # thumbprint as MISSING. Fail-closed in direction, but MISLABELLED: it reads "this host needs
+        # roots" when the truth is "we could not read this host". Return the Err sentinel the check
+        # worker already honours -> the row becomes CHECK ERROR, never a missing-roots verdict.
+        if ($openErr) {
+            return [pscustomobject]@{ MissRoot=@(); MissCA=@(); MissDis=@(); PresRoot=0; PresCA=0; PresDis=0; Err="store $($sm.Store) open/read failed: $openErr - stores NOT compared (this is a READ failure, not missing roots)" }
+        }
         $miss = New-Object System.Collections.ArrayList
         $presN = 0
         foreach ($tp in $wantTps) { if ($present.Contains($tp)) { $presN++ } else { [void]$miss.Add($tp) } }
@@ -620,21 +664,36 @@ function Get-CertDeployCheckRow {
     try { $ok = [bool]$Res.Ok } catch { $ok = $false }
     if ($ok) {
         $mr = @($Res.MissRoot); $mc = @($Res.MissCA); $md = @($Res.MissDis)
-        $missTotal = $mr.Count + $mc.Count + $md.Count
-        $missCell = [string]$missTotal
-        if ($missTotal -eq 0) {
+        # audit 2026-07-25 (fable re-audit follow-up): MISSING now counts ONLY the TRUST ANCHORS
+        # (Root + CA). WHY: since the audit 2026-07-24 gate, Deploy pushes the Untrusted\ ->
+        # Disallowed BLACKLIST only when pushDisallowed is armed (default OFF), yet the want-set
+        # still asks for those thumbprints - so a fleet deployed Root/CA-only read "MISSING 8"
+        # FOREVER, bucketed missing, and every run closed warn with no way to tell "needs roots"
+        # from "blacklist never armed". The distrust shortfall is now its OWN clearly-labelled
+        # state (BLACKLIST NOT ARMED n) and never inflates the missing-roots count.
+        $missAnchor = $mr.Count + $mc.Count
+        $missDis    = $md.Count
+        $missTotal  = $missAnchor
+        $missCell   = [string]$missAnchor
+        $disNote    = if ($missDis -gt 0) { "$missDis Untrusted\ blacklist cert(s) NOT in Disallowed - Deploy pushes those ONLY with the pushDisallowed opt-in armed (default OFF); this is NOT a missing trust root" } else { '' }
+        if ($missAnchor -eq 0 -and $missDis -eq 0) {
             $status = 'ALL PRESENT'
             $detail = "all $BundleCertCount root(s) present (Root $($Res.PresRoot)/CA $($Res.PresCA)/Disallowed $($Res.PresDis))"
+        } elseif ($missAnchor -eq 0) {
+            # Every trust anchor is present; only the (opt-in) blacklist is absent.
+            $status = "BLACKLIST NOT ARMED $missDis"
+            $detail = "all trust anchors present (Root $($Res.PresRoot)/CA $($Res.PresCA)) - $disNote"
         } else {
-            $status = "MISSING $missTotal"
+            $status = "MISSING $missAnchor"
             $ex = New-Object System.Collections.ArrayList
-            foreach ($tp in @($mr + $mc + $md)) {
+            foreach ($tp in @($mr + $mc)) {
                 $key = (([string]$tp) -replace '[^0-9A-Fa-f]','')
                 $subj = if ($SubjectMap -and $SubjectMap.ContainsKey($key)) { [string]$SubjectMap[$key] } else { $key }
                 if ($ex.Count -lt 3) { [void]$ex.Add($subj) }
             }
-            $detail = "Root $($mr.Count) / CA $($mc.Count) / Disallowed $($md.Count) missing"
+            $detail = "Root $($mr.Count) / CA $($mc.Count) trust anchor(s) missing"
             if ($ex.Count -gt 0) { $detail += " - e.g. " + ($ex -join '; ') }
+            if ($disNote) { $detail += "  |  separately: $disNote" }
         }
     }
     # Legacy intermediates (allowlisted expired CAs, LocalMachine\CA): report present/total
@@ -688,7 +747,10 @@ function Get-CertDeployScanRow {
     try { $ok = [bool]$Res.Ok } catch { $ok = $false }
     if (-not $ok) {
         $st  = [string]$Res.Status
-        $rec = if ($st -eq 'OFFLINE') { 'OFFLINE' } else { 'CHECK ERROR' }
+        # audit 2026-07-24: an operator CANCEL is not a probe failure. The check path already
+        # reports it as 'Cancelled'; the scan reported 'CHECK ERROR', so a cancelled run read as
+        # a fleet of broken hosts. Same token on both read-only paths now.
+        $rec = if ($st -eq 'OFFLINE') { 'OFFLINE' } elseif ($st -eq 'Cancelled') { 'Cancelled' } else { 'CHECK ERROR' }
         return @{ Host=$hostName; Ping=$ping; InstallRoot=''; GPRoots=''; Reconciler=$rec; Detail=[string]$Res.Detail }
     }
     $irPresent = [bool]$Res.InstallRootPresent
@@ -709,7 +771,7 @@ function Get-CertDeployScanRow {
 # box running JANET could disrupt the server mid-run, so the dispatcher is dropped
 # from every deploy run (read-only Check does not need it, but shares the helper).
 function Get-JanetCertDeployLocalIdentity {
-    if ($script:CertDeployLocalIdentity) { return $script:CertDeployLocalIdentity }
+    if ($script:CertDeployLocalIdentity) { return ,$script:CertDeployLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -727,7 +789,7 @@ function Get-JanetCertDeployLocalIdentity {
         }
     } catch {}
     $script:CertDeployLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 function Test-JanetCertDeployHostIsSelf {
@@ -1070,8 +1132,10 @@ function Invoke-CertDeployCheckAction {
     # Always surface the bundle's expired-cert census (SHARED CONTRACT), regardless of
     # includeExpired - Check is the read-only truth about dead anchors in the bundle.
     $expiredCount = [int]$bundle.ExpiredCount
+    # audit 2026-07-24 (P3): hoisted out of the log branch - the summary carries it so the
+    # view's expired badge can name the dead anchors (sum.expiredSubjects).
+    $expSubs = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
     if ($expiredCount -gt 0) {
-        $expSubs = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
         & $send @{ type='log'; level='warn'; text="Bundle contains $expiredCount EXPIRED cert(s) (dead trust anchors, not allowlisted): $($expSubs -join '; '). Deploy EXCLUDES these by default." }
     } else {
         & $send @{ type='log'; level='info'; text='Bundle contains 0 expired cert(s) - all trust anchors are within validity.' }
@@ -1085,7 +1149,7 @@ function Invoke-CertDeployCheckAction {
     $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
     if ($targets.Count -eq 0) {
         & $send @{ type='log'; level='warn'; text='No valid targets.' }
-        return @{ rows=@(); summary=@{ total=0; expiredCount=$expiredCount } }
+        return @{ rows=@(); summary=@{ total=0; expiredCount=$expiredCount; expiredSubjects=@($expSubs) } }
     }
 
     $attemptOffline = Get-CertDeployBool $Params['attemptOffline'] $false
@@ -1128,10 +1192,14 @@ function Invoke-CertDeployCheckAction {
         [void]$rows.Add($row)
         & $send (@{ type='row' } + $row)
         $lvl = 'info'
-        if     ($status -eq 'ALL PRESENT') { $lvl = 'ok' }
-        elseif ($status -like 'MISSING*')  { $lvl = 'warn' }
-        elseif ($status -eq 'OFFLINE')     { $lvl = 'warn' }
-        elseif ($status -eq 'CHECK ERROR') { $lvl = 'error' }
+        if     ($status -eq 'ALL PRESENT')          { $lvl = 'ok' }
+        elseif ($status -like 'MISSING*')           { $lvl = 'warn' }
+        # audit 2026-07-25: the distrust shortfall is informational, NOT a missing-roots warning -
+        # it only says the operator has not armed the (default-OFF) blacklist push.
+        elseif ($status -like 'BLACKLIST NOT ARMED*') { $lvl = 'info' }
+        elseif ($status -eq 'OFFLINE')              { $lvl = 'warn' }
+        elseif ($status -eq 'Cancelled')            { $lvl = 'warn' }
+        elseif ($status -eq 'CHECK ERROR')          { $lvl = 'error' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$row.Host) : $status - $([string]$row.Detail)" }
         if ($hint) { & $send @{ type='log'; level='err'; text="$([string]$row.Host) : $status - $([string]$row.Detail) | FIX: $hint" } }
     }
@@ -1145,21 +1213,33 @@ function Invoke-CertDeployCheckAction {
 
     $allPresent = @($rows | Where-Object { $_.Status -eq 'ALL PRESENT' }).Count
     $missing    = @($rows | Where-Object { [string]$_.Status -like 'MISSING*' }).Count
+    # audit 2026-07-25 (fable re-audit follow-up): the distrust shortfall is its own bucket - it is
+    # NOT a missing root, and lumping it in made a fully-deployed Root/CA-only fleet unreadable.
+    $blacklist  = @($rows | Where-Object { [string]$_.Status -like 'BLACKLIST NOT ARMED*' }).Count
     $offline    = @($rows | Where-Object { $_.Status -eq 'OFFLINE' }).Count
     $errors     = @($rows | Where-Object { $_.Status -eq 'CHECK ERROR' }).Count
-    & $send @{ type='log'; level='ok'; text="Cert Check done - ALL PRESENT: $allPresent, MISSING: $missing, OFFLINE: $offline, CHECK ERROR: $errors (of $($targets.Count) host(s))." }
-    & $send @{ type='status'; text="Done. $allPresent all-present, $missing missing, $offline offline of $($targets.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; allPresent=$allPresent; missing=$missing; offline=$offline; checkErrors=$errors; expiredCount=$expiredCount; source=$bundleSource } }
+    # audit 2026-07-25: an operator cancel emits Status 'Cancelled' (Invoke-CertDeployFanOut's
+    # MakeCancelResult) but matched NO counter here, so cancelled hosts vanished from the done-line
+    # and the tallies never reconciled to the target count.
+    $cancelled  = @($rows | Where-Object { $_.Status -eq 'Cancelled' }).Count
+    & $send @{ type='log'; level='ok'; text="Cert Check done - ALL PRESENT: $allPresent, MISSING: $missing, BLACKLIST NOT ARMED: $blacklist, OFFLINE: $offline, CHECK ERROR: $errors, CANCELLED: $cancelled (of $($targets.Count) host(s))." }
+    & $send @{ type='status'; text="Done. $allPresent all-present, $missing missing, $blacklist blacklist-not-armed, $offline offline of $($targets.Count)." }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; allPresent=$allPresent; missing=$missing; blacklistNotArmed=$blacklist; offline=$offline; checkErrors=$errors; cancelled=$cancelled; expiredCount=$expiredCount; expiredSubjects=@($expSubs); source=$bundleSource } }
 }
 
 # =============================================================================
 #  deploy (DESTRUCTIVE): per-host worker + fan-out. ADDITIVELY installs the bundle
-#  into Root/CA/Disallowed over WinRM. Confirm word DEPLOY + admin session + self-
-#  guard + wrong-box HARD abort + per-host watchdog + operator cancel.
+#  into Root/CA over WinRM - plus the Disallowed BLACKLIST group ONLY when the
+#  operator armed pushDisallowed (audit 2026-07-24; that push DISTRUSTS certs fleet-
+#  wide, so it is gated and labelled apart from the trust adds). Confirm word DEPLOY
+#  + admin session + self-guard + wrong-box HARD abort + watchdog + operator cancel.
 # =============================================================================
 $script:CertDeployDeployBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc)
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc, [bool]$PushDisallowed)
     $RunCompanions = ($DoPrune -or $DoRdp)
+    # audit 2026-07-24: which stores this run may write. Disallowed is a DISTRUST push and
+    # only rides along when the operator armed pushDisallowed - the row detail must say so.
+    $storeScope = if ($PushDisallowed) { 'Root/CA/Disallowed' } else { 'Root/CA' }
 
     $r = @{ Host=$Computer; Ping=''; Status=''; Missing=''; Detail=''; Added=0; Total=0 }
 
@@ -1205,7 +1285,7 @@ $script:CertDeployDeployBlock = {
     # first runs the wrong-box compare (Token='WRONGBOX' aborts before ANY store write),
     # then dot-sources Add-CertDeployBundleToStores and adds only-missing (NEVER removes).
     $installSb = {
-        param([string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc, [string]$ExpectedShort)
+        param([string]$BundleJson, [string]$AddCertsSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$CompanionsSrc, [string]$ExpectedShort, [bool]$PushDisallowed)
         if ($ExpectedShort) {
             $actual = ([string]$env:COMPUTERNAME).Trim()
             if ($actual.ToUpper() -ne $ExpectedShort.Trim().ToUpper()) {
@@ -1217,6 +1297,11 @@ $script:CertDeployDeployBlock = {
         if ($BundleJson) { try { $bundle = $BundleJson | ConvertFrom-Json } catch { $bundle = $null } }
         if ($AddCertsSrc) { try { . ([scriptblock]::Create($AddCertsSrc)) } catch {} }
         if (-not $bundle) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='no cert bundle delivered to the worker'; Companions=@() } }
+        # DISALLOWED (DISTRUST) GATE, audit 2026-07-24 - SECOND, remote-side assertion. The admin
+        # side already omits the group from $BundleJson when the operator did not arm it; re-assert
+        # HERE, before any store is opened, so no stale/edited payload can blacklist certs on a host
+        # the operator never armed for it (same belt-and-braces idiom as the wrong-box abort above).
+        if (-not $PushDisallowed) { try { $bundle.Disallowed = @() } catch {} }
         if (-not (Get-Command Add-CertDeployBundleToStores -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Token='FAIL'; Added=0; Already=0; Total=0; PerStore=@(); FailDetail='cert-store installer helper unavailable on target'; Companions=@() } }
         $ar  = Add-CertDeployBundleToStores -Bundle $bundle
         $tok = if (Get-Command Get-CertDeployResultToken -ErrorAction SilentlyContinue) { Get-CertDeployResultToken $ar }
@@ -1232,11 +1317,11 @@ $script:CertDeployDeployBlock = {
                 else { $comp = @('companions FAIL: helper unavailable on target') }
             } catch { $comp = @('companions FAIL: ' + $_.Exception.Message) }
         }
-        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified); Rejected=[int]$ar.Rejected; RejectDetail=[string]$ar.RejectDetail; AddedCerts=@($ar.AddedCerts); Companions=@($comp) }
+        return [pscustomobject]@{ Token=$tok; Added=[int]$ar.Added; Already=[int]$ar.Already; Total=[int]$ar.Total; PerStore=@($ar.PerStore); FailDetail=[string]$ar.FailDetail; Verified=[int]$ar.Verified; NotVerified=@($ar.NotVerified); Rejected=[int]$ar.Rejected; RejectDetail=[string]$ar.RejectDetail; AddedCerts=@($ar.AddedCerts); AddedAnchors=@($ar.AddedAnchors); AddedDistrust=@($ar.AddedDistrust); Companions=@($comp) }
     }
 
     $ir = $null
-    try { $ir = Invoke-Command -Session $sess -ScriptBlock $installSb -ArgumentList $BundleJson, $AddCertsSrc, $DoPrune, $DoRdp, $CompanionsSrc, $expectedShort -ErrorAction Stop }
+    try { $ir = Invoke-Command -Session $sess -ScriptBlock $installSb -ArgumentList $BundleJson, $AddCertsSrc, $DoPrune, $DoRdp, $CompanionsSrc, $expectedShort, $PushDisallowed -ErrorAction Stop }
     catch { $r.Status = 'FAILED'; $r.Detail = "Deploy: $($_.Exception.Message)"; Remove-PSSession $sess -ErrorAction SilentlyContinue; return $r }
     finally { if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue } }
 
@@ -1251,16 +1336,20 @@ $script:CertDeployDeployBlock = {
     $storeTxt = (@($ir.PerStore) -join ', ')
     $r.Added = [int]$ir.Added; $r.Total = [int]$ir.Total
     switch ([string]$ir.Token) {
-        'INSTALLED'    { $r.Status = 'ROOTS INSTALLED';       $r.Detail = "added $($ir.Added) of $($ir.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
-        'ALREADY'      { $r.Status = 'ROOTS ALREADY PRESENT'; $r.Detail = "all $($ir.Total) already present across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        'INSTALLED'    { $r.Status = 'ROOTS INSTALLED';       $r.Detail = "added $($ir.Added) of $($ir.Total) across $storeScope" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
+        'ALREADY'      { $r.Status = 'ROOTS ALREADY PRESENT'; $r.Detail = "all $($ir.Total) already present across $storeScope" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         'NOT VERIFIED' { $r.Status = 'NOT VERIFIED';          $r.Detail = "added $($ir.Added) of $($ir.Total) but $(@($ir.NotVerified).Count) absent on re-read - a reconciler/policy may be stripping in-session" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         'REJECTED'     { $r.Status = 'REJECTED (non-CA)';     $r.Detail = "refused $([int]$ir.Rejected) non-CA cert(s) destined for a trust-anchor store (ABSENT, NOT installed); added $($ir.Added) of $($ir.Total). " + ([string]$ir.RejectDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
         default        { $r.Status = 'FAILED';                $r.Detail = "added $($ir.Added) of $($ir.Total); errors: " + ([string]$ir.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }) }
     }
     # Surface exactly WHICH CAs were trusted (Subject CN + thumbprint) so the operator can
     # verify the landed anchors, and flag any non-CA cert refused by the trust-anchor guard.
-    $addedCerts = @($ir.AddedCerts)
-    if ($addedCerts.Count -gt 0) { $r.Detail += " | trusted: " + ($addedCerts -join '; ') }
+    # audit 2026-07-24: a Disallowed add is a BLACKLIST entry - the OPPOSITE of trust - so it
+    # gets its own DISTRUSTED label; the old single "| trusted:" list mislabelled every one.
+    $addedAnchors  = @($ir.AddedAnchors)
+    $addedDistrust = @($ir.AddedDistrust)
+    if ($addedAnchors.Count -gt 0)  { $r.Detail += " | trusted (Root/CA): " + ($addedAnchors -join '; ') }
+    if ($addedDistrust.Count -gt 0) { $r.Detail += " | DISTRUSTED (blacklisted into Disallowed): " + ($addedDistrust -join '; ') }
     $rejN = [int]$ir.Rejected
     if ($rejN -gt 0) { $r.Detail += " | REJECTED $rejN non-CA (not added to Root/CA): " + ([string]$ir.RejectDetail).TrimEnd('; ') }
     # Companion outcomes ride in Detail only - the row Status stays the install token.
@@ -1314,10 +1403,25 @@ function Invoke-CertDeployDeployAction {
     $expiredSubjects = @(@($bundle.Expired) | ForEach-Object { [string]$_.Subject })
     $legacyCount     = [int]$bundle.LegacyAllowedCount
     $legacySubjects  = @(@($bundle.LegacyAllowed) | ForEach-Object { [string]$_.Subject })
-    $bundleJson      = Convert-CertDeployBundleToJson $bundle $includeExpired
+    # DISALLOWED (DISTRUST) GATE, audit 2026-07-24: pushing the Untrusted\ group BLACKLISTS those
+    # certs fleet-wide - a trust change in the opposite direction to the rest of this deploy and
+    # NOT covered by the "never removes anything" promise. Armed like the other trust-changing
+    # extras (prunePki/fixRdp): explicit, default OFF, named in the log and the row detail.
+    $pushDisallowed  = Get-CertDeployBool $Params['pushDisallowed'] $false
+    $disallowedCount = @(Select-CertDeployPushableCerts $bundle.Disallowed $includeExpired).Count
+    $bundleJson      = Convert-CertDeployBundleToJson $bundle $includeExpired $pushDisallowed
     # pushCount excludes only the TRULY dead anchors ($expiredCount, which already omits the
-    # allowlisted legacy intermediates - those stay in CertCount and DO push).
+    # allowlisted legacy intermediates - those stay in CertCount and DO push), plus the
+    # Disallowed group when it is not armed (it is not delivered to the worker at all).
     $pushCount       = if ($includeExpired) { [int]$bundle.CertCount } else { ([int]$bundle.CertCount - $expiredCount) }
+    if (-not $pushDisallowed) { $pushCount = $pushCount - $disallowedCount }
+    if ($disallowedCount -gt 0) {
+        if ($pushDisallowed) {
+            & $send @{ type='log'; level='warn'; text="[DISTRUST] pushDisallowed is ARMED: $disallowedCount cert(s) from the bundle Untrusted\ folder WILL be added to the LocalMachine Disallowed store - that BLACKLISTS them fleet-wide (nothing is removed, but those certs stop being usable on every target)." }
+        } else {
+            & $send @{ type='log'; level='info'; text="[DISTRUST] pushDisallowed is OFF (default): the $disallowedCount Untrusted\ blacklist cert(s) are NOT delivered to any host - only Root/CA are pushed. The read-only Check reports that as BLACKLIST NOT ARMED, not as missing roots (audit 2026-07-25)." }
+        }
+    }
     if ($legacyCount -gt 0) {
         & $send @{ type='log'; level='warn'; text="[LEGACY] $legacyCount expired-but-allowlisted intermediate(s) WILL be pushed (LegacyIntermediates - required for legacy chain/signature validation): $($legacySubjects -join '; ')." }
     }
@@ -1329,8 +1433,11 @@ function Invoke-CertDeployDeployAction {
         }
     }
     if ($pushCount -le 0) {
-        & $send @{ type='log'; level='err'; text="Deploy aborted: after excluding $expiredCount expired cert(s) (dead trust anchors) the push set is EMPTY - nothing valid to deploy. Enable 'Include EXPIRED certs' only if you truly need dead anchors. Nothing was dialed." }
-        return @{ rows=@(); summary=@{ total=0; rejected=$true; expiredCount=$expiredCount; expiredExcluded=$expiredCount } }
+        & $send @{ type='log'; level='err'; text="Deploy aborted: after excluding $expiredCount expired cert(s) (dead trust anchors) and $(if ($pushDisallowed) { 0 } else { $disallowedCount }) un-armed Untrusted\ blacklist cert(s) the push set is EMPTY - nothing valid to deploy. Enable 'Include EXPIRED certs' only if you truly need dead anchors; tick the Disallowed blacklist opt-in only if you mean to DISTRUST those certs. Nothing was dialed." }
+        # audit 2026-07-24 (P3): the view's expired badge reads these EXACT keys - lowercase
+        # expiredCount + expiredSubjects. It used to read ExpiredCount/Expired, which no summary
+        # ever returned, so the badge was permanently inert. Every deploy return carries them.
+        return @{ rows=@(); summary=@{ total=0; rejected=$true; expiredCount=$expiredCount; expiredExcluded=$expiredCount; expiredSubjects=@($expiredSubjects); disallowedExcluded=$(if ($pushDisallowed) { 0 } else { $disallowedCount }) } }
     }
 
     # OPT-IN v1.9 companions (default OFF - deploy stays purely additive unless ticked). Two
@@ -1389,7 +1496,7 @@ function Invoke-CertDeployDeployAction {
     foreach ($h in $dial) {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($script:CertDeployDeployBlock)
-        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($script:CertDeployAddCertsSrc); [void]$ps.AddArgument($doPrune); [void]$ps.AddArgument($doRdp); [void]$ps.AddArgument($script:CertDeployCompanionsSrc)
+        [void]$ps.AddArgument($h); [void]$ps.AddArgument($Credential); [void]$ps.AddArgument($auth); [void]$ps.AddArgument($attemptOffline); [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($script:CertDeployAddCertsSrc); [void]$ps.AddArgument($doPrune); [void]$ps.AddArgument($doRdp); [void]$ps.AddArgument($script:CertDeployCompanionsSrc); [void]$ps.AddArgument($pushDisallowed)
         [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -1439,7 +1546,10 @@ function Invoke-CertDeployDeployAction {
     $rejected    = @($rows | Where-Object { $_.Status -eq 'REJECTED (non-CA)' }).Count
     & $send @{ type='log'; level='ok'; text="Cert Deploy done - INSTALLED: $installed, ALREADY PRESENT: $already, NOT VERIFIED: $notVerified, REJECTED: $rejected, FAILED: $failed, OFFLINE: $offline, SKIPPED: $skipped." }
     & $send @{ type='status'; text="Done. $installed installed, $already already-present, $notVerified not-verified, $rejected rejected, $failed failed of $($rows.Count) row(s)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; installed=$installed; already=$already; notVerified=$notVerified; rejected=$rejected; failed=$failed; offline=$offline; skipped=$skipped; selfSkipped=$selfSkipped.Count; expiredCount=$expiredCount; expiredExcluded=$(if ($includeExpired) { 0 } else { $expiredCount }); source=$bundleSource } }
+    # audit 2026-07-24 (P3): expiredSubjects rides the summary so the view's expired badge can name
+    # the skipped anchors (it read a never-returned sum.Expired before); disallowedExcluded reports
+    # the un-armed blacklist certs the operator may be expecting to see land.
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; installed=$installed; already=$already; notVerified=$notVerified; rejected=$rejected; failed=$failed; offline=$offline; skipped=$skipped; selfSkipped=$selfSkipped.Count; expiredCount=$expiredCount; expiredExcluded=$(if ($includeExpired) { 0 } else { $expiredCount }); expiredSubjects=@($expiredSubjects); disallowedExcluded=$(if ($pushDisallowed) { 0 } else { $disallowedCount }); source=$bundleSource } }
 }
 
 # =============================================================================
@@ -1625,6 +1735,7 @@ function Invoke-CertDeployScanAction {
         $lvl = 'info'
         if     ($rec -eq 'None detected') { $lvl = 'ok' }
         elseif ($rec -eq 'OFFLINE')       { $lvl = 'warn' }
+        elseif ($rec -eq 'Cancelled')     { $lvl = 'warn' }   # audit 2026-07-24: operator cancel, not a failure
         elseif ($rec -eq 'CHECK ERROR')   { $lvl = 'error' }
         else                              { $lvl = 'warn' }
         & $send @{ type='log'; level=$lvl; text="[$(Get-Date -Format 'HH:mm:ss')] $([string]$row.Host) : $rec - $([string]$row.Detail)" }
@@ -1635,7 +1746,7 @@ function Invoke-CertDeployScanAction {
     Invoke-CertDeployFanOut -Jobs $jobs -Pool $pool -EmitResult $emitResult -Send $send -CancelCheck $cancelCheck `
         -PerHostTimeoutSeconds $perHostTimeout -TimeoutDetail 'possible remote read hang' `
         -MakeErrorResult { param($jobHost, $detail) @{ Host=$jobHost; Ping=''; Status='CHECK ERROR'; Detail=$detail; Ok=$false } } `
-        -MakeCancelResult { param($jobHost) @{ Host=$jobHost; Ping=''; Status='CHECK ERROR'; Detail='cancelled by operator'; Ok=$false } } `
+        -MakeCancelResult { param($jobHost) @{ Host=$jobHost; Ping=''; Status='Cancelled'; Detail='cancelled by operator'; Ok=$false } } `
         -CancelLogText 'Run cancelled by operator; in-flight scans stopped.'
 
     $installRoot = @($rows | Where-Object { @('InstallRoot','InstallRoot+GPO') -contains [string]$_.Reconciler }).Count

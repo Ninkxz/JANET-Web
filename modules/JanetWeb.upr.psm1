@@ -22,6 +22,21 @@
 #  pins an EOL-by-definition product) OR the installed version parses below
 #  VersionMaxExclusive. Otherwise the row is surfaced as 'Review' and never
 #  auto-removed. Tanium is always skipped.
+#
+#  SCOPED REMOVAL (audit 2026-07-24, v1.2.9): a handler removes ONLY the
+#  candidate the operator selected. Adobe resolves the MSI ProductCode off the
+#  candidate's own key/uninstall string (audit#3); Microsoft 365 now does the
+#  same -- the setup.exe /configure XML names <Product ID="<C2R product>"> and
+#  NEVER <Remove All="TRUE"/>, which had been removing every Click-to-Run Office
+#  product on the host. Unresolvable target => that path is skipped, not widened.
+#
+#  STAGING PARITY (audit 2026-07-25 (fable re-audit follow-up), v1.2.10): the M365
+#  removal-config staging directory is created WITHOUT -Force, exactly like
+#  pkginstall's staging root. Both modules face the same threat (a pre-planted /
+#  squatted directory whose contents are then consumed under the admin credential)
+#  and they now answer it the same way: a collision FAILS that path instead of being
+#  silently reused, and the cleanup only removes a directory this run created. The
+#  explicit non-inherited DACL and the pre-exec SHA-256 re-read still gate the file.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -35,7 +50,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.8'
+        version  = '1.2.10' # audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -474,31 +489,40 @@ function Parse-PdfFinding {
         return @()
     }
     $tmpTxt = [IO.Path]::Combine([IO.Path]::GetTempPath(), "upr_pdf_$([guid]::NewGuid().ToString('N')).txt")
+    $tmpErr = $tmpTxt + '.err'
+    ## audit 2026-07-24: the cleanup used to sit AFTER the failure `return`s, so
+    ## every non-zero exit / thrown invocation / missing-output parse left
+    ## upr_pdf_<guid>.txt + .err behind in %TEMP% -- and the .err file is created
+    ## by the redirect even when pdftotext never ran. One try/finally around the
+    ## whole body deletes both on EVERY exit path (success, failure, throw).
     try {
-        ## v1.1.0 fix: pass a single PRE-QUOTED argument string. PS 5.1
-        ## Start-Process does NOT quote individual -ArgumentList array elements,
-        ## so a report path containing spaces / parentheses got split into bad
-        ## args and pdftotext returned exit 99 with no output. Quoting both paths
-        ## in one string fixes it while keeping -NoNewWindow + the stderr capture.
-        $argLine = '-layout "{0}" "{1}"' -f $Path, $tmpTxt
-        $proc = Start-Process -FilePath $pdfExe -ArgumentList $argLine -Wait -PassThru -NoNewWindow -RedirectStandardError ($tmpTxt + '.err')
-        if ($proc.ExitCode -ne 0) {
-            & $Log "pdftotext returned exit $($proc.ExitCode)" 'err'
+        try {
+            ## v1.1.0 fix: pass a single PRE-QUOTED argument string. PS 5.1
+            ## Start-Process does NOT quote individual -ArgumentList array elements,
+            ## so a report path containing spaces / parentheses got split into bad
+            ## args and pdftotext returned exit 99 with no output. Quoting both paths
+            ## in one string fixes it while keeping -NoNewWindow + the stderr capture.
+            $argLine = '-layout "{0}" "{1}"' -f $Path, $tmpTxt
+            $proc = Start-Process -FilePath $pdfExe -ArgumentList $argLine -Wait -PassThru -NoNewWindow -RedirectStandardError $tmpErr
+            if ($proc.ExitCode -ne 0) {
+                & $Log "pdftotext returned exit $($proc.ExitCode)" 'err'
+                return @()
+            }
+        } catch {
+            & $Log "pdftotext invocation failed: $($_.Exception.Message)" 'err'
             return @()
         }
-    } catch {
-        & $Log "pdftotext invocation failed: $($_.Exception.Message)" 'err'
-        return @()
+        if (-not (Test-Path -LiteralPath $tmpTxt)) { return @() }
+
+        $allText = Get-Content -LiteralPath $tmpTxt -Raw
+
+        ## pdftotext -layout output and a PDF-viewer copy-paste are both jagged
+        ## reading-order text with the same section anchors -- share one parser.
+        return @(Parse-ReportText -Text $allText -Catalog $Catalog -Log $Log)
+    } finally {
+        try { Remove-Item -LiteralPath $tmpTxt -Force -EA SilentlyContinue } catch {}
+        try { Remove-Item -LiteralPath $tmpErr -Force -EA SilentlyContinue } catch {}
     }
-    if (-not (Test-Path -LiteralPath $tmpTxt)) { return @() }
-
-    $allText = Get-Content -LiteralPath $tmpTxt -Raw
-    try { Remove-Item -LiteralPath $tmpTxt -Force -EA SilentlyContinue } catch {}
-    try { Remove-Item -LiteralPath ($tmpTxt + '.err') -Force -EA SilentlyContinue } catch {}
-
-    ## pdftotext -layout output and a PDF-viewer copy-paste are both jagged
-    ## reading-order text with the same section anchors -- share one parser.
-    return @(Parse-ReportText -Text $allText -Catalog $Catalog -Log $Log)
 }
 
 # -----------------------------------------------------------------------------
@@ -685,7 +709,15 @@ function Parse-ReportTextRelaxed {
             if ($findings.ContainsKey($key)) { continue }
             $catg = $sec.Category
             if (Test-IsOsFinding $Catalog $name) { $catg = 'OS' }
-            $f = [PSCustomObject]@{ Plugin=''; PluginName=$name; Category=$catg; SourceSection=$sec.Name; Severity=''; Hosts=(New-Object System.Collections.ArrayList) }
+            # audit 2026-07-24: this object had NO HostAttribution member, so the
+            # consumers ($f.HostAttribution -eq 'section-approximate' at report-findings
+            # / os-findings) read $null and labelled the row ATTRIB='exact' with a bare
+            # host count -- the LEAST exact ingestion mode advertising the HIGHEST
+            # confidence. This path attaches EVERY IP in the section's hosts block to
+            # EVERY catalog-matched name in that section (no per-plugin breakdown
+            # survives a PDF-viewer copy-paste), which is section-approximate BY
+            # CONSTRUCTION -- unconditionally, not just when the section has >1 finding.
+            $f = [PSCustomObject]@{ Plugin=''; PluginName=$name; Category=$catg; SourceSection=$sec.Name; Severity=''; HostAttribution='section-approximate'; Hosts=(New-Object System.Collections.ArrayList) }
             foreach ($h in $hostRows) { [void]$f.Hosts.Add(($h | Select-Object *)) }
             $findings[$key] = $f
         }
@@ -979,7 +1011,38 @@ $UprWorkerBlock = {
                                     # WinRM credential (LPE). Removed - drive removal only through the
                                     # trusted built-in Office C2R remover (setup.exe /configure) below.
                                     $setupExe = Join-Path $c2rPath "setup.exe"
-                                    if (Test-Path $setupExe) {
+                                    ## Scope removal to the SELECTED candidate ONLY (audit 2026-07-24) --
+                                    ## the same fix already applied to the Adobe handler below (audit#3),
+                                    ## which was never carried here. The config XML carried
+                                    ## <Remove All="TRUE"/>, which tells the C2R engine to remove EVERY
+                                    ## Click-to-Run Office product on the host, so an operator removing one
+                                    ## EOL Office component wiped the user's entire Office install. Like
+                                    ## Adobe, derive the target from the candidate's OWN registry key /
+                                    ## uninstall string, never a family-wide sweep:
+                                    ##   * C2R ARP keys are named '<ProductID> - <culture>'
+                                    ##     (e.g. 'O365ProPlusRetail - en-us')
+                                    ##   * the C2R uninstall string carries
+                                    ##     productstoremove=<ProductID>.16_<culture>_x-none
+                                    ## Either one names the exact product to put in <Remove><Product ID=.
+                                    $c2rId = $null; $c2rCulture = $null
+                                    if ($childName -match '^\s*(?<id>[A-Za-z0-9_]+)\s*-\s*(?<cul>[A-Za-z]{2,3}-[A-Za-z0-9\-]{2,12})\s*$') {
+                                        $c2rId = $Matches['id']; $c2rCulture = $Matches['cul']
+                                    }
+                                    if (-not $c2rId -and $unStr -match '(?i)productstoremove=(?<id>[A-Za-z0-9_]+)\.\d+_(?<cul>[A-Za-z]{2,3}-[A-Za-z0-9\-]+?)_') {
+                                        $c2rId = $Matches['id']; $c2rCulture = $Matches['cul']
+                                    }
+                                    if (-not $c2rId -and $unStr -match '(?i)productstoremove=(?<id>[A-Za-z0-9_]+)') { $c2rId = $Matches['id'] }
+                                    if (-not $c2rCulture -and $unStr -match '(?i)\bculture=(?<cul>[A-Za-z]{2,3}-[A-Za-z0-9\-]+)') { $c2rCulture = $Matches['cul'] }
+
+                                    $haveSetup = Test-Path -LiteralPath $setupExe
+                                    if ($haveSetup -and -not $c2rId) {
+                                        ## FAIL CLOSED, exactly like Adobe's "no MSI GUID resolvable": with no
+                                        ## product ID the only thing setup.exe /configure could be handed is a
+                                        ## fleet-wide Remove All, which is precisely the over-removal this fix
+                                        ## exists to prevent. Skip it and let the (already product-scoped) C2R
+                                        ## uninstall string below do the work.
+                                        $steps += "setup.exe /configure skipped (no Click-to-Run product ID resolvable for '$name' [$childName]; refusing a fleet-wide Remove All)"
+                                    } elseif ($haveSetup) {
                                         # audit 2026-07-23 (finding: C:\Temp staging): the removal XML was
                                         # written to fixed, often world-writable C:\Temp - the same TOCTOU
                                         # class audit#11 removed for the .cmd (a low-priv local user could
@@ -987,15 +1050,74 @@ $UprWorkerBlock = {
                                         # Stage it in a per-run RANDOM-named directory under %ProgramData%
                                         # (admin-writable root) and clean the whole directory up in finally.
                                         $cfgDir = Join-Path $env:ProgramData ("JanetUpr_" + [Guid]::NewGuid().ToString('N'))
+                                        $dirOk = $false
                                         try {
-                                            New-Item -Path $cfgDir -ItemType Directory -Force -EA SilentlyContinue | Out-Null
-                                            $xmlPath = Join-Path $cfgDir "OfficeRemoveAll.xml"
-                                            '<Configuration><Remove All="TRUE"/><Display Level="None" AcceptEULA="TRUE"/><Property Name="FORCEAPPSHUTDOWN" Value="TRUE"/></Configuration>' | Out-File $xmlPath -Encoding ASCII -Force
-                                            $proc = Start-Process $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
-                                            if ($proc.ExitCode -eq 0) { return "OK (Office removed via setup.exe /configure)" }
-                                            $steps += "setup.exe /configure exit $($proc.ExitCode)"
+                                            # audit 2026-07-25 (fable re-audit follow-up): NO -Force, and the
+                                            # failure is NOT swallowed. pkginstall deliberately creates its staging
+                                            # root without -Force so a SQUATTED directory FAILS the host rather than
+                                            # being silently reused; upr used '-Force -EA SilentlyContinue', so the
+                                            # two modules embodied opposite decisions about the same threat. Nothing
+                                            # legitimate can already own a fresh GUID name, so a collision is
+                                            # somebody waiting for us: refuse the directory instead of adopting it.
+                                            try {
+                                                New-Item -Path $cfgDir -ItemType Directory -EA Stop | Out-Null
+                                                $dirOk = $true
+                                            } catch {
+                                                $steps += "staging dir already existed or could not be created exclusively ($($_.Exception.Message)); setup.exe /configure skipped (refusing to reuse a directory we did not create)"
+                                            }
+                                            # audit 2026-07-24 (staging DACL): the random name defeated PRE-planting,
+                                            # but the directory still INHERITED %ProgramData%'s ACL, which carries a
+                                            # container-inheritable BUILTIN\Users (WD,AD) ACE -- i.e. every local user
+                                            # can create files inside our staging dir. That is the C:\Temp LPE class
+                                            # again (win the race between New-Item and the write, plant the config the
+                                            # admin WinRM credential then feeds to setup.exe). Stamp an EXPLICIT,
+                                            # NON-inherited DACL: SYSTEM + Administrators, full control, nobody else.
+                                            $aclOk = $false
+                                            if ($dirOk) {
+                                                try {
+                                                    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+                                                    $acl.SetAccessRuleProtection($true, $false)   # inheritance OFF, copy no inherited ACEs
+                                                    foreach ($sidId in @('S-1-5-18', 'S-1-5-32-544')) {   # LocalSystem, BUILTIN\Administrators
+                                                        $sid = New-Object System.Security.Principal.SecurityIdentifier($sidId)
+                                                        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+                                                    }
+                                                    Set-Acl -LiteralPath $cfgDir -AclObject $acl -EA Stop
+                                                    $aclOk = $true
+                                                } catch {
+                                                    $steps += "staging dir could not be locked down ($($_.Exception.Message)); setup.exe /configure skipped"
+                                                }
+                                            }
+                                            if ($aclOk) {
+                                                $xmlPath = Join-Path $cfgDir "OfficeRemove.xml"
+                                                $langXml = if ($c2rCulture) { '<Language ID="{0}"/>' -f $c2rCulture } else { '' }
+                                                $cfgXml  = '<Configuration><Remove><Product ID="{0}">{1}</Product></Remove><Display Level="None" AcceptEULA="TRUE"/><Property Name="FORCEAPPSHUTDOWN" Value="TRUE"/></Configuration>' -f $c2rId, $langXml
+                                                # WriteAllText (not Out-File) so the bytes on disk are EXACTLY the
+                                                # bytes we hashed -- Out-File appends a trailing newline.
+                                                [IO.File]::WriteAllText($xmlPath, $cfgXml, [Text.Encoding]::ASCII)
+                                                # audit 2026-07-24 (hash check): re-read and compare before executing,
+                                                # so a swap between write and consume aborts instead of running an
+                                                # attacker-authored Office configuration under the operator's credential.
+                                                $sha = [Security.Cryptography.SHA256]::Create()
+                                                try {
+                                                    $want = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($cfgXml))).Replace('-', '')
+                                                    $got  = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($xmlPath))).Replace('-', '')
+                                                } finally { $sha.Dispose() }
+                                                if ($want -ne $got) {
+                                                    $steps += "staged Office config changed between write and execute (hash mismatch) -- setup.exe /configure ABORTED"
+                                                } else {
+                                                    # Keep the PRE-QUOTED single arg string (PS 5.1 Start-Process does
+                                                    # not quote -ArgumentList array elements; a redirected %ProgramData%
+                                                    # containing spaces would otherwise split into bad args).
+                                                    $proc = Start-Process $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
+                                                    if ($proc.ExitCode -eq 0) { return "OK (Office '$c2rId' removed via setup.exe /configure)" }
+                                                    $steps += "setup.exe /configure exit $($proc.ExitCode)"
+                                                }
+                                            }
                                         } finally {
-                                            Remove-Item $cfgDir -Recurse -Force -EA SilentlyContinue
+                                            # Only ever delete a directory THIS run created - if the exclusive
+                                            # create lost, the thing on disk belongs to somebody else and the
+                                            # cleanup must not remove it on their behalf either.
+                                            if ($dirOk) { Remove-Item -LiteralPath $cfgDir -Recurse -Force -EA SilentlyContinue }
                                         }
                                     }
                                     if (-not [string]::IsNullOrWhiteSpace($unStr)) {
@@ -1038,7 +1160,12 @@ $UprWorkerBlock = {
                                         $adobeGuids = @()
                                         if ($childName -match '^\{[0-9A-Fa-f\-]{8,}\}$') { $adobeGuids += $childName }
                                         foreach ($hive in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
-                                            $item = Get-ItemProperty (Join-Path $hive $childName) -EA SilentlyContinue
+                                            # audit 2026-07-24: -LiteralPath. Without it $childName is treated as a
+                                            # WILDCARD pattern, so a key name carrying [ ] ? * (legal in the registry)
+                                            # either matched a DIFFERENT product's key or matched several -- and the
+                                            # GUID scraped off that wrong key was then fed to `msiexec /x`, removing
+                                            # something the operator never selected. Literal lookup only.
+                                            $item = Get-ItemProperty -LiteralPath (Join-Path $hive $childName) -EA SilentlyContinue
                                             if ($item -and $item.UninstallString -match '(\{[0-9A-Fa-f\-]{8,}\})') { $adobeGuids += $Matches[1] }
                                         }
                                         if ($unStr -match '(\{[0-9A-Fa-f\-]{8,}\})') { $adobeGuids += $Matches[1] }

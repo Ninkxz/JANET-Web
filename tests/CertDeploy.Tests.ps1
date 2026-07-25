@@ -402,8 +402,11 @@ Describe 'certdeploy 1.4.4 - read-only check + scan harvests attach a hint to a 
     $man = & $cm { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Raw
 
-    It 'manifest version is exactly 1.4.4 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.4.4'
+    # audit 2026-07-24: the exact pin moved to the newest bump test
+    # (CertDeploy.DisallowedGate.Tests.ps1, v1.5.0) - this one keeps a floor so the
+    # 1.4.4 hint behaviour stays pinned without re-breaking on every later bump.
+    It 'manifest version is at or past 1.4.4 (floor; exact pin lives in the newest bump test)' {
+        ([version][string]$man.version -ge [version]'1.4.4') | Should Be $true
     }
     It 'the check harvest computes a hint only for a CHECK ERROR status and attaches it to the row' {
         ($src -match '\$hint\s*=\s*if\s*\(\$status\s*-eq\s*''CHECK ERROR''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true

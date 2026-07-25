@@ -22,11 +22,44 @@
 #  Run:  Invoke-Pester -Path .\tests\FixVerify3.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb.dhcp.psm1)' {
 
     $dm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Force -PassThru
+    Add-ShimGuard $dm
 
     # Drive the REAL Invoke-JanetDhcpApply with the two remote seams shadowed:
     #   Invoke-JanetOnDhcp          -> the pre-read (returns canned current values)
@@ -41,6 +74,7 @@ Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb
             $script:__setCnt  = 0
             # Shadow the reachability probe so Apply stays offline + deterministic (no real
             # 5985/5986/445 dial to the synthetic 'TESTSRV') and dials HTTP (UseSsl=$false).
+            $__shims = Save-ShimState @('Test-JanetWsmanReachable','Invoke-JanetOnDhcp','Invoke-JanetOnDhcpCancelable')
             function script:Test-JanetWsmanReachable { param($Server, $TimeoutMs = 3000) @{ Reachable = $true; UseSsl = $false } }
             # Both seams gained a -UseSsl param (v1.1.8 5986 sweep); the strict [CmdletBinding()]
             # mocks must accept it or Apply's -UseSsl pass-through throws "parameter cannot be found".
@@ -69,7 +103,9 @@ Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb
                     SetCalls = [int]$script:__setCnt
                 }
             } finally {
-                Remove-Item function:script:Invoke-JanetOnDhcp, function:script:Invoke-JanetOnDhcpCancelable, function:script:Test-JanetWsmanReachable -EA SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $Current $Desired $ReadOk
     }
@@ -99,6 +135,7 @@ Describe 'FIX 1 - DHCP single-scope Apply no-ops an unchanged re-apply (JanetWeb
 Describe 'FIX 2 - pkginstall PSADT soft-fail is Success (warnings) (JanetWeb.pkginstall.psm1)' {
 
     $pm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Force -PassThru
+    Add-ShimGuard $pm
 
     # Extract the inline "run Deploy-Application.ps1 + classify exit/output" scriptblock
     # from $script:RpiDeployHostScript via the PS parser, then run it against a REAL temp
@@ -161,6 +198,7 @@ Describe 'FIX 2 - pkginstall PSADT soft-fail is Success (warnings) (JanetWeb.pkg
 Describe 'FIX 3 - WinUpgrade Pin AND Unpin expose a confirm string (JanetWeb.winupgrade.psm1)' {
 
     $wm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.winupgrade.psm1') -Force -PassThru
+    Add-ShimGuard $wm
     $man = & $wm { Get-JanetToolManifest }
 
     It 'pin is destructive AND has a non-empty confirm' {
@@ -181,6 +219,7 @@ Describe 'FIX 3 - WinUpgrade Pin AND Unpin expose a confirm string (JanetWeb.win
 Describe 'FIX 4 - Secure Boot idempotency + honest state labels (JanetWeb.secureboot.psm1)' {
 
     $sbm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Force -PassThru
+    Add-ShimGuard $sbm
 
     # --- Dell OEM function extracted from the remote payload, run against shims. ---
     $payload = & $sbm { $script:SbePayload }
@@ -284,6 +323,7 @@ Describe 'FIX 4 - Secure Boot idempotency + honest state labels (JanetWeb.secure
 Describe 'FIX 5 - ACAS "unchanged after update" is a distinct UNCONFIRMED state (JanetWeb.acas.psm1)' {
 
     $am = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Force -PassThru
+    Add-ShimGuard $am
 
     $okOf = & $am { $script:AcasOkOf }
 

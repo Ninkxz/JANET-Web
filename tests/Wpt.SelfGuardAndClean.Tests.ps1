@@ -20,7 +20,40 @@
 #  Run:  Invoke-Pester -Path .\tests\Wpt.SelfGuardAndClean.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
+Add-ShimGuard $m
 
 # Drive the REAL entry point in module scope, capturing every emitted event so
 # we can assert the self-guard fired and no dispatch/reboot was ever started.
@@ -120,6 +153,7 @@ Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)'
         $r = & $m {
             $script:probeCalled = $false
             $script:restartCalled = $false
+            $__shims = Save-ShimState @('Invoke-Command','Restart-Computer')
             function script:Invoke-Command {
                 param($ComputerName, $SessionOption, $ErrorAction, $Credential, $Authentication, $ArgumentList, [scriptblock]$ScriptBlock)
                 $script:probeCalled = $true
@@ -133,8 +167,9 @@ Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)'
                 $res = & $script:WptRebootBlock -Computer '198.51.100.5' -Cred $null -Auth 'Default'
                 @{ Result = $res; ProbeCalled = $script:probeCalled; RestartCalled = $script:restartCalled }
             } finally {
-                Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue
-                Remove-Item function:script:Restart-Computer -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         }
         $r.ProbeCalled          | Should Be $false   # IPv4 literal -> DNS-mismatch probe never runs
@@ -146,6 +181,7 @@ Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)'
     It 'hostname target: DNS-mismatch guard still hard-aborts on a confirmed mismatch (guard stays active)' {
         $r = & $m {
             $script:restartCalled = $false
+            $__shims = Save-ShimState @('Invoke-Command','Restart-Computer')
             function script:Invoke-Command {
                 param($ComputerName, $SessionOption, $ErrorAction, $Credential, $Authentication, $ArgumentList, [scriptblock]$ScriptBlock)
                 return 'SOMEOTHERBOX'   # a genuine mismatch for a hostname target
@@ -158,8 +194,9 @@ Describe 'WptRebootBlock DNS-mismatch guard skips IPv4-literal targets (FIX 3b)'
                 $res = & $script:WptRebootBlock -Computer 'WS-REMOTE-999' -Cred $null -Auth 'Default'
                 @{ Result = $res; RestartCalled = $script:restartCalled }
             } finally {
-                Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue
-                Remove-Item function:script:Restart-Computer -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         }
         $r.Result.Detail  | Should Match 'DNS mismatch'
@@ -220,8 +257,8 @@ Describe 'WptCleanBlock + WptCleanUserAppsBlock wrong-box (DNS-mismatch) guard (
         # and the old dedicated clean-block probe idiom must NOT come back (fold holds)
         ([regex]::Matches($script:WptSrc, "\`$actualName = try \{ Invoke-Command -Session \`$sess -EA Stop -ScriptBlock \{ \`$env:COMPUTERNAME \} \} catch \{ '' \}").Count) | Should Be 1
     }
-    It 'wpt manifest is exactly 6.10.0 (newest bump holds the exact pin; vendor-MSI browser push)' {
-        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.10.0'
+    It 'wpt manifest is at or past 6.10.0 (exact pin migrated to the newest bump: audit 2026-07-24, 6.10.1)' {
+        ([version][string](& $m { (Get-JanetToolManifest).version }) -ge [version]'6.10.0') | Should Be $true
     }
 }
 

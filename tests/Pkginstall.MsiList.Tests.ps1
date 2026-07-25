@@ -149,8 +149,8 @@ Describe 'pkginstall 2.5.13 - fan-out attaches a troubleshooting hint to a faile
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
 
-    It 'manifest version is exactly 2.5.13 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '2.5.13'
+    It 'manifest version is at least 2.5.13 (floor; newest exact pin = the audit-2026-07-24 staging Describe, v2.5.14)' {
+        ([version][string]$mani.version -ge [version]'2.5.13') | Should Be $true
     }
     It 'pkginstall imports the shared troubleshoot engine' {
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
@@ -162,5 +162,135 @@ Describe 'pkginstall 2.5.13 - fan-out attaches a troubleshooting hint to a faile
     }
     It 'the err log appends the FIX hint when one exists (raw detail preserved)' {
         ($src -match "\`$status : \`$detail\`$\(if \(\`$hint\) \{ ' \| FIX: ' \+ \`$hint \}") | Should Be $true
+    }
+}
+
+# -----------------------------------------------------------------------------
+# audit 2026-07-24 (P1 LOCAL PRIVILEGE ESCALATION): the per-host worker staged the payload in
+# world-writable C:\Temp under a predictable "<pkgname>_<yyyyMMddHHmmss>" name, stripped MOTW
+# (Unblock-File), then executed it as the DEPLOY credential - typically a domain admin. Any
+# non-admin on the target could pre-create that directory, or swap the PSADT entry script / an
+# .msi between the copy and the execute, and get code running elevated (the same class already
+# fixed on the desktop UPR tool). Staging now goes into a RANDOM-named directory under
+# %ProgramData% created with an EXPLICIT DACL (SYSTEM + BUILTIN\Administrators FullControl,
+# inheritance broken) that is verified FAIL-CLOSED before anything is copied in, and every staged
+# file must match its source by SHA256 before the execute. Same pass, P3: the folder copy was the
+# module's only SOURCE operation using -Path, so an operator package folder containing '[' or ']'
+# was treated as a wildcard.
+# Static analysis of the worker (it lives inside the module-less runspace scriptblock
+# $RpiDeployHostScript, so it cannot be invoked here) + a behavioural test of the DACL the module
+# builds, replicated VERBATIM below (the Get-ExpectedName / Test-WrongBoxAbort pattern from
+# tests\PkginstallSecureboot.WrongBoxGuard.Tests.ps1). Purely in-memory: applying this DACL to a
+# real directory locks the (non-elevated) test runner out of its own temp folder.
+function New-PkgStagingDaclReplica {
+    # Verbatim replica of the module's staging DACL construction (3a).
+    $sidSystem = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $sidAdmins = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritBoth = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($sid in @($sidSystem, $sidAdmins)) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritBoth,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    $acl
+}
+
+Describe 'pkginstall 2.5.14 - the staged payload is not in world-writable C:\Temp (LPE)' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'manifest version is exactly 2.5.14 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.14'
+    }
+
+    It 'no longer stages under C:\Temp on the target' {
+        # both halves of the old path: the C$-mounted staging root and the on-target local path
+        $src.Contains('${driveName}:\Temp')       | Should Be $false
+        $src.Contains('C:\Temp\$remoteFolderName') | Should Be $false
+        # and the old predictable "<pkg>_<yyyyMMddHHmmss>" folder name is gone
+        ($src -match '\$remoteFolderName\s*=\s*"\$\{safePkgName\}_\$stamp"') | Should Be $false
+    }
+
+    It 'stages under %ProgramData% in a per-run RANDOM directory name' {
+        $src.Contains('${driveName}:\ProgramData')   | Should Be $true
+        $src.Contains('C:\ProgramData\$remoteFolderName') | Should Be $true
+        ($src -match '\$remoteFolderName\s*=\s*"JanetPkg_') | Should Be $true
+        ($src -match '\[Guid\]::NewGuid\(\)\.ToString\(''N''\)') | Should Be $true
+    }
+
+    It 'creates the staging root WITHOUT -Force, so a squatted directory fails the host' {
+        ($src -match "New-Item -ItemType Directory -Path \`$remoteSharePath -EA Stop") | Should Be $true
+    }
+
+    It 'applies an explicit DACL: inheritance broken, well-known SYSTEM + Administrators SIDs only' {
+        ($src -match '\$stageAcl\.SetAccessRuleProtection\(\$true,\s*\$false\)') | Should Be $true
+        ($src -match 'WellKnownSidType\]::LocalSystemSid')            | Should Be $true
+        ($src -match 'WellKnownSidType\]::BuiltinAdministratorsSid')  | Should Be $true
+        ($src -match 'Set-Acl -LiteralPath \$remoteSharePath')        | Should Be $true
+    }
+
+    It 'that DACL grants FullControl to exactly SYSTEM + BUILTIN\Administrators and nobody else' {
+        $acl   = New-PkgStagingDaclReplica
+        $rules = @($acl.Access)
+        $acl.AreAccessRulesProtected | Should Be $true
+        $rules.Count                 | Should Be 2
+        $sids = @($rules | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })
+        ($sids -contains 'S-1-5-18')     | Should Be $true   # LOCAL SYSTEM
+        ($sids -contains 'S-1-5-32-544') | Should Be $true   # BUILTIN\Administrators
+        foreach ($ru in $rules) {
+            [string]$ru.AccessControlType | Should Be 'Allow'
+            [string]$ru.FileSystemRights  | Should Be 'FullControl'
+            # inheritable, so files/subdirs the copy creates get the same lockdown
+            [string]$ru.InheritanceFlags  | Should Be 'ContainerInherit, ObjectInherit'
+        }
+    }
+
+    It 'verifies the DACL FAIL-CLOSED before anything is copied into the staging root' {
+        ($src -match '\$checkAcl\.AreAccessRulesProtected') | Should Be $true
+        ($src -match 'Staging DACL verification failed')    | Should Be $true
+        $idxVerify = $src.IndexOf('Staging DACL verification failed')
+        $idxCopy   = $src.IndexOf('Copy-Item -LiteralPath $PkgPath')
+        ($idxVerify -gt 0) | Should Be $true
+        ($idxCopy   -gt 0) | Should Be $true
+        ($idxVerify -lt $idxCopy) | Should Be $true
+    }
+
+    It 'a SHA256 comparison GATES the execute on the folder path too (was count+bytes only)' {
+        ($src -match 'staged file SHA256 mismatch') | Should Be $true
+        ($src -match 'refusing to run a modified payload') | Should Be $true
+        # the old "a per-file hash over a large PSADT tree is too costly" carve-out is gone
+        ($src -match 'per-file hash over a large') | Should Be $false
+        # and the hash check runs BEFORE the session that executes the payload is opened
+        $idxHash = $src.IndexOf('staged file SHA256 mismatch')
+        $idxSess = $src.IndexOf('$session = New-PSSession @sessSplat')
+        ($idxSess -gt 0) | Should Be $true
+        ($idxHash -lt $idxSess) | Should Be $true
+    }
+
+    It 'the staging directory is cleaned up afterwards' {
+        ($src -match 'Remove-Item -LiteralPath \$remoteSharePath -Recurse -Force') | Should Be $true
+    }
+}
+
+Describe 'pkginstall 2.5.14 - the package path is never treated as a wildcard' {
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'the folder copy uses -LiteralPath (a package folder containing [ or ] copied nothing)' {
+        $src.Contains('Copy-Item -LiteralPath $PkgPath') | Should Be $true
+        $src.Contains('Copy-Item -Path $PkgPath')        | Should Be $false
+    }
+    It 'NO Copy-Item in the module reads a source through wildcard-expanding -Path' {
+        ($src -match 'Copy-Item\s+-Path\b') | Should Be $false
+    }
+    It 'the copied tree is verified from the nested <root>\<packageFolder>, not the staging root' {
+        # Copy-Item into an EXISTING (hardened) destination lands the tree one level in;
+        # the verification and both remote blocks must agree on that shape.
+        ($src -match '\$copiedRoot\s*=\s*if\s*\(\$pkgLeaf\)') | Should Be $true
+        ($src -match 'Get-ChildItem -LiteralPath \$copiedRoot -Recurse -File') | Should Be $true
     }
 }

@@ -23,6 +23,29 @@
 #  per-action session log automatically. Read-only: nothing is ever written.
 #  Parsing is lenient and never throws on malformed input.
 #
+#  v1.1.1 (audit 2026-07-25 (fable re-audit follow-up)) one correctness fix:
+#    - the operator's extraPath root now de-dupes on the SAME canonical path key the
+#      -PackagesRoot leg uses. Pasting the work share (or the repo Packages folder)
+#      into "extra content folder" added it a SECOND time and double-counted the
+#      whole inventory - every stat card doubled, every package listed twice.
+#
+#  v1.1.0 (audit 2026-07-24) four correctness/cost fixes:
+#    - crossref gained a THIRD verdict, UNKNOWN. A content root that could not be
+#      read is not evidence of absence; crossref used to render every unmatched
+#      item MISSING even when ZERO roots were scanned (it never had the zero-root
+#      guard the inventory path has), so "I did not look there" read exactly like
+#      "it is not there" - the error that gets an operator to a closed network
+#      without the patch. Skipped roots now flow into the verdict and the summary.
+#    - product names match on NORMALISED TOKENS, not a raw substring, so a
+#      multi-word name finally hits a real package folder ("Google Chrome" ->
+#      'GoogleChrome_120.0.6099'). The old test could not match ANY multi-word
+#      product, including the view's own "Google Chrome" placeholder.
+#    - the -PackagesRoot leg de-dupes on a canonical path key, so an FQDN or a
+#      relative alias of a folder already listed no longer double-counts the
+#      entire inventory.
+#    - folder size rides the SINGLE bounded classify/KB walk (Get-PatchlibFolderSize
+#      is gone): every folder used to be walked TWICE per inventory.
+#
 #  Contract (server convention):
 #    Get-JanetToolManifest                                       -> descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -33,7 +56,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'patchlib'
         name     = 'Patch Content'
-        version  = '1.0.1'
+        version  = '1.1.1'   # audit 2026-07-25 (fable re-audit follow-up): extraPath root de-dupes on the canonical path key
         category = 'Remediation'
         summary  = 'Offline patch-content library. Inventories the remediation content already staged for air-gapped use (the repo .\Packages folder, the work share when reachable, plus an operator extra path) - classifying PSADT packages, MSI / MSU / CAB / EXE bundles and pulling KB ids from filenames - then cross-references it against the KBs you still need (pasted list or an uploaded ACAS CSV) so you know what can be pushed today and what is MISSING. Read-only; touches no hosts.'
         actions  = @(
@@ -51,7 +74,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'crossref'
                 label       = 'Cross-Reference'
-                description = 'Match a list of needed KBs / product names (pasted and/or from an uploaded ACAS CSV) against the staged content and mark each ON HAND or MISSING. Read-only - no hosts touched.'
+                description = 'Match a list of needed KBs / product names (pasted and/or from an uploaded ACAS CSV) against the staged content and mark each ON HAND, MISSING, or UNKNOWN. UNKNOWN means a content root could not be scanned, so this run cannot prove the item is absent - never read it as MISSING. Read-only - no hosts touched.'
                 kind        = 'stream-table'
                 destructive = $false
                 columns     = @('Needed','Kind','Status','Matches')
@@ -75,6 +98,30 @@ function Get-JanetToolManifest {
 $script:PatchlibShare = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages'
 
 function Get-PatchlibLocalPackages { Join-Path $PSScriptRoot '..\Packages' }
+
+# Canonical, comparable identity for a content root (audit 2026-07-24). The
+# -PackagesRoot leg used to de-dupe on the RAW string, so '\\dm-tn-01\...' vs its
+# FQDN, or '.\Packages' vs the resolved absolute path, read as two different roots
+# and the ENTIRE inventory was counted twice (doubling every stat card and making
+# the same package appear on two rows).
+#
+# [System.IO.Path]::GetFullPath is a PURE string normalisation - it collapses '.'
+# and '..' and roots a relative alias against the process CWD WITHOUT touching the
+# filesystem, so unlike Resolve-Path it can never stall on a dead UNC host (this
+# runs BEFORE the 445 reachability gate). Never throws.
+function Get-PatchlibPathKey {
+    param([string]$Path)
+    $p = ([string]$Path).Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($p)) { return '' }
+    try { $p = [System.IO.Path]::GetFullPath($p) } catch {}
+    $p = $p.TrimEnd('\', '/')
+    # A UNC host is the same server whether it is spelled short or FQDN, so key on
+    # the short name: '\\dm-tn-01.area52.afnoapps.usaf.mil\x' == '\\dm-tn-01\x'.
+    if ($p -match '^\\\\([^\\]+)(\\.*)?$') {
+        $p = '\\' + (($Matches[1] -split '\.')[0]) + ([string]$Matches[2])
+    }
+    return $p.ToLowerInvariant()
+}
 
 # AFNET-safe reachability: pure-TCP (never ICMP). One connect to 445 with a short
 # timeout so a dead share never hangs the enumeration. Returns $true/$false.
@@ -124,8 +171,12 @@ function Get-PatchlibRoots {
     if ([string]::IsNullOrWhiteSpace($srvRoot)) { $srvRoot = [string]$env:JANET2_PACKAGES_ROOT }
     if (-not [string]::IsNullOrWhiteSpace($srvRoot)) {
         $sr = $srvRoot.Trim().Trim('"')
+        # audit 2026-07-24: compare CANONICAL keys, not raw strings - an FQDN or a
+        # relative alias of a root already listed used to slip through and double-scan
+        # (and so double-count) the whole inventory.
         $already = $false
-        foreach ($rr in $roots) { if (([string]$rr.Path).TrimEnd('\') -eq $sr.TrimEnd('\')) { $already = $true; break } }
+        $srKey = Get-PatchlibPathKey $sr
+        foreach ($rr in $roots) { if ((Get-PatchlibPathKey ([string]$rr.Path)) -eq $srKey) { $already = $true; break } }
         if (-not $already) {
             $srOk = $true
             if ($sr -match '^\\\\([^\\]+)') { $srOk = Test-PatchlibShareReachable $Matches[1] }
@@ -137,14 +188,29 @@ function Get-PatchlibRoots {
 
     if (-not [string]::IsNullOrWhiteSpace($ExtraPath)) {
         $ep = ([string]$ExtraPath).Trim().Trim('"')
-        # 445-gate a UNC extra path the same way the work share is gated, so a dead
-        # host does not stall Test-Path (and later Get-ChildItem) for the full SMB
-        # connect/retry timeout with no cancel button in the UI.
-        $epHostOk = $true
-        if ($ep -match '^\\\\([^\\]+)') { $epHostOk = Test-PatchlibShareReachable $Matches[1] }
-        if (-not $epHostOk) { [void]$roots.Add(@{ Path=$ep; Label='Extra'; Ok=$false; Note='operator path host unreachable on 445' }) }
-        elseif (Test-Path -LiteralPath $ep) { [void]$roots.Add(@{ Path=$ep; Label='Extra'; Ok=$true; Note='operator path' }) }
-        else { [void]$roots.Add(@{ Path=$ep; Label='Extra'; Ok=$false; Note='operator path not found' }) }
+        # audit 2026-07-25 (fable re-audit follow-up): the operator's extra folder gets the
+        # SAME canonical-key de-dupe the -PackagesRoot leg got - pasting the work share (or
+        # the repo Packages folder) as "extra folder" used to add it as a SECOND root and
+        # double-count the entire inventory: every item twice, every stat card doubled, and
+        # two grid rows per package (the row key is Label|FullName, so the duplicate does
+        # not even collapse). Only an EXACT canonical match is dropped, so a genuinely
+        # distinct folder - including a subfolder or sibling of a listed root - is still
+        # scanned. A de-duped duplicate is NOT added as a skipped root: it is already being
+        # scanned, so recording it Ok=$false would fabricate an unreadable root and push
+        # crossref's honest MISSING verdicts to UNKNOWN for no reason.
+        $epKey = Get-PatchlibPathKey $ep
+        $epDup = $false
+        foreach ($rr in $roots) { if ((Get-PatchlibPathKey ([string]$rr.Path)) -eq $epKey) { $epDup = $true; break } }
+        if (-not $epDup) {
+            # 445-gate a UNC extra path the same way the work share is gated, so a dead
+            # host does not stall Test-Path (and later Get-ChildItem) for the full SMB
+            # connect/retry timeout with no cancel button in the UI.
+            $epHostOk = $true
+            if ($ep -match '^\\\\([^\\]+)') { $epHostOk = Test-PatchlibShareReachable $Matches[1] }
+            if (-not $epHostOk) { [void]$roots.Add(@{ Path=$ep; Label='Extra'; Ok=$false; Note='operator path host unreachable on 445' }) }
+            elseif (Test-Path -LiteralPath $ep) { [void]$roots.Add(@{ Path=$ep; Label='Extra'; Ok=$true; Note='operator path' }) }
+            else { [void]$roots.Add(@{ Path=$ep; Label='Extra'; Ok=$false; Note='operator path not found' }) }
+        }
     }
     return @($roots)
 }
@@ -163,6 +229,32 @@ function Get-PatchlibKbTokens {
     return ,@($out)
 }
 
+# Normalise a name for product matching: keep ASCII letters/digits only, lower-
+# case. 'Google_Chrome-124.0 (x64)' -> 'googlechrome1240x64'. The separators are
+# EXACTLY what differs between an operator's "Google Chrome" and a real package
+# folder name, so dropping them is the whole point (audit 2026-07-24). Never throws.
+function Get-PatchlibNormalizedName {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    return ([regex]::Replace([string]$Text, '[^A-Za-z0-9]+', '')).ToLowerInvariant()
+}
+
+# Split an operator-supplied product name into normalised match tokens
+# ('Google Chrome 120' -> google, chrome, 120). The split pattern is OURS, not the
+# operator's, so there is no -match/regex-injection surface here: the operator's
+# text is only ever the SUBJECT of the split and is compared with literal
+# .Contains() afterwards. Empty pieces dropped. Never throws.
+function Get-PatchlibNameTokens {
+    param([string]$Text)
+    $out = New-Object System.Collections.ArrayList
+    if ([string]::IsNullOrWhiteSpace($Text)) { return ,@() }
+    foreach ($p in ([regex]::Split([string]$Text, '[^A-Za-z0-9]+'))) {
+        $t = Get-PatchlibNormalizedName $p
+        if ($t) { [void]$out.Add($t) }
+    }
+    return ,@($out)
+}
+
 # Human-friendly byte size. Blank for a null/negative input.
 function Format-PatchlibSize {
     param($Bytes)
@@ -175,27 +267,36 @@ function Format-PatchlibSize {
     return ('{0:N2} GB' -f ($b / 1073741824))
 }
 
-# Classify one item (file or directory) -> @{ Type; KbList }.
+# Classify one item (file or directory) -> @{ Type; KbList; SizeBytes }.
 # Directory: PSADT when it holds a Deploy-Application.ps1 OR an
 # Invoke-AppDeployToolkit.ps1 (PSADT v4's entry script - parity with the
 # pkginstall v4 support; audit 2026-07-23) anywhere in the tree (recurse,
 # bounded); else Folder. File: by extension. KB ids come from the item name AND,
 # for a package folder, from any installer filename inside it. Never throws.
+# -WithSize additionally sums the folder's files during that SAME walk; SizeBytes
+# stays $null when it was not asked for or could not be measured.
 function Get-PatchlibItemInfo {
-    param($Item)
-    $info = @{ Type='Other'; KbList=@() }
+    param($Item, [switch]$WithSize)
+    $info = @{ Type='Other'; KbList=@(); SizeBytes=$null }
     $kbSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($k in (Get-PatchlibKbTokens $Item.Name)) { [void]$kbSet.Add($k) }
 
     if ($Item.PSIsContainer) {
         # audit 2026-07-23: ONE bounded walk detects the PSADT marker AND harvests
         # installer-filename KB ids (was two full recursive share walks per folder).
+        # audit 2026-07-24: the FOLDER SIZE now rides that same walk too. A separate
+        # Get-PatchlibFolderSize recursed the identical bounded tree a second time, so
+        # every folder was enumerated TWICE per inventory - double the SMB metadata
+        # round-trips on the work share for a number this walk already had in hand.
         # NOTE: -Include is silently ignored when combined with -LiteralPath on
         # PS 5.1 (it only filters with -Path), so match names/extensions inline.
         # The 200-installer cap keeps bounding a huge package; the walk stops early
-        # once the marker is found AND the cap is hit.
+        # once the marker is found AND the cap is hit - but ONLY when we are not
+        # summing sizes, since breaking mid-tree would under-report the folder size.
         $isPsadt = $false
         $harvested = 0
+        $bytes = 0L
+        $walked = $false
         try {
             foreach ($f in (Get-ChildItem -LiteralPath $Item.FullName -Recurse -Depth 4 -File -ErrorAction SilentlyContinue)) {
                 if (-not $isPsadt -and ($f.Name -eq 'Deploy-Application.ps1' -or $f.Name -eq 'Invoke-AppDeployToolkit.ps1')) { $isPsadt = $true }
@@ -203,10 +304,14 @@ function Get-PatchlibItemInfo {
                     $harvested++
                     foreach ($k in (Get-PatchlibKbTokens $f.Name)) { [void]$kbSet.Add($k) }
                 }
-                if ($isPsadt -and $harvested -ge 200) { break }
+                if ($WithSize) { try { $bytes += [long]$f.Length } catch {} }
+                if (-not $WithSize -and $isPsadt -and $harvested -ge 200) { break }
             }
-        } catch {}
+            $walked = $true
+        } catch { $walked = $false }
         if ($isPsadt) { $info.Type = 'PSADT' } else { $info.Type = 'Folder' }
+        # Unmeasurable stays $null (renders blank), matching the old helper.
+        if ($WithSize -and $walked) { $info.SizeBytes = $bytes }
     } else {
         $ext = ''
         try { $ext = ([string]$Item.Extension).ToLower() } catch {}
@@ -222,18 +327,10 @@ function Get-PatchlibItemInfo {
     return $info
 }
 
-# Total size (bytes) of a directory's files, bounded + guarded (a huge or slow
-# share folder must not hang the scan). -Depth caps the walk (matching the KB
-# scan) so a deep tree on a slow share cannot stall inventory. Returns $null when
-# it cannot be measured.
-function Get-PatchlibFolderSize {
-    param([string]$Path)
-    try {
-        $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Depth 4 -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($null -eq $sum) { return 0L }
-        return [long]$sum
-    } catch { return $null }
-}
+# (audit 2026-07-24: Get-PatchlibFolderSize is gone - its bounded recursive walk
+#  was a verbatim duplicate of the classify/KB walk, so folder size is now summed
+#  inline by Get-PatchlibItemInfo -WithSize. Same bound (-Depth 4), same guards,
+#  half the enumerations.)
 
 # Build the staged-content inventory from the resolved roots. Returns an array of
 # @{ Name; Type; KbList; Kb; SizeBytes; Size; Modified; Location; Path; Rk }.
@@ -259,9 +356,12 @@ function Get-PatchlibInventory {
         try { $entries = @(Get-ChildItem -LiteralPath $rootPath -Force -ErrorAction SilentlyContinue | Sort-Object PSIsContainer, Name) } catch { $entries = @() }
         foreach ($e in $entries) {
             try {
-                $info = Get-PatchlibItemInfo $e
+                # audit 2026-07-24: one walk per folder - classify, KB harvest and size
+                # all come back from the SAME enumeration (see Get-PatchlibItemInfo).
+                $wantSize = ($e.PSIsContainer -and -not $SkipSizes)
+                $info = Get-PatchlibItemInfo -Item $e -WithSize:$wantSize
                 $sizeBytes = $null
-                if ($e.PSIsContainer) { if (-not $SkipSizes) { $sizeBytes = Get-PatchlibFolderSize $e.FullName } }
+                if ($e.PSIsContainer) { if ($wantSize) { $sizeBytes = $info.SizeBytes } }
                 else { try { $sizeBytes = [long]$e.Length } catch { $sizeBytes = $null } }
                 $modified = ''
                 try { $modified = $e.LastWriteTime.ToString('yyyy-MM-dd HH:mm') } catch {}
@@ -446,13 +546,30 @@ function Invoke-JanetToolAction {
         $state = if ($r.Ok) { 'included' } else { 'skipped' }
         & $send @{ type='log'; level=$lvl; text="Root [$($r.Label)] $($r.Path) - $state ($($r.Note))." }
     }
+    # audit 2026-07-24: a root we could NOT read is not evidence of absence. crossref
+    # had NO skipped-root signal and none of the zero-root guarding the inventory path
+    # has, so an unreachable share (or a run with nothing reachable at all) rendered
+    # every unmatched item as a flat MISSING - "I did not look there" printed exactly
+    # like "it is not there". That is the error that gets someone to a closed network
+    # without the patch. Skipped roots now carry through to a distinct UNKNOWN verdict.
+    $okRoots      = @($roots | Where-Object { $_.Ok })
+    $skippedRoots = @($roots | Where-Object { -not $_.Ok })
+    $skipNote = ''
+    if ($skippedRoots.Count -gt 0) { $skipNote = ((@($skippedRoots | ForEach-Object { "$($_.Label): $($_.Note)" })) -join '; ') }
+    if ($okRoots.Count -eq 0) {
+        & $send @{ type='log'; level='warn'; text="NO reachable content roots ($skipNote) - NOTHING was scanned. Every needed item is reported UNKNOWN, not MISSING: this run proves nothing about what is staged. Fix the roots and re-run before trusting any coverage number." }
+    } elseif ($skippedRoots.Count -gt 0) {
+        & $send @{ type='log'; level='warn'; text="$($skippedRoots.Count) content root(s) were NOT scanned ($skipNote). Unmatched items are reported UNKNOWN rather than MISSING - they may well be staged on a root this run could not read." }
+    }
     & $send @{ type='status'; text="Cross-referencing $($needed.Count) needed item(s) against staged content..." }
     $inv = Get-PatchlibInventory -Roots $roots -Sink $send -SkipSizes
 
-    # Index: KB id -> matching item names; keep a flat name list for product substring hits.
+    # Index: KB id -> matching item names; keep a flat name list for product hits.
     $kbIndex = @{}
     $allItems = New-Object System.Collections.ArrayList
     foreach ($it in $inv) {
+        # Normalise each item name ONCE here, not once per (needed x item) pair below.
+        $it.NameNorm = Get-PatchlibNormalizedName ([string]$it.Name)
         [void]$allItems.Add($it)
         foreach ($k in $it.KbList) {
             $ku = ([string]$k).ToUpper()
@@ -462,7 +579,7 @@ function Invoke-JanetToolAction {
     }
 
     $rows = New-Object System.Collections.ArrayList
-    $onHand = 0; $idx = 0
+    $onHand = 0; $unknown = 0; $idx = 0
     foreach ($n in $needed) {
         $idx++
         $val = [string]$n.Value
@@ -486,31 +603,65 @@ function Invoke-JanetToolAction {
                 }
             }
         } else {
-            # product-name substring match (case-insensitive) against item names.
-            $needle = $val.ToLower()
-            if ($needle) {
+            # audit 2026-07-24: product names match on NORMALISED TOKENS, not a raw
+            # substring. Real package folders are named 'GoogleChrome_120.0.6099' or
+            # 'Google_Chrome-124', never 'google chrome', so the old
+            # .Contains('google chrome') test could not match ANY multi-word product -
+            # including the view's own "Google Chrome" placeholder, i.e. the advertised
+            # example always reported MISSING with the package sitting right there.
+            # Every token of the needle must appear in the item's alphanumeric-only
+            # name. Comparison is literal .Contains(), NOT -match: an operator product
+            # string is DATA and must never be evaluated as a regex.
+            # NOTE: plain assignment, NOT '@(Get-PatchlibNameTokens ...)'. These
+            # helpers return ',@(...)' so an EMPTY result survives the pipeline;
+            # wrapping that in @() again yields a 1-element array holding the array,
+            # which would compare a stringified array (and match '' -> everything).
+            $tokens = Get-PatchlibNameTokens $val
+            if ($tokens.Count -gt 0) {
                 foreach ($it in $allItems) {
-                    if (([string]$it.Name).ToLower().Contains($needle) -and (-not $hits.Contains($it.Name))) { [void]$hits.Add($it.Name) }
+                    if ($hits.Contains($it.Name)) { continue }
+                    $norm = [string]$it.NameNorm
+                    if (-not $norm) { continue }
+                    $allTok = $true
+                    foreach ($t in $tokens) { if (-not $norm.Contains($t)) { $allTok = $false; break } }
+                    if ($allTok) { [void]$hits.Add($it.Name) }
                 }
             }
         }
-        $status = if ($hits.Count -gt 0) { 'ON HAND' } else { 'MISSING' }
-        if ($hits.Count -gt 0) { $onHand++ }
+        # MISSING is only honest when EVERY root was actually scanned. With a skipped
+        # root a no-hit item is UNKNOWN - "not present in what we could read" - which
+        # the view renders amber instead of the red certainty of a complete scan
+        # (audit 2026-07-24). A HIT stays ON HAND regardless: finding it is proof.
+        $status = 'MISSING'
+        if ($hits.Count -gt 0) { $status = 'ON HAND'; $onHand++ }
+        elseif ($skippedRoots.Count -gt 0) { $status = 'UNKNOWN'; $unknown++ }
         $matchTxt = ''
         if ($hits.Count -gt 0) { $matchTxt = ((@($hits) | Select-Object -First 6) -join '; '); if ($hits.Count -gt 6) { $matchTxt += " (+$($hits.Count - 6) more)" } }
+        elseif ($status -eq 'UNKNOWN') { $matchTxt = "NOT SCANNED: $($okRoots.Count) root(s) searched, $($skippedRoots.Count) root(s) unreadable - absence is unproven" }
         $row = @{ _rk=("$idx|$kind|$val"); Needed=$val; Kind=$kind; Status=$status; Matches=$matchTxt }
         [void]$rows.Add($row); & $send (@{ type='row' } + $row)
     }
 
-    $missing = $needed.Count - $onHand
+    # UNKNOWN is its own bucket: rolling it into MISSING would overstate what we
+    # actually proved, and rolling it into coverage would understate the risk. It is
+    # excluded from both (audit 2026-07-24).
+    $missing = $needed.Count - $onHand - $unknown
     $coverage = if ($needed.Count -gt 0) { [math]::Round(($onHand / $needed.Count) * 100, 1) } else { 0 }
+    if ($unknown -gt 0) {
+        & $send @{ type='log'; level='warn'; text="$unknown of $($needed.Count) needed item(s) are UNKNOWN - $($skippedRoots.Count) content root(s) were never scanned ($skipNote), so this run CANNOT say whether they are staged. Do NOT read UNKNOWN as on hand, and do not read it as missing either: re-run with every root reachable before going to a closed network." }
+    }
     if ($missing -gt 0) {
         & $send @{ type='log'; level='warn'; text="$missing of $($needed.Count) needed item(s) are MISSING from staged content - stage these before an air-gapped push." }
-    } else {
+    } elseif ($unknown -eq 0) {
         & $send @{ type='log'; level='ok'; text="All $($needed.Count) needed item(s) are ON HAND - ready to push offline." }
     }
-    & $send @{ type='status'; text="Done. $onHand on hand, $missing missing of $($needed.Count) ($coverage% coverage)." }
-    return @{ rows=@($rows); summary=@{ needed=$needed.Count; onHand=$onHand; missing=$missing; coverage=$coverage; inventory=$inv.Count } }
+    $unkTxt = ''
+    if ($unknown -gt 0) { $unkTxt = ", $unknown UNKNOWN ($($skippedRoots.Count) root(s) not scanned)" }
+    & $send @{ type='status'; text="Done. $onHand on hand, $missing missing$unkTxt of $($needed.Count) ($coverage% coverage)." }
+    return @{ rows=@($rows); summary=@{
+        needed=$needed.Count; onHand=$onHand; missing=$missing; unknown=$unknown; coverage=$coverage; inventory=$inv.Count
+        rootsScanned=$okRoots.Count; rootsSkipped=$skippedRoots.Count
+    } }
 }
 
 Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction

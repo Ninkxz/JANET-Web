@@ -12,6 +12,14 @@
 #  v2.5.7 reachability also probes WinRM HTTPS 5986 (after HTTP 5985, before the
 #  SMB/DCOM repair fallback), auto-switching that host's session to -UseSSL.
 #
+#  v2.5.14 (audit 2026-07-24) the payload is no longer staged in world-writable
+#  C:\Temp under a predictable name: it goes into a RANDOM-named directory under
+#  %ProgramData% created with an explicit DACL (SYSTEM + BUILTIN\Administrators,
+#  inheritance broken, verified fail-closed), and every staged file must match its
+#  source by SHA256 before anything is MOTW-stripped or executed. The folder copy
+#  also moved to -LiteralPath (it was the only source op treating the operator's
+#  package path as a wildcard).
+#
 #  Contract:
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -25,7 +33,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.13'
+        version  = '2.5.14'
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -375,23 +383,41 @@ $script:RpiDeployHostScript = {
             New-PSDrive -Name $driveName -PSProvider FileSystem -Root "\\$Computer\C`$" -EA Stop | Out-Null
         }
 
-        $remoteBase = "${driveName}:\Temp"
-        if (-not (Test-Path $remoteBase)) {
-            New-Item -ItemType Directory -Force -Path $remoteBase | Out-Null
-        }
-
-        ## 3. Copy package to the target's C:\Temp\<pkg>_<stamp>\.
+        ## 3. Copy the package into a HARDENED per-run staging directory on the target.
         ## PSADT mode: copy the whole folder (Deploy-Application.ps1 needs its
         ## siblings). MSI mode with a selection: copy ONLY the selected .msi
         ## files (preserving any 1-level subdir like x64\foo.msi). MSI mode with
         ## an EMPTY selection: copy the whole bundle folder so the remote
         ## *.msi discovery fallback finds real files (install-everything).
-        $stamp            = Get-Date -Format 'yyyyMMddHHmmss'
+        ##
+        ## audit 2026-07-24 (P1 LOCAL PRIVILEGE ESCALATION): this used to stage into
+        ## C:\Temp\<pkgname>_<yyyyMMddHHmmss> - a WORLD-WRITABLE directory under a name
+        ## any non-admin on the target can predict. The staged payload is then
+        ## MOTW-stripped (Unblock-File) and executed as the DEPLOY credential, typically
+        ## a domain admin, so a local user could pre-create the directory, or swap the
+        ## PSADT entry script / an .msi between the copy and the execute, and get their
+        ## code running elevated. The same pattern was already flagged on the desktop UPR
+        ## tool - a known-real class, not a theoretical one. The fix has three parts:
+        ##   * root under %ProgramData% (admin-owned; C:\Temp grants Everyone write),
+        ##   * a per-run RANDOM (GUID-derived) directory name, so it cannot be squatted,
+        ##   * an EXPLICIT DACL applied BEFORE anything is copied in (3a), verified
+        ##     fail-closed, plus a per-file SHA256 match against the source that GATES
+        ##     the execute (3b / the MSI loop below).
+        ## The whole directory is removed in the finally, and by the driver's leak sweep
+        ## when the watchdog or an operator-cancel abandons this host.
+        $remoteBase = "${driveName}:\ProgramData"
+        if (-not (Test-Path -LiteralPath $remoteBase)) {
+            New-Item -ItemType Directory -Force -Path $remoteBase -EA Stop | Out-Null
+        }
         $safePkgName      = ($PkgName -replace '[^a-zA-Z0-9._-]','_')
         if ([string]::IsNullOrWhiteSpace($safePkgName)) { $safePkgName = 'pkg' }
-        $remoteFolderName = "${safePkgName}_$stamp"
+        # The package tag is only there so an operator cleaning a leaked directory by
+        # hand can tell them apart; the UNPREDICTABLE half is the 64-bit GUID slice.
+        # Capped at 16 chars so a deep PSADT tree still clears MAX_PATH.
+        if ($safePkgName.Length -gt 16) { $safePkgName = $safePkgName.Substring(0, 16) }
+        $remoteFolderName = "JanetPkg_${safePkgName}_$([Guid]::NewGuid().ToString('N').Substring(0, 16))"
         $remoteSharePath  = Join-Path $remoteBase $remoteFolderName
-        $remoteLocalPath  = "C:\Temp\$remoteFolderName"
+        $remoteLocalPath  = "C:\ProgramData\$remoteFolderName"
         # Publish the on-target staged path so the driver can sweep it if the
         # wall-clock watchdog or an operator-cancel abandons this host (its
         # finally cleanup below never runs in that case, leaking the copy).
@@ -400,8 +426,49 @@ $script:RpiDeployHostScript = {
         if ($PathMap) { $PathMap[$Computer] = $remoteLocalPath }
         if ($UseSslMap) { $UseSslMap[$Computer] = $useSsl }
 
+        ## 3a. Create the staging root and LOCK IT DOWN before a single byte lands in
+        ## it (audit 2026-07-24). No -Force: a collision - i.e. somebody got there
+        ## first - must FAIL this host, never silently reuse a directory we did not
+        ## create. Well-known SIDs, never group NAMES: a localized or renamed
+        ## Administrators group must not quietly yield an unprotected directory.
+        New-Item -ItemType Directory -Path $remoteSharePath -EA Stop | Out-Null
+        $sidSystem = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+        $sidAdmins = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $stageAcl = Get-Acl -LiteralPath $remoteSharePath -EA Stop
+        # $true/$false = protect the DACL AND drop the inherited ACEs rather than
+        # copying them in - %ProgramData% grants CreateFiles to Users, and that ACE is
+        # exactly what must not reach the staging tree.
+        $stageAcl.SetAccessRuleProtection($true, $false)
+        foreach ($ace in @($stageAcl.Access)) {
+            if (-not $ace.IsInherited) { $stageAcl.RemoveAccessRuleSpecific($ace) }
+        }
+        $inheritBoth = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        foreach ($sid in @($sidSystem, $sidAdmins)) {
+            $stageAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (
+                $sid,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                $inheritBoth,
+                [System.Security.AccessControl.PropagationFlags]::None,
+                [System.Security.AccessControl.AccessControlType]::Allow)))
+        }
+        Set-Acl -LiteralPath $remoteSharePath -AclObject $stageAcl -EA Stop
+        ## Fail CLOSED. If the DACL did not take (share semantics, a filter driver,
+        ## anything at all), staging an executable payload here is no safer than
+        ## C:\Temp was - refuse the host with a clear row instead of proceeding.
+        $checkAcl    = Get-Acl -LiteralPath $remoteSharePath -EA Stop
+        $allowedSids = @($sidSystem.Value, $sidAdmins.Value)
+        $strayAce    = @($checkAcl.Access | Where-Object {
+            $aceSid = 'unresolved'
+            try { $aceSid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+            $allowedSids -notcontains $aceSid
+        })
+        if ((-not $checkAcl.AreAccessRulesProtected) -or $strayAce.Count -gt 0) {
+            $r.Reason = "Staging DACL verification failed for $remoteLocalPath (inheritance-protected=$($checkAcl.AreAccessRulesProtected), non-admin ACE(s)=$($strayAce.Count)) - refusing to stage an executable payload where a non-admin may write it"
+            $r.Detail = $r.Reason
+            return $r
+        }
+
         if ($Mode -eq 'MSI' -and @($MsiList).Count -gt 0) {
-            New-Item -ItemType Directory -Force -Path $remoteSharePath -EA Stop | Out-Null
             foreach ($rel in $MsiList) {
                 $srcFile = Join-Path $PkgPath $rel
                 if (-not (Test-Path -LiteralPath $srcFile)) {
@@ -436,19 +503,51 @@ $script:RpiDeployHostScript = {
                 }
             }
         } else {
-            Copy-Item -Path $PkgPath -Destination $remoteSharePath -Recurse -Force -EA Stop
-            ## Post-copy integrity (folder path): a per-file hash over a large
-            ## PSADT tree is too costly, so compare file COUNT and total byte
-            ## SIZE of the source vs the copied tree before executing; on
-            ## mismatch fail this host instead of running a partial package.
+            ## audit 2026-07-24 (P3): -LiteralPath, not -Path. This was the module's ONLY
+            ## source operation that let PowerShell treat the operator-supplied package
+            ## path as a WILDCARD, so a package folder containing '[' or ']' silently
+            ## copied nothing (or the wrong thing) and the host then "deployed" a tree
+            ## that was never the package the operator picked.
+            ## The staging root already exists (3a, hardened), so the tree lands one
+            ## level in, at <root>\<packageFolderName>; both remote blocks below search
+            ## $destPath RECURSIVELY, so that extra level is transparent to them - and
+            ## the child inherits the root's SYSTEM+Administrators-only ACEs.
+            Copy-Item -LiteralPath $PkgPath -Destination $remoteSharePath -Recurse -Force -EA Stop
+            $pkgLeaf    = [System.IO.Path]::GetFileName($PkgPath.TrimEnd('\', '/'))
+            $copiedRoot = if ($pkgLeaf) { Join-Path $remoteSharePath $pkgLeaf } else { $remoteSharePath }
+            ## Post-copy verification (folder path). File COUNT + total byte SIZE stay as
+            ## the cheap pre-filter that catches a truncated copy over a flaky SMB link;
+            ## the per-file SHA256 comparison below is the one that GATES the execute
+            ## (audit 2026-07-24) - a count/size check is exactly what a swapped or
+            ## planted file of the same length walks straight through, and nothing is
+            ## Unblock-File'd or run until every staged byte matches its source.
             $srcFiles = @(Get-ChildItem -LiteralPath $PkgPath -Recurse -File -EA Stop)
-            $dstFiles = @(Get-ChildItem -LiteralPath $remoteSharePath -Recurse -File -EA Stop)
+            $dstFiles = @(Get-ChildItem -LiteralPath $copiedRoot -Recurse -File -EA Stop)
             $srcBytes = ($srcFiles | Measure-Object -Property Length -Sum).Sum
             $dstBytes = ($dstFiles | Measure-Object -Property Length -Sum).Sum
             if ($srcFiles.Count -ne $dstFiles.Count -or $srcBytes -ne $dstBytes) {
                 $r.Reason = "Copy verification failed: tree mismatch (source $($srcFiles.Count) file(s)/$srcBytes B, copy $($dstFiles.Count) file(s)/$dstBytes B)"
                 $r.Detail = $r.Reason
                 return $r
+            }
+            $srcRoot  = (Get-Item -LiteralPath $PkgPath -EA Stop).FullName.TrimEnd('\')
+            $dstRoot  = (Get-Item -LiteralPath $copiedRoot -EA Stop).FullName.TrimEnd('\')
+            $srcByRel = @{}
+            foreach ($sf in $srcFiles) { $srcByRel[$sf.FullName.Substring($srcRoot.Length).TrimStart('\')] = $sf.FullName }
+            foreach ($df in $dstFiles) {
+                $rel = $df.FullName.Substring($dstRoot.Length).TrimStart('\')
+                if (-not $srcByRel.ContainsKey($rel)) {
+                    $r.Reason = "Copy verification failed: staged file '$rel' has no counterpart in the source package - refusing to run a payload that does not match the source"
+                    $r.Detail = $r.Reason
+                    return $r
+                }
+                $srcHash = (Get-FileHash -LiteralPath $srcByRel[$rel] -Algorithm SHA256 -EA Stop).Hash
+                $dstHash = (Get-FileHash -LiteralPath $df.FullName -Algorithm SHA256 -EA Stop).Hash
+                if ($srcHash -ne $dstHash) {
+                    $r.Reason = "Copy verification failed: staged file SHA256 mismatch for '$rel' (source $srcHash, staged $dstHash) - refusing to run a modified payload"
+                    $r.Detail = $r.Reason
+                    return $r
+                }
             }
         }
 
@@ -727,8 +826,11 @@ $script:RpiDeployHostScript = {
         $r.Reason = $_.Exception.Message
         $r.Detail = $r.Reason
     } finally {
-        if ($remoteSharePath -and (Test-Path $remoteSharePath -EA SilentlyContinue)) {
-            Remove-Item $remoteSharePath -Recurse -Force -EA SilentlyContinue
+        # audit 2026-07-24: -LiteralPath here too - the staging root is ours and has no
+        # wildcard chars, but a wildcard-interpreting Remove-Item on a path built from
+        # operator input is not a habit worth keeping on a recursive delete.
+        if ($remoteSharePath -and (Test-Path -LiteralPath $remoteSharePath -EA SilentlyContinue)) {
+            Remove-Item -LiteralPath $remoteSharePath -Recurse -Force -EA SilentlyContinue
         }
         if ($session) { Remove-PSSession -Session $session -EA SilentlyContinue }
         Remove-PSDrive -Name $driveName -Force -EA SilentlyContinue
@@ -771,7 +873,7 @@ function Invoke-JanetToolAction {
     # server-side, BEFORE any target parsing / self-guard / fan-out: refuse unless the operator typed
     # DEPLOY (exactly). The server admin-session gate + self-guard + wrong-box + IPv4 guards remain; this
     # adds the missing typed barrier so a stray armed session can't one-click a fleet-wide install.
-    if ([string]$Params['confirm'] -ne 'DEPLOY') {
+    if ([string]$Params['confirm'] -cne 'DEPLOY') {
         & $send @{ type='log'; level='err'; text='Refused: type DEPLOY (exactly) in Confirm to arm the deploy.' }
         return @{ rows=@(); summary=@{ total=0; rejected=$true } }
     }
@@ -963,7 +1065,7 @@ function Invoke-JanetToolAction {
     # pushing 'Probing', so any host seen here has actually started executing -
     # $dispatched lets the cancel path tell in-flight hosts from still-Queued.
     $stepQueue  = [System.Collections.Concurrent.ConcurrentQueue[psobject]]::new()
-    # Thread-safe map of host -> on-target staged path ("C:\Temp\<pkg>_<stamp>"),
+    # Thread-safe map of host -> on-target staged path ("C:\ProgramData\JanetPkg_..."),
     # populated by each per-host scriptblock the moment it computes its copy
     # target. The driver consults it to sweep staged payloads left behind when
     # the watchdog or an operator-cancel abandons a host (its finally never ran).
@@ -1228,7 +1330,7 @@ function Invoke-JanetToolAction {
 
     # Best-effort staged-payload cleanup sweep. Hosts abandoned by the watchdog
     # or operator-cancel never ran their per-host finally, so the staged
-    # C:\Temp\<pkg>_<stamp> copy leaks on the target. Remove it via a bounded,
+    # C:\ProgramData\JanetPkg_<pkg>_<rand> copy leaks on the target. Remove it via a bounded,
     # short-timeout credentialed WinRM session (bounded so a still-unreachable
     # host cannot re-hang the run); any failure only logs - the leaked path is
     # already in the row detail so the operator can clean it manually.

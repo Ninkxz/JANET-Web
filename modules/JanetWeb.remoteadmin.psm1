@@ -25,6 +25,21 @@
 #  / New-PSSession / Invoke-Command / Start-RemoteAdminShare) are named functions so
 #  tests shim them (mirrors tests\Wpt.Guards.Tests.ps1 / Sysadmin.Sweeps.Tests.ps1).
 #
+#  v1.0.4 (audit 2026-07-24) makes run-script's output, targets and audit honest:
+#    - partial remote output is PRESERVED alongside the error. The result of a piped
+#      Invoke-Command is never assigned when the command throws, so a block that printed
+#      200 useful lines and then failed showed the operator nothing but the error.
+#    - a remote ERROR RECORD now fails the host without aborting the client pipeline at
+#      the first one (-ErrorAction Stop did the aborting, contradicting the adjacent
+#      comment about 2>&1 merging non-terminating errors into the captured output).
+#    - the WinRM session caps MaximumReceivedDataSizePerCommand, so one chatty host can
+#      no longer buffer unbounded output in-process before the 4000-char truncation.
+#    - the pre-run forensic audit uses the '(custom command)' sentinel that BOTH audit
+#      filter sites already recognise; '(run-script)' was unknown to them and became a
+#      phantom TouchedHosts host that inflated the HostsTouched usage count.
+#    - the target parser strips '#' comments (an advertised syntax nothing implemented:
+#      '# lab row' tokenised to the LIVE targets 'lab' and 'row').
+#
 #  Contract (server convention):
 #    Get-JanetToolManifest                                       -> descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -43,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'remoteadmin'
         name     = 'Remote Admin'
-        version  = '1.0.3'
+        version  = '1.0.4'   # audit 2026-07-24 fix pass (partial output preserved, recognised audit sentinel, receive cap, '#' comment strip); RemoteAdmin.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Operations'
         summary  = 'Two operator hands-on-keyboard capabilities. Open C$: launch \\<computer>\C$ in Explorer on your own session by computer name (strict name validation, audited; needs no admin session). Run Script: fan an operator-authored PowerShell block to one or many hosts over WinRM - arbitrary remote code, so it is destructive and rides the admin-session gate, mirrors the WPT Custom Command SHA256 forensic audit, and self-guards the JANET dispatcher host out of every run.'
         actions  = @(
@@ -69,7 +84,10 @@ function Get-JanetToolManifest {
                     @{ name='targets'; label='Targets (one host per line)'; type='hostlist'; required=$true },
                     @{ name='script'; label='PowerShell script block'; type='textarea'; required=$true },
                     @{ name='threads'; label='Parallel hosts (1-32)'; type='int'; required=$false; default=8 },
-                    @{ name='timeoutSeconds'; label='Per-host timeout (seconds, 15-900)'; type='int'; required=$false; default=120 }
+                    @{ name='timeoutSeconds'; label='Per-host timeout (seconds, 15-900)'; type='int'; required=$false; default=120 },
+                    # audit 2026-07-24 (S2): typed barrier, enforced server-side. Declared so the
+                    # contract is visible; the custom view supplies it from its ArmingDialog.
+                    @{ name='confirm'; label='Type RUN to arm'; type='text'; required=$true }
                 )
             }
         )
@@ -116,7 +134,17 @@ function Get-RemoteAdminTargets {
     # TWICE on the same physical host (double side effects on a run-arbitrary-script tool). A
     # HashSet(OrdinalIgnoreCase) keeps only the first occurrence and preserves order. (loop23 P3)
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    return @(([string]$Raw) -split '[\r\n,;\t ]+' |
+    # audit 2026-07-24 (P3): strip '#'-to-end-of-line BEFORE tokenising. A comment syntax
+    # was advertised that nothing implemented, so '# lab row' split into '#' (dropped by
+    # the name validation) plus 'lab' and 'row' - two perfectly legal hostnames that
+    # became LIVE targets for an arbitrary script block. '#' can never appear in a legal
+    # computer name, so discarding the rest of the line is unambiguous. NOTE the custom
+    # view no longer advertises the syntax either: the SHARED client-side host parser
+    # (shell.js, not this tool's to change) splits a comment into tokens before the raw
+    # text ever reaches here, so only a raw-text caller (direct API post) delivers an
+    # intact comment for this to strip - defence in depth on the arbitrary-RCE tool.
+    $noComments = ([string]$Raw) -replace '(?m)#.*$', ''
+    return @($noComments -split '[\r\n,;\t ]+' |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ -and (Test-RemoteAdminComputerName -Name $_) -and $seen.Add($_) })
 }
@@ -260,7 +288,14 @@ $script:RemoteAdminScriptBlock = {
     # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is
     # common on AFNET, so skip CA/CN validation - the transport stays encrypted).
     $opTimeout = [Math]::Max(15000, $TimeoutSeconds * 1000)
-    $soP = @{ OperationTimeout = $opTimeout; OpenTimeout = 15000; CancelTimeout = 5000; IdleTimeout = 60000 }
+    # audit 2026-07-24 (P3): MaximumReceivedDataSizePerCommand caps what THIS process will
+    # accept from one host in a single command. Without it a chatty (or hostile) remote
+    # block streamed unbounded output into the dispatcher's memory and only got trimmed
+    # AFTER the fact by Get-RemoteAdminTruncatedOutput's 4000-char cap - N threads of that
+    # is a dispatcher-wide memory problem. 10 MB is orders of magnitude above any sane
+    # script's output, and a host that blows through it fails visibly with whatever it had
+    # already sent preserved (see the incremental capture below).
+    $soP = @{ OperationTimeout = $opTimeout; OpenTimeout = 15000; CancelTimeout = 5000; IdleTimeout = 60000; MaximumReceivedDataSizePerCommand = 10485760 }
     if ($useSsl) { $soP['SkipCACheck'] = $true; $soP['SkipCNCheck'] = $true }
     $wsOpt = New-PSSessionOption @soP
     $splat = @{ ComputerName = $Computer; SessionOption = $wsOpt; ErrorAction = 'Stop' }
@@ -293,19 +328,45 @@ $script:RemoteAdminScriptBlock = {
         return $r
     }
 
+    # audit 2026-07-24 (P2): capture the remote output INCREMENTALLY into a list instead of
+    # assigning the pipeline's result. `$raw = Invoke-Command ... | Out-String` never
+    # assigns when the command throws, so everything the block had already printed was
+    # DISCARDED - a script that emitted 200 useful lines and then failed showed the
+    # operator only the error message. Each object is banked as it arrives, and the
+    # finally block publishes what arrived on BOTH the success and the failure path.
+    $collected = New-Object System.Collections.ArrayList
     try {
         # Recreate the operator block INSIDE the worker (scriptblocks don't cross
         # runspace boundaries cleanly; the text does). Already parse-validated up
         # front in the dispatcher. 2>&1 merges the error stream into the captured
-        # output so a non-terminating remote error still shows; a TERMINATING error
-        # throws to the catch below and marks the host Failed.
+        # output so a non-terminating remote error still shows - which is what the
+        # old -ErrorAction Stop broke: it turned the FIRST forwarded remote error into
+        # a client-side terminating error, killing the rest of the run and the output
+        # with it. -ErrorAction Continue lets the block finish and keeps every stream;
+        # the host is still marked Failed below whenever an error record came back, so
+        # nothing is silently downgraded to Success. A LOCAL failure (dead session,
+        # receive cap blown) still throws to the catch.
         $sb = [scriptblock]::Create($ScriptText)
-        $raw = Invoke-Command -Session $sess -ScriptBlock $sb -ErrorAction Stop 2>&1 | Out-String
-        $r.Output = Get-RemoteAdminTruncatedOutput -Text $raw -Max $MaxOutput
-        $r.Status = 'Success'
+        Invoke-Command -Session $sess -ScriptBlock $sb -ErrorAction Continue 2>&1 |
+            ForEach-Object { [void]$collected.Add($_) }
+        # Honest status: any error record in the merged stream fails the host, with the
+        # first message surfaced in Error (the full text stays in Output).
+        $errRecs = @($collected | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+        if ($errRecs.Count -gt 0) {
+            $r.Status = 'Failed'
+            $r.Error  = if ($errRecs.Count -eq 1) { [string]$errRecs[0].Exception.Message }
+                        else { "$($errRecs.Count) remote errors; first: $([string]$errRecs[0].Exception.Message)" }
+        } else {
+            $r.Status = 'Success'
+        }
     } catch {
         $r.Status = 'Failed'; $r.Error = $_.Exception.Message
-    } finally { if ($sess) { try { Remove-PSSession $sess -ErrorAction SilentlyContinue } catch {} } }
+    } finally {
+        if ($collected.Count -gt 0) {
+            $r.Output = Get-RemoteAdminTruncatedOutput -Text (($collected | Out-String)) -Max $MaxOutput
+        }
+        if ($sess) { try { Remove-PSSession $sess -ErrorAction SilentlyContinue } catch {} }
+    }
 
     return $r
 }
@@ -365,6 +426,23 @@ function Invoke-JanetToolAction {
     }
 
     # ---- run-script ----
+    # audit 2026-07-24 (S2): server-side typed barrier, BEFORE parse / target resolution /
+    # fan-out. When the client gate turned out to be inert (ctx.confirm silently dropped
+    # confirmWord) there was NO barrier left at all on fleet-wide arbitrary RCE.
+    #
+    # CORRECTION (fable re-audit F2): the original comment here claimed run-script was "the
+    # only destructive fleet writer in the suite with no server-side confirm word". That was
+    # FALSE - wpt's app-update-apply with the 'Custom Command' profile is equivalent-severity
+    # arbitrary remote PowerShell and had no server-side word either. It was given one in the
+    # same pass (JanetWeb.wpt.psm1, 'Custom Command' branch).
+    #
+    # -cne, not -ne: the operator-facing text says "exactly", and a case-insensitive compare
+    # accepted 'run' (proven by probe). Fail closed and mean what the message says.
+    if ([string]$Params['confirm'] -cne 'RUN') {
+        & $send @{ type='log'; level='err'; text='Refused: type RUN (exactly, uppercase) in Confirm to arm the script run.' }
+        return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+    }
+
     # Parse the operator block up front so a syntax error fails fast with a clean
     # message and never fans out (mirrors WPT Custom Command).
     $scriptText = [string]$Params['script']
@@ -416,7 +494,13 @@ function Invoke-JanetToolAction {
     $scriptLogText = if ($scriptFlat.Length -gt 500) { $scriptFlat.Substring(0, 500) + '... (truncated)' } else { $scriptFlat }
     $scriptAuditTag = " | script sha256:$scriptHash"
     & $send @{ type='log'; level='warn'; text="Run Script (sha256:$scriptHash) fanning out to $($targets.Count) host(s) ($authLabel): $scriptLogText" }
-    & $send @{ type='audit'; action='TouchHost'; target='(run-script)'; result='Skipped'; itemCount=0; detail="Run Script queued for $($targets.Count) host(s) (pre-run forensic record; per-host audits carry the real result); sha256:$scriptHash; body: $scriptLogText" }
+    # audit 2026-07-24 (P3): the sentinel MUST be one the two audit filter sites recognise -
+    # the TouchedHosts writer (server) and the usage host-count tally (logging bridge) both
+    # skip only 'N/A' and '(custom command)'. '(run-script)' sailed past both, so this
+    # forensic record wrote a per-host attribution row for a machine that does not exist and
+    # inflated the operator's HostsTouched by one on every run. '(custom command)' is also
+    # what the WPT Custom Command record this mirrors already emits.
+    & $send @{ type='audit'; action='TouchHost'; target='(custom command)'; result='Skipped'; itemCount=0; detail="Run Script queued for $($targets.Count) host(s) (pre-run forensic record; per-host audits carry the real result); sha256:$scriptHash; body: $scriptLogText" }
 
     & $send @{ type='status'; text="Run Script on $($targets.Count) host(s) with $threads thread(s)..." }
 

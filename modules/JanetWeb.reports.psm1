@@ -10,6 +10,23 @@
 #  credential is required (LDAP ADSI binds with the calling thread identity;
 #  WMI probes use the same identity).
 #
+#  v2.15.2 (audit 2026-07-25, fable re-audit follow-up): squadron-rollup records
+#  every unreadable log-share path in an error bag and returns readErrors/readFailed
+#  (a denied directory silently contributed ZERO rows, so "could not read" rendered
+#  as "no activity"); its usage pass globs '<month>_usage*.csv' so header-rotation
+#  sister files (<base>.r<unix>.csv) are no longer invisible; acas-ping-hosts records
+#  a 'cancelled' sentinel on the cancel sweep so a previously-confirmed-offline host
+#  cannot stay in the Offline export while the grid shows '?'; sla-aging / command-
+#  brief skip Patched on the exact literal like host-summary does (was -match).
+#
+#  v2.15.1 (audit 2026-07-24): acas-host-summary classifies each finding into
+#  exactly ONE bucket (Patched / NOT OUR PATCH / Open) so a Patched+NOT-OUR-PATCH
+#  finding can no longer drive Open negative or overstate PatchRate; acas-ping-hosts
+#  records never-probed hosts as Timeout (truthy sentinel) instead of confirmed
+#  offline; weekly-export-csv's single-week write gets the TCP-445 pre-gate its
+#  siblings already have; iavm-board splits a multi-bulletin IAVA cell before
+#  grouping so a finding counts under EVERY bulletin it maps to.
+#
 #  Contract:
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
@@ -21,7 +38,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.15.0'
+        version  = '2.15.2'
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -3850,7 +3867,7 @@ $more
 </div>
 <table class="grid"><thead><tr><th>Level</th><th>Operator / Squadron</th><th>Actions</th><th>Hosts</th><th>Vulns</th><th>Last Active</th></tr></thead><tbody>
 $($sqRows.ToString())</tbody></table>
-<div class="src">Window: $(ConvertTo-HtmlEscaped $sq.Months)$(if (-not $sq.SquadronResolved) { ' - operator-level only (no AD squadron classification)' } else { '' })</div>
+<div class="src">Window: $(ConvertTo-HtmlEscaped $sq.Months)$(if (-not $sq.SquadronResolved) { ' - operator-level only (no AD squadron classification)' } else { '' })$(if ($sq.ReadFailed) { " - INCOMPLETE: $([int]$sq.ReadErrors) log-share path(s) could not be read, so absent operators/hosts are UNKNOWN, not idle (audit 2026-07-25)" } else { '' })</div>
 "@
     } else { & $noteHtml $sq.Note }
 
@@ -4794,7 +4811,16 @@ function Invoke-JanetToolAction {
             $bytes = [System.Text.Encoding]::UTF8.GetByteCount($csv)
             $written = ''; $writeErr = $null
             if ($outPath) {
-                try { [System.IO.File]::WriteAllText($outPath, $csv, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                # audit 2026-07-24: TCP-445 pre-gate, same idiom as the AllWeeks branch above
+                # and cora-render-html. This single-week write was the LAST operator-supplied
+                # output write in the module with no gate, so a dead UNC path blocked the
+                # whole serialized reports runspace on the SMB timeout instead of failing fast.
+                if (Test-JanetUncReachable -Path $outPath) {
+                    try { [System.IO.File]::WriteAllText($outPath, $csv, [System.Text.UTF8Encoding]::new($true)); $written = $outPath } catch { $writeErr = $_.Exception.Message; & $send @{ type='log'; level='err'; text="Write failed: $writeErr" } }
+                } else {
+                    $writeErr = 'output share unreachable (ping/TCP-445 failed)'
+                    & $send @{ type='log'; level='err'; text="Output share unreachable (ping/TCP-445 failed): $outPath" }
+                }
                 if ($written) { & $send @{ type='audit'; action='TouchHost'; target=(Split-Path -Leaf $outPath); result='Success'; itemCount=1; detail="Weekly CSV written for $($week.Enclave) $($week.DateRange) ($bytes bytes)" } }
                 else { & $send @{ type='audit'; action='TouchHost'; target=$outPath; result='Failure'; itemCount=0; detail="weekly CSV write failed: $writeErr" } }
             }
@@ -5372,8 +5398,17 @@ function Invoke-JanetToolAction {
             $findingsWithIava = 0; $findingsNoIava = 0
             foreach ($f in $script:AcasFindings) {
                 if ($f.Status -eq 'Patched') { continue }
-                $iava = ([string]$f.IAVA).Trim()
-                if ([string]::IsNullOrWhiteSpace($iava)) { $findingsNoIava++; continue }
+                $iavaRaw = ([string]$f.IAVA).Trim()
+                if ([string]::IsNullOrWhiteSpace($iavaRaw)) { $findingsNoIava++; continue }
+                # audit 2026-07-24 (BUG): the IAVA cell is MULTI-VALUE - Get-ReportsIavmTags
+                # joins every bulletin a finding's CVEs map to with ', ' (:883). Grouping on
+                # the raw cell therefore minted a PHANTOM compound bucket named e.g.
+                # "2021-A-0573, 2022-A-0221", and the finding was counted under NEITHER real
+                # bulletin - exactly the rows an inspector grades. Split first so the finding
+                # contributes to BOTH. findingsWithIava still counts FINDINGS (not bulletin
+                # memberships) so the with/no-IAVA pair still sums to the open set.
+                $iavas = @($iavaRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                if ($iavas.Count -eq 0) { $findingsNoIava++; continue }
                 $findingsWithIava++
                 # audit 2026-07-23: host tallies (count-only here - no display list) key on
                 # the normalized audit key so short+FQDN of one host counts once, agreeing
@@ -5381,27 +5416,30 @@ function Invoke-JanetToolAction {
                 $hn = Get-ReportsAuditHostKey ([string]$f.Hostname)
                 $sev = [string]$f.Severity
                 $isKev = [bool]$f.InKEV
-                if (-not $iavaMap.ContainsKey($iava)) {
-                    $entry = @{ IAVA = $iava; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false }
-                    $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                    $entry.Cves = New-Object System.Collections.ArrayList
-                    $entry.CveSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                    $entry.Plugins = New-Object System.Collections.ArrayList
-                    $entry.PluginSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                    $iavaMap[$iava] = $entry
-                }
-                $e = $iavaMap[$iava]
-                $e.Findings = [int]$e.Findings + 1
-                if ($hn) { [void]$e.Hosts.Add($hn); [void]$allHosts.Add($hn) }
-                if ($isKev) { $e.Kev = $true }
                 $rank = if ($sevRank.ContainsKey($sev)) { $sevRank[$sev] } else { 0 }
-                if ($rank -gt $e.MaxSev) { $e.MaxSev = $rank; $e.SevName = $sev }
-                foreach ($mm in [regex]::Matches([string]$f.CVE, '(?i)CVE-\d{4}-\d{4,}')) {
-                    $cve = $mm.Value.ToUpper()
-                    if ($e.CveSeen.Add($cve)) { [void]$e.Cves.Add($cve) }
+                if ($hn) { [void]$allHosts.Add($hn) }
+                foreach ($iava in $iavas) {
+                    if (-not $iavaMap.ContainsKey($iava)) {
+                        $entry = @{ IAVA = $iava; Findings = 0; MaxSev = 0; SevName = ''; Kev = $false }
+                        $entry.Hosts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                        $entry.Cves = New-Object System.Collections.ArrayList
+                        $entry.CveSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                        $entry.Plugins = New-Object System.Collections.ArrayList
+                        $entry.PluginSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                        $iavaMap[$iava] = $entry
+                    }
+                    $e = $iavaMap[$iava]
+                    $e.Findings = [int]$e.Findings + 1
+                    if ($hn) { [void]$e.Hosts.Add($hn) }
+                    if ($isKev) { $e.Kev = $true }
+                    if ($rank -gt $e.MaxSev) { $e.MaxSev = $rank; $e.SevName = $sev }
+                    foreach ($mm in [regex]::Matches([string]$f.CVE, '(?i)CVE-\d{4}-\d{4,}')) {
+                        $cve = $mm.Value.ToUpper()
+                        if ($e.CveSeen.Add($cve)) { [void]$e.Cves.Add($cve) }
+                    }
+                    $plg = [string]$f.PluginID
+                    if ($plg -and $e.PluginSeen.Add($plg)) { [void]$e.Plugins.Add($plg) }
                 }
-                $plg = [string]$f.PluginID
-                if ($plg -and $e.PluginSeen.Add($plg)) { [void]$e.Plugins.Add($plg) }
             }
             # Rank: KEV first, then most hosts, then worst severity (same order as kb-needed).
             $ordered = @($iavaMap.Values | Sort-Object -Property `
@@ -6151,8 +6189,8 @@ function Invoke-JanetToolAction {
         'acas-host-summary' {
             # Per-host dashboard tallies over the loaded findings - the exact
             # single-pass walk of desktop Refresh-Dashboard (3443-3463) plus the
-            # grid math at 3494-3499. PatchRate denominator = Patched + Open
-            # (= Total - NotOurs); N/A when a host has no actionable findings.
+            # grid math at 3494-3499. PatchRate denominator = Patched + Open (the
+            # actionable set); N/A when a host has no actionable findings.
             if ($script:AcasFindings.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text='No ACAS findings loaded. Parse an ACAS file first.' }
                 return @{ rows=@(); summary=@{ total=0 } }
@@ -6166,7 +6204,7 @@ function Invoke-JanetToolAction {
                 # Rows display the normalized key, matching sla-aging / CORA.
                 $h = Get-ReportsAuditHostKey ([string]$f.Hostname)
                 if (-not $perHost.ContainsKey($h)) {
-                    $perHost[$h] = @{ Total=0; Critical=0; High=0; Medium=0; Low=0; Info=0; Patched=0; NotOurs=0; Kev=0 }
+                    $perHost[$h] = @{ Total=0; Critical=0; High=0; Medium=0; Low=0; Info=0; Patched=0; NotOurs=0; Open=0; Kev=0 }
                 }
                 $t = $perHost[$h]
                 $t.Total++
@@ -6177,8 +6215,20 @@ function Invoke-JanetToolAction {
                     'Low'      { $t.Low++ }
                     'Info'     { $t.Info++ }
                 }
+                # audit 2026-07-24 (BUG): these two tests were separate `if`s and are NOT
+                # mutually exclusive - acas-apply-remediated (:5937) flips a finding to
+                # Patched WITHOUT inspecting Category, so one finding could be Patched AND
+                # NOT OUR PATCH and tally in BOTH buckets. The arithmetic below assumed the
+                # buckets partition the set, so Total-Patched-NotOurs went NEGATIVE and the
+                # PatchRate denominator was understated (rate overstated). Classify into
+                # exactly ONE bucket, Patched winning over NOT OUR PATCH - the same
+                # precedence sla-aging uses when it skips (:6250-6254), and Open matches the
+                # Open export view (:6437), which excludes a finding that is either. The
+                # NOT-OUR-PATCH test also checks Status now, like both siblings (acas-mark-
+                # status writes the triage verdict to Status, not Category).
                 if ($f.Status -eq 'Patched') { $t.Patched++ }
-                if ($f.Category -eq 'NOT OUR PATCH') { $t.NotOurs++ }
+                elseif ($f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH') { $t.NotOurs++ }
+                else { $t.Open++ }
                 if ($f.InKEV) { $t.Kev++ }
             }
             $rows = New-Object System.Collections.ArrayList
@@ -6187,8 +6237,10 @@ function Invoke-JanetToolAction {
                 $i++
                 $t = $perHost[$h]
                 if ($t.Kev -gt 0) { $kevHosts++ }
-                $hOpen = $t.Total - $t.Patched - $t.NotOurs
-                $act = $t.Total - $t.NotOurs   # = Patched + Open
+                # audit 2026-07-24: both figures now come FROM the counters instead of being
+                # subtracted out of Total, so neither can drift when the buckets overlap.
+                $hOpen = $t.Open
+                $act = $t.Patched + $t.Open    # actionable denominator (excludes NOT OUR PATCH)
                 $pr = if ($act -gt 0) { "$([Math]::Round(($t.Patched / $act) * 100, 0))%" } else { 'N/A' }
                 $row = @{
                     Host=$h; TotalVulns=$t.Total
@@ -6247,7 +6299,11 @@ function Invoke-JanetToolAction {
             foreach ($f in $script:AcasFindings) {
                 $i++
                 if (($i % 200) -eq 0) { & $send @{ type='progress'; done=$i; total=$total } }
-                if ($f.Status -match 'Patched') { $cPatchedSkipped++; continue }   # Patched = remediated, out of scope
+                # audit 2026-07-25 (fable re-audit follow-up): -eq, not -match. host-summary
+                # partitions on the exact literal (:6220) while this skipped on a SUBSTRING,
+                # so an externally-produced save file carrying e.g. 'Unpatched' bucketed as
+                # actionable-Open there and silently vanished from the SLA board here.
+                if ($f.Status -eq 'Patched') { $cPatchedSkipped++; continue }   # Patched = remediated, out of scope
                 # NOT OUR PATCH = vendor/EOL findings the shop triaged as not theirs;
                 # keep them out of the actionable OVERDUE set (matches the Open export
                 # view and the CORA / remediation actionable-set convention).
@@ -6753,7 +6809,7 @@ function Invoke-JanetToolAction {
             $pool = $null
             $jobs = New-Object System.Collections.ArrayList
             $rows = New-Object System.Collections.ArrayList
-            $done = 0; $online = 0; $offline = 0; $unresolved = 0; $cancelledCount = 0
+            $done = 0; $online = 0; $offline = 0; $unresolved = 0; $timedOut = 0; $cancelledCount = 0
             $jobTimeout = [TimeSpan]::FromMilliseconds($timeoutMs + 20000)
             try {
                 $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $threads, $iss, $Host)
@@ -6783,6 +6839,8 @@ function Invoke-JanetToolAction {
                             # NOT the same as a resolved-but-powered-off host. Store the
                             # confirmed-offline hosts as $false, unresolved as 'unresolved'
                             # (truthy sentinel) so the Offline export (== $false) skips them.
+                            # audit 2026-07-24: a NEVER-PROBED host (stall reaper / deadline
+                            # sweep below) is a third non-confirmed case - 'timeout'.
                             if ($res -and $res.Online) {
                                 $online++; $script:AcasHostOnline[[string]$j.Host] = $true; $pStatus = 'Online'
                             } elseif ($res -and $res.ResolveOk) {
@@ -6795,12 +6853,18 @@ function Invoke-JanetToolAction {
                             $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                         }
                         elseif ($j.PS -and $j.Async -and (((Get-Date) - $j.Started) -gt $jobTimeout)) {
+                            # Stalled RUNNING job: reaped before it answered. audit 2026-07-24
+                            # (BUG): this recorded $false = CONFIRMED offline, so a host we
+                            # NEVER got a probe result for landed in the "Offline (host down)"
+                            # export. Honour the tri-state contract above - a 'timeout' sentinel
+                            # is truthy, so the Offline export (== $false) skips it - and tally
+                            # it separately, mirroring resolve-target-ips (:6672).
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}
                             $j.PS = $null; $running--
-                            $script:AcasHostOnline[[string]$j.Host] = $false
-                            $row = @{ Host=$j.Host; Online='Offline' }
+                            $script:AcasHostOnline[[string]$j.Host] = 'timeout'
+                            $row = @{ Host=$j.Host; Online='Timeout' }
                             [void]$rows.Add($row); & $send (@{ type='row' } + $row)
-                            $offline++; $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                            $timedOut++; $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                         }
                     }
                     if ($done -lt $jobs.Count -and (& $cancelCheck)) {
@@ -6808,6 +6872,14 @@ function Invoke-JanetToolAction {
                             if ($j.PS) {
                                 if ($j.Async) { try { [void]$j.PS.BeginStop($null, $null) } catch {} } else { try { $j.PS.Dispose() } catch {} }
                                 $j.PS = $null; $cancelledCount++
+                                # audit 2026-07-25 (fable re-audit follow-up): the cancel sweep
+                                # emitted '?' to the grid but left the server-side map holding
+                                # whatever a PREVIOUS ping wrote, so a host confirmed $false last
+                                # run stayed in the "Offline (host down)" export (:6487) while the
+                                # grid showed '?' - the same grid-vs-CSV disagreement the tri-state
+                                # closed for Unresolved/Timeout. 'cancelled' is truthy, so the
+                                # ==$false export skips it: cancelled is NOT confirmed-offline.
+                                $script:AcasHostOnline[[string]$j.Host] = 'cancelled'
                                 $row = @{ Host=$j.Host; Online='?' }
                                 [void]$rows.Add($row); & $send (@{ type='row' } + $row)
                                 $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
@@ -6821,13 +6893,15 @@ function Invoke-JanetToolAction {
                             if ($j.PS) {
                                 if ($j.Async) { try { [void]$j.PS.BeginStop($null, $null) } catch {} } else { try { $j.PS.Dispose() } catch {} }
                                 $j.PS = $null
-                                $script:AcasHostOnline[[string]$j.Host] = $false
-                                $row = @{ Host=$j.Host; Online='Offline' }
+                                # audit 2026-07-24: same never-probed case as the stall reaper -
+                                # the deadline sweep must NOT claim these hosts are down.
+                                $script:AcasHostOnline[[string]$j.Host] = 'timeout'
+                                $row = @{ Host=$j.Host; Online='Timeout' }
                                 [void]$rows.Add($row); & $send (@{ type='row' } + $row)
-                                $offline++; $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                                $timedOut++; $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                             }
                         }
-                        & $send @{ type='log'; level='warn'; text='Ping deadline exceeded; remaining host(s) marked Offline.' }
+                        & $send @{ type='log'; level='warn'; text='Ping deadline exceeded; remaining host(s) marked Timeout (never probed - NOT counted as offline).' }
                         break
                     }
                     if ($done -lt $jobs.Count) { Start-Sleep -Milliseconds 120 }
@@ -6836,9 +6910,9 @@ function Invoke-JanetToolAction {
                 foreach ($j in $jobs) { if ($j.PS) { try { $j.PS.Dispose() } catch {} } }
                 if ($pool) { try { $pool.Close(); $pool.Dispose() } catch {} }
             }
-            & $send @{ type='audit'; action='TouchHost'; target="ACAS ping hosts ($($jobs.Count))"; result=$(if ($cancelledCount -gt 0) { 'Failure' } else { 'Success' }); itemCount=$online; detail="online $online, offline $offline, unresolved $unresolved, cancelled $cancelledCount" }
-            & $send @{ type='status'; text="Ping done. Online $online, offline $offline$(if ($unresolved) { ", unresolved $unresolved" })$(if ($cancelledCount) { ", cancelled $cancelledCount" }) of $($jobs.Count)." }
-            return @{ rows=@(); summary=@{ total=$jobs.Count; online=$online; offline=$offline; unresolved=$unresolved; cancelled=$cancelledCount } }
+            & $send @{ type='audit'; action='TouchHost'; target="ACAS ping hosts ($($jobs.Count))"; result=$(if ($cancelledCount -gt 0) { 'Failure' } else { 'Success' }); itemCount=$online; detail="online $online, offline $offline, unresolved $unresolved, timeout $timedOut, cancelled $cancelledCount" }
+            & $send @{ type='status'; text="Ping done. Online $online, offline $offline$(if ($unresolved) { ", unresolved $unresolved" })$(if ($timedOut) { ", timeout $timedOut" })$(if ($cancelledCount) { ", cancelled $cancelledCount" }) of $($jobs.Count)." }
+            return @{ rows=@(); summary=@{ total=$jobs.Count; online=$online; offline=$offline; unresolved=$unresolved; timedOut=$timedOut; cancelled=$cancelledCount } }
         }
 
         # -------------------------------------------------------------------
@@ -6878,6 +6952,25 @@ function Invoke-JanetToolAction {
             $hostTally  = @{}        # HOST(UPPER)     -> @{Actions;TouchOK;TouchFail;Vulns;LastActive} for the squadron fold
             $filesRead  = 0
 
+            # audit 2026-07-25 (fable re-audit follow-up): every walk below used to be
+            # `-ErrorAction SilentlyContinue` inside a BARE `catch {}`, so a denied or
+            # vanished directory contributed ZERO rows and said nothing - "could not read
+            # the share" rendered as "nobody did any work". Record each failing path here
+            # and carry readErrors/readFailed out in the summary, the same error-bag
+            # contract JanetWeb.history.psm1 adopted, so neither the grid nor the Command
+            # Brief can present a confident empty rollup over a tree we never walked.
+            # (Keys are Errors/Messages, NOT 'Count' - a hashtable's real .Count property
+            # would shadow that key.)
+            $readBag = @{ Errors = 0; Messages = (New-Object System.Collections.ArrayList) }
+            $addReadErr = {
+                param([string]$Path, $Err)
+                $readBag.Errors++
+                if ($readBag.Messages.Count -lt 25) {
+                    $m = if ($Err) { [string]$Err.Exception.Message } else { 'not readable' }
+                    [void]$readBag.Messages.Add(("{0} ({1})" -f $Path, $m))
+                }
+            }
+
             # ---- Pass A: the monthly usage rollup at the share root -------------------
             # SessionEnd + aggregate rows (Tool=JANET-WEB, or the TWO-era JANET-TWO on
             # historical rows): seeds operators (incl. those
@@ -6885,12 +6978,35 @@ function Invoke-JanetToolAction {
             # and their session ids + last-active. One small file per month.
             foreach ($m in $months) {
                 if (& $cancelCheck) { break }
-                $usagePath = Join-Path $root ($m + '_usage.csv')
-                if (-not (Test-Path -LiteralPath $usagePath -ErrorAction SilentlyContinue)) { continue }
-                & $send @{ type='status'; text="Reading usage rollup $m ..." }
+                # audit 2026-07-25 (fable re-audit follow-up): glob '<m>_usage*.csv', not the
+                # exact name. When the live rollup is locked, Invoke-JanetWebHeaderEnsure
+                # redirects rows to a sister '<base>.r<unix>.csv' (server\JanetWeb.Logging.ps1
+                # :423), so an exact-name read made whole live web sessions invisible to this
+                # pass. history.psm1 already globs this way; '*.legacy_*' rotations stay
+                # excluded (stale schema - the replay path skips them the same way).
+                $usageFiles = @()
+                try {
+                    $usageFiles = @(Get-ChildItem -LiteralPath $root -Filter ($m + '_usage*.csv') -File -ErrorAction Stop |
+                        Where-Object { $_.Name -notlike '*.legacy_*' })
+                } catch {
+                    & $send @{ type='log'; level='warn'; text="Could not list the usage rollup for ${m}: $($_.Exception.Message)" }
+                    & $addReadErr $root $_
+                }
+                foreach ($uf in $usageFiles) {
+                if (& $cancelCheck) { break }
+                $usagePath = $uf.FullName
+                & $send @{ type='status'; text="Reading usage rollup $($uf.Name) ..." }
                 try {
                     Import-Csv -LiteralPath $usagePath -ErrorAction Stop | ForEach-Object {
-                        if ([string]$_.RowType -ne 'SessionEnd') { return }
+                        # audit 2026-07-24 (S4): accept Snapshot as well as SessionEnd. Snapshot
+                        # rows are the LIVE cumulative rollup, so a still-running or killed
+                        # session used to be invisible here. The aggregate-row filter below is
+                        # what scopes this pass to JANET Web (desktop tools share the per-tool
+                        # names but never write 'JANET-WEB'), and Write-JanetWebUsageSnapshot now
+                        # emits that aggregate row too. $op.Sessions is a HashSet, so the ~5-min
+                        # cumulative re-emission adds each SessionId exactly once.
+                        $rowType = [string]$_.RowType
+                        if ($rowType -ne 'SessionEnd' -and $rowType -ne 'Snapshot') { return }
                         if ('JANET-WEB','JANET-TWO' -notcontains [string]$_.Tool) { return }
                         $opName = [string]$_.Operator
                         if ([string]::IsNullOrWhiteSpace($opName)) { return }
@@ -6903,20 +7019,27 @@ function Invoke-JanetToolAction {
                     }
                     $filesRead++
                 } catch {
-                    & $send @{ type='log'; level='warn'; text="Skipped unreadable usage rollup ${m}: $($_.Exception.Message)" }
+                    & $send @{ type='log'; level='warn'; text="Skipped unreadable usage rollup $($uf.Name): $($_.Exception.Message)" }
+                    & $addReadErr $usagePath $_
+                }
                 }
             }
 
             # ---- Pass B: per-tool detail CSVs (the per-action truth) ------------------
             # Logs\<Tool>\<userFolder>\<YYYY-MM>_detail.csv. Streamed via Import-Csv |
             # ForEach so only one row is in memory at a time; capped at $maxRows.
+            # audit 2026-07-25 (fable re-audit follow-up): -ErrorAction Stop + a RECORDING
+            # catch on all three walks (see $addReadErr above) - a denied tool/user folder
+            # must not read as an idle one.
             $toolDirs = @()
-            try { $toolDirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) } catch {}
+            try { $toolDirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop) }
+            catch { & $send @{ type='log'; level='warn'; text="Could not list the log share root ${root}: $($_.Exception.Message)" }; & $addReadErr $root $_ }
             foreach ($td in $toolDirs) {
                 if ($capped -or (& $cancelCheck)) { break }
                 $toolName = $td.Name
                 $userDirs = @()
-                try { $userDirs = @(Get-ChildItem -LiteralPath $td.FullName -Directory -ErrorAction SilentlyContinue) } catch {}
+                try { $userDirs = @(Get-ChildItem -LiteralPath $td.FullName -Directory -ErrorAction Stop) }
+                catch { & $send @{ type='log'; level='warn'; text="Could not list operator folders under ${toolName}: $($_.Exception.Message)" }; & $addReadErr $td.FullName $_ }
                 foreach ($ud in $userDirs) {
                     if ($capped -or (& $cancelCheck)) { break }
                     $userFolder = $ud.Name
@@ -6928,9 +7051,12 @@ function Invoke-JanetToolAction {
                         # rotations - stale schema (matches the replay convention).
                         $detailFiles = @()
                         try {
-                            $detailFiles = @(Get-ChildItem -LiteralPath $ud.FullName -Filter ($m + '_detail*.csv') -File -ErrorAction SilentlyContinue |
+                            $detailFiles = @(Get-ChildItem -LiteralPath $ud.FullName -Filter ($m + '_detail*.csv') -File -ErrorAction Stop |
                                 Where-Object { $_.Name -notlike '*.legacy_*' })
-                        } catch {}
+                        } catch {
+                            & $send @{ type='log'; level='warn'; text="Could not list ${toolName}/${userFolder} for ${m}: $($_.Exception.Message)" }
+                            & $addReadErr $ud.FullName $_
+                        }
                         foreach ($df in $detailFiles) {
                             if ($capped -or (& $cancelCheck)) { break }
                             $detailPath = $df.FullName
@@ -6997,6 +7123,7 @@ function Invoke-JanetToolAction {
                                 # cancel break, not a read error - do not log it as unreadable.
                                 if ([string]$_.Exception.Message -ne 'JANET_ROLLUP_STOP') {
                                     & $send @{ type='log'; level='warn'; text="Skipped unreadable detail ${toolName}/${userFolder}/$($df.Name): $($_.Exception.Message)" }
+                                    & $addReadErr $detailPath $_    # audit 2026-07-25: count it, not just log it
                                 }
                             }
                             if ($capped) {
@@ -7107,14 +7234,27 @@ function Invoke-JanetToolAction {
             $denom = $totOK + $totFail
             $failPct = if ($denom -gt 0) { [math]::Round(($totFail / $denom) * 100, 1) } else { 0 }
 
+            # audit 2026-07-25 (fable re-audit follow-up): surface the read failures as an
+            # operator-visible error BEFORE the totals land, and mark the whole rollup
+            # incomplete - a zero/short rollup over a tree we could not walk is UNKNOWN,
+            # not "no activity". readFailed rides out in the summary + the Command Brief
+            # cache so no downstream renderer can present it as a confident result.
+            $readErrors = [int]$readBag.Errors
+            $readFailed = ($readErrors -gt 0)
+            $errNote = ''
+            if ($readFailed) {
+                $errNote = " READ ERRORS - INCOMPLETE ($readErrors path(s) unreadable)."
+                & $send @{ type='error'; text="Rollup INCOMPLETE - $readErrors log-share path(s) could not be read (first: $($readBag.Messages[0])). Operators, hosts and squadrons missing from this rollup may simply be unreadable, NOT inactive - this is no proof of no activity until the share reads clean." }
+            }
             $capNote = if ($capped) { " Detail parsing was capped at $maxRows rows - lower the month count for a complete pass." } else { '' }
-            & $send @{ type='status'; text="Rollup: $($ops.Count) operator(s), $($hostTally.Count) distinct host(s), $totVulns vuln(s) patched, $failPct% fleet failure over $($months -join ', ').$capNote" }
+            & $send @{ type='status'; text="Rollup: $($ops.Count) operator(s), $($hostTally.Count) distinct host(s), $totVulns vuln(s) patched, $failPct% fleet failure over $($months -join ', ').$capNote$errNote" }
 
             # Cache a compact summary for the Executive Command Brief (feature) so the
             # brief can render a squadron section without re-reading the whole log share.
             $script:LastSquadronRollup = @{
                 shareOk=$true; months=($months -join ', '); operators=$ops.Count; hosts=$hostTally.Count
                 vulns=$totVulns; failPct=$failPct; squadronResolved=$squadronResolved; rows=@($rows)
+                readErrors=$readErrors; readFailed=$readFailed   # audit 2026-07-25: the brief must not quote an incomplete rollup as fact
             }
 
             return @{ rows=@($rows); summary=@{
@@ -7123,6 +7263,8 @@ function Invoke-JanetToolAction {
                 touchOk=$totOK; touchFail=$totFail; failPct=$failPct
                 squadronResolved=$squadronResolved; squadronNote=$squadronNote; squadrons=$sq.Count
                 capped=$capped; rowsParsed=$rowsParsed; maxRows=$maxRows; filesRead=$filesRead
+                # audit 2026-07-25 (fable re-audit follow-up): "could not look" != "nothing there".
+                readErrors=$readErrors; readFailed=$readFailed; readErrorPaths=@($readBag.Messages)
                 csv=$csv.ToString().TrimEnd()
             } }
         }
@@ -7146,7 +7288,9 @@ function Invoke-JanetToolAction {
                 $cOverdue=0; $cDueSoon=0; $cOnTrack=0; $cUntracked=0
                 $overdueList = New-Object System.Collections.ArrayList
                 foreach ($f in $script:AcasFindings) {
-                    if ($f.Status -match 'Patched') { continue }
+                    # audit 2026-07-25 (fable re-audit follow-up): exact literal, mirroring the
+                    # sla-aging skip this section reproduces (:6293) and host-summary (:6220).
+                    if ($f.Status -eq 'Patched') { continue }
                     if ($f.Status -eq 'NOT OUR PATCH' -or $f.Category -eq 'NOT OUR PATCH') { continue }
                     $inKev = [bool]$f.InKEV
                     $fsRaw = if ($f.PSObject.Properties['FirstSeen']) { [string]$f.FirstSeen } else { '' }
@@ -7197,8 +7341,11 @@ function Invoke-JanetToolAction {
                 if ($lr.shareOk -eq $false) {
                     $sqSec = @{ HasData=$false; Note="Last squadron rollup could not reach the log share ($($lr.months)) - re-run Squadron Rollup on-network." }
                 } else {
+                    # audit 2026-07-25 (fable re-audit follow-up): carry the rollup's read-failure
+                    # state into the brief so a partial rollup is not quoted as fleet fact.
                     $sqSec = @{ HasData=$true; Months=$lr.months; Operators=$lr.operators; Hosts=$lr.hosts; Vulns=$lr.vulns
-                                FailPct=$lr.failPct; SquadronResolved=$lr.squadronResolved; Rows=@($lr.rows | Select-Object -First 15) }
+                                FailPct=$lr.failPct; SquadronResolved=$lr.squadronResolved; Rows=@($lr.rows | Select-Object -First 15)
+                                ReadFailed=[bool]$lr.readFailed; ReadErrors=[int]$lr.readErrors }
                 }
             }
 

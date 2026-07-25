@@ -23,13 +23,23 @@
 #
 #  v1.1.8 Connect's WSMan reachability preflight also probes HTTPS 5986 (after
 #  HTTP 5985, before SMB 445 liveness), auto-switching that session to -UseSSL.
+#  v1.1.16 (audit 2026-07-25, fable re-audit follow-up) editing the custom option ID
+#  after a Load now invalidates the loaded before-state (and reloads on commit) instead
+#  of leaving APPLY armed with the PREVIOUS option's expectedOld; and the typed-APPLY
+#  gate's dry-run trade-off is documented at the gate + at both view call sites (the
+#  gate stays unconditional on purpose - see the comment above it).
+#  v1.1.15 (audit 2026-07-24) bulk results are unwrapped one level deeper (the
+#  remote ,$out.ToArray() self-guard survived the [powershell] handle, so every
+#  multi-scope run collapsed into ONE bogus "unexpected status" row); expectedOld
+#  (the optimistic-concurrency guard) is declared in the manifest; and a dry run
+#  books NoChange where the live path does, instead of a phantom WouldRemove.
 # =============================================================================
 
 function Get-JanetToolManifest {
     @{
         id       = 'dhcp'
         name     = 'DHCP Scope Options'
-        version  = '1.1.14'
+        version  = '1.1.16'
         category = 'Network'
         summary  = 'Edit IP-array DHCP scope options (006 DNS, 003 Router, 042 NTP, 044 WINS) on a remote Windows DHCP server: list scopes, load values, apply to one scope, or bulk append/prepend/remove across many scopes.'
         actions  = @(
@@ -69,6 +79,14 @@ function Get-JanetToolManifest {
                     @{ name='scopeId';      label='Scope ID (dotted quad)'; type='text'; required=$true },
                     @{ name='optionId';     label='Option ID'; type='int'; required=$false; default=6 },
                     @{ name='newValues';    label='New values (ordered, one IPv4 per line; leave blank ONLY with Remove option checked)'; type='textarea'; required=$false },
+                    # audit 2026-07-24: expectedOld drives the ENTIRE optimistic-concurrency guard
+                    # (present => the engine refuses the whole-option replace when the option changed
+                    # on the server since the operator loaded it) yet it was undeclared here, so the
+                    # action's own contract hid its only anti-clobber input. Optional by design:
+                    # ABSENT means "no staleness check" (back-compat); present-but-blank means "the
+                    # option must still be unset", so a caller that cannot supply a before-state MUST
+                    # omit the key rather than send an empty one.
+                    @{ name='expectedOld';  label='Expected current values (optimistic-concurrency guard: the before-state you loaded; omit to skip the check)'; type='textarea'; required=$false },
                     @{ name='removeOption'; label='Remove option (delete the option from the scope; requires blank New values)'; type='bool'; required=$false; default=$false },
                     @{ name='dryRun';       label='Dry run (preview the diff, change nothing)'; type='bool'; required=$false; default=$false },
                     @{ name='confirm';      label='Type APPLY to arm'; type='text'; required=$true }
@@ -720,7 +738,12 @@ function Invoke-JanetDhcpApply {
     # Dry run: report the diff the apply WOULD make, write nothing, and audit
     # it as a read (TouchHost) like the load action.
     if ($DryRun) {
-        $wouldStatus = $(if ($new.Count -eq 0) { 'WouldRemove' } elseif ($sameOrder) { 'NoChange' } else { 'WouldChange' })
+        # audit 2026-07-24: the empty-new-list test came FIRST, so a remove against an
+        # option that is already unset previewed 'WouldRemove' while the live path
+        # (the idempotent-removal short-circuit below) books 'NoChange' -- the preview
+        # promised a change the real run would not make. sameOrder covers the
+        # both-empty case, so test it first and the two paths agree.
+        $wouldStatus = $(if ($sameOrder) { 'NoChange' } elseif ($new.Count -eq 0) { 'WouldRemove' } else { 'WouldChange' })
         & $Send @{ type='audit'; action='TouchHost'; target=$Server; result='Success'; itemCount=$new.Count; detail=("DRY RUN apply scope=$ScopeId opt=$OptionId would=$wouldStatus values=" + ($new -join ';')) }
         $row = @{
             Host      = $Server
@@ -1006,7 +1029,28 @@ function Invoke-JanetDhcpBulk {
             & $Send @{ type='status'; text="Bulk $Mode cancelled." }
             return @{ rows=@($rows); summary=@{ total=$total; ok=0; failed=$total; noChange=0 } }
         }
-        $results = @($bulkCall.Result)
+        # audit 2026-07-24: the remote bulk scriptblock returns ,$out.ToArray() -- the
+        # comma self-guard that stops a 1-scope run unrolling to a bare record. That
+        # wrapper SURVIVES the [powershell] handle in Invoke-JanetOnDhcpCancelable
+        # (Invoke-Command hands the record array back as ONE output object), so
+        # @($bulkCall.Result) unrolled only the outer collection and left $results
+        # holding a single element that IS the record array. The foreach below then ran
+        # ONCE with $r bound to that array: [string]$r.Status member-enumerated to a
+        # space-joined blob matching no bucket, so a fully successful multi-scope write
+        # reported 0 changed + 1 'unexpected status' failure and streamed one junk row.
+        # Flatten one level deeper so each scope's record is its own row. Kept
+        # shape-tolerant (a record is not IEnumerable) so an already-flat result set --
+        # what the test shims and any future non-wrapping caller produce -- is unchanged.
+        $results = New-Object System.Collections.ArrayList
+        foreach ($item in @($bulkCall.Result)) {
+            if ($null -eq $item) { continue }
+            if (($item -is [System.Collections.IEnumerable]) -and ($item -isnot [string]) -and ($item -isnot [System.Collections.IDictionary])) {
+                foreach ($rec in $item) { if ($null -ne $rec) { [void]$results.Add($rec) } }
+            } else {
+                [void]$results.Add($item)
+            }
+        }
+        $results = @($results.ToArray())
 
         $done = 0
         foreach ($r in $results) {
@@ -1197,9 +1241,15 @@ function Invoke-JanetToolAction {
     # destructive engine). Fail closed, server-side, BEFORE any DHCP session: (1) require the operator to
     # type APPLY (case-insensitive, like adto's -ne 'FIX'); (2) refuse when the target resolves to the box
     # running JANET. connect/load are read-only and ungated.
+    # audit 2026-07-25 (fable re-audit follow-up): this gate is deliberately NOT exempted for
+    # dryRun, even though the view auto-sends confirm='APPLY' on a preview (so on a preview the
+    # word evidences nothing). An exemption would make the only unbypassable refusal in this
+    # engine depend on the operator/request-controlled dryRun flag; keeping it unconditional
+    # costs a preview its arming evidence and buys a gate with no shape that can slip past it.
+    # A preview cannot write regardless: Get-DhcpDryRunSafe resolves anything unrecognized to DRY.
     $isDestructive = $ActionId -in @('apply','bulk-append','bulk-prepend','bulk-remove')
     if ($isDestructive) {
-        if ([string]$Params['confirm'] -ne 'APPLY') {
+        if ([string]$Params['confirm'] -cne 'APPLY') {
             & $send @{ type='log'; level='err'; text='Refused: type APPLY (exactly) in Confirm to arm a DHCP option change.' }
             return @{ rows=@(); summary=@{ total=0; rejected=$true } }
         }

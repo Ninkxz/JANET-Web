@@ -114,6 +114,61 @@ Describe 'WPT 6.6.0 - shared engine security guards (verbatim in the source + be
     }
 }
 
+Describe 'WPT - fix-java fails CLOSED when the engine returns no rollup row (audit 2026-07-24)' {
+
+    # Behavioural: shadow the worker so the engine "answers" without a rollup row. That
+    # used to default to NOCHANGE -> counted ok -> VulnPatched Success on a host the
+    # engine never reported on. An absent verdict is not a clean verdict: it must read
+    # FAIL, exactly as spec-exec-enable's identical branch already did.
+    function Invoke-FixJavaWithWorker {
+        param([string]$WorkerBody)
+        & $m {
+            param($body)
+            $orig = $script:WptFixJavaBlock
+            $script:WptFixJavaBlock = [scriptblock]::Create($body)
+            try {
+                $ev = New-Object System.Collections.ArrayList
+                $emit = { param($e) [void]$ev.Add($e) }
+                $res = Invoke-JanetToolAction -ActionId 'fix-java' -Params @{ targets='UNIT-JAVA-HOST'; threads=1 } -Credential $null -Emit $emit
+                return @{ Summary = $res.summary; Rows = @($res.rows); Events = @($ev) }
+            } finally { $script:WptFixJavaBlock = $orig }
+        } $WorkerBody
+    }
+    function Get-JavaAudit($out) { @($out.Events | Where-Object { $_.type -eq 'audit' -and $_.target -eq 'UNIT-JAVA-HOST' })[0] }
+
+    $hdr     = 'param($Computer,$Cred,$Auth,$Src) '
+    $noRow   = Invoke-FixJavaWithWorker ($hdr + '@{ Host=$Computer; Reachable=$true; Rows=@(); Error="" }')
+    $noChange= Invoke-FixJavaWithWorker ($hdr + '@{ Host=$Computer; Reachable=$true; Rows=@(@{ Result="NOCHANGE"; Detail="no Oracle/Sun Java older than 8u491" }); Error="" }')
+
+    It 'an empty engine result reports FAIL, not NOCHANGE' {
+        [string]@($noRow.Rows)[0].Result | Should Be 'FAIL'
+    }
+    It 'an empty engine result is NOT counted ok and audits Failure' {
+        [int]$noRow.Summary.ok | Should Be 0
+        [string](Get-JavaAudit $noRow).result    | Should Be 'Failure'
+        [int](Get-JavaAudit $noRow).itemCount    | Should Be 0
+    }
+    It 'a real NOCHANGE verdict from the engine is still ok (clean host, nothing to remove)' {
+        [string]@($noChange.Rows)[0].Result | Should Be 'NOCHANGE'
+        [int]$noChange.Summary.ok           | Should Be 1
+        [string](Get-JavaAudit $noChange).result | Should Be 'Success'
+    }
+}
+
+Describe 'WPT - fix-java is reachable from the view (audit 2026-07-24)' {
+
+    # The action was declared, self-guarded, confirm-gated and tested - but no operator
+    # could run it: the view referenced neither it nor the two spec-exec actions.
+    $viewSrc = Get-Content (Join-Path $script:Root 'web\js\views\wpt.view.js') -Raw
+
+    It 'the view runs the fix-java action' {
+        $viewSrc.Contains("'fix-java'") | Should Be $true
+    }
+    It 'the fix-java trigger is armed (typed confirmation), not a bare click' {
+        ($viewSrc -match "confirmWord: 'JAVA'") | Should Be $true
+    }
+}
+
 Describe 'WPT 6.6.0 - shared verdict heuristic honours the 1.8.0_491 bar (unchanged)' {
 
     It 'old Oracle Java is OLD; 8u491+ and modern JDKs are OK; junk is UNKNOWN' {

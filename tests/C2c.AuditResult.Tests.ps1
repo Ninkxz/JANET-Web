@@ -98,8 +98,8 @@ Describe 'c2c 1.15.12 - read-only scan + version-check harvests attach a hint to
     $man = & $cm { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
 
-    It 'manifest version is exactly 1.15.12 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.15.12'
+    It 'c2c is at or past v1.15.12 (hint harvests shipped here; exact pin migrated to the newest bump)' {
+        ([version][string]$man.version -ge [version]'1.15.12') | Should Be $true
     }
     It 'the scan harvest computes a hint only for a CHECK ERRORS host' {
         ($src -match '\$hint\s*=\s*if\s*\(\$row\.Status\s*-eq\s*''CHECK ERRORS''\s*-and\s*\$row\.Detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true

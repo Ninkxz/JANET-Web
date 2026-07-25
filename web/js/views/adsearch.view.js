@@ -460,7 +460,7 @@
 
         run = ctx.run(currentMode, params, { keyOf: spec.keyOf });
         if (unsub) unsub();
-        var rowCount = 0, hadError = false, cancelled = false, refusedMsg = null;
+        var rowCount = 0, hadError = false, cancelled = false, refusedMsg = null, failedCount = 0;
         unsub = run.subscribe({
           status: function (t) { prog.setPhase(t); },
           progress: function (pp) { prog.setProgress(pp.done, pp.total); },
@@ -480,6 +480,12 @@
             // input, no match) via summary.message + 0 rows (not an error event), so
             // capture it to avoid painting a green "OK :: 000 RESULTS".
             if (res && res.summary && res.summary.message) refusedMsg = res.summary.message;
+            // audit 2026-07-24: a real FAILURE (rejected SearchBase, no DC discovered,
+            // a LastPC scan where every DC denied access) comes back only as
+            // summary.failed > 0 - no 'error' event and no "(error)" row. Without
+            // reading it we painted the amber "NO RESULTS" banner, which reads as
+            // "the directory has nothing" instead of "the search never ran".
+            if (res && res.summary && Number(res.summary.failed) > 0) failedCount = Number(res.summary.failed);
           },
           active: function (a) {
             runbar.setActive(a);
@@ -495,7 +501,7 @@
             setStatus('STATUS :: CANCELLED :: ' + String(n).padStart(3, '0') + ' PARTIAL', 'warn'); setDot('error');
             return;
           }
-          if (hadError && rowCount === 0) {
+          if ((hadError || failedCount > 0) && rowCount === 0) {
             setStatus('STATUS :: SEARCH ERROR', 'err'); setDot('error');
             brief('Search failed - see the lines above.', 'err');
             return;

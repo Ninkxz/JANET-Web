@@ -109,14 +109,23 @@ Describe 'secureboot server-side ENABLE gate (audit 2026-07-23)' {
         [bool]$r.summary.rejected | Should Be $true
         (@($logs | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'ENABLE' }).Count -ge 1) | Should Be $true
     }
-    It 'refuses a LIVE enable with a wrong word (pkginstall-gate parity: -ne, so case folds but the word must match)' {
+    It 'refuses a LIVE enable with a wrong word' {
         $r = & $m { param($p) Invoke-JanetToolAction -ActionId 'enable-secure-boot' -Params $p -Emit { param($e) } } `
             @{ targets = 'WS-GATE-TEST-01'; dry_run = 'false'; confirm = 'DEPLOY' }
         [bool]$r.summary.rejected | Should Be $true
     }
+    It 'refuses a LIVE enable with the RIGHT word in the WRONG case (behavioural, audit 2026-07-24)' {
+        # fable re-audit F3: the gate was `-ne`, which is case-INSENSITIVE, so 'enable' armed a
+        # fleet FIRMWARE WRITE through a gate whose own error text promises "exactly". Proven by
+        # probe on the sibling remoteadmin gate before the sweep. Now -cne everywhere; this is
+        # the behavioural pin so a future -ne cannot silently reintroduce it.
+        $r = & $m { param($p) Invoke-JanetToolAction -ActionId 'enable-secure-boot' -Params $p -Emit { param($e) } } `
+            @{ targets = 'WS-GATE-TEST-01'; dry_run = 'false'; confirm = 'enable' }
+        [bool]$r.summary.rejected | Should Be $true
+    }
     It 'the gate sits on the LIVE path only - dry run stays ungated (static source check)' {
         $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
-        ($src -match '\(-not \$isDry\) -and \(\[string\]\$Params\[''confirm''\] -ne ''ENABLE''\)') | Should Be $true
+        ($src -match '\(-not \$isDry\) -and \(\[string\]\$Params\[''confirm''\] -cne ''ENABLE''\)') | Should Be $true
     }
     It 'the view SENDS the confirm param the module now checks (must land together)' {
         ($script:View.IndexOf("confirm: isDry ? '' : 'ENABLE'") -ge 0) | Should Be $true

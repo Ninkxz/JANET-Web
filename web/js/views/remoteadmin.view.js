@@ -117,8 +117,14 @@
         compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
         var targets = C.TargetManager({
           model: ctx.util.targetModel(''),
-          hint: 'One host per line - comma/space/semicolon ok; # starts a comment.',
-          placeholder: 'WS-0001\nWS-0002\n# lab row\nWS-0003',
+          // audit 2026-07-24: the '# starts a comment' hint advertised a syntax that does
+          // NOT exist - the shared client host parser (shell.js parseHosts, not this
+          // tool's to change) splits on whitespace, so '# lab row' handed the server the
+          // live targets 'lab' and 'row' for an ARBITRARY remote script block. The claim
+          // is removed rather than half-honoured; the server-side parser strips '#'
+          // comments defensively for raw-text callers.
+          hint: 'One host per line - comma/space/semicolon ok. No comment syntax: every word here is a TARGET.',
+          placeholder: 'WS-0001\nWS-0002\nWS-0003',
           importLabel: 'Import TXT', importAccept: '.txt', countNoun: 'host',
           onImport: function (n, name) { actlog.append({ text: '[' + ts() + '] Added ' + n + ' host(s) from ' + name, level: 'info' }); }
         });
@@ -215,12 +221,21 @@
           var scriptText = String(scriptTa.value || '').trim();
           var threads = intOr(threadsIn, 8);
           var timeoutSeconds = intOr(timeoutIn, 120);
-          ctx.confirm({
+          // audit 2026-07-24 (S2): this was ctx.confirm, which silently DROPPED the
+          // confirmWord - the typed-RUN gate on fleet-wide arbitrary RCE never rendered.
+          // Destructive actions must go through ctx.arm (ArmingDialog).
+          ctx.arm({
             title: 'Run arbitrary PowerShell on ' + hosts.length + ' host(s)?',
+            banner: 'ARBITRARY REMOTE CODE - RUNS WITH ADMIN RIGHTS ON EVERY TARGET',
             danger: true,
             confirmWord: 'RUN',
             body: 'You are about to run an <b>arbitrary PowerShell script block, with admin rights, on ' + hosts.length + ' target host(s)</b> over WinRM. This is <b>destructive</b> - JANET cannot preview or undo what your script does. The exact script body is recorded to the audit trail by SHA256 hash before it runs.<br><br>First few targets:',
             list: hosts.slice(0, 6),
+            preflight: [
+              { label: hosts.length + ' target host(s)', ok: hosts.length > 0 },
+              { label: 'Admin credential set (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+              { label: 'Script body is ' + scriptText.length + ' char(s) - JANET cannot preview or undo it', ok: false }
+            ],
             okText: 'Run', cancelText: 'Cancel'
           }).then(function (ok) {
             if (!ok) { actlog.append({ text: '[' + ts() + '] Run cancelled at confirm.', level: 'warn' }); return; }
@@ -229,7 +244,9 @@
             setLine(statusLine, 'Working...', 'st-info');
             actlog.banner ? actlog.banner('Run Script on ' + hosts.length + ' host(s)') : actlog.append({ text: '[' + ts() + '] Run Script on ' + hosts.length + ' host(s).', level: 'accent' });
             lockInputs(true);
-            curRun = ctx.run('run-script', { targets: hosts.join('\n'), script: scriptText, threads: threads, timeoutSeconds: timeoutSeconds }, { keyOf: function (ev) { return ev._rk; }, destructive: true });
+            // confirm:'RUN' satisfies the server-side typed barrier (audit 2026-07-24 S2).
+            // The ArmingDialog above is what actually validated the operator typed it.
+            curRun = ctx.run('run-script', { targets: hosts.join('\n'), script: scriptText, threads: threads, timeoutSeconds: timeoutSeconds, confirm: 'RUN' }, { keyOf: function (ev) { return ev._rk; }, destructive: true });
             // audit 2026-07-23 deferred pass: a re-run must replace, not stack, its
             // handler - the stale copy shared the live `counters` and double-counted.
             if (scriptUnsub) { var pi = subs.indexOf(scriptUnsub); if (pi >= 0) subs.splice(pi, 1); scriptUnsub(); }

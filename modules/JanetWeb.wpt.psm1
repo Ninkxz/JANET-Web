@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.10.0'  # vendor-direct browser push: 'Google Chrome - Update (Vendor MSI - Google)' + 'Microsoft Edge - Update (Vendor MSI - Microsoft)' force-install the vendor's own Enterprise MSI (not just the MECM/on-box-updater nudge)
+        version  = '6.10.2'  # audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -568,7 +568,7 @@ function New-WptRowEvent {
 # wave before it fires (a self-reboot would kill the HttpListener mid-dispatch
 # and abandon every other host in the fan-out). Computed once and cached.
 function Get-WptLocalIdentity {
-    if ($script:WptLocalIdentity) { return $script:WptLocalIdentity }
+    if ($script:WptLocalIdentity) { return ,$script:WptLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -591,7 +591,7 @@ function Get-WptLocalIdentity {
         }
     } catch {}
     $script:WptLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 # True if a target token names this dispatcher host (short/FQDN/IP/loopback).
@@ -2617,7 +2617,22 @@ $script:WptCcmRepairBlock = {
     $splat = @{ ComputerName=$Computer; SessionOption=$opt; ErrorAction='Stop' }
     if ($Cred) { $splat['Credential']=$Cred; $splat['Authentication']=$Auth }
     try {
-        $out = Invoke-Command @splat -ScriptBlock {
+        # Wrong-box (DNS-mismatch) guard (audit 2026-07-24): RepairClient REINSTALLS the ConfigMgr
+        # client on the box that answers (a 5-20 min ccmsetup run), and the result was then reported
+        # under the DIALED name - a stale DNS / reused IP would rebuild the WRONG machine's client
+        # and file the evidence against an innocent host. This was the last destructive block still
+        # missing the guard every sibling carries (WptWuResetBlock parity ~:2794). FOLDED into the
+        # first (only) working Invoke-Command instead of a dedicated probe round-trip: the
+        # scriptblock runs ON the answering box, so $env:COMPUTERNAME is the real machine - abort
+        # before touching anything if it isn't the host we dialed. An IPv4-literal target has no
+        # shortname to compare -> skip (an IP dialed directly can't be a stale-DNS mismatch).
+        $isIPv4 = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        $targetShort = ($Computer -split '\.')[0]
+        $out = Invoke-Command @splat -ArgumentList $targetShort, $isIPv4 -ScriptBlock {
+            param($expected, $isIPv4)
+            if (-not $isIPv4 -and $expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                return @{ DnsMismatch = $env:COMPUTERNAME }
+            }
             if (-not (Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM')) {
                 return [pscustomobject]@{ Triggered=$false; Detail='MECM client not installed (HKLM\SOFTWARE\Microsoft\CCM missing)'; Running=$false; LogResult='' }
             }
@@ -2651,6 +2666,11 @@ $script:WptCcmRepairBlock = {
                 } catch {}
             }
             return [pscustomobject]@{ Triggered=$triggered; Detail=$tdetail; Running=$running; LogResult=$logResult; ReturnCode=$retCode }
+        }
+        # audit 2026-07-24: the wrong-box marker wins before any result is interpreted (hard abort).
+        if ($out.DnsMismatch) {
+            $r.Detail = "DNS mismatch: dialed '$targetShort' but remote is '$(([string]$out.DnsMismatch).Trim())' - ABORTED, no client repair triggered"
+            return $r
         }
         if ($out.Triggered) {
             $r.Success = $true
@@ -5137,7 +5157,11 @@ function Invoke-WptFanOut {
     # DYNAMICALLY up the call stack, and a local named $emit here would shadow it ->
     # infinite $send<->$emit recursion / call depth overflow.)
     $emitRow = { param($row) [void]$rows.Add($row); & $Send (New-WptRowEvent $row) }
-    $done = 0; $okCount = 0; $failCount = 0
+    # audit 2026-07-25 (fable re-audit follow-up): $skipCount is a THIRD tally, separate from
+    # ok/failed. A host whose AuditResultOf maps it to 'Skipped' (kb-install "No change",
+    # app-update-apply PENDING) was neither patched nor broken, yet it landed in $failCount -
+    # so the "Done. X ok, Y failed" line contradicted the 'Skipped' audits emitted beside it.
+    $done = 0; $okCount = 0; $failCount = 0; $skipCount = 0
     $deadline = (Get-Date).AddSeconds([Math]::Max(60, $DeadlineSeconds))
     $cancelled = $false; $timedOut = $false
     try {
@@ -5173,7 +5197,10 @@ function Invoke-WptFanOut {
                     $j.PS = $null
                     if ($null -eq $res) { $res = @{ Host=$j.Host; Error='no result' } }
                     $ok = [bool](& $OkOf $res)
-                    if ($ok) { $okCount++ } else { $failCount++ }
+                    # audit 2026-07-25 (fable re-audit follow-up): the not-ok half of this tally is
+                    # deferred until $auditResult is known (below) so a 'Skipped' host is booked as
+                    # skipped, not failed.
+                    if ($ok) { $okCount++ }
                     $row = & $RowOf $res
                     # loop72 (informative failures): on a failure, translate the raw error (else the audit
                     # detail) into an actionable troubleshooting hint - carried in a Hint row field + an err
@@ -5184,6 +5211,9 @@ function Invoke-WptFanOut {
                     [void]$rows.Add($row)
                     & $Send (New-WptRowEvent $row)
                     $auditResult = if ($AuditResultOf) { [string](& $AuditResultOf $res $ok) } else { if ($ok) { 'Success' } else { 'Failure' } }
+                    # audit 2026-07-25 (fable re-audit follow-up): book the not-ok host against the
+                    # SAME verdict the audit trail records, so the status line and the audit agree.
+                    if (-not $ok) { if ($auditResult -eq 'Skipped') { $skipCount++ } else { $failCount++ } }
                     & $Send @{ type='audit'; action=$AuditAction; target=$res.Host; result=$auditResult; itemCount=$(if($ok){1}else{0}); detail=$auditDetailStr }
                     if ($hint) { & $Send @{ type='log'; level='err'; text="$($res.Host) : $(if ($res.Error) { [string]$res.Error } else { 'failed' }) | FIX: $hint" } }
                     # opt-in per-host activity-log line, so a clean run leaves evidence in
@@ -5252,8 +5282,22 @@ function Invoke-WptFanOut {
     } finally {
         try { $pool.Close(); $pool.Dispose() } catch {}
     }
-    if (-not $NoDoneStatus) { & $Send @{ type='status'; text="Done. $okCount ok, $failCount failed of $($jobs.Count)." } }
-    return @{ rows = @($rows); summary = @{ total=$jobs.Count; ok=$okCount; failed=$failCount; cancelled=$cancelled; timedOut=$timedOut } }
+    # audit 2026-07-24: a run where EVERY host failed (e.g. a missing -InjectFunctions entry
+    # made every worker throw) still returned a summary a caller could read as a completed,
+    # usable run. Flag it explicitly - callers that persist/publish results (bulk-scan's trend
+    # snapshot) refuse an all-failed run, and the operator gets a banner instead of a quiet
+    # "0 ok" line. Only meaningful when jobs actually ran.
+    # audit 2026-07-25 (fable re-audit follow-up): the first cut of this signal was
+    # "$okCount -eq 0", i.e. ANY not-ok host counted toward "failed". A kb-install of a KB
+    # not deployed in MECM with no MSU against 10 HEALTHY hosts is honestly "No change" on
+    # every row and audits 'Skipped' every time - and still raised "EVERY host failed". Same
+    # for an all-Pending app-update-apply, and a cancelled run stacked the alarm on top of
+    # the cancel warn. Fire it only when every host GENUINELY failed: at least one real
+    # failure, zero successes, nothing merely skipped/pending, and the run ran to completion.
+    $allFailed = ($jobs.Count -gt 0 -and $okCount -eq 0 -and $skipCount -eq 0 -and $failCount -gt 0 -and -not $cancelled -and -not $timedOut)
+    if ($allFailed) { & $Send @{ type='log'; level='warn'; text="'$ActionId': EVERY host failed (0 of $($jobs.Count) succeeded) - treat this as a failed run, not an empty result." } }
+    if (-not $NoDoneStatus) { & $Send @{ type='status'; text="Done. $okCount ok, $failCount failed$(if ($skipCount -gt 0) { ", $skipCount skipped" }) of $($jobs.Count)." } }
+    return @{ rows = @($rows); summary = @{ total=$jobs.Count; ok=$okCount; failed=$failCount; skipped=$skipCount; allFailed=$allFailed; cancelled=$cancelled; timedOut=$timedOut } }
 }
 
 # -----------------------------------------------------------------------------
@@ -5717,9 +5761,14 @@ function Invoke-JanetToolAction {
         'bulk-scan' {
             $threads = Get-WptThreadCount $Params 24
             $saveSnap = ConvertTo-WptBool $Params['saveSnapshot']
+            # audit 2026-07-24: WptScanBlock calls Test-WptRemoteNameMatch (~:2172) but only
+            # Test-WptHostReachable was injected into the pool ISS - a bare worker runspace has
+            # no module scope, so EVERY online host threw CommandNotFound at the wrong-box check:
+            # the guard was inert and the host's real readings were thrown away for a 'worker
+            # error' row. Inject BOTH probes, matching every other guarded fan-out below.
             $scanResult = Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send -PerHostTimeoutSeconds 300 `
                 -Work $script:WptScanBlock -AuditAction 'TouchHost' `
-                -InjectFunctions 'Test-WptHostReachable' `
+                -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth) } `
                 -OkOf { param($r)
                     # audit 2026-07-23: Online alone is NOT a good scan. WptScanBlock pre-sets
@@ -5761,9 +5810,11 @@ function Invoke-JanetToolAction {
             # A cancelled / timed-out run's rows are partial (abandoned hosts read offline
             # with zero counts), so saving them would permanently pollute the trend series
             # with a false compliance dip - skip the save with a warn instead.
+            # audit 2026-07-24: allFailed added to the skip set - a scan where NO host produced a
+            # usable reading (the wrong-box/injection class above) is not a compliance data point.
             if ($saveSnap) {
-                if ($scanResult.summary.cancelled -or $scanResult.summary.timedOut) {
-                    & $send @{ type='log'; level='warn'; text='Snapshot NOT saved: run was cancelled/timed out - a partial scan would pollute the compliance trend.' }
+                if ($scanResult.summary.cancelled -or $scanResult.summary.timedOut -or $scanResult.summary.allFailed) {
+                    & $send @{ type='log'; level='warn'; text='Snapshot NOT saved: run was cancelled/timed out or every host failed - a partial/failed scan would pollute the compliance trend.' }
                 } else {
                     Save-WptBulkSnapshot -Rows $scanResult.rows -Send $send
                 }
@@ -6153,8 +6204,12 @@ function Invoke-JanetToolAction {
                         return $false
                     }
                     # The shared engine returns a single rollup 'Java' row per host.
+                    # audit 2026-07-24: a MISSING rollup row defaulted to NOCHANGE, which counts ok
+                    # and books a VulnPatched Success for a host the engine never reported on. An
+                    # absent verdict is not a clean verdict - fail closed to FAIL, matching
+                    # spec-exec-enable's identical branch (~:6266).
                     $jrow = @($res.Rows)[0]
-                    $rslt = if ($jrow) { [string]$jrow.Result } else { 'NOCHANGE' }
+                    $rslt = if ($jrow) { [string]$jrow.Result } else { 'FAIL' }
                     $det  = if ($jrow) { [string]$jrow.Detail } else { 'no result row' }
                     $isOk = ($rslt -eq 'FIXED' -or $rslt -eq 'NOCHANGE')
                     $row = @{ _rk=$job.Host; Host=$job.Host; Reachable=[bool]$res.Reachable; Result=$rslt; Detail=$det }
@@ -6299,7 +6354,19 @@ function Invoke-JanetToolAction {
                 -Work $script:WptKbInstallBlock -AuditAction 'VulnPatched' `
                 -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $kbList, $msuPath, $noReboot) } `
-                -OkOf { param($r) (@($r.Errors).Count -eq 0) } `
+                -OkOf { param($r)
+                    # audit 2026-07-24: "no errors" is NOT a patched host. A KB that is not in MECM
+                    # with no MSU path is counted Skipped and NOTHING is installed (~:3104), yet the
+                    # host booked Success + a VulnPatched audit with itemCount 1 - a vulnerability
+                    # recorded as remediated on a box that was never touched. Require a real
+                    # outcome: an accepted MECM trigger or a confirmed MSU install (the same pair
+                    # Get-WptKbInstallResult turns into 'Triggered (verify)' / 'Installed').
+                    (@($r.Errors).Count -eq 0) -and ((([int]$r.MECMInstalled) + ([int]$r.MSUInstalled)) -gt 0) } `
+                -AuditResultOf { param($r, $ok)
+                    # Skipped/unverified is neither a patch nor a failure: audit it 'Skipped' (the
+                    # app-update-apply treatment, ~:6710) so it is excluded from the patched tally
+                    # without booking a phantom failure against a healthy host.
+                    if ($ok) { 'Success' } elseif (@($r.Errors).Count -eq 0) { 'Skipped' } else { 'Failure' } } `
                 -AuditDetail { param($r) "MECM=$($r.MECMInstalled) MSU=$($r.MSUInstalled) Skip=$($r.Skipped) Err=$(@($r.Errors).Count)" } `
                 -RowOf { param($r) @{ Host=$r.Host; MECMFound=[int]$r.MECMFound; MECMInstalled=[int]$r.MECMInstalled; MSUInstalled=[int]$r.MSUInstalled; Skipped=[int]$r.Skipped; Result=(Get-WptKbInstallResult -ErrorCount (@($r.Errors).Count) -MecmTriggered ([int]$r.MECMInstalled) -MsuInstalled ([int]$r.MSUInstalled)); Detail=$((@($r.Details) + @(@($r.Errors) | ForEach-Object { "ERR: $_" })) -join ' | ') } }
         }
@@ -6659,6 +6726,20 @@ function Invoke-JanetToolAction {
             $remote = $null
             $cmdAuditTag = ''   # appended to each host's audit Detail for Custom Command forensics
             if ($profName -eq 'Custom Command') {
+                # audit 2026-07-24 (fable re-audit F2): server-side typed barrier for the
+                # Custom Command profile. This path is fleet-wide ARBITRARY remote PowerShell -
+                # the same severity as remoteadmin's run-script, which got a server-side word in
+                # this same pass. The re-audit found the claim "run-script was the only
+                # destructive fleet writer with no server-side confirm word" was FALSE: this
+                # path had only the client gate, so a direct POST from an armed session reached
+                # arbitrary RCE with nothing server-side asking for a word. Fail closed, and
+                # -cne so the word is genuinely case-exact as the operator-facing text promises.
+                # Only the Custom Command profile is gated: the table-driven profiles are fixed,
+                # reviewed scripts, not operator text.
+                if ([string]$Params['confirm'] -cne 'RUN') {
+                    & $send @{ type='log'; level='err'; text='Refused: type RUN (exactly, uppercase) in Confirm to arm a Custom Command fan-out.' }
+                    return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+                }
                 $cmd = ([string]$Params['customcommand']).Trim()
                 if ([string]::IsNullOrWhiteSpace($cmd)) {
                     & $send @{ type='log'; level='warn'; text='Custom Command profile requires a customcommand.' }

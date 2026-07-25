@@ -456,41 +456,6 @@
         ],
         "flag": "read-only"
       },
-      "opencshare": {
-        "what": "<b>Open a machine's C$ administrative share in Windows Explorer</b> by computer name. JANET Web runs in your interactive session, so the Explorer window opens on YOUR own desktop. Read-only / non-destructive - JANET only launches the share; it reads and writes nothing. Needs no admin session.",
-        "steps": [
-          "Go to the Open C$ tab.",
-          "Type a single computer name in the Computer box (bare hostname or IPv4 only).",
-          "Click 'Open C$' (or press Enter). Explorer opens \\\\<computer>\\C$ on your session.",
-          "The result grid shows Computer, Path, Status (Opened / Opened (host was unreachable on 445) / Rejected / Failed), and Detail."
-        ],
-        "patch": "Validates the computer name against a strict pattern (bare hostname or IPv4 - no spaces, quotes, backslashes, or UNC), TCP-probes port 445 for a reachability hint, then runs Start-Process explorer.exe against \\\\<computer>\\C$. An invalid name is Rejected and nothing is launched. Every successful open is written to the audit trail (accessing an admin share is security-relevant). Non-destructive: JANET changes nothing on the target.",
-        "notes": [
-          "The share opens on the operator's own desktop because the tool runs in the operator's interactive session (loopback HttpListener), not a service.",
-          "An unreachable host still opens the Explorer window - Windows shows the error itself; Status notes the 445 probe failed.",
-          "Your current Windows credentials (or a mapped drive) govern access to the share; JANET does not pass a separate credential here."
-        ],
-        "flag": "read-only"
-      },
-      "runscript": {
-        "what": "<b>Run an operator-authored PowerShell script block on one or more hosts over WinRM</b> and stream each host's captured output. DESTRUCTIVE - it is arbitrary remote code, so it requires a live admin session, self-guards the JANET host out of the run, and records the exact script body to the audit trail by SHA256 hash before fanning out.",
-        "steps": [
-          "Set Credentials and Start Admin Session (top of the window) - Run Script is gated and will not run without both.",
-          "Go to the Run Script tab and load Targets (one host per line).",
-          "Type your PowerShell script block in the editor. It runs verbatim inside Invoke-Command on each target.",
-          "Set Max concurrent (1-32) and per-host Timeout (15-900s).",
-          "Click 'RUN SCRIPT', then type RUN in the confirmation dialog to acknowledge arbitrary remote execution.",
-          "Each host streams a row: Online, Status (Success / Failed / Offline / Timeout / Session error), captured Output, and Error."
-        ],
-        "patch": "Parses your block once up front (a syntax error fails fast and nothing runs), strict-parses targets (bare host / IPv4 only), and drops the JANET dispatcher host via the self-guard. It logs a SHA256 hash + a preview of the script and writes a pre-run audit record before any host is touched; the hash is stamped into every per-host audit entry. Then it fans one worker per host (TCP reachability -> New-PSSession -> Invoke-Command your block, all streams captured via 2>&1 | Out-String, truncated ~4000 chars). A terminating remote error marks the host Failed; a host past its timeout is abandoned as Timeout. Server-side the action is destructive=true, so it 403s without a live admin session.",
-        "notes": [
-          "Arbitrary code: JANET cannot preview or undo what your script does. The SHA256 audit record is the forensic trail of exactly what ran.",
-          "The JANET dispatcher host is always removed from the target list - an arbitrary block must never run against the box hosting this session.",
-          "Output is captured (including the error stream) and truncated server-side to ~4000 chars per host; a note marks truncation.",
-          "This is deliberately separate from the WPT App Updater 'Custom Command', which is scoped to the App Updater flow; Run Script is a general-purpose remote console."
-        ],
-        "flag": "destructive"
-      },
       "reports": {
         "what": "<b>Session telemetry: live statistics, action history grid, and CSV/text exports.</b> Tracks cumulative counts (Scanned, Updates, Installed, Uninstalled, Repaired, Reboots) and full action history (Time / Action / Target / Result / Detail) fed live by every WPT run on every tab.",
         "steps": [
@@ -1211,6 +1176,63 @@
         "DCOM must be working (TCP 135/445); some firewalls block it. If all targets fail with 'timeout' or 'DCOM connect failed', check firewall rules."
       ],
       "flag": "destructive"
+    }
+  },
+  "remoteadmin": {
+    "overview": {
+      "what": "<b>Remote Admin</b> pairs two hands-on-keyboard capabilities in one tool. <b>Open C$</b> launches \\\\&lt;computer&gt;\\C$ in Windows Explorer on your own session (read-only, no admin session, strictly validated and audited). <b>Run Script</b> fans an operator-authored PowerShell block to one or many hosts over WinRM and streams each host's captured output - arbitrary remote code, so it is DESTRUCTIVE, admin-session-gated, self-guarded against the JANET host, and SHA256-audited before it runs.",
+      "steps": [
+        "Pick the tab for the job: Open C$ (single host, read-only) or Run Script (fleet, destructive).",
+        "Open C$: type one computer name (bare hostname or IPv4) and click Open C$ - Explorer opens the share on YOUR desktop.",
+        "Run Script: Set Credentials and Start Admin Session first - the action 403s without both.",
+        "Load Targets, type the PowerShell block, set Max concurrent and per-host Timeout, then RUN SCRIPT and type RUN to confirm.",
+        "Read the per-host rows and the activity log at the bottom; export when done."
+      ],
+      "patch": "Open C$ changes nothing - it validates the name, TCP-probes 445 for a reachability hint, and launches explorer.exe against the admin share, writing an audit record for the access. Run Script is the destructive half: it parses the block up front, strict-parses targets, drops the JANET dispatcher host, writes a pre-run audit record with a SHA256 hash of the exact script body, then fans one worker per host (New-PSSession -> Invoke-Command, all streams captured). Verify per tab: Open C$ succeeds when Explorer shows the share; Run Script succeeds when each host row reads Success with the output you expected.",
+      "notes": [
+        "Open C$ needs no admin session; Run Script requires a live one (server-side destructive=true).",
+        "JANET cannot preview or undo an arbitrary script - the SHA256 audit record is the forensic trail of exactly what ran.",
+        "The JANET dispatcher host is always removed from a Run Script target list.",
+        "Both capabilities are audited; accessing an admin share is security-relevant even though it is read-only."
+      ],
+      "flag": "destructive"
+    },
+    "tabs": {
+      "opencshare": {
+        "what": "<b>Open a machine's C$ administrative share in Windows Explorer</b> by computer name. JANET Web runs in your interactive session, so the Explorer window opens on YOUR own desktop. Read-only / non-destructive - JANET only launches the share; it reads and writes nothing. Needs no admin session.",
+        "steps": [
+          "Go to the Open C$ tab.",
+          "Type a single computer name in the Computer box (bare hostname or IPv4 only).",
+          "Click 'Open C$' (or press Enter). Explorer opens \\\\<computer>\\C$ on your session.",
+          "The result grid shows Computer, Path, Status (Opened / Opened (host was unreachable on 445) / Rejected / Failed), and Detail."
+        ],
+        "patch": "Validates the computer name against a strict pattern (bare hostname or IPv4 - no spaces, quotes, backslashes, or UNC), TCP-probes port 445 for a reachability hint, then runs Start-Process explorer.exe against \\\\<computer>\\C$. An invalid name is Rejected and nothing is launched. Every successful open is written to the audit trail (accessing an admin share is security-relevant). Non-destructive: JANET changes nothing on the target.",
+        "notes": [
+          "The share opens on the operator's own desktop because the tool runs in the operator's interactive session (loopback HttpListener), not a service.",
+          "An unreachable host still opens the Explorer window - Windows shows the error itself; Status notes the 445 probe failed.",
+          "Your current Windows credentials (or a mapped drive) govern access to the share; JANET does not pass a separate credential here."
+        ],
+        "flag": "read-only"
+      },
+      "runscript": {
+        "what": "<b>Run an operator-authored PowerShell script block on one or more hosts over WinRM</b> and stream each host's captured output. DESTRUCTIVE - it is arbitrary remote code, so it requires a live admin session, self-guards the JANET host out of the run, and records the exact script body to the audit trail by SHA256 hash before fanning out.",
+        "steps": [
+          "Set Credentials and Start Admin Session (top of the window) - Run Script is gated and will not run without both.",
+          "Go to the Run Script tab and load Targets (one host per line).",
+          "Type your PowerShell script block in the editor. It runs verbatim inside Invoke-Command on each target.",
+          "Set Max concurrent (1-32) and per-host Timeout (15-900s).",
+          "Click 'RUN SCRIPT', then type RUN in the confirmation dialog to acknowledge arbitrary remote execution.",
+          "Each host streams a row: Online, Status (Success / Failed / Offline / Timeout / Session error), captured Output, and Error."
+        ],
+        "patch": "Parses your block once up front (a syntax error fails fast and nothing runs), strict-parses targets (bare host / IPv4 only), and drops the JANET dispatcher host via the self-guard. It logs a SHA256 hash + a preview of the script and writes a pre-run audit record before any host is touched; the hash is stamped into every per-host audit entry. Then it fans one worker per host (TCP reachability -> New-PSSession -> Invoke-Command your block, all streams captured via 2>&1 | Out-String, truncated ~4000 chars). A terminating remote error marks the host Failed; a host past its timeout is abandoned as Timeout. Server-side the action is destructive=true, so it 403s without a live admin session.",
+        "notes": [
+          "Arbitrary code: JANET cannot preview or undo what your script does. The SHA256 audit record is the forensic trail of exactly what ran.",
+          "The JANET dispatcher host is always removed from the target list - an arbitrary block must never run against the box hosting this session.",
+          "Output is captured (including the error stream) and truncated server-side to ~4000 chars per host; a note marks truncation.",
+          "This is deliberately separate from the WPT App Updater 'Custom Command', which is scoped to the App Updater flow; Run Script is a general-purpose remote console."
+        ],
+        "flag": "destructive"
+      }
     }
   }
 };

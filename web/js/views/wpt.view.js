@@ -89,7 +89,10 @@
           'unsupported-uninstall': 'Unsupported Uninstall', 'kb-scan': 'KB Scan', 'kb-trigger-mecm': 'MECM Cycles',
           'kb-push-download': 'KB Push', 'kb-install': 'KB Install', 'verify-patch': 'Verify Patch', 'remote-message': 'Remote Message',
           'cleanup-disk': 'Cleanup', 'registry-key-scan': 'Reg Scan', 'registry-key-apply': 'Reg Apply',
-          'app-update-verify': 'App Update Verify', 'app-update-apply': 'App Update', 'log4j-scanner': 'Log4j Scan'
+          'app-update-verify': 'App Update Verify', 'app-update-apply': 'App Update', 'log4j-scanner': 'Log4j Scan',
+          // audit 2026-07-24: the three actions the view never exposed (now the Vuln Fixes tab)
+          // were also missing here, so their history rows would have read as raw action ids.
+          'spec-exec-scan': 'BHI Check', 'spec-exec-enable': 'BHI Enable', 'fix-java': 'Fix Java'
         };
         function label(id) { return LABELS[id] || id; }
         // classify one result row -> { add:{stat:n}, result, detail }. Multi-row-per-host
@@ -1270,7 +1273,10 @@
           if (!ok) { tab.log.append({ text: 'Apply cancelled.', level: 'warn' }); return; }
           tab.log.banner('Apply ' + prof + ' - ' + count + ' ' + noun + ' host(s)');
           applyBtn.disabled = applySelBtn.disabled = true;
-          var run = ctx.run('app-update-apply', { targets: targetsRaw, profile: prof, customcommand: customCmd.value });
+          // audit 2026-07-24 (fable re-audit F2): Custom Command now carries a SERVER-SIDE
+          // typed barrier too (parity with remoteadmin run-script). The ctx.arm above is what
+          // actually validated the operator typed it; this just satisfies the server gate.
+          var run = ctx.run('app-update-apply', { targets: targetsRaw, profile: prof, customcommand: customCmd.value, confirm: isCustom ? 'RUN' : '' });
           // audit 2026-07-23 deferred pass: per-key resub (re-click stacked handlers;
           // key shared with the Beta tab's apply) - onReplace unfreezes the buttons.
           resub('app-update-apply', run, {
@@ -1665,6 +1671,107 @@
           },
           intro: [{ text: 'Log4j Finder ready. SCAN FOR LOG4J across the target list.', level: 'accent' }]
         });
+      }
+
+      // ---- TAB: Vuln Fixes (spec-exec-scan + spec-exec-enable + fix-java) ----
+      // audit 2026-07-24: these three manifest actions had NO entry point anywhere in the
+      // view - declared, self-guarded, confirm-gated and tested server-side, yet no operator
+      // could reach them. Wired here rather than deleted from the manifest: both are proven
+      // remediations driven by the SHARED engines c2c (javafix) and ACAS Nemesis (specfix)
+      // already ship, and each clears a recurring Tenable finding (302873 / Oracle Java).
+      // Layout mirrors the Beta tab: a read-only scan grid + an apply bar under it.
+      function buildVulnFixes(panel) {
+        var tab = makeRunTab(panel, {
+          actionId: 'spec-exec-scan', runLabel: 'CHECK BHI MITIGATION', cancelLabel: 'CANCEL CHECK',
+          title: 'VULN FIXES (SPECTRE/BHI + ORACLE JAVA)', logName: 'WPT_VulnFixes',
+          description: 'Read-only check of the Intel BHI (CVE-2022-0001) mitigation state Tenable plugin 302873 audits, then a one-click ENABLE that ORs the BHI bit into FeatureSettingsOverride (existing Spectre/Meltdown bits preserved; reboot required). FIX JAVA removes Oracle/Sun Java older than 8u491 - OpenJDK/Temurin/Corretto are never touched. Both drop this dispatcher host from the wave.',
+          selectable: true,
+          columns: [
+            { key: 'Host', label: 'HOST', width: 130 },
+            { key: 'CPU', label: 'CPU', width: 220 },
+            { key: 'Verdict', label: 'VERDICT', width: 110, render: function (r) {
+                var v = String(r.Verdict || '');
+                if (!v) return { text: '', cls: 'cell-dim' };
+                return { text: v, cls: /compliant/i.test(v) ? 'st-ok' : /vulnerable/i.test(v) ? 'st-bad' : 'st-warn' };
+            } },
+            { key: 'FeatureSettingsOverride', label: 'FSO', width: 90 },
+            { key: 'Mask', label: 'MASK', width: 70 },
+            { key: 'Recommendation', label: 'RECOMMENDATION', width: 190 },
+            { key: 'Error', label: 'ERROR', render: function (r) { return { text: r.Error == null ? '' : String(r.Error), cls: r.Error ? 'st-bad' : '' }; } }
+          ],
+          rowClass: function (r) { if (r.Error) return 'row-bad'; var v = String(r.Verdict || ''); return /compliant/i.test(v) ? 'row-ok' : (v ? 'row-warn' : ''); },
+          settings: function (h) { var t = threadsInput(h, 12); return function () { return { threads: t() }; }; },
+          params: function (api) { return { threads: api.getSettings().threads }; },
+          onFinal: function (log, grid) {
+            var need = grid.rows().filter(function (r) { return r.Verdict && !/compliant/i.test(String(r.Verdict)); }).length;
+            log.banner('BHI check complete: ' + grid.rows().length + ' host(s), ' + need + ' need the mitigation enabled');
+          },
+          intro: [{ text: 'Vuln Fixes ready. CHECK BHI MITIGATION (read-only) first, then enable on the hosts that need it. FIX JAVA runs independently of the grid.', level: 'accent' }],
+          toolbarButtons: function (getGrid) {
+            var selN = ui.ghostButton('Select non-compliant', { size: 'sm', title: 'Check every host whose verdict is not COMPLIANT (DRIFT / VULNERABLE).' });
+            selN.onclick = function () { getGrid().selectWhere(function (r) { return r.Verdict && !/compliant/i.test(String(r.Verdict)); }); };
+            return [selN];
+          }
+        });
+
+        // Remediation bar: BHI enable (all / selected) + the Oracle Java cleanup
+        var bar = el('div'); bar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap';
+        var enableBtn = ui.button('ENABLE BHI MITIGATION (ALL TARGETS)', { variant: 'danger', title: 'OR the BHI bit 0x800000 into FeatureSettingsOverride + Mask=3 on every target. Reboot required to apply.' });
+        var enableSelBtn = ui.button('Enable on Selected', { variant: 'gold', title: 'Enable only on the CHECKED hosts in the grid.' });
+        var javaBtn = ui.button('FIX JAVA (ORACLE/SUN < 8u491)', { variant: 'danger', title: 'Remove Oracle/Sun Java older than 8u491 from every target. OpenJDK/Temurin/Corretto and unknown versions are never touched.' });
+        bar.appendChild(enableBtn); bar.appendChild(enableSelBtn); bar.appendChild(javaBtn);
+        tab.prog.el.parentNode.appendChild(bar);
+
+        var fixBtns = [enableBtn, enableSelBtn, javaBtn];
+        // Both remediations stream the SAME rollup row shape (Host/Reachable/Result/Detail),
+        // so one runner drives them; rows go to the log (the grid holds the BHI scan verdicts).
+        function runFix(actionId, label, targetsRaw, count, noun) {
+          tab.log.banner(label + ' - ' + count + ' ' + noun + ' host(s)');
+          fixBtns.forEach(function (b) { b.disabled = true; });
+          var run = ctx.run(actionId, { targets: targetsRaw });
+          // per-key resub (a re-click must replace, not stack, the handler); onReplace
+          // unfreezes the buttons for the superseded run.
+          resub(actionId, run, {
+            status: function (t) { tab.prog.setPhase(t); },
+            progress: function (p) { tab.prog.setProgress(p.done, p.total); },
+            row: function (r) {
+              var rs = String(r.Result || '');
+              tab.log.append({ text: '[' + r.Host + '] ' + rs + (r.Detail ? ' - ' + r.Detail : ''), level: /^fixed$/i.test(rs) ? 'ok' : /^nochange$/i.test(rs) ? 'info' : 'err' });
+            },
+            log: function (l) { tab.log.append(l); },
+            error: function (e) { tab.log.append({ text: e.text, level: 'err' }); },
+            final: function () { tab.log.banner(label + ' complete'); },
+            active: function (a) { if (!a) fixBtns.forEach(function (b) { b.disabled = false; }); }
+          }, function () { fixBtns.forEach(function (b) { b.disabled = false; }); });
+        }
+
+        async function enableBhi(targetsRaw, count, noun) {
+          if (!count) { notice('No Targets', noun === 'selected' ? 'Check at least one host in the grid first.' : 'Build the host list first.'); return; }
+          if (needCred()) return;
+          var ok = await ctx.arm({
+            title: 'Enable Spectre/BHI Mitigation',
+            body: 'Enable the Intel BHI (CVE-2022-0001) mitigation on <b>' + count + '</b> ' + noun + ' host(s)? The BHI bit 0x800000 is OR-ed into FeatureSettingsOverride (existing Spectre/Meltdown bits preserved) and Mask is set to 3.',
+            list: ['A REBOOT is required before the mitigation takes effect.', 'This dispatcher host is dropped from the wave automatically.'],
+            confirmWord: 'ENABLE', okText: 'Enable', cancelText: 'Cancel'
+          });
+          if (!ok) { tab.log.append({ text: 'BHI enable cancelled.', level: 'warn' }); return; }
+          runFix('spec-exec-enable', 'Enable BHI mitigation', targetsRaw, count, noun);
+        }
+        enableBtn.onclick = function () { enableBhi(ctx.targets.raw, ctx.targets.count(), 'target'); };
+        enableSelBtn.onclick = function () { var ch = tab.grid.getChecked().map(function (r) { return r.Host; }).filter(Boolean); enableBhi(ch.join('\n'), ch.length, 'selected'); };
+
+        javaBtn.onclick = async function () {
+          if (!ctx.targets.count()) { notice('No Targets', 'Build the host list first.'); return; }
+          if (needCred()) return;
+          var ok = await ctx.arm({
+            title: 'Fix Java (Oracle/Sun only)',
+            body: 'Remove all Oracle/Sun Java <b>older than 8u491</b> from <b>' + ctx.targets.count() + '</b> host(s): installed products (msiexec /x on strict-GUID ProductCodes only), JavaSoft registry residue and Program Files\\Java folders.',
+            list: ['OpenJDK / Temurin / Corretto and UNKNOWN versions are NEVER touched.', 'This dispatcher host is dropped from the wave automatically.', 'Java-dependent apps on the target may stop working until they are repointed.'],
+            confirmWord: 'JAVA', okText: 'Remove old Java', cancelText: 'Cancel'
+          });
+          if (!ok) { tab.log.append({ text: 'Fix Java cancelled.', level: 'warn' }); return; }
+          runFix('fix-java', 'Fix Java (Oracle/Sun < 8u491)', ctx.targets.raw, ctx.targets.count(), 'target');
+        };
       }
 
       // ---- TAB: Health / Healers (health-scan + 6 healer actions) ----
@@ -2624,6 +2731,7 @@
         { id: 'regkey', label: 'Reg Key Fixes', build: buildRegKeys },
         { id: 'unsupported', label: 'Unsupported Software', build: buildUnsupported },
         { id: 'log4j', label: 'Log4j Finder', build: buildLog4j },
+        { id: 'vulnfix', label: 'Vuln Fixes', build: buildVulnFixes },
         { id: 'health', label: 'Health / Healers', build: buildHealth },
         { id: 'hostinfo', label: 'Host Info', build: buildHostInfo },
         { id: 'eventlog', label: 'Event Logs', build: buildEventLog },

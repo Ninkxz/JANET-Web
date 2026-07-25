@@ -18,16 +18,20 @@ Import-Module (Join-Path $script:Root 'modules\JanetWeb.winrmbridge.psm1') -Forc
 Describe 'winrmbridge REVERT script - scoped to OUR artifacts only (never a prod listener)' {
     $rev = New-WinRmBridgeRevertScript
 
-    It 'gates the entire teardown behind the presence of OUR temp cert' {
-        # if our FriendlyName cert is absent, the box has a pre-existing/foreign listener
-        # (enable creates nothing in that case), so nothing is torn down.
+    It 'scopes the LISTENER teardown to OUR temp cert (never a foreign/prod listener)' {
+        # audit 2026-07-25 (fable re-audit follow-up): the cert used to gate the WHOLE
+        # teardown (rule + tasks included) - a fail-OPEN, because the tasks deleted
+        # themselves unconditionally. It now scopes ONLY the listener removal, by thumbprint.
         $rev.Contains("FriendlyName -eq 'JANET-WinRMBridge-Temp'") | Should Be $true
-        $rev.Contains('if ($myCert.Count -gt 0)')                  | Should Be $true
+        $rev.Contains('if ($tpRead -and ($mine -contains $tp))')   | Should Be $true
     }
-    It 'removes the HTTPS listener ONLY inside the our-cert-present guard' {
-        $gi = $rev.IndexOf('if ($myCert.Count -gt 0)')
-        $ri = $rev.IndexOf('Remove-Item -Recurse -Force')
-        ($gi -ge 0 -and $ri -gt $gi) | Should Be $true
+    It 'no longer wraps the rule/task teardown in the cert guard (the fail-open)' {
+        # the only surviving cert guard is the one-line cert removal itself...
+        $rev.Contains('if ($myCert.Count -gt 0) { $myCert | Remove-Item -Force }') | Should Be $true
+        # ...and the rule + task teardown sit at TOP LEVEL (a leading newline = column 0,
+        # i.e. not indented inside any guard block).
+        $rev.Contains("`nRemove-NetFirewallRule -Group 'JANET-WinRMBridge'")        | Should Be $true
+        $rev.Contains("`nschtasks.exe /delete /tn 'JANET-WinRMBridge-Enable' /f")   | Should Be $true
     }
     It 'removes the firewall rule only by OUR group tag (not a blanket 5986 teardown)' {
         $rev.Contains("Remove-NetFirewallRule -Group 'JANET-WinRMBridge'") | Should Be $true

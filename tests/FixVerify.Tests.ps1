@@ -16,11 +16,44 @@
 #  Run:  Invoke-Pester -Path .\tests\FixVerify.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 Describe 'FIX 1 - DHCP option reads fail-closed (JanetWeb.dhcp.psm1)' {
 
     $dm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Force -PassThru
+    Add-ShimGuard $dm
 
     function Invoke-DhcpBulk {
         param([string]$ReadMode, [string]$Mode = 'Append')
@@ -28,6 +61,7 @@ Describe 'FIX 1 - DHCP option reads fail-closed (JanetWeb.dhcp.psm1)' {
             param($ReadMode, $Mode)
             $script:__set = $false; $script:__remove = $false
             $script:__readmode = $ReadMode; $script:__getcalls = 0
+            $__shims = Save-ShimState @('Import-Module','Get-DhcpServerv4OptionValue','Set-DhcpServerv4OptionValue','Remove-DhcpServerv4OptionValue')
             function script:Import-Module { param([Parameter(ValueFromRemainingArguments = $true)]$r) }
             function script:Get-DhcpServerv4OptionValue {
                 param($ScopeId, $OptionId, $ErrorAction)
@@ -46,7 +80,9 @@ Describe 'FIX 1 - DHCP option reads fail-closed (JanetWeb.dhcp.psm1)' {
                 $rec = @($res)[0]
                 [pscustomobject]@{ Status = [string]$rec.Status; Error = [string]$rec.Error; Set = [bool]$script:__set; Remove = [bool]$script:__remove }
             } finally {
-                Remove-Item function:script:Get-DhcpServerv4OptionValue, function:script:Set-DhcpServerv4OptionValue, function:script:Remove-DhcpServerv4OptionValue, function:script:Import-Module -EA SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $ReadMode $Mode
     }
@@ -56,6 +92,7 @@ Describe 'FIX 1 - DHCP option reads fail-closed (JanetWeb.dhcp.psm1)' {
         & $dm {
             param($ReadMode)
             $script:__readmode = $ReadMode
+            $__shims = Save-ShimState @('Import-Module','Get-DhcpServerv4OptionValue')
             function script:Import-Module { param([Parameter(ValueFromRemainingArguments = $true)]$r) }
             function script:Get-DhcpServerv4OptionValue {
                 param($ScopeId, $OptionId, $ErrorAction)
@@ -69,7 +106,9 @@ Describe 'FIX 1 - DHCP option reads fail-closed (JanetWeb.dhcp.psm1)' {
                 $r = & $script:DhcpLoadScript '10.0.0.0' 6
                 [pscustomobject]@{ Ok = [bool]$r.Ok; NotSet = [bool]$r.NotSet; Values = @($r.Values); Err = [string]$r.Err }
             } finally {
-                Remove-Item function:script:Get-DhcpServerv4OptionValue, function:script:Import-Module -EA SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $ReadMode
     }
@@ -129,11 +168,13 @@ Describe 'FIX 1 - DHCP option reads fail-closed (JanetWeb.dhcp.psm1)' {
 Describe 'FIX 2 - WPT maintenance lock/unlock gate success on secedit read-back (JanetWeb.wpt.psm1)' {
 
     $wm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
+    Add-ShimGuard $wm
 
     function Invoke-WptLock {
         param($LockResult)
         & $wm {
             param($LockResult)
+            $__shims = Save-ShimState @('Invoke-Command')
             function script:Invoke-Command {
                 param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
                 if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $env:COMPUTERNAME }
@@ -142,7 +183,7 @@ Describe 'FIX 2 - WPT maintenance lock/unlock gate success on secedit read-back 
             try {
                 $out = & $script:WptMaintLockBlock -Computer $env:COMPUTERNAME -Cred $null -Auth 'Default' -Caption 'C' -Message 'M' -HardLock $true
                 [pscustomobject]@{ Success = [bool]$out.Success; Mode = [string]$out.Mode; Detail = [string]$out.Detail }
-            } finally { Remove-Item function:script:Invoke-Command -EA SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $LockResult
     }
 
@@ -150,6 +191,7 @@ Describe 'FIX 2 - WPT maintenance lock/unlock gate success on secedit read-back 
         param($UnlockResult)
         & $wm {
             param($UnlockResult)
+            $__shims = Save-ShimState @('Invoke-Command')
             function script:Invoke-Command {
                 param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
                 return $UnlockResult
@@ -157,7 +199,7 @@ Describe 'FIX 2 - WPT maintenance lock/unlock gate success on secedit read-back 
             try {
                 $out = & $script:WptMaintUnlockBlock -Computer $env:COMPUTERNAME -Cred $null -Auth 'Default'
                 [pscustomobject]@{ Success = [bool]$out.Success; Detail = [string]$out.Detail }
-            } finally { Remove-Item function:script:Invoke-Command -EA SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $UnlockResult
     }
 
@@ -187,6 +229,7 @@ Describe 'FIX 2 - WPT maintenance lock/unlock gate success on secedit read-back 
 Describe 'FIX 3 - UPR uninstall gates OK on a post-uninstall re-enumeration (JanetWeb.upr.psm1)' {
 
     $um = Import-Module (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Force -PassThru
+    Add-ShimGuard $um
 
     function Invoke-UprVerify {
         param([bool]$Present, [string]$UninstallResult, [switch]$VerifyThrows)
@@ -195,6 +238,7 @@ Describe 'FIX 3 - UPR uninstall gates OK on a post-uninstall re-enumeration (Jan
             $script:__present = $Present
             $script:__uninstallResult = $UninstallResult
             $script:__verifyThrows = [bool]$VerifyThrows
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command')
             function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) return ([pscustomobject]@{ Id = 1; Name = 'shim' }) }
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
@@ -216,7 +260,7 @@ Describe 'FIX 3 - UPR uninstall gates OK on a post-uninstall re-enumeration (Jan
                 $out = & $script:UprWorkerBlock -ConnectTarget $env:COMPUTERNAME -Profiles @($prof) -Cred $null -Auth 'Negotiate' -DoUninstall $true -DryRun $false -RemoveSet $null
                 $cand = @($out.Candidates)[0]
                 [pscustomobject]@{ Error = [string]$out.Error; CandResult = [string]$cand.Result }
-            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -EA SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $Present $UninstallResult $VerifyThrows
     }
 

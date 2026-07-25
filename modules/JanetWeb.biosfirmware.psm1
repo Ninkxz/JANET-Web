@@ -15,13 +15,34 @@
 #    Get-JanetToolManifest                                       -> descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
 #  PowerShell 5.1 only.
+#
+#  Changelog
+#    1.1.1  audit 2026-07-25 (fable re-audit follow-up) - (P4) the unscorable-version
+#           roll-up split again: a mis-typed / mixed-format TARGET in the catalog used
+#           to be reported as "the baseline is fine, investigate the host", which is the
+#           opposite action to the one it needs, so Get-BiosComplianceStatus now names
+#           the side that failed to parse ('host version format' vs 'baseline version
+#           format') and the summary carries a badTargetModels bucket keyed by MODEL;
+#           (P4) the Dell letter-series compare is Ordinal, not the culture-sensitive
+#           overload; (P4) behavioural coverage added for the operator-cancel progress
+#           event (the 1.1.0 fix shipped untested).
+#    1.1.0  audit 2026-07-24 - (P2) DNS-mismatch guard gained the IPv4-literal
+#           carve-out every sibling guard already had (an IP target false-skipped
+#           100% of the time); (P3) the Unknown roll-up split into two buckets -
+#           "no baseline for this model" vs "this host returned no usable BIOS
+#           version" - because they are different operator actions; (P4) operator
+#           cancel now emits a progress event per abandoned host so the strip
+#           finishes instead of freezing; version compare taught the Dell-style
+#           letter-prefixed format ('A9' < 'A12') and mixed formats now refuse to
+#           score rather than guess. Tests: tests\BiosFirmware.Tests.ps1.
+#    1.0.1  initial fan-out + catalog fallback.
 # =============================================================================
 
 function Get-JanetToolManifest {
     @{
         id       = 'biosfirmware'
         name     = 'BIOS Firmware'
-        version  = '1.0.1'
+        version  = '1.1.1'   # audit 2026-07-25 (fable re-audit follow-up): catalog-side vs host-side unscorable version split out, Ordinal series compare, cancel-progress now tested; tests\BiosFirmware.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Hardening'
         summary  = 'Read-only fleet BIOS firmware compliance: scan Win32_BIOS over WinRM, compare each model to a per-model target-version baseline (editable JanetLocal catalog), and flag Current / Outdated / Unknown.'
         actions  = @(
@@ -88,21 +109,67 @@ function Get-BiosFirmwareCatalog {
     } catch { return @{ Baselines = $default; Source = "embedded default (catalog read error: $($_.Exception.Message))" } }
 }
 
-# Tolerant version compare (same idiom as wpt/upr): strip non-numeric, [version] >= target.
+# Parse one vendor BIOS version string into a comparable key, or $null when the
+# string carries no version this tool knows how to score. Two recognised shapes:
+#   Kind='dotted' -> Value is a [version]  ('1.28', 'N40 Ver. 01.28')
+#   Kind='alpha'  -> Series (letter run) + Rev (revision as an INT)  ('A12', 'BIOS A05')
+# audit 2026-07-24: the alpha shape is new. Dell ships 'A9'/'A12' and any text
+# ordering of those is backwards, so the revision is compared as a number.
+function ConvertTo-BiosVersionKey {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $t = ([string]$Text).Trim()
+    # Dotted-numeric wins when present. Take the TRAILING dotted token so a leading
+    # model number ('N40 Ver. 01.28' -> '01.28') cannot pollute the major field.
+    $m = [regex]::Matches($t, '\d+(\.\d+)+')
+    if ($m.Count -gt 0) {
+        try { return @{ Kind='dotted'; Value=[version]$m[$m.Count - 1].Value } } catch { return $null }
+    }
+    # Letter-prefixed vendor revision, optionally after a label ('BIOS A05').
+    $a = [regex]::Match($t, '^(?:.*\s)?([A-Za-z]{1,3})(\d{1,4})$')
+    if ($a.Success) { return @{ Kind='alpha'; Series=$a.Groups[1].Value.ToUpperInvariant(); Rev=[int]$a.Groups[2].Value } }
+    return $null
+}
+
+# Tolerant version compare (same idiom as wpt/upr) - NEVER a raw string compare:
+# as text '1.9.0' sorts ABOVE '1.10.0' and 'A9' above 'A12', both of which would
+# report an out-of-date box as Current. Both sides are parsed to a typed key and
+# only like-for-like shapes are scored; a dotted version against a letter revision
+# is not a comparison anyone can make, so it refuses rather than guesses.
 function Get-BiosComplianceStatus {
     param([string]$Installed, [string]$Target)
-    if ([string]::IsNullOrWhiteSpace($Target))    { return 'Unknown' }
-    if ([string]::IsNullOrWhiteSpace($Installed) -or $Installed -eq 'N/A') { return 'Unknown' }
-    # Extract the TRAILING dotted-numeric token (e.g. 'N40 Ver. 01.28' -> '01.28')
-    # so a leading model number like the N40 cannot pollute the major field. A bare
-    # token with no dotted version (e.g. 'A12') is not comparable - stays Unknown.
-    $mi = [regex]::Matches($Installed, '\d+(\.\d+)+')
-    $mt = [regex]::Matches($Target,    '\d+(\.\d+)+')
-    if ($mi.Count -eq 0 -or $mt.Count -eq 0) { return 'Unknown' }
+    if ([string]::IsNullOrWhiteSpace($Target)) { return 'Unknown (no baseline)' }
+    # audit 2026-07-24: an unreadable BIOS version is a HOST problem, not a missing
+    # catalog row - it gets its own state so the roll-up below (and the operator)
+    # can tell "investigate this host" from "add a baseline". Never 'Current'.
+    if ([string]::IsNullOrWhiteSpace($Installed) -or $Installed -eq 'N/A') { return 'Unknown (no BIOS version)' }
     try {
-        $ci = [version]$mi[$mi.Count - 1].Value
-        $ct = [version]$mt[$mt.Count - 1].Value
-        if ($ci -ge $ct) { return 'Current' } else { return 'Outdated' }
+        $ki = ConvertTo-BiosVersionKey $Installed
+        $kt = ConvertTo-BiosVersionKey $Target
+        # Unrecognised on either side, or two different vendor formats: not scorable.
+        # audit 2026-07-25 (fable re-audit follow-up): WHICH side is unparseable decides the
+        # operator's action, and both used to land in one 'Unknown (version format)' bucket
+        # whose roll-up said "the baseline is fine, investigate the host" - dead wrong for a
+        # typo'd TARGET in the catalog, where the hosts are fine and the JSON needs editing.
+        # A mixed pair (both parse, different shapes) stays generic: the catalog is the side
+        # we can edit, so the roll-up files it with the catalog, but neither value is provably
+        # wrong on its own.
+        if ($null -eq $ki -and $null -eq $kt) { return 'Unknown (version format)' }
+        if ($null -eq $ki)                    { return 'Unknown (host version format)' }
+        if ($null -eq $kt)                    { return 'Unknown (baseline version format)' }
+        if ($ki.Kind -ne $kt.Kind)            { return 'Unknown (version format)' }
+        if ($ki.Kind -eq 'dotted') {
+            if ($ki.Value -ge $kt.Value) { return 'Current' } else { return 'Outdated' }
+        }
+        # Alpha: the letter series bumps first (Dell A## -> B##), then the revision.
+        # audit 2026-07-25 (fable re-audit follow-up): ORDINAL, not the culture-sensitive
+        # 3-arg overload. Both series are already ToUpperInvariant'd by the parser, so there
+        # is nothing for a culture to case-fold - and a vendor revision letter is a byte code,
+        # not text to be collated under whatever culture the service happens to run as.
+        if ($ki.Series -ne $kt.Series) {
+            if ([string]::Compare($ki.Series, $kt.Series, [System.StringComparison]::Ordinal) -ge 0) { return 'Current' } else { return 'Outdated' }
+        }
+        if ($ki.Rev -ge $kt.Rev) { return 'Current' } else { return 'Outdated' }
     } catch { return 'Parse Error' }
 }
 
@@ -155,9 +222,16 @@ $script:BiosFirmwareScanBlock = {
         }
         # DNS-mismatch guard (read-only soft-warn, consistent with WPT scan): a wrong
         # box would report the wrong firmware. Session name compare, never PTR.
+        # audit 2026-07-24: IPv4-literal carve-out (parity with restart/wpt, which is
+        # Test-WptRemoteNameMatch's first test). An IP target has no DNS indirection -
+        # the box answering at that IP IS the box - and its first dot-token ('192')
+        # can never equal a COMPUTERNAME, so without this EVERY IP-addressed host was
+        # falsely reported as skipped. Workers can't see module functions, so the test
+        # is inlined here exactly as the sibling guards inline it.
         $actualName  = ([string]$info.Name).Trim()
         $targetShort = ($Computer -split '\.')[0]
-        if ($actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+        $isIPv4      = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
+        if (-not $isIPv4 -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
             $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$actualName' - skipped"
             return $r
         }
@@ -245,7 +319,10 @@ function Invoke-JanetToolAction {
         $baseVal     = if ($hasBaseline) { [string]$baselines[$lookupKey] } else { '' }
         $status = ''
         if ($res.Online -and -not $res.Error) {
-            $status = if ($baseVal) { Get-BiosComplianceStatus -Installed $res.InstalledBIOS -Target $baseVal } else { 'Unknown (no baseline)' }
+            # audit 2026-07-24: the empty-baseline branch moved INSIDE the scorer, which
+            # now returns the specific Unknown flavour ('no baseline' vs 'no BIOS version'
+            # vs 'version format') the roll-up below buckets on. One source of truth.
+            $status = Get-BiosComplianceStatus -Installed $res.InstalledBIOS -Target $baseVal
         } elseif ($res.Error) { $status = 'Error' } else { $status = 'Offline' }
         $target = if ($hasBaseline) { $baseVal } else { 'N/A' }
         $row = @{ Host=[string]$res.Host; Manufacturer=[string]$res.Manufacturer; Model=[string]$res.Model
@@ -292,7 +369,11 @@ function Invoke-JanetToolAction {
                         if ($j.PS) {
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
                             & $emitRow @{ Host=$j.Host; Online=$false; Error='cancelled by operator' }
-                            $done++
+                            # audit 2026-07-24: emit progress here too. The harvest and
+                            # watchdog paths both do; cancel only bumped $done, so the
+                            # strip froze at its last pre-cancel count while rows kept
+                            # landing - the run looked wedged instead of cancelled.
+                            $done++; & $send @{ type='progress'; done=$done; total=$jobs.Count }
                         }
                     }
                     & $send @{ type='log'; level='warn'; text='Run cancelled by operator; in-flight scans stopped.' }
@@ -311,23 +392,59 @@ function Invoke-JanetToolAction {
     $withData = $current + $outdated
     $pctData  = if ($withData -gt 0) { [math]::Round(($current / $withData) * 100, 1) } else { 0 }
     $pctFleet = if ($targets.Count -gt 0) { [math]::Round(($current / $targets.Count) * 100, 1) } else { 0 }
-    # Unbaselined-model roll-up: which distinct models scanned Unknown, with an example
-    # observed BIOS, so the operator knows exactly what to add to the catalog (read-only).
-    $unkModels = @{}
+    # Unknown roll-up, THREE buckets. audit 2026-07-24: one bucket named catalogued
+    # models as "unbaselined" and sent the operator to edit a JSON that already had
+    # the row. They are different actions, so they are different messages:
+    #   A. no catalog entry for this model     -> ADD a baseline (keyed by model)
+    #   B. baselined model, no usable version  -> INVESTIGATE the host (keyed by host)
+    # audit 2026-07-25 (fable re-audit follow-up): bucket C. A mis-typed or mixed-format
+    # TARGET value in the catalog is unscorable too, and it used to fall into B - which
+    # tells the operator to go poke every host over a defect in a JSON file they own.
+    # The catalog is the thing to FIX there, and it is keyed by model, not by host.
+    $unbaselinedModels = @{}
+    $badTargetModels   = @{}
+    $noVersionHosts    = New-Object System.Collections.ArrayList
     foreach ($rw in $rows) {
-        if (([string]$rw.Status) -like 'Unknown*' -and -not [string]::IsNullOrWhiteSpace([string]$rw.Model)) {
-            $k = [string]$rw.Model
-            if (-not $unkModels.ContainsKey($k)) { $unkModels[$k] = @{ Count=0; Bios=[string]$rw.InstalledBIOS } }
-            $unkModels[$k].Count++
+        $st = [string]$rw.Status
+        if (-not ($st -like 'Unknown*' -or $st -like 'Parse*')) { continue }
+        $mdl = [string]$rw.Model
+        # A blank model can't be added to the catalog by name, so it belongs in B
+        # (the host read didn't come back usable) rather than being dropped silently.
+        if ($st -eq 'Unknown (no baseline)' -and -not [string]::IsNullOrWhiteSpace($mdl)) {
+            if (-not $unbaselinedModels.ContainsKey($mdl)) { $unbaselinedModels[$mdl] = @{ Count=0; Bios=[string]$rw.InstalledBIOS } }
+            $unbaselinedModels[$mdl].Count++
+        } elseif (($st -eq 'Unknown (baseline version format)' -or $st -eq 'Unknown (version format)') -and -not [string]::IsNullOrWhiteSpace($mdl)) {
+            if (-not $badTargetModels.ContainsKey($mdl)) { $badTargetModels[$mdl] = @{ Count=0; Target=[string]$rw.TargetBIOS; Bios=[string]$rw.InstalledBIOS } }
+            $badTargetModels[$mdl].Count++
+        } else {
+            $shown = if ([string]::IsNullOrWhiteSpace($mdl)) { 'model unreported' } else { $mdl }
+            [void]$noVersionHosts.Add("$([string]$rw.Host) ($shown - $st)")
         }
     }
-    if ($unkModels.Count -gt 0) {
-        $parts = foreach ($k in ($unkModels.Keys | Sort-Object)) { "$k (e.g. BIOS $($unkModels[$k].Bios)) x$($unkModels[$k].Count)" }
+    if ($unbaselinedModels.Count -gt 0) {
+        $parts = foreach ($k in ($unbaselinedModels.Keys | Sort-Object)) { "$k (e.g. BIOS $($unbaselinedModels[$k].Bios)) x$($unbaselinedModels[$k].Count)" }
         & $send @{ type='log'; level='warn'; text="Unbaselined model(s) - add to JanetLocal\BiosFirmwareCatalog.json: $($parts -join '; ')" }
+    }
+    if ($badTargetModels.Count -gt 0) {
+        # The HOSTS are fine here - the catalog's target value is what cannot be scored,
+        # so name the model + the offending target string and point at the JSON.
+        $bparts = foreach ($k in ($badTargetModels.Keys | Sort-Object)) { "$k (target '$($badTargetModels[$k].Target)' vs installed '$($badTargetModels[$k].Bios)') x$($badTargetModels[$k].Count)" }
+        & $send @{ type='log'; level='warn'; text="Unscorable TARGET version in JanetLocal\BiosFirmwareCatalog.json - fix the catalog entry, the host(s) are fine: $($bparts -join '; ')" }
+    }
+    if ($noVersionHosts.Count -gt 0) {
+        # Cap the list so a fleet-wide WMI outage can't emit a 500-host log line.
+        $shownHosts = @($noVersionHosts | Select-Object -First 20) -join '; '
+        if ($noVersionHosts.Count -gt 20) { $shownHosts += "; ... (+$($noVersionHosts.Count - 20) more)" }
+        & $send @{ type='log'; level='warn'; text="No usable BIOS version from $($noVersionHosts.Count) host(s) - the baseline is fine, investigate the host (SMBIOS/WMI read): $shownHosts" }
     }
     & $send @{ type='log'; level='ok'; text="BIOS compliance - Fleet: $pctFleet% ($current/$($targets.Count)) | Measured: $pctData% ($current/$withData with a baseline+data). Outdated: $outdated, Unknown: $unknown, Failed/Offline: $failed." }
     & $send @{ type='status'; text="Done. $current current, $outdated outdated, $unknown unknown, $failed failed/offline of $($targets.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; current=$current; outdated=$outdated; unknown=$unknown; failed=$failed; fleetPct=$pctFleet; measuredPct=$pctData; source=$catalog.Source } }
+    # audit 2026-07-24: the two Unknown buckets are surfaced in the summary too, so a
+    # caller never has to re-derive "add a baseline" vs "investigate the host" counts.
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; current=$current; outdated=$outdated; unknown=$unknown; failed=$failed
+                                        unbaselinedModels=$unbaselinedModels.Count; noVersionHosts=$noVersionHosts.Count
+                                        badTargetModels=$badTargetModels.Count
+                                        fleetPct=$pctFleet; measuredPct=$pctData; source=$catalog.Source } }
 }
 
 Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction

@@ -12,6 +12,19 @@
 #  ACL'd payload .ps1 onto each target's C$ admin share and running it through a
 #  WinRM-armed SYSTEM scheduled task, then polling the JSON result off
 #  the share. Fans out across hosts with the RunspacePool pattern, streaming rows.
+#  audit 2026-07-24 (v1.6.8): the payload now SUSPENDS BITLOCKER for one reboot on
+#  every TPM-sealed volume before the firmware write (a Secure Boot change re-measures
+#  the boot PCRs, so an un-suspended host stops at the recovery-key prompt) and fails
+#  CLOSED - a host whose suspend does not take is REFUSED, never written. Refusals
+#  (BitLocker + the UEFI/GPT brick-safety stop) now carry their own 'Refused' status
+#  and tally instead of riding out green as "already enabled".
+#  audit 2026-07-25 (v1.6.9, fable re-audit follow-up): closed the ONE fail-OPEN corner
+#  left in that guarantee - the cmdlets-absent manage-bde fallback used to proceed on a
+#  throw / non-zero exit / empty or LOCALIZED output, so an unreadable state read as "no
+#  protected volume". It now REFUSES anything it cannot positively parse as protection-off.
+#  Also resumes BitLocker when the firmware write never happened (unsupported OEM or a
+#  rejected OEM write) instead of costing the host an unprotected boot for nothing, and
+#  fills the BitLocker cell on the early-error / timeout / cancel rows.
 #
 #  Contract (unchanged across the suite):
 #    Get-JanetToolManifest                                         -> descriptors
@@ -28,7 +41,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.6.7'   # audit 2026-07-23 fix pass; Secureboot.Scan.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.6.9'   # audit 2026-07-25 fable re-audit follow-up (manage-bde fallback fails CLOSED / resume-on-no-write / BitLocker cell on every row shape); Secureboot.BitLockerRefuse.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + Dell/HP/Lenovo), OFF - UNSUPPORTED OEM, or BLOCKED - LEGACY/MBR - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -48,16 +61,21 @@ function Get-JanetToolManifest {
             @{
                 id          = 'enable-secure-boot'
                 label       = 'Enable Secure Boot'
-                description = 'Enable Secure Boot across target machines with OEM-specific WMI payloads (Dell/HP/Lenovo). Validates UEFI+GPT boot safety, detects manufacturer, writes the firmware setting, and polls the result JSON from the C$ admin share. Dry Run does a TCP (5985/5986/445) reachability + WinRM manufacturer preflight only.'
+                description = 'Enable Secure Boot across target machines with OEM-specific WMI payloads (Dell/HP/Lenovo). Validates UEFI+GPT boot safety, SUSPENDS BitLocker for one reboot on any TPM-sealed volume (a host whose suspend fails is REFUSED, never written), detects manufacturer, writes the firmware setting, and polls the result JSON from the C$ admin share. Dry Run does a TCP (5985/5986/445) reachability + WinRM manufacturer preflight only.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Write the UEFI Secure Boot firmware setting on the selected host(s)? Each enabled host is left PENDING A REBOOT; the JANET dispatcher is auto-excluded (self-guard) and JANET skips any host it cannot confirm is on a safe UEFI+GPT boot path. A live run (not Dry Run) requires typing ENABLE to arm. Proceed?'
-                columns     = @('Host','Status','Manufacturer','Before','After','SetResult','Error')
+                confirm     = 'Write the UEFI Secure Boot firmware setting on the selected host(s)? Each enabled host is left PENDING A REBOOT; the JANET dispatcher is auto-excluded (self-guard), JANET skips any host it cannot confirm is on a safe UEFI+GPT boot path, and BitLocker is suspended for one reboot on TPM-sealed volumes (REFUSED if that suspend fails). A live run (not Dry Run) requires typing ENABLE to arm. Proceed?'
+                columns     = @('Host','Status','Manufacturer','Before','After','SetResult','BitLocker','Error')
                 inputs      = @(
                     @{ name='targets';            label='Targets (one host per line, max 50)'; type='hostlist'; required=$true },
                     @{ name='bios_password';      label='BIOS Password (no comma, quote or backtick)'; type='password'; required=$false },
                     @{ name='allowEmptyPassword'; label='Allow empty BIOS password (only if the BIOS has no password set)'; type='bool'; required=$false; default=$false },
                     @{ name='dry_run';            label='Dry Run (preflight only, no firmware write)'; type='bool'; required=$false; default=$false },
+                    # audit 2026-07-24: secureboot was the ONLY module reading a 'confirm' param it never
+                    # declared, so the typed-word gate at Invoke-JanetToolAction was invisible to the
+                    # manifest-driven generic view / API caller. required=$false because Dry Run is
+                    # deliberately ungated (mirrors restart.psm1's RESTART input).
+                    @{ name='confirm';            label='Type ENABLE to arm (live firmware write only; dry run exempt)'; type='text'; required=$false },
                     @{ name='threads';            label='Parallel hosts (1-10)'; type='int'; required=$false; default=5 }
                 )
             }
@@ -90,7 +108,7 @@ function ConvertTo-SecureBootHostList {
 # NIC IPs, and loopback. Computed once and cached. Case-insensitive HashSet.
 # -----------------------------------------------------------------------------
 function Get-JanetSbeLocalIdentity {
-    if ($script:SbeLocalIdentity) { return $script:SbeLocalIdentity }
+    if ($script:SbeLocalIdentity) { return ,$script:SbeLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -111,7 +129,7 @@ function Get-JanetSbeLocalIdentity {
         }
     } catch {}
     $script:SbeLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 # True if a target token names this dispatcher host (short/FQDN/IP/loopback).
@@ -301,6 +319,169 @@ function Get-OSSecureBootState {
     }
 }
 
+# ----------------------------------------------------------------------------
+# audit 2026-07-24 (P1): SUSPEND BITLOCKER BEFORE THE FIRMWARE WRITE.
+# Turning Secure Boot on changes the boot-measurement PCRs the TPM seals the
+# BitLocker volume master key to, so on the pending reboot a TPM-protected
+# volume no longer unseals and the host stops at the 48-digit RECOVERY KEY
+# prompt. Across a wave that strands every user who does not have their key -
+# the highest-consequence failure this tool can cause. Suspending for exactly
+# ONE reboot lets that boot proceed unsealed; protection auto-resumes after it
+# and re-seals against the NEW (Secure Boot on) PCR values.
+# Only TPM-BACKED protectors are PCR-sealed - a password/recovery-password-only
+# volume is unaffected, so it is left alone rather than needlessly suspended.
+# FAIL CLOSED: if a volume that needs suspending cannot be suspended (or its
+# state cannot be read at all), the caller REFUSES the firmware write on this
+# host. Writing blind is what strands a fleet; refusing only costs a re-run.
+# ----------------------------------------------------------------------------
+function Suspend-TpmBitLockerForFirmware {
+    $res = [PSCustomObject]@{ Ok = $true; Detail = ''; Suspended = @() }
+
+    # No BitLocker cmdlets => we cannot suspend anything, so the ONLY safe way past
+    # this branch is POSITIVE proof that nothing is protected. Corroborate with
+    # manage-bde when it exists.
+    if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Suspend-BitLocker  -ErrorAction SilentlyContinue)) {
+        $mbde = Join-Path $env:SystemRoot 'System32\manage-bde.exe'
+        if (-not (Test-Path -LiteralPath $mbde)) {
+            # Neither the cmdlets NOR manage-bde exist: the BitLocker feature is genuinely
+            # not installed on this box, so no volume can be TPM-sealed. That is a positive
+            # fact about the host - not an unread state - so it may proceed.
+            $res.Detail = 'BitLocker cmdlets and manage-bde are both absent (feature not installed); no volume can be TPM-sealed.'
+            return $res
+        }
+        # audit 2026-07-25 (fable re-audit follow-up): this fallback FAILED OPEN. A throw,
+        # a non-zero exit, empty output, or LOCALIZED output (the old regex matched only the
+        # English 'Protection Status: Protection On') all fell through to Ok=$true with a
+        # Detail asserting "no protected volume to suspend" when the true state was UNKNOWN -
+        # and the firmware write then proceeded on a genuinely protected volume. Unknown is
+        # now a REFUSAL, matching the fail-closed contract the rest of this function keeps.
+        $st = ''; $exitBad = $false
+        try {
+            $st = (& $mbde -status 2>&1 | Out-String)
+            # $LASTEXITCODE is only meaningful once a native command has actually set it; a
+            # $null here means "no signal", NOT success - the parse gate below is what
+            # decides, and it refuses anything it cannot positively read.
+            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $exitBad = $true }
+        } catch { $st = ''; $exitBad = $true }
+        if ($exitBad -or [string]::IsNullOrWhiteSpace($st)) {
+            $res.Ok = $false
+            $res.Detail = 'BitLocker state could not be determined - refusing the firmware write (the BitLocker cmdlets are absent and manage-bde -status failed or returned no output).'
+            return $res
+        }
+        # POSITIVE parse only. Every volume block must yield a readable 'Protection Status:'
+        # line; if none parse, the output is localized/unexpected and we do not know what we
+        # are looking at, so we refuse rather than assume "off".
+        $stLines = @([regex]::Matches($st, '(?im)^\s*Protection\s+Status:\s*(.+?)\s*$'))
+        if ($stLines.Count -eq 0) {
+            $res.Ok = $false
+            $res.Detail = 'BitLocker state could not be determined - refusing the firmware write (manage-bde -status produced no readable "Protection Status:" line; the output may be localized).'
+            return $res
+        }
+        if (@($stLines | Where-Object { $_.Groups[1].Value -match '(?i)Protection\s+On' }).Count -gt 0) {
+            $res.Ok = $false
+            $res.Detail = 'BitLocker protection is ON but the BitLocker PowerShell cmdlets are unavailable, so it cannot be suspended for the reboot.'
+            return $res
+        }
+        if (@($stLines | Where-Object { $_.Groups[1].Value -notmatch '(?i)Protection\s+Off' }).Count -gt 0) {
+            $res.Ok = $false
+            $res.Detail = 'BitLocker state could not be determined - refusing the firmware write (manage-bde -status reported a protection state this payload does not recognise).'
+            return $res
+        }
+        $res.Detail = "BitLocker cmdlets not present; manage-bde reports every volume Protection Off ($($stLines.Count) volume(s)) - no protected volume to suspend."
+        return $res
+    }
+
+    # TPM-backed protector types (the PCR-sealed ones).
+    $tpmTypes = @('Tpm','TpmPin','TpmStartupKey','TpmPinStartupKey')
+    $vols = @()
+    try {
+        $vols = @(Get-BitLockerVolume -ErrorAction Stop | Where-Object {
+            ("$($_.ProtectionStatus)" -match '(?i)^(On|1)$') -and
+            (@($_.KeyProtector | Where-Object { $tpmTypes -contains "$($_.KeyProtectorType)" }).Count -gt 0)
+        })
+    } catch {
+        $res.Ok = $false
+        $res.Detail = "Could not read BitLocker volume state ($($_.Exception.Message))."
+        return $res
+    }
+    if ($vols.Count -eq 0) {
+        $res.Detail = 'No TPM-sealed BitLocker volume; nothing to suspend.'
+        return $res
+    }
+
+    $done = New-Object System.Collections.ArrayList
+    foreach ($v in $vols) {
+        $mp = "$($v.MountPoint)"
+        try {
+            Suspend-BitLocker -MountPoint $mp -RebootCount 1 -ErrorAction Stop | Out-Null
+        } catch {
+            $res.Ok = $false
+            $res.Detail = "Suspend-BitLocker failed on $mp : $($_.Exception.Message)"
+            return $res
+        }
+        # Verify the suspend actually took - a silent no-op would leave the volume
+        # PCR-sealed and we would still strand the host.
+        try {
+            $after = Get-BitLockerVolume -MountPoint $mp -ErrorAction Stop
+            if ("$($after.ProtectionStatus)" -match '(?i)^(On|1)$') {
+                $res.Ok = $false
+                $res.Detail = "Suspend-BitLocker on $mp returned without error but protection is still ON."
+                return $res
+            }
+        } catch {
+            $res.Ok = $false
+            $res.Detail = "Could not verify the BitLocker suspend on $mp : $($_.Exception.Message)"
+            return $res
+        }
+        [void]$done.Add($mp)
+    }
+    $res.Suspended = $done.ToArray()
+    $res.Detail    = "Suspended for 1 reboot: $($done -join ', ')"
+    return $res
+}
+
+# ----------------------------------------------------------------------------
+# audit 2026-07-25 (fable re-audit follow-up): RESUME WHAT WE SUSPENDED FOR NOTHING.
+# The suspend runs BEFORE the manufacturer switch, so an unsupported OEM or a
+# rejected OEM write (wrong BIOS password, setting absent, commit refused) left the
+# host with BitLocker suspended for its next reboot and ZERO firmware change to show
+# for it - a needless unprotected boot. Resume protection on those paths.
+# Deliberately NOT called when the write DID (or may have) happened: an already-
+# staged 'AlreadyPending' host still faces a re-measured next boot, and after an
+# unexpected exception the write state is unknown - resuming a host whose firmware
+# did change is exactly what strands it at the recovery prompt. One unprotected boot
+# is the safe side of that trade; a recovery-key prompt is not.
+# ----------------------------------------------------------------------------
+function Resume-TpmBitLockerAfterNoWrite {
+    param($MountPoints)
+    $res = [PSCustomObject]@{ Ok = $true; Detail = '' }
+    $mps = @($MountPoints)
+    if ($mps.Count -eq 0) { return $res }
+    if (-not (Get-Command Resume-BitLocker -ErrorAction SilentlyContinue)) {
+        $res.Ok = $false
+        $res.Detail = "resume FAILED on $($mps -join ', ') (Resume-BitLocker unavailable) - protection stays suspended until the next reboot."
+        return $res
+    }
+    $back = New-Object System.Collections.ArrayList
+    $bad  = New-Object System.Collections.ArrayList
+    foreach ($mp in $mps) {
+        try {
+            Resume-BitLocker -MountPoint $mp -ErrorAction Stop | Out-Null
+            [void]$back.Add($mp)
+        } catch {
+            $res.Ok = $false
+            [void]$bad.Add("$mp ($($_.Exception.Message))")
+        }
+    }
+    # Report honestly per host: a partial resume must not read as a clean one.
+    $parts = New-Object System.Collections.ArrayList
+    if ($back.Count -gt 0) { [void]$parts.Add("no firmware change was made, so BitLocker was RESUMED on $($back -join ', ')") }
+    if ($bad.Count  -gt 0) { [void]$parts.Add("resume FAILED on $($bad -join '; ') - protection stays suspended until the next reboot") }
+    $res.Detail = ($parts -join '; ')
+    return $res
+}
+
 try {
     $mfr   = (Get-CimInstance Win32_ComputerSystem -EA Stop).Manufacturer
     $osSB  = Get-OSSecureBootState
@@ -369,28 +550,73 @@ try {
             }
         }
         if (-not $bootSafe) {
+            # audit 2026-07-24 (P3): a brick-safety stop is a REFUSAL, not a success.
+            # It used to ride out as SetResult/Skipped='Skipped'/$true, which the
+            # consumer bucketed with "already enabled" and painted green - so a host
+            # JANET deliberately declined to touch read as done. Refused=$true gives
+            # it its own status + tally; Skipped stays $false so nothing conflates them.
             $out = [PSCustomObject]@{
                 Manufacturer = $mfr
                 CurrentValue = 'N/A'
-                SetResult    = 'Skipped'
+                SetResult    = 'Refused'
                 NewValue     = 'N/A'
                 Error        = "Brick-safety stop: $bootWhy. Enabling Secure Boot on a non-UEFI/non-GPT boot path can make the host unbootable - resolve the boot mode first. No BIOS write attempted."
-                Skipped      = $true
+                Skipped      = $false
+                Refused      = $true
                 Timestamp    = (Get-Date -Format 'o')
             }
         }
         else {
-            $out = switch -Regex ($mfr) {
-                'LENOVO'      { Enable-LenovoSecureBoot; break }
-                'HP|Hewlett'  { Enable-HPSecureBoot;     break }
-                'Dell'        { Enable-DellSecureBoot;   break }
-                default  {
-                    New-Result -Mfr $mfr -Current 'N/A' -SetResult 'N/A' -New 'N/A' `
-                        -Err "Unsupported manufacturer [$mfr] - no changes made."
+            # audit 2026-07-24 (P1): suspend BitLocker for ONE reboot BEFORE the write.
+            # A Secure Boot change re-measures the boot PCRs, so a TPM-sealed volume
+            # would demand its recovery key on the pending reboot. Fail CLOSED - if the
+            # suspend did not take, REFUSE this host instead of writing firmware that
+            # could leave it unbootable for a user who has no recovery key.
+            $bl = Suspend-TpmBitLockerForFirmware
+            if (-not $bl.Ok) {
+                $out = [PSCustomObject]@{
+                    Manufacturer = $mfr
+                    CurrentValue = 'N/A'
+                    SetResult    = 'Refused'
+                    NewValue     = 'N/A'
+                    Error        = "BitLocker safety stop: $($bl.Detail) Enabling Secure Boot re-measures the boot PCRs the volume key is sealed to, so this host would stop at the BitLocker recovery-key prompt on the next boot. No BIOS write attempted."
+                    Skipped      = $false
+                    Refused      = $true
+                    BitLocker    = "NOT SUSPENDED - $($bl.Detail)"
+                    Timestamp    = (Get-Date -Format 'o')
                 }
             }
-            if ($null -ne $out -and -not ($out | Get-Member -Name 'Skipped' -EA SilentlyContinue)) {
-                $out | Add-Member -NotePropertyName Skipped -NotePropertyValue $false
+            else {
+                $out = switch -Regex ($mfr) {
+                    'LENOVO'      { Enable-LenovoSecureBoot; break }
+                    'HP|Hewlett'  { Enable-HPSecureBoot;     break }
+                    'Dell'        { Enable-DellSecureBoot;   break }
+                    default  {
+                        New-Result -Mfr $mfr -Current 'N/A' -SetResult 'N/A' -New 'N/A' `
+                            -Err "Unsupported manufacturer [$mfr] - no changes made."
+                    }
+                }
+                if ($null -ne $out -and -not ($out | Get-Member -Name 'Skipped' -EA SilentlyContinue)) {
+                    $out | Add-Member -NotePropertyName Skipped -NotePropertyValue $false
+                }
+                # audit 2026-07-25 (fable re-audit follow-up): NO firmware change happened on
+                # this host - unsupported OEM, or the OEM branch reported the write rejected/
+                # not staged/not persisted (every such branch sets a non-empty Error). The
+                # one-reboot suspend therefore bought nothing and would only cost the user an
+                # unprotected boot, so resume protection now. EXCEPTION: 'AlreadyPending' means
+                # the enable is ALREADY staged and the next boot is the re-measured one - that
+                # host genuinely needs the suspend, so leave it suspended.
+                $blDetail = [string]$bl.Detail
+                if ($null -ne $out -and @($bl.Suspended).Count -gt 0 -and
+                    "$($out.SetResult)" -ne 'AlreadyPending' -and "$($out.Error)") {
+                    $rb = Resume-TpmBitLockerAfterNoWrite -MountPoints $bl.Suspended
+                    if ("$($rb.Detail)") { $blDetail = "$blDetail | $($rb.Detail)" }
+                }
+                # Report the suspension outcome per host, honestly, on the row itself -
+                # the operator has to know whether this box will come back up clean.
+                if ($null -ne $out) {
+                    $out | Add-Member -NotePropertyName BitLocker -NotePropertyValue $blDetail -Force
+                }
             }
         }
     }
@@ -447,6 +673,7 @@ $script:SbeDryWorker = {
             Before       = 'N/A (Dry Run)'
             After        = 'N/A (Dry Run)'
             SetResult    = 'N/A (Dry Run)'
+            BitLocker    = 'N/A (Dry Run)'
             Error        = 'Unreachable: no TCP on 5985/5986 (WinRM) or 445 (SMB) within 1.5s.'
             Skipped      = $false
         }
@@ -477,6 +704,7 @@ $script:SbeDryWorker = {
             Before       = 'N/A (Dry Run)'
             After        = 'N/A (Dry Run)'
             SetResult    = 'N/A (Dry Run)'
+            BitLocker    = 'N/A (Dry Run)'
             Error        = ''
             Skipped      = $false
         }
@@ -488,6 +716,7 @@ $script:SbeDryWorker = {
             Before       = 'N/A (Dry Run)'
             After        = 'N/A (Dry Run)'
             SetResult    = 'N/A (Dry Run)'
+            BitLocker    = 'N/A (Dry Run)'
             Error        = "WinRM unreachable (TCP open but WinRM/5985/5986 did not answer): $($_.Exception.Message)"
             Skipped      = $false
         }
@@ -538,6 +767,11 @@ $script:SbeLiveWorker = {
     $lastParseErr = $null
     $sbDrive        = "SBE_$($comp -replace '[^A-Za-z0-9]','')"
     $sbDriveMounted = $false
+    # audit 2026-07-24 (P3): the post-run "was C$ even reachable?" diagnosis used to
+    # probe the share AFTER the finally had removed the credentialed PSDrive, so the
+    # probe ran on the SERVER's own token and a host that had simply timed out came
+    # back "permission denied". Sample it while the $cred SMB session is still up.
+    $shareReachable = $null
     try {
         # AFNET-safe: open ONE WinRM session up front (Register here, Start next,
         # Unregister in finally) instead of a DCOM CIM session. Opened FIRST, before
@@ -701,13 +935,21 @@ $script:SbeLiveWorker = {
         if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
         Remove-Item -LiteralPath $uncPath   -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $scriptUnc -Force -ErrorAction SilentlyContinue
-        if ($sbDriveMounted) { Remove-PSDrive -Name $sbDrive -Force -ErrorAction SilentlyContinue }
+        if ($sbDriveMounted) {
+            # audit 2026-07-24 (P3): sample C$ reachability BEFORE dropping the drive -
+            # once the credentialed SMB session is gone the same probe authenticates as
+            # the server process and mislabels a timeout as "permission denied".
+            if ($null -eq $result) {
+                try { $shareReachable = [bool](Test-Path -LiteralPath "\\$comp\C`$\Windows\Temp" -ErrorAction SilentlyContinue) } catch { $shareReachable = $false }
+            }
+            Remove-PSDrive -Name $sbDrive -Force -ErrorAction SilentlyContinue
+        }
     }
 
     if ($earlyErr) {
         return [ordered]@{
             Computer=$comp; Status='Error'; Manufacturer='?'
-            Before='?'; After='?'; SetResult='?'; Error=$earlyErr; Skipped=$false
+            Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error=$earlyErr; Skipped=$false
         }
     }
     if ($null -eq $result) {
@@ -715,18 +957,29 @@ $script:SbeLiveWorker = {
         if ($fileSeen) {
             $msg = if ($lastParseErr) { "Result file was present but unreadable/corrupt: $lastParseErr" }
                    else { 'Result file present but missing expected fields (payload may have crashed mid-write).' }
-            return [ordered]@{ Computer=$comp; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error=$msg; Skipped=$false }
+            return [ordered]@{ Computer=$comp; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error=$msg; Skipped=$false }
         }
-        if (-not (Test-Path -LiteralPath "\\$comp\C`$\Windows\Temp" -ErrorAction SilentlyContinue)) {
-            return [ordered]@{ Computer=$comp; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error="C`$ admin share not accessible on $comp (permission denied or unreachable); the task may have run but the result could not be read."; Skipped=$false }
+        # audit 2026-07-24 (P3): use the reading taken while the credentialed PSDrive was
+        # STILL mounted (see $shareReachable above). Only fall back to a live probe if the
+        # drive never got mounted at all - otherwise this call would run on the server's
+        # own token and report "denied" for what was really a timeout.
+        $shareOk = if ($null -ne $shareReachable) { [bool]$shareReachable }
+                   else { [bool](Test-Path -LiteralPath "\\$comp\C`$\Windows\Temp" -ErrorAction SilentlyContinue) }
+        if (-not $shareOk) {
+            return [ordered]@{ Computer=$comp; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error="C`$ admin share not accessible on $comp with the run credential (permission denied or unreachable); the task may have run but the result could not be read."; Skipped=$false }
         }
-        return [ordered]@{ Computer=$comp; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error='Payload ran but produced no result within 90 s.'; Skipped=$false }
+        return [ordered]@{ Computer=$comp; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error='Payload ran but produced no result within 90 s.'; Skipped=$false }
     }
     # loop59 (item62): 'AlreadyPending' means the host was ALREADY staged pending-reboot on a
     # prior run and this run wrote NOTHING (the vendor branch returns before re-firing the set/
     # save). It must resolve to 'Skipped' - not 'Success' - so a re-run doesn't book a fresh
     # VulnPatched/Success/itemCount=1 audit + inflate the "N enabled" count for work it didn't do.
+    # audit 2026-07-24 (P3): 'Refused' is a SAFETY REFUSAL (brick-safety stop or a
+    # BitLocker suspend that would not take) - JANET declined to write firmware and
+    # nothing changed. It is neither a success nor an "already enabled" skip, so it
+    # gets its own status and its own bucket upstream instead of being painted green.
     $resolvedStatus = if     ($result.Unknown -eq $true)             { 'Unknown' }
+                      elseif ($result.Refused -eq $true)             { 'Refused' }
                       elseif ($result.Skipped -eq $true)             { 'Skipped' }
                       elseif ($result.SetResult -eq 'AlreadyPending'){ 'Skipped' }
                       elseif ($result.Error)                         { 'Error'   }
@@ -738,6 +991,7 @@ $script:SbeLiveWorker = {
         Before       = $result.CurrentValue
         After        = $result.NewValue
         SetResult    = $result.SetResult
+        BitLocker    = [string]$result.BitLocker   # audit 2026-07-24: per-host suspend outcome
         Error        = $result.Error
         Skipped      = [bool]($resolvedStatus -eq 'Skipped')   # align field to status (AlreadyPending now Skipped)
     }
@@ -1192,7 +1446,7 @@ function Invoke-JanetToolAction {
     # word at all; loop62 retrofitted dhcp (APPLY) and pkginstall (DEPLOY) server-side but
     # secureboot was never retrofitted. Fail-closed: refuse unless the operator typed
     # ENABLE (exactly). Dry run stays ungated (harmless preflight - the loop-15 design).
-    if ((-not $isDry) -and ([string]$Params['confirm'] -ne 'ENABLE')) {
+    if ((-not $isDry) -and ([string]$Params['confirm'] -cne 'ENABLE')) {
         & $send @{ type='log'; level='err'; text='Refused: type ENABLE (exactly) in Confirm to arm the live enable.' }
         return @{ rows=@(); summary=@{ total=0; rejected=$true } }
     }
@@ -1261,6 +1515,7 @@ function Invoke-JanetToolAction {
 
     $rows = New-Object System.Collections.ArrayList
     $done = 0; $okCount = 0; $skipCount = 0; $failCount = 0
+    $refusedCount = 0   # audit 2026-07-24: safety refusals get their own tally, never "already enabled"
     try {
         while ($done -lt $jobs.Count) {
             # Stamp the per-host clock only up to the pool's real concurrency, in queue
@@ -1274,13 +1529,13 @@ function Invoke-JanetToolAction {
                     $res = $null
                     try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 }
                     catch {
-                        $res = [ordered]@{ Computer=$j.Host; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error="worker error: $($_.Exception.Message)"; Skipped=$false }
+                        $res = [ordered]@{ Computer=$j.Host; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error="worker error: $($_.Exception.Message)"; Skipped=$false }
                     }
                     try { $j.PS.Dispose() } catch {}
                     $j.PS = $null
 
                     if ($null -eq $res) {
-                        $res = [ordered]@{ Computer=$j.Host; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error='Worker returned no data.'; Skipped=$false }
+                        $res = [ordered]@{ Computer=$j.Host; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error='Worker returned no data.'; Skipped=$false }
                     }
 
                     $status = [string]$res.Status
@@ -1291,15 +1546,22 @@ function Invoke-JanetToolAction {
                     # and the outcome is indeterminate. Bucket it with Skipped (not counted as
                     # OK, not a hard Failure) but keep its DISTINCT 'Unknown' row status.
                     $isUnknown = ($status -eq 'Unknown')
+                    # audit 2026-07-24 (P3): a REFUSAL (brick-safety stop / BitLocker suspend that
+                    # would not take) is its own outcome - JANET declined to write and nothing
+                    # changed. It was previously tallied as an already-enabled skip, inflating the
+                    # "N enabled/skipped" line with hosts that still need hands-on work.
+                    $isRefused = ($status -eq 'Refused')
                     if ($isOk)          { $okCount++ }
                     elseif ($isSkip)    { $skipCount++ }
                     elseif ($isUnknown) { $skipCount++ }
+                    elseif ($isRefused) { $refusedCount++ }
                     elseif (-not $isDryR) { $failCount++ }
 
                     # loop76 (informative failures): on a real enable failure (not ok/skip/unknown/dry-run),
                     # translate the raw error into an actionable troubleshooting hint - carried in a Hint row
-                    # field + appended to the err log; the raw error is preserved.
-                    $hint = if ((-not $isOk) -and (-not $isSkip) -and (-not $isUnknown) -and (-not $isDryR) -and $res.Error) { Get-JanetTroubleshootHint -Message ([string]$res.Error) -Server ([string]$res.Computer) } else { '' }
+                    # field + appended to the err log; the raw error is preserved. audit 2026-07-24: a
+                    # refusal is not a failure - its Error already states the exact precondition to fix.
+                    $hint = if ((-not $isOk) -and (-not $isSkip) -and (-not $isUnknown) -and (-not $isRefused) -and (-not $isDryR) -and $res.Error) { Get-JanetTroubleshootHint -Message ([string]$res.Error) -Server ([string]$res.Computer) } else { '' }
 
                     $row = @{
                         Host         = $res.Computer
@@ -1308,21 +1570,26 @@ function Invoke-JanetToolAction {
                         Before       = [string]$res.Before
                         After        = [string]$res.After
                         SetResult    = [string]$res.SetResult
+                        BitLocker    = [string]$res.BitLocker   # audit 2026-07-24: per-host suspend outcome
                         Error        = [string]$res.Error
                         Hint         = [string]$hint
                     }
                     [void]$rows.Add($row)
                     & $send (@{ type='row' } + $row)
 
-                    $lvl = if ($isOk -or $isSkip -or $isDryR -or $isUnknown) { '' } else { 'err' }
+                    # A refusal is amber, not red (nothing broke) and not silent (it needs action).
+                    $lvl = if ($isRefused) { 'warn' } elseif ($isOk -or $isSkip -or $isDryR -or $isUnknown) { '' } else { 'err' }
                     $detailText = if ($res.Error) { [string]$res.Error } else { "$status ($($res.Manufacturer))" }
+                    if ($res.BitLocker -and -not $res.Error) { $detailText += " | BitLocker: $([string]$res.BitLocker)" }
                     & $send @{ type='log'; level=$lvl; text=(("{0}: {1} - {2}" -f $res.Computer, $status, $detailText) + $(if ($hint) { ' | FIX: ' + $hint } else { '' })) }
 
                     # JANET audit. Enabling Secure Boot is a security-state change ->
                     # VulnPatched. Success + Skipped (already-enabled) both count;
                     # failures count as Failure. Dry-run preflight rows are NOT logged.
                     if (-not $isDryR) {
-                        $auditResult = if ($isOk) { 'Success' } elseif ($isSkip -or $isUnknown) { 'Skipped' } else { 'Failure' }
+                        # audit 2026-07-24: a Refused host is audited Skipped (itemCount 0) - no
+                        # write was attempted, so it is neither patched nor a failed attempt.
+                        $auditResult = if ($isOk) { 'Success' } elseif ($isSkip -or $isUnknown -or $isRefused) { 'Skipped' } else { 'Failure' }
                         $itemCount   = if ($isOk) { 1 } else { 0 }
                         # Carry the Before->After transition into the audit trail for
                         # non-error rows (HP success stages '<target> (pending reboot)',
@@ -1347,7 +1614,7 @@ function Invoke-JanetToolAction {
                     if ($j.PS -and $j.StartedAt -and ($nowPh - $j.StartedAt).TotalSeconds -gt $perHostTimeout) {
                         try { [void]$j.PS.BeginStop($null, $null) } catch {}
                         $j.PS = $null
-                        $row = @{ Host=$j.Host; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error="per-host timeout (${perHostTimeout}s) - hung WinRM/SMB step reaped"; Hint='' }
+                        $row = @{ Host=$j.Host; Status='Timeout'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error="per-host timeout (${perHostTimeout}s) - hung WinRM/SMB step reaped"; Hint='' }
                         [void]$rows.Add($row)
                         & $send (@{ type='row' } + $row)
                         & $send @{ type='log'; level='err'; text=("{0}: Timeout - per-host timeout ({1}s), in-flight call stopped" -f $j.Host, $perHostTimeout) }
@@ -1373,7 +1640,7 @@ function Invoke-JanetToolAction {
                             # Close/Dispose in finally reclaims the runspaces.
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}
                             $j.PS = $null
-                            $row = @{ Host=$j.Host; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; Error='cancelled by operator' }
+                            $row = @{ Host=$j.Host; Status='Error'; Manufacturer='?'; Before='?'; After='?'; SetResult='?'; BitLocker='n/a'; Error='cancelled by operator' }
                             [void]$rows.Add($row)
                             & $send (@{ type='row' } + $row)
                             # Honest audit: on a post-arm cancel the SYSTEM task may
@@ -1398,12 +1665,12 @@ function Invoke-JanetToolAction {
     if ($isDry) {
         & $send @{ type='status'; text="Dry run complete: $($jobs.Count) host(s) probed for TCP (5985/5986/445) reachability + WinRM manufacturer only, $failCount unreachable. A reachable result does NOT confirm the live enable will succeed - UEFI/GPT brick-safety and the BIOS password are only checked during a live run." }
     } else {
-        & $send @{ type='status'; text="Done. $okCount enabled, $skipCount already-enabled/skipped, $failCount error/timeout of $($jobs.Count)." }
+        & $send @{ type='status'; text="Done. $okCount enabled, $skipCount already-enabled/skipped, $refusedCount refused (safety), $failCount error/timeout of $($jobs.Count)." }
     }
 
     return @{
         rows    = @($rows)
-        summary = @{ total=$jobs.Count; ok=$okCount; skipped=$skipCount; failed=$failCount; dryRun=[bool]$isDry }
+        summary = @{ total=$jobs.Count; ok=$okCount; skipped=$skipCount; refused=$refusedCount; failed=$failCount; dryRun=[bool]$isDry }
     }
 }
 

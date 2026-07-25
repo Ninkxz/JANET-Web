@@ -34,9 +34,21 @@ function Get-JanetTroubleshootHint {
     if ($m -match 'TrustedHosts') {
         return "The target$on is not in the WinRM client TrustedHosts. As admin on the dispatcher: Set-Item WSMan:\localhost\Client\TrustedHosts -Value '<hostname-or-FQDN-or-*>' -Concatenate -Force. Workgroup and cross-forest targets always need this."
     }
-    # Logon failure = genuinely wrong credential (distinct from access-denied)
-    if ($m -match 'logon\s+failure|0x8009030E|0xC000006D|wrong\s+user\s*name\s+or\s+password|the\s+user\s+name\s+or\s+password\s+is\s+incorrect') {
+    # Logon failure = genuinely wrong credential (distinct from access-denied).
+    # audit 2026-07-24: the hex code here was 0x8009030E, which is SEC_E_NO_CREDENTIALS
+    # ("no credentials are available"), NOT a bad password - so an operator chasing a
+    # no-credential problem was sent to reset a perfectly good password. The real
+    # wrong-password code is 0x8009030C (SEC_E_LOGON_DENIED); 0x8009030E now has its
+    # own branch immediately below.
+    if ($m -match 'logon\s+failure|0x8009030C|SEC_E_LOGON_DENIED|0xC000006D|wrong\s+user\s*name\s+or\s+password|the\s+user\s+name\s+or\s+password\s+is\s+incorrect') {
         return "Logon failure - the credential is wrong (bad username/password), not merely under-privileged. Check for a missing domain prefix (DOMAIN\user or user@domain.com), an expired/changed password, or a locked-out account. Clear the credential to fall back to the current CAC/session identity, or supply a different one."
+    }
+    # No credentials available in the security package (SEC_E_NO_CREDENTIALS). The
+    # credential is not WRONG - there is none to present: no CAC/Kerberos ticket in the
+    # session, a smart-card credential that cannot be delegated to a second hop, or an
+    # explicit credential that never reached the runspace. (audit 2026-07-24)
+    if ($m -match '0x8009030E|SEC_E_NO_CREDENTIALS|no\s+credentials\s+are\s+available') {
+        return "WinRM auth 0x8009030E (SEC_E_NO_CREDENTIALS): the security package had NO credential to present to the target$on - this is NOT a wrong password, so do not reset one. The session has no usable ticket/credential: the CAC/Kerberos ticket is missing or expired, or a smart-card credential cannot be delegated onward (double hop). Supply an explicit account with Set Credentials, or re-authenticate (lock/unlock or re-insert the CAC) and re-run."
     }
     # Access denied = authenticated but not privileged / UAC token filtering
     if ($m -match 'access\s+is\s+denied|access\s+denied|0x80070005|ERROR_ACCESS_DENIED|E_ACCESSDENIED') {

@@ -16,6 +16,12 @@
   var ui = function () { return Janet.ui; };
   var el = Janet.ui.el;
 
+  var modalSeq = 0;   // unique title ids: stacked/queued dialogs must not collide
+  // Everything a browser lets you Tab to inside the card. Disabled controls are
+  // excluded by the filter below (the confirmWord gate disables the go button until
+  // the word is typed - it must not be a hole in the cycle).
+  var FOCUSABLE = 'button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
+
   function modal(build) {
     return new Promise(function (resolve) {
       var prevFocus = document.activeElement;
@@ -30,14 +36,42 @@
         try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (e) {}
         resolve(val);
       }
+      function focusables() {
+        return Array.prototype.filter.call(card.querySelectorAll(FOCUSABLE), function (n) {
+          return !n.disabled && n.getClientRects().length > 0;
+        });
+      }
       function onKey(e) {
-        if (e.key === 'Escape') { e.preventDefault(); close(false); }
+        if (e.key === 'Escape') { e.preventDefault(); close(false); return; }
+        // Focus trap. These modals are the last gate before a destructive fleet wave,
+        // so Tab must not walk out of the card into the still-live tool behind the
+        // overlay - a keyboard operator could otherwise "confirm" while focus sat on
+        // a background button, or lose the dialog entirely. Capture-phase listener,
+        // so preventDefault beats the browser's own Tab handling. Escape-to-cancel
+        // above is unchanged. (audit 2026-07-24 P3)
+        if (e.key !== 'Tab') return;
+        var f = focusables();
+        if (!f.length) { e.preventDefault(); return; }
+        var first = f[0], last = f[f.length - 1], a = document.activeElement;
+        if (!card.contains(a)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return; }
+        if (!e.shiftKey && a === last) { e.preventDefault(); first.focus(); }
+        else if (e.shiftKey && a === first) { e.preventDefault(); last.focus(); }
       }
       build(card, close);
       document.body.appendChild(overlay);
       document.addEventListener('keydown', onKey, true);
       overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(false); });
       card.setAttribute('role', 'dialog'); card.setAttribute('aria-modal', 'true');
+      // Accessible name: point at the title appendBody just rendered, so a screen
+      // reader announces "Confirm reboot" rather than an anonymous "dialog" - on a
+      // destructive confirm, WHICH dialog is the whole message. (audit 2026-07-24 P3)
+      var titleEl = card.querySelector('.j-modal-title');
+      if (titleEl) {
+        if (!titleEl.id) titleEl.id = 'j-modal-title-' + (++modalSeq);
+        card.setAttribute('aria-labelledby', titleEl.id);
+      } else {
+        card.setAttribute('aria-label', 'Dialog');
+      }
       setTimeout(function () { var f = card.querySelector('button, input'); if (f) try { f.focus(); } catch (e) {} }, 0);
     });
   }
@@ -98,6 +132,29 @@
     return box;
   }
 
+  // Typed-confirmation input, shared by BOTH dialogs.
+  //
+  // audit 2026-07-24 (S2): this used to live inline in ArmingDialog only, so a
+  // caller that passed `confirmWord` to ctx.confirm (-> ConfirmDialog) got a plain
+  // OK/Cancel box and was never asked to type anything - the gate vanished with no
+  // warning. That silently disarmed the typed gate on fleet-wide arbitrary remote
+  // PowerShell (remoteadmin) and on a fleet firmware write (secureboot); the
+  // 2026-07-23 audit hit the same bug on wpt and fixed only that one call site.
+  // Keep this ONE implementation wired into both dialogs: a safety option that is
+  // accepted-but-ignored is the failure mode that produced all three instances.
+  function attachConfirmWord(card, opts, getGo) {
+    if (!opts.confirmWord) return;
+    var wrap = el('div', 'j-modal-confirm-input');
+    wrap.appendChild(ui().label('Type ' + opts.confirmWord + ' to enable:'));
+    var inp = ui().input({ placeholder: opts.confirmWord });
+    inp.style.fontFamily = 'var(--mono)';
+    inp.addEventListener('input', function () {
+      var go = getGo(); if (go) go.disabled = (inp.value.trim() !== opts.confirmWord);
+    });
+    wrap.appendChild(inp);
+    card.appendChild(wrap);
+  }
+
   function ConfirmDialog(opts) {
     opts = opts || {};
     return modal(function (card, close) {
@@ -109,6 +166,9 @@
         acts.appendChild(cancel);
       }
       var ok = ui().button(opts.okText || 'OK', { variant: opts.danger ? 'danger' : 'go', onClick: function () { close(true); } });
+      // honour confirmWord here too (input renders above the buttons, as in ArmingDialog)
+      attachConfirmWord(card, opts, function () { return ok; });
+      if (opts.confirmWord) ok.disabled = true;
       acts.appendChild(ok);
       card.appendChild(acts);
     });
@@ -138,16 +198,8 @@
       }
 
       var go;
-      // typed confirmation (e.g. STIG "APPLY")
-      if (opts.confirmWord) {
-        var wrap = el('div', 'j-modal-confirm-input');
-        wrap.appendChild(ui().label('Type ' + opts.confirmWord + ' to enable:'));
-        var inp = ui().input({ placeholder: opts.confirmWord });
-        inp.style.fontFamily = 'var(--mono)';
-        inp.addEventListener('input', function () { go.disabled = (inp.value.trim() !== opts.confirmWord); });
-        wrap.appendChild(inp);
-        card.appendChild(wrap);
-      }
+      // typed confirmation (e.g. STIG "APPLY") - shared with ConfirmDialog
+      attachConfirmWord(card, opts, function () { return go; });
 
       var acts = el('div', 'j-modal-actions');
       var cancel = ui().ghostButton(opts.cancelText || 'Cancel', { onClick: function () { close(false); } });

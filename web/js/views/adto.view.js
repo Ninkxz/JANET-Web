@@ -169,6 +169,37 @@
         [baseInput, catInput, onlyBad._cb, clearBtn, fixConfirm, fixBtn, valBtn]
           .concat(Object.keys(fixCbs).map(function (k) { return fixCbs[k]._cb; })));
 
+      // audit 2026-07-24 (P2): the runbar was driven ONLY by the scan run, so during a
+      // DESTRUCTIVE fix/validate it sat idle and still read "SCAN AD COMPLIANCE". One click
+      // launched a fresh scan whose subscribe() replaced this view's single `unsub`/`run`,
+      // detaching the LIVE write run - which kept committing userAccountControl to AD with no
+      // rows, no audit surface and no way to cancel it. One owner for the bar's state.
+      var RUN_LABEL = 'SCAN AD COMPLIANCE';
+      function setRunMode(verb) {
+        runbar.setActive(!!verb);
+        runbar.cta.textContent = verb ? ('CANCEL ' + String(verb).toUpperCase()) : RUN_LABEL;
+      }
+
+      // audit 2026-07-24 (P2): the SERVER's summary is the authority for the headline numbers.
+      // The row stream is FILTERED when "Only show NON-COMPLIANT" is ticked, so tallying rows
+      // client-side counted only the bad objects and then reported that as the TOTAL - the tiles
+      // and the completion dialog read "142 objects / 142 non-compliant" on a 4000-object domain,
+      // hiding the true compliance ratio. The engine's summary is computed over the FULL scanned
+      // population (see $byCat/$total in the scan), so apply it when it arrives; the row-derived
+      // tally stays as the live in-progress display and the fallback for an absent summary.
+      function applySummary(s) {
+        if (!s) return;
+        if (typeof s.total === 'number') counts.total = s.total;
+        if (typeof s.nonCompliant === 'number') counts.bad = s.nonCompliant;
+        if (typeof s.iaoRequired === 'number') counts.iao = s.iaoRequired;
+        var bc = s.byCategory;
+        if (!bc) return;
+        CATS.forEach(function (c) {
+          var e = bc[c]; if (!e) return;
+          catCounts[c] = { total: Number(e.total) || 0, bad: Number(e.bad) || 0 };
+        });
+      }
+
       function updateTiles() { tiles.setAll({ total: counts.total, bad: counts.bad, iao: counts.iao }); }
       function updateChips() {
         Object.keys(chips).forEach(function (c) {
@@ -215,6 +246,10 @@
       }
 
       async function doRun() {
+        // audit 2026-07-24 (P2): belt-and-braces - the runbar routes a click to onCancel while a
+        // run is active, but never let a stray call start a second run over a live (possibly
+        // DESTRUCTIVE) one and orphan its stream.
+        if (isRunning()) return;
         resetState();
         if (!baseInput.value) {
           var go = await ctx.confirm({ title: 'Whole-domain scan', body: 'No base-DN set - this enumerates EVERY user and computer in the domain, which can be thousands of objects and take a while. Continue?', okText: 'Scan whole domain', cancelText: 'Cancel' });
@@ -235,17 +270,24 @@
           log: function (l) { actlog.append(l); },
           error: function (e) { setStatus((e && e.text) || 'Scan error', 'st-bad'); if (e && e.text) actlog.append({ text: e.text, level: 'err' }); },
           active: function (a) {
-            runbar.setActive(a);
+            setRunMode(a ? 'Scan' : null);
             if (!a) { lockInputs(false); updateTiles(); updateChips(); }
           },
-          final: function () {
+          final: function (res) {
+            applySummary(res && res.summary);
             updateTiles(); updateChips();
             var anyBad = counts.bad > 0;
             var catLine = CATS.map(function (c) { return c + ': ' + catCounts[c].bad + '/' + catCounts[c].total; }).join('<br>');
-            setStatus('Done - ' + counts.bad + ' non-compliant of ' + counts.total + '.', anyBad ? 'st-warn' : 'st-ok');
+            var stopped = !!(res && res.summary && res.summary.cancelled);
+            // With "Only show NON-COMPLIANT" ticked the grid holds fewer rows than the totals
+            // above - say so, or the numbers look wrong next to the visible row count.
+            var shownNote = (allRows.length !== counts.total)
+              ? '<br><span class="muted">Grid shows ' + allRows.length + ' row(s) - compliant objects were filtered out of the stream.</span>' : '';
+            setStatus((stopped ? 'Cancelled - ' : 'Done - ') + counts.bad + ' non-compliant of ' + counts.total + '.', stopped ? 'st-warn' : (anyBad ? 'st-warn' : 'st-ok'));
             ctx.confirm({
-              title: 'AD Nemesis - Scan Complete',
-              body: 'Total objects: <b>' + counts.total + '</b><br>Non-compliant: <b>' + counts.bad + '</b><br>Need IAO validation: <b>' + counts.iao + '</b><br><br><b>By category (non-compliant / total):</b><br>' + catLine + '<br><br><span class="muted">Click a category chip to filter. Fixes + the IAO validation role are the next build.</span>',
+              title: 'AD Nemesis - Scan ' + (stopped ? 'Cancelled' : 'Complete'),
+              body: (stopped ? '<b>Cancelled by operator - these counts cover only the objects scanned so far.</b><br><br>' : '')
+                + 'Total objects: <b>' + counts.total + '</b><br>Non-compliant: <b>' + counts.bad + '</b><br>Need IAO validation: <b>' + counts.iao + '</b>' + shownNote + '<br><br><b>By category (non-compliant / total):</b><br>' + catLine + '<br><br><span class="muted">Click a category chip to filter.</span>',
               okText: 'OK', cancelText: null
             });
           }
@@ -257,17 +299,44 @@
 
       function bindWriteRun(verb) {
         if (unsub) unsub();
+        // audit 2026-07-25 (fable re-audit follow-up): remember the ENGINE's own verdict.
+        // shell.js reduces the 'final' event inside the poll loop and only dispatches
+        // 'active:false' after that loop exits, so this flag is always set by the time
+        // the terminal branch below reads it (replay() for a late binder is ordered the
+        // same way: final, then active).
+        var cancelled = false;
         unsub = run.subscribe({
           status: function (t) { setStatus(t, 'st-info'); prog.setPhase(t); },
           progress: function (p) { prog.setProgress(p.done, p.total); setStatus(verb + '... ' + p.done + ' / ' + p.total, 'st-info'); },
           row: function (r) { grid.upsert(r); },   // keyed by DN -> updates the object's row in place (NON-COMPLIANT -> FIXED/VALIDATED)
           log: function (l) { actlog.append(l); },
           error: function (e) { setStatus((e && e.text) || 'error', 'st-bad'); if (e && e.text) actlog.append({ text: e.text, level: 'err' }); },
+          final: function (res) { if (res && res.summary && res.summary.cancelled) cancelled = true; },
           active: function (a) {
+            // audit 2026-07-24 (P2): own the runbar for the write run too - it morphs to
+            // CANCEL FIX / CANCEL VALIDATE (which now reaches the engine's __job cancel
+            // bridge) instead of staying a live SCAN button that would orphan this stream.
+            setRunMode(a ? verb : null);
             if (!a) {
               lockInputs(false);
-              setStatus(verb + ' done - re-scan to refresh compliance counts.', 'st-ok');
-              ctx.confirm({ title: 'AD Nemesis - ' + verb + ' complete', body: 'Re-run the scan to confirm the affected objects now read COMPLIANT and refresh the category counts.', okText: 'OK', cancelText: null });
+              // audit 2026-07-25 (fable re-audit follow-up): this used to paint '<verb> done'
+              // GREEN and pop a '<verb> complete' dialog UNCONDITIONALLY, stomping the
+              // server's honest 'Cancelled. X fixed of Y' status - a success headline over
+              // a half-finished DESTRUCTIVE AD write, with only the log/grid telling the
+              // truth. A hard-killed job never emits 'final', so also honour the run-state's
+              // own 'cancelled' status as a second source.
+              var stopped = cancelled || !!(run && run.state && String(run.state.status) === 'cancelled');
+              if (stopped) {
+                setStatus(verb + ' CANCELLED - partial write; only some objects were changed.', 'st-warn');
+                ctx.confirm({
+                  title: 'AD Nemesis - ' + verb + ' Cancelled',
+                  body: '<b>Cancelled by the operator - the ' + verb.toLowerCase() + ' did NOT complete.</b><br><br>Only part of the plan was written to AD. The grid rows and the activity log show exactly which objects were changed. Re-run the scan before deciding what still needs work.',
+                  okText: 'OK', cancelText: null
+                });
+              } else {
+                setStatus(verb + ' done - re-scan to refresh compliance counts.', 'st-ok');
+                ctx.confirm({ title: 'AD Nemesis - ' + verb + ' complete', body: 'Re-run the scan to confirm the affected objects now read COMPLIANT and refresh the category counts.', okText: 'OK', cancelText: null });
+              }
             }
           }
         });
@@ -292,7 +361,7 @@
           okText: 'Run Fix', cancelText: 'Cancel'
         });
         if (!ok) { actlog.append({ text: 'Fix cancelled at arming.', level: 'warn' }); return; }
-        lockInputs(true); setStatus('Fixing ' + plan.length + '...', 'st-info');
+        lockInputs(true); setRunMode('Fix'); setStatus('Fixing ' + plan.length + '...', 'st-info');
         run = ctx.run('fix', { plan: JSON.stringify(plan), confirm: fixConfirm.value }, { keyOf: function (ev) { return ev.DN != null ? String(ev.DN) : null; }, destructive: true });
         bindWriteRun('Fix');
       }
@@ -310,7 +379,7 @@
           okText: 'Validate', cancelText: 'Cancel'
         });
         if (!ok) { actlog.append({ text: 'Validation cancelled at arming.', level: 'warn' }); return; }
-        lockInputs(true); setStatus('Validating ' + plan.length + '...', 'st-info');
+        lockInputs(true); setRunMode('Validate'); setStatus('Validating ' + plan.length + '...', 'st-info');
         run = ctx.run('validate-iao', { plan: JSON.stringify(plan), confirm: fixConfirm.value }, { keyOf: function (ev) { return ev.DN != null ? String(ev.DN) : null; }, destructive: true });
         bindWriteRun('Validate');
       }

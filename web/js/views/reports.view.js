@@ -442,7 +442,13 @@
           rowClass: function (r) { return isKev(r) ? 'row-bad' : (r.Category === 'NOT OUR PATCH' ? 'row-warn' : ''); }
         });
         // live triage filter (Severity / Status / Category / free-text + host online-state) - hides rows in place
-        var hostOnline = {};            // host(UPPER) -> bool, from acas-ping-hosts (#10)
+        // audit 2026-07-24: the ping map is a TRI-STATE, not a bool. acas-ping-hosts emits
+        // 'Online' / 'Offline' / 'Unresolved' (DNS name did not resolve) / 'Timeout' (never
+        // probed) / '?' (cancelled), and only 'Offline' is a CONFIRMED-down host - the
+        // server's Offline export keys on that alone. Collapsing to a bool made Unresolved
+        // read as offline, so the grid's "Offline only" view disagreed with the CSV and
+        // "Mark All Visible" bulk-triaged hosts we never actually reached.
+        var hostOnline = {};            // host(UPPER) -> lowercased state string, from acas-ping-hosts (#10)
         var onlineFilterMode = 'all';   // 'all' | 'online' | 'offline' (#10)
         var filterRow = btnRow();
         var sevFilterSel = ui.select({ options: ['All severities', 'Critical', 'High', 'Medium', 'Low', 'Info'], title: 'Show only findings of this severity.' });
@@ -474,8 +480,11 @@
           if (kevOnlyCb._cb.checked && !isKev(r)) return false;
           if (onlineFilterMode !== 'all') {
             var on = hostOnline[String(r.Hostname).toUpperCase()];
-            if (onlineFilterMode === 'online' && on !== true) return false;
-            if (onlineFilterMode === 'offline' && on !== false) return false;   // unknown (never pinged) is NOT counted offline
+            if (onlineFilterMode === 'online' && on !== 'online') return false;
+            // audit 2026-07-24: ONLY a confirmed-offline host counts. Unresolved / Timeout /
+            // cancelled / never-pinged are excluded, matching the server Offline export
+            // (== $false only) so the grid and the CSV agree.
+            if (onlineFilterMode === 'offline' && on !== 'offline') return false;
           }
           var q = (findSearch.value || '').trim().toLowerCase();
           if (q) {
@@ -514,14 +523,20 @@
           var h = ctx.run('acas-ping-hosts', { threads: 32, timeoutMs: 1500 }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; } });
           resub('acas-ping-hosts', h.subscribe({
             status: function (t) { log.append({ text: t, level: 'mode' }); },
-            row: function (r) { hostOnline[String(r.Host).toUpperCase()] = /^Online$/i.test(String(r.Online)); },
+            // audit 2026-07-24: store the state VERBATIM (lowercased) instead of collapsing
+            // it to a bool - see the hostOnline declaration for why.
+            row: function (r) { hostOnline[String(r.Host).toUpperCase()] = String(r.Online == null ? '' : r.Online).trim().toLowerCase(); },
             log: function (l) { log.append(l); },
             error: function (e) { log.append({ text: e.text, level: 'err' }); },
             final: function (res) {
               var s = res && res.summary || {};
-              pingStat.textContent = (s.online || 0) + ' online / ' + (s.offline || 0) + ' offline of ' + (s.total || 0);
+              // audit 2026-07-24: surface the non-confirmed states too, so "12 online / 3
+              // offline of 40" no longer silently hides 25 hosts we never reached.
+              var unk = (s.unresolved || 0) + (s.timedOut || 0) + (s.cancelled || 0);
+              var unkNote = unk ? (' / ' + unk + ' unknown') : '';
+              pingStat.textContent = (s.online || 0) + ' online / ' + (s.offline || 0) + ' offline' + unkNote + ' of ' + (s.total || 0);
               pingStat.className = 'st-ok';
-              log.banner('Ping: ' + (s.online || 0) + ' online, ' + (s.offline || 0) + ' offline of ' + (s.total || 0));
+              log.banner('Ping: ' + (s.online || 0) + ' online, ' + (s.offline || 0) + ' offline' + (unk ? (', ' + unk + ' unknown (unresolved/timeout/cancelled - NOT counted offline)') : '') + ' of ' + (s.total || 0));
               if (onlineFilterMode !== 'all') applyFindingFilter();   // repaint with the fresh map
             }
           }));
@@ -2311,9 +2326,17 @@
               }
               cards.setAll({ operators: s.operators || 0, hosts: s.hosts || 0, vulns: s.vulns || 0, failPct: (s.failPct != null ? s.failPct + '%' : '0%') });
               artifact.set(s, 'ReportsTool_SquadronRollup');
-              noteLbl.textContent = (s.months || '') + (s.squadronResolved ? ' - squadrons resolved' : ' - operator-level');
-              noteLbl.className = 'muted';
-              log.banner('Rollup: ' + (s.operators || 0) + ' operator(s), ' + (s.hosts || 0) + ' host(s) touched, ' + (s.vulns || 0) + ' vuln(s), ' + (s.failPct || 0) + '% fleet failure over ' + (s.months || '?'));
+              // audit 2026-07-25 (fable re-audit follow-up): a rollup whose log-share walk
+              // hit denied/vanished paths is INCOMPLETE - never let a short (or empty) result
+              // render as a confident "this is what the fleet did".
+              noteLbl.textContent = (s.months || '') + (s.squadronResolved ? ' - squadrons resolved' : ' - operator-level') +
+                                    (s.readFailed ? ' - READ ERRORS, INCOMPLETE' : '');
+              noteLbl.className = s.readFailed ? 'st-bad' : 'muted';
+              log.banner('Rollup: ' + (s.operators || 0) + ' operator(s), ' + (s.hosts || 0) + ' host(s) touched, ' + (s.vulns || 0) + ' vuln(s), ' + (s.failPct || 0) + '% fleet failure over ' + (s.months || '?') + (s.readFailed ? ' [INCOMPLETE - ' + (s.readErrors || 0) + ' unreadable path(s)]' : ''));
+              if (s.readFailed) {
+                log.append({ text: (s.readErrors || 0) + ' log-share path(s) could not be read - operators/hosts missing here may be UNREADABLE, not inactive. This rollup proves nothing about them.', level: 'err' });
+                (s.readErrorPaths || []).slice(0, 10).forEach(function (p) { log.append({ text: 'unreadable: ' + p, level: 'warn' }); });
+              }
               if (s.squadronNote) log.append({ text: s.squadronNote, level: 'dim' });
               if (s.capped) log.append({ text: 'Detail parsing capped at ' + (s.maxRows || 0) + ' rows (' + (s.rowsParsed || 0) + ' parsed) - lower the month count for a complete pass.', level: 'warn' });
             }

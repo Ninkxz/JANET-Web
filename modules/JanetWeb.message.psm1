@@ -16,13 +16,31 @@
 #  -Emit event shapes: status / progress / row / log / audit.  The bespoke view
 #  (web/js/views/message.view.js) owns ALL presentation: it derives the colour-
 #  coded per-host activity lines + banners from these row/progress events.
+#
+#  Changelog
+#    1.3.6  audit 2026-07-25 (fable re-audit follow-up): (1) an OVERALL run ceiling
+#           reaps whatever the per-job watchdog structurally cannot - a host that
+#           never got a runspace has no start stamp and so no clock, which left the
+#           drain unbounded by design; (2) the EndInvoke-failure fallback row reports
+#           'Worker error' instead of the unmeasured 'Unreachable' claim; (3) a
+#           cancelled/abandoned PING row renders a BLANK reachability cell instead of
+#           booking 'No' for a probe that never ran (send already did this).
+#    1.3.5  audit 2026-07-24 fix pass: (1) wrong-box HARD ABORT inside the remote
+#           send block - the box that answered proves its own name before msg.exe
+#           runs; (2) the per-job watchdog clock now starts when the worker really
+#           STARTS, not at enqueue (a saturated pool was false-timing-out its own
+#           backlog); (3) "nobody logged on" + operator TCP-probe skips book as
+#           Skipped, not Failure; (4) watchdog-/cancel-abandoned hosts report
+#           'Timed out'/'Abandoned' instead of the unmeasured 'Unreachable' claim;
+#           (5) dead $okOf / ping $auditDetail bindings dropped.
+#    1.3.4  dispatcher self-guard (never message the JANET console host itself).
 # =============================================================================
 
 function Get-JanetToolManifest {
     @{
         id       = 'message'
         name     = 'Remote Message'
-        version  = '1.3.4'
+        version  = '1.3.6'   # audit 2026-07-25 (fable re-audit follow-up): overall run ceiling, honest worker-error + unmeasured-ping rows
         category = 'Operations'
         summary  = 'Broadcast a popup to logged-on users across many workstations in parallel (msg.exe over WinRM).'
         actions  = @(
@@ -131,11 +149,93 @@ function Test-JanetMessageHostIsSelf {
     return $false
 }
 
+# -----------------------------------------------------------------------------
+#  Verdict helpers (audit 2026-07-24). These were inline scriptblocks inside the
+#  dispatcher; they are plain functions now ONLY so the honesty rules below are
+#  unit-testable without opening a WinRM session. The worker's $r.MsgStatus is the
+#  single source of truth for both.
+# -----------------------------------------------------------------------------
+
+# Audit verdict for one send result. A confirmed delivery is Success. Three
+# outcomes are SKIPS, not failures, because the tool changed nothing and claims
+# nothing (audit 2026-07-24 - "nobody logged on" and an operator-requested probe
+# skip were both booked as Failure, which inflated the failure count and made the
+# audit trail read as if the tool had tried and lost):
+#   Unknown    - reached the host, msg.exe gave no clear success/error signal;
+#   NoSessions - nobody is logged on, so there is no session to pop a message on;
+#   Skipped    - the operator asked us to skip hosts failing the TCP probe.
+# Everything else (WinRM error, wrong box, msg.exe failure, timeout, cancel) is a
+# real Failure.
+function Get-JanetMessageSendVerdict {
+    param([bool]$Success, [string]$MsgStatus)
+    if ($Success) { return 'Success' }
+    if (@('Unknown','NoSessions','Skipped') -contains $MsgStatus) { return 'Skipped' }
+    return 'Failure'
+}
+
+# Display Status for one row. 'Unreachable' is an AFFIRMATIVE network claim and is
+# only ever emitted when the probe actually ran and the host stayed silent - a host
+# we abandoned (watchdog timeout / operator cancel) was never measured, so it
+# reports its real disposition instead (audit 2026-07-24).
+function Get-JanetMessageRowStatus {
+    param([bool]$Success, [string]$MsgStatus, [bool]$Pingable)
+    if ($Success) { return 'Delivered' }
+    switch ($MsgStatus) {
+        'Unknown'    { return 'Unknown' }
+        'NoSessions' { return 'No sessions' }
+        'Skipped'    { return 'Skipped' }
+        'TimedOut'   { return 'Timed out' }
+        'Cancelled'  { return 'Abandoned' }
+        'WrongBox'   { return 'Wrong host' }
+        # audit 2026-07-25 (fable re-audit follow-up): a runspace that blew up inside
+        # EndInvoke told us NOTHING about the target's network - it is OUR failure, not
+        # the host's. It used to fall through to the affirmative 'Unreachable' claim.
+        'WorkerError' { return 'Worker error' }
+    }
+    if ($Pingable) { return 'Undelivered' }
+    return 'Unreachable'
+}
+
+# Per-job watchdog decision (audit 2026-07-24). $StartedAt is the stamp the worker
+# writes into the shared start-map the instant it BEGINS executing - a host still
+# queued behind a busy runspace pool has no stamp and can therefore never expire,
+# no matter how long it has waited for a free runspace. The old code clocked from
+# BeginInvoke (enqueue), so a pool narrower than the target list declared its own
+# backlog timed-out before those hosts ever ran.
+function Test-JanetMessageJobExpired {
+    param($StartedAt, [datetime]$Now, [int]$LimitSeconds)
+    if (-not $StartedAt) { return $false }
+    return ((($Now - [datetime]$StartedAt).TotalSeconds) -gt $LimitSeconds)
+}
+
+# Overall run ceiling (audit 2026-07-25 (fable re-audit follow-up)). The per-job
+# watchdog above is deliberately blind to a host that never STARTED, so it cannot
+# reap one: if a watchdog-stopped runspace never releases its slot, the hosts still
+# queued behind it have no clock at all and the drain loop would spin forever. That
+# was previously bounded only INDIRECTLY (New-PSSessionOption -CancelTimeout 5000
+# caps a BeginStop, and operator cancel is still an exit) - i.e. by luck, not by
+# design. This gives the WHOLE run a hard wall-clock ceiling so the pool always
+# drains: one full per-job window for every WAVE the pool must run (ceil(total /
+# threads)), plus one wave of slack, so a legitimately slow-but-progressing run is
+# never cut short. Pure + total: never throws, never returns less than one window.
+function Get-JanetMessageRunCeilingSeconds {
+    param([int]$Total, [int]$Threads, [int]$PerJobSeconds)
+    if ($Total -lt 1) { $Total = 1 }
+    if ($Threads -lt 1) { $Threads = 1 }
+    if ($PerJobSeconds -lt 1) { $PerJobSeconds = 1 }
+    $waves = [Math]::Ceiling($Total / [double]$Threads)
+    return [int](($waves + 1) * $PerJobSeconds)
+}
+
 # Per-host worker: ping, then deliver the popup to every interactive session.
 # Returns the desktop result shape { Host; Success; Sessions; Pingable; Error;
 # Detail; Diagnostic }; the harvest loop turns it into a streamed row.
 $script:MessageWorker = {
-    param($hostname, $title, $body, $timeoutSec, $requireOK, $requirePing, $cred, $openMs, $opMs, $cancelJob)
+    param($hostname, $title, $body, $timeoutSec, $requireOK, $requirePing, $cred, $openMs, $opMs, $cancelJob, $startMap)
+    # Watchdog start stamp (audit 2026-07-24): FIRST statement, so the per-job clock
+    # measures actual runtime and not the time this host spent queued for a runspace.
+    # Same cross-runspace idiom as the synchronized $cancelJob hashtable.
+    if ($startMap) { try { $startMap[$hostname] = Get-Date } catch {} }
     $r = [ordered]@{ Host = $hostname; Pingable = $false; Sessions = 0; Success = $false; MsgStatus = ''; Detail = ''; Diagnostic = '' }
 
     # Cooperative cancel: poll the synchronized job's Cancel flag at safe points so
@@ -162,10 +262,14 @@ $script:MessageWorker = {
     # requirePing (opt-in): when the operator chose to skip hosts that fail the TCP
     # 5985/5986/445 probe, bail before WinRM instead of attempting delivery. Rebased onto
     # the TCP probe (an ICMP gate is meaningless on a no-ICMP network).
-    if ($requirePing -and -not $tcpUp) { $r.Detail = 'Host not reachable (skipped: failed TCP 5985/5986/445 probe)'; return $r }
+    # audit 2026-07-24: this is an OPERATOR-REQUESTED skip, not a failure - flag it so
+    # the verdict helper books it Skipped (we never attempted a delivery to lose).
+    if ($requirePing -and -not $tcpUp) { $r.MsgStatus = 'Skipped'; $r.Detail = 'Host not reachable (skipped: failed TCP 5985/5986/445 probe)'; return $r }
     # Ping is advisory by default: attempt WinRM even when ICMP is blocked (hardened
     # hosts often allow WinRM while dropping ICMP); mark Unreachable only if WinRM fails.
-    if (& $isCancelled) { $r.Detail = 'cancelled by operator'; return $r }
+    # audit 2026-07-24: a cancelled host was abandoned, never measured - MsgStatus keeps
+    # the row off the affirmative 'Unreachable' claim.
+    if (& $isCancelled) { $r.MsgStatus = 'Cancelled'; $r.Detail = 'cancelled by operator'; return $r }
 
     try {
         # -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS is
@@ -185,9 +289,23 @@ $script:MessageWorker = {
         try {
             # Last safe point before the long remote call: bail cooperatively so the
             # finally below tears the session down instead of leaking a remote shell.
-            if (& $isCancelled) { $r.Detail = 'cancelled by operator'; return $r }
+            if (& $isCancelled) { $r.MsgStatus = 'Cancelled'; $r.Detail = 'cancelled by operator'; return $r }
+            # Wrong-box guard (audit 2026-07-24): the dialed name is resolved by DNS, so a
+            # stale record / reused IP can land this destructive send on a DIFFERENT machine
+            # than the operator typed. An IPv4 literal has no DNS indirection (the box at that
+            # IP IS the box) and its first dot-token could never equal a COMPUTERNAME, so ''
+            # skips the compare for IPs - same expected-name shape as restart/pkginstall.
+            $expectedName = if ($hostname -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($hostname -split '\.')[0] }
             $sr = Invoke-Command -Session $session -ScriptBlock {
-                param($t, $b, $to, $req)
+                param($t, $b, $to, $req, $expected)
+                # HARD ABORT before msg.exe: the box that answered runs THIS block, so
+                # $env:COMPUTERNAME is the real machine. If it isn't the one we dialed, pop
+                # nothing (identical idiom to JanetWeb.restart.psm1's shutdown guard).
+                if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
+                    return @{ Count = 0; Status = 'WrongBox'
+                              Error = "DNS mismatch: dialed '$expected' but this machine is '$($env:COMPUTERNAME)' - ABORTED, no message sent"
+                              Diagnostic = "wrongbox.expected=$expected | wrongbox.actual=$($env:COMPUTERNAME)" }
+                }
                 $fullMsg = "$t`r`n`r`n$b"
                 $diag = New-Object System.Collections.ArrayList
                 $count = 0
@@ -218,7 +336,9 @@ $script:MessageWorker = {
                         }
                     } catch { [void]$diag.Add("qw.exception=$($_.Exception.Message)") }
                 }
-                if ($sids.Count -eq 0) { return @{ Count = 0; Status = 'Failed'; Error = 'No interactive user sessions detected on target'; Diagnostic = ($diag -join ' | ') } }
+                # audit 2026-07-24: nobody logged on is a SKIP, not a failure - there is no
+                # session to pop a message on, so nothing was attempted and nothing lost.
+                if ($sids.Count -eq 0) { return @{ Count = 0; Status = 'NoSessions'; Error = 'No interactive user sessions detected on target (nothing to message)'; Diagnostic = ($diag -join ' | ') } }
 
                 # Broadcast first; fall back to per-session if that delivers nothing.
                 # require-OK pins /TIME at 99999 (~27 hrs, effectively forever); larger
@@ -266,7 +386,7 @@ $script:MessageWorker = {
                 if ($count -gt 0) { return @{ Count = $count; Status = 'Delivered'; Error = $null; Diagnostic = ($diag -join ' | ') } }
                 if ($ambiguous) { return @{ Count = 0; Status = 'Unknown'; Error = 'msg.exe gave no clear success or error signal - delivery unconfirmed'; Diagnostic = ($diag -join ' | ') } }
                 return @{ Count = 0; Status = 'Failed'; Error = 'msg.exe delivery failed on all strategies'; Diagnostic = ($diag -join ' | ') }
-            } -ArgumentList $title, $body, $timeoutSec, $requireOK -ErrorAction Stop
+            } -ArgumentList $title, $body, $timeoutSec, $requireOK, $expectedName -ErrorAction Stop
 
             $r.Sessions   = [int]$sr.Count
             $r.MsgStatus  = [string]$sr.Status
@@ -293,7 +413,9 @@ $script:MessageWorker = {
 # actually matter here. This worker only reports Pingable (no session is opened),
 # so there is no $useSsl to thread anywhere.
 $script:PingWorker = {
-    param($hostname)
+    param($hostname, $startMap)
+    # Watchdog start stamp - see the send worker (audit 2026-07-24).
+    if ($startMap) { try { $startMap[$hostname] = Get-Date } catch {} }
     $up = $false
     foreach ($port in 5985, 5986, 445) {
         $tc = $null
@@ -335,6 +457,13 @@ function Invoke-JanetToolAction {
     if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }
 
+    # Shared start-map for the per-job watchdog (audit 2026-07-24): each worker stamps
+    # its own start time here the instant it begins running, so the watchdog measures
+    # RUNTIME instead of enqueue-age. Declared before the arg factories below because
+    # they close over it. Keys are hostnames (already de-duplicated case-insensitively
+    # by ConvertTo-MessageHostList, and a PS hashtable is case-insensitive too).
+    $startMap = [hashtable]::Synchronized(@{})
+
     $targets = ConvertTo-MessageHostList ([string]$Params['targets'])
     if ($targets.Count -eq 0) { & $send @{ type='log'; level='warn'; text='No valid targets.' }; return @{ rows=@(); summary=@{ total=0 } } }
 
@@ -369,10 +498,16 @@ function Invoke-JanetToolAction {
     # Build the per-host job set for the chosen action.
     if ($ActionId -eq 'ping') {
         $work = $script:PingWorker
-        $argFactory = { param($h) ,@($h) }
-        $auditDetail = { param($r) if ($r.Pingable) { 'reachable' } else { 'no ping reply' } }
-        $rowOf = { param($r) @{ Host=$r.Host; Pingable=[bool]$r.Pingable } }
-        $okOf  = { param($r) [bool]$r.Pingable }
+        $argFactory = { param($h) ,@($h, $startMap) }
+        # audit 2026-07-24: no $auditDetail / $okOf here - Ping All is read-only, emits no
+        # audit event at all (the emit is gated to 'send'), and the harvest loop derives
+        # $ok from $resultOf. Both bindings were dead.
+        # audit 2026-07-25 (fable re-audit follow-up): Pingable stays EMPTY (not 'No')
+        # when the probe never ran. Cancelling a sweep - and the watchdog/worker-error
+        # rows below - hand this projection Pingable=$null, and the old [bool] cast turned
+        # every one of them into an affirmative "this host is NOT reachable" claim we had
+        # not measured. Same honesty rule the send projection already carries.
+        $rowOf = { param($r) @{ Host=$r.Host; Pingable=$(if ($null -eq $r.Pingable) { '' } else { [bool]$r.Pingable }) } }
         $resultOf = { param($r) if ($r.Pingable) { 'Success' } else { 'Failure' } }
     }
     elseif ($ActionId -eq 'send') {
@@ -393,15 +528,19 @@ function Invoke-JanetToolAction {
         $requireOK   = Get-MessageBool $Params['requireOK'] $false     # popup stays until dismissed
         $requirePing = Get-MessageBool $Params['requirePing'] $false   # skip hosts that fail the TCP 5985/5986/445 probe instead of trying WinRM
         $work = $script:MessageWorker
-        $argFactory = { param($h) ,@($h, $title, $body, $timeout, $requireOK, $requirePing, $Credential, $openMs, $opMs, $cancelJob) }
+        $argFactory = { param($h) ,@($h, $title, $body, $timeout, $requireOK, $requirePing, $Credential, $openMs, $opMs, $cancelJob, $startMap) }
         $auditDetail = { param($r) $r.Detail }
         # Diagnostic is not a column, so it surfaces in the row popup / export without widening the table.
-        $rowOf = { param($r) @{ Host=$r.Host; Pingable=[bool]$r.Pingable; Sessions=[int]$r.Sessions; Status=$(if($r.Success){'Delivered'}elseif($r.MsgStatus -eq 'Unknown'){'Unknown'}elseif($r.Pingable){'Undelivered'}else{'Unreachable'}); Detail=$r.Detail; Diagnostic=[string]$r.Diagnostic } }
-        $okOf  = { param($r) [bool]$r.Success }
-        # Audit honesty (ported from SECRET): a confirmed delivery is Success; a host we
-        # reached but whose delivery msg.exe could not confirm is Skipped (nothing-
-        # confirmed-done, not a claimed success); everything else is a real Failure.
-        $resultOf = { param($r) if ($r.Success) { 'Success' } elseif ($r.MsgStatus -eq 'Unknown') { 'Skipped' } else { 'Failure' } }
+        # audit 2026-07-24: Status/verdict moved into the shared helpers above (they are the
+        # honesty rules, and they are unit-tested); $okOf dropped - the harvest loop already
+        # derives $ok from $resultOf, so it was dead in both branches.
+        # Pingable stays EMPTY (not 'No') when the probe never ran - same audit 2026-07-24
+        # honesty rule as the Status above; the view renders a blank REACHABLE cell.
+        $rowOf = { param($r) @{ Host=$r.Host; Pingable=$(if ($null -eq $r.Pingable) { '' } else { [bool]$r.Pingable }); Sessions=[int]$r.Sessions; Status=(Get-JanetMessageRowStatus ([bool]$r.Success) ([string]$r.MsgStatus) ([bool]$r.Pingable)); Detail=$r.Detail; Diagnostic=[string]$r.Diagnostic } }
+        # Audit honesty (ported from SECRET, extended by audit 2026-07-24): a confirmed
+        # delivery is Success; unconfirmed / nobody-logged-on / operator-skipped are Skipped
+        # (nothing-confirmed-done, and nothing lost); everything else is a real Failure.
+        $resultOf = { param($r) Get-JanetMessageSendVerdict ([bool]$r.Success) ([string]$r.MsgStatus) }
     }
     else { & $send @{ type='error'; text="Unknown action '$ActionId'." }; return @{ rows=@(); summary=@{} } }
 
@@ -415,7 +554,10 @@ function Invoke-JanetToolAction {
         $ps = [powershell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($work)
         foreach ($a in (& $argFactory $h)) { [void]$ps.AddArgument($a) }
-        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke(); StartTime=(Get-Date) })
+        # audit 2026-07-24: NO enqueue timestamp here - BeginInvoke only QUEUES the work
+        # when the pool is saturated. The watchdog reads $startMap, which the worker
+        # itself stamps once it is actually running.
+        [void]$jobs.Add([pscustomobject]@{ Host=$h; PS=$ps; Async=$ps.BeginInvoke() })
     }
 
     $rows = New-Object System.Collections.ArrayList
@@ -424,12 +566,26 @@ function Invoke-JanetToolAction {
     $cancelling  = $false                                    # cooperative-drain mode after operator cancel
     $coopDeadline = [datetime]::MaxValue                     # grace window for workers to return on their own
     $maxJobSeconds = 90                                      # per-job wall-clock watchdog (desktop parity)
+    # audit 2026-07-25 (fable re-audit follow-up): overall wall-clock ceiling for the
+    # WHOLE run. The per-job watchdog only clocks hosts that actually started, so a host
+    # that never gets a runspace (a stopped runspace whose stop never settles) is
+    # structurally un-reapable by it - the drain was therefore unbounded BY DESIGN.
+    # This ceiling is the never-started reaper: when it fires, every host still holding a
+    # live PS is booked TimedOut (an honest 'Timed out', never an unmeasured network
+    # claim) and the loop exits, so the pool ALWAYS drains.
+    $runCeilingSeconds = Get-JanetMessageRunCeilingSeconds -Total $jobs.Count -Threads $threads -PerJobSeconds $maxJobSeconds
+    $runDeadline = (Get-Date).AddSeconds($runCeilingSeconds)
     try {
         while ($done -lt $jobs.Count) {
             foreach ($j in $jobs) {
                 if ($j.PS -and $j.Async.IsCompleted) {
                     $res = $null
-                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; Pingable=$false; Success=$false; Sessions=0; Detail="worker error: $($_.Exception.Message)"; Diagnostic='' } }
+                    # audit 2026-07-25 (fable re-audit follow-up): a worker that blew up is
+                    # OUR fault and tells us nothing about the target - MsgStatus='WorkerError'
+                    # (Status 'Worker error') and Pingable=$null (blank cell), instead of the
+                    # old Pingable=$false + no MsgStatus, which fell through to the affirmative
+                    # 'Unreachable' claim for a host whose network we never measured.
+                    try { $res = $j.PS.EndInvoke($j.Async) | Select-Object -First 1 } catch { $res = @{ Host=$j.Host; Pingable=$null; Success=$false; Sessions=0; MsgStatus='WorkerError'; Detail="worker error: $($_.Exception.Message)"; Diagnostic='' } }
                     try { $j.PS.Dispose() } catch {}
                     $j.PS = $null
                     $result = [string](& $resultOf $res)
@@ -442,7 +598,8 @@ function Invoke-JanetToolAction {
                     # state-changing host touch (Add-SendResult -> Write-JanetAction
                     # 'TouchHost'). Ping All is read-only there and is NOT logged, so
                     # gate the emit to the send action and skip it for ping. An
-                    # unconfirmed delivery audits as Skipped (allowed result), not Failure.
+                    # unconfirmed delivery - and, since audit 2026-07-24, a nobody-logged-on
+                    # host and an operator probe-skip - audits Skipped (allowed result).
                     if ($ActionId -eq 'send') { & $send @{ type='audit'; action='TouchHost'; target=$res.Host; result=$result; itemCount=$(if($ok){1}else{0}); detail=([string](& $auditDetail $res)) } }
                     $done++
                     & $send @{ type='progress'; done=$done; total=$jobs.Count }
@@ -450,19 +607,45 @@ function Invoke-JanetToolAction {
             }
             # Watchdog: a wedged host (stuck WinRM, hung msg.exe) must not stall the
             # whole run. BeginStop only - never Dispose here (blocks ~11s); the
-            # handle settles via EndStop in the finally below.
+            # handle settles via EndStop in the finally below. audit 2026-07-24: the
+            # clock runs from the worker's OWN start stamp, so a host still waiting for
+            # a free runspace is never declared timed-out before it ever ran; and the row
+            # says 'Timed out' rather than asserting an unmeasured 'Unreachable'.
             foreach ($j in $jobs) {
-                if ($j.PS -and -not $j.Async.IsCompleted -and ((Get-Date) - $j.StartTime).TotalSeconds -gt $maxJobSeconds) {
+                if ($j.PS -and -not $j.Async.IsCompleted -and (Test-JanetMessageJobExpired $startMap[$j.Host] (Get-Date) $maxJobSeconds)) {
                     try { [void]$stopHandles.Add([pscustomobject]@{ PS=$j.PS; Handle=$j.PS.BeginStop($null, $null) }) } catch {}
                     $j.PS = $null
                     $failCount++; $done++
-                    $trow = & $rowOf @{ Host=$j.Host; Pingable=$false; Sessions=0; Success=$false; Detail='Job timeout over 90s'; Diagnostic='Aborted by per-job timeout' }
+                    $tdetail = "Abandoned: no result after ${maxJobSeconds}s of run time (delivery state unknown)"
+                    $trow = & $rowOf @{ Host=$j.Host; Pingable=$null; Sessions=0; Success=$false; MsgStatus='TimedOut'; Detail=$tdetail; Diagnostic='Aborted by per-job timeout' }
                     [void]$rows.Add($trow)
                     & $send (@{ type='row' } + $trow)
-                    if ($ActionId -eq 'send') { & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail='Job timeout over 90s' } }
-                    & $send @{ type='log'; level='warn'; text="[$($j.Host)] TIMEOUT after ${maxJobSeconds}s - aborting" }
+                    if ($ActionId -eq 'send') { & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$tdetail } }
+                    & $send @{ type='log'; level='warn'; text="[$($j.Host)] TIMEOUT after ${maxJobSeconds}s of run time - abandoning" }
                     & $send @{ type='progress'; done=$done; total=$jobs.Count }
                 }
+            }
+            # Overall run ceiling (audit 2026-07-25 (fable re-audit follow-up)): the last
+            # backstop, above the per-job watchdog. Anything still outstanding here -
+            # including a host that never started and therefore never had a per-job clock -
+            # is booked 'Timed out' and the run ends. Never claims reachability it did not
+            # measure (Pingable=$null -> blank cell).
+            if ($done -lt $jobs.Count -and (Get-Date) -ge $runDeadline) {
+                foreach ($j in $jobs) {
+                    if ($j.PS) {
+                        try { [void]$stopHandles.Add([pscustomobject]@{ PS=$j.PS; Handle=$j.PS.BeginStop($null, $null) }) } catch {}
+                        $j.PS = $null
+                        $failCount++; $done++
+                        $cdetail = "Abandoned: overall run ceiling of ${runCeilingSeconds}s reached before this host produced a result (delivery state unknown)"
+                        $ceilRow = & $rowOf @{ Host=$j.Host; Pingable=$null; Sessions=0; Success=$false; MsgStatus='TimedOut'; Detail=$cdetail; Diagnostic='Aborted by overall run ceiling' }
+                        [void]$rows.Add($ceilRow)
+                        & $send (@{ type='row' } + $ceilRow)
+                        if ($ActionId -eq 'send') { & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail=$cdetail } }
+                    }
+                }
+                & $send @{ type='log'; level='warn'; text="Overall run ceiling of ${runCeilingSeconds}s reached - remaining host(s) abandoned so the run always drains." }
+                & $send @{ type='progress'; done=$done; total=$jobs.Count }
+                break
             }
             if ($done -lt $jobs.Count) {
                 if (-not $cancelling -and (& $cancelCheck)) {
@@ -480,7 +663,9 @@ function Invoke-JanetToolAction {
                             try { [void]$stopHandles.Add([pscustomobject]@{ PS=$j.PS; Handle=$j.PS.BeginStop($null, $null) }) } catch {}
                             $j.PS = $null
                             $failCount++; $done++
-                            $crow = & $rowOf @{ Host=$j.Host; Pingable=$false; Sessions=0; Success=$false; Detail='cancelled by operator'; Diagnostic='' }
+                            # audit 2026-07-24: 'Abandoned', not 'Unreachable' - we stopped
+                            # this host on operator request and never measured its network.
+                            $crow = & $rowOf @{ Host=$j.Host; Pingable=$null; Sessions=0; Success=$false; MsgStatus='Cancelled'; Detail='cancelled by operator'; Diagnostic='' }
                             [void]$rows.Add($crow)
                             & $send (@{ type='row' } + $crow)
                             if ($ActionId -eq 'send') { & $send @{ type='audit'; action='TouchHost'; target=$j.Host; result='Failure'; itemCount=0; detail='cancelled by operator' } }
@@ -502,7 +687,8 @@ function Invoke-JanetToolAction {
         catch { & $send @{ type='log'; level='warn'; text="Runspace pool close error: $($_.Exception.Message)" } }
     }
 
-    & $send @{ type='status'; text="Done. $okCount ok, $skipCount unconfirmed, $failCount failed of $($jobs.Count)." }
+    # audit 2026-07-24: 'skipped' now covers unconfirmed + nobody-logged-on + probe skips.
+    & $send @{ type='status'; text="Done. $okCount ok, $skipCount skipped, $failCount failed of $($jobs.Count)." }
     return @{ rows = @($rows); summary = @{ total=$jobs.Count; ok=$okCount; skipped=$skipCount; failed=$failCount; sent=$okCount } }
 }
 

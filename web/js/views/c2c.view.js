@@ -97,18 +97,26 @@
       // amber: no fail but a check errored, the host couldn't be evaluated, operator cancel,
       // a partial fix, a self/DNS skip, product not installed, or Tanium not reporting
       // (NOT ATTESTING - box invisible to the C2C dashboard, distinct from a quarantine).
+      // audit 2026-07-24: NOT VERIFIED (a first-class host status the fix engine emits - the
+      // change was made but could NOT be confirmed) had NO class at all, so it rendered like a
+      // plain uncoloured row next to green compliant ones. It is fail-closed evidence: amber.
+      // audit 2026-07-25 (fable re-audit follow-up): IN PROGRESS moved DOWN here from the blue
+      // group. It is now a first-class host rollup status (an all-in-progress host used to book
+      // NO CHANGE), and an UNFINISHED remediation must not sit in the same colour family as
+      // "nothing to do" - the box would still fail the C2C scan. Amber, like PARTIAL.
       case 'CHECK ERRORS':
       case 'NOT ATTESTING':
+      case 'NOT VERIFIED':
+      case 'IN PROGRESS':
       case 'Cancelled':
       case 'ERROR':
       case 'DNS MISMATCH':
       case 'PARTIAL':
       case 'NOT INSTALLED':
       case 'SKIPPED': return 'st-warn';
-      // blue: nothing changed (fix), encryption already running, a newer-than-target version,
-      // or live in-progress phases streamed by the engine.
+      // blue: nothing changed (fix), a newer-than-target version, or live in-progress phases
+      // streamed by the engine.
       case 'NO CHANGE':
-      case 'IN PROGRESS':
       case 'NEWER':
       case 'Scanning':
       case 'Probing':
@@ -139,6 +147,10 @@
       var pkiBundleValue = '';           // persists the PKI cert bundle folder across card rebuilds
       var pkiPruneChecked = false;       // persists the "prune expired retired DoD intermediates" opt-in (default OFF)
       var pkiRdpChecked = false;         // persists the "repair broken RDP listener" opt-in (default OFF)
+      // audit 2026-07-25 (fable re-audit follow-up): persists the "BLACKLIST the bundle Untrusted
+      // certs into Disallowed" opt-in (default OFF) - a fleet-wide DISTRUST, so it is armed
+      // explicitly, exactly like the certdeploy tool's pushDisallowed.
+      var pkiDistrustChecked = false;
       var importTiles = null;            // hero StatCards (built in the import card below)
 
       // =================== layout ===================
@@ -258,12 +270,15 @@
       javaArm.style.margin = '0 0 8px';
       javaArm._cb.addEventListener('change', function () { updateTargetButtons(); });
       javaCard.appendChild(javaArm);
-      var javaBtn = ui.button('REMOVE OUTDATED JAVA', { variant: 'gold', title: 'Run the Java cleanup on every host in Target Computers (destructive - uninstalls old Oracle/Sun Java and deletes its residue). A host with nothing old reports NO OLD JAVA.' });
+      // audit 2026-07-25 (fable re-audit follow-up): the no-op label is NO JAVA REMOVED, not
+      // "NO OLD JAVA" - since the vendor gate it can also mean OLD items were found but left
+      // (publisher is not Oracle/Sun). The label must not assert the opposite of the Detail.
+      var javaBtn = ui.button('REMOVE OUTDATED JAVA', { variant: 'gold', title: 'Run the Java cleanup on every host in Target Computers (destructive - uninstalls old Oracle/Sun Java and deletes its residue). A host where nothing was removed reports NO JAVA REMOVED - either nothing old was found, or what was found is not an Oracle/Sun product (the row Detail says which).' });
       javaBtn.style.cssText += ';width:100%;font-weight:700';
       javaBtn.disabled = true;
       javaBtn.onclick = function () { doJavaFix(); };
       javaCard.appendChild(javaBtn);
-      var javaFoot = el('div', 'muted', 'Requires an admin session + the FIX confirm above. JAVA CLEANED / NO OLD JAVA / FAILED stream into the results grid like every other fix.');
+      var javaFoot = el('div', 'muted', 'Requires an admin session + the FIX confirm above. JAVA CLEANED / NO JAVA REMOVED / FAILED stream into the results grid like every other fix.');
       javaFoot.style.cssText = 'font-size:11px;line-height:1.35;margin-top:6px';
       javaCard.appendChild(javaFoot);
       left.appendChild(javaCard);
@@ -534,17 +549,24 @@
         javaBtn.disabled = locked || n === 0 || !javaArm._cb.checked;
       }
 
+      // audit 2026-07-24: 'errors' was total-minus-the-rest, so NOT ATTESTING (Tanium down - the box
+      // is INVISIBLE to the C2C dashboard, its own verdict) was silently reported as "CHECK ERRORS",
+      // and neither counted as bad - a fleet where EVERY host was NOT ATTESTING closed the run green.
+      // Each verdict now gets its own bucket, with an 'other' catch-all so a future status cannot
+      // vanish into an arithmetic remainder.
       function summarize() {
-        var ready = 0, risk = 0, offline = 0;
+        var t = { ready: 0, risk: 0, notAttesting: 0, errors: 0, offline: 0, other: 0, total: 0 };
         grid.rows().forEach(function (r) {
           var s = String(r.Status);
-          if (s === 'READY') ready++;
-          else if (s === 'QUARANTINE RISK') risk++;
-          else if (s === 'OFFLINE') offline++;
+          if (s === 'READY') t.ready++;
+          else if (s === 'QUARANTINE RISK') t.risk++;
+          else if (s === 'NOT ATTESTING') t.notAttesting++;
+          else if (s === 'CHECK ERRORS') t.errors++;
+          else if (s === 'OFFLINE') t.offline++;
+          else t.other++;
         });
-        var total = grid.rows().length;
-        var errors = total - ready - risk - offline;
-        return { ready: ready, risk: risk, errors: errors, offline: offline, total: total };
+        t.total = grid.rows().length;
+        return t;
       }
 
       // ---- bind a streaming SCAN run handle to the grid/log/progress surfaces ----
@@ -562,9 +584,12 @@
               lockInputs(false);
               var c = summarize();
               countLine.textContent = c.total + ' / ' + c.total;
-              var bad = c.risk + c.offline;
-              log.append({ text: '[' + ts() + '] FINISHED ' + verb + '. READY=' + c.ready + '  QUARANTINE RISK=' + c.risk + '  CHECK ERRORS=' + c.errors + '  OFFLINE=' + c.offline, level: bad ? 'warn' : 'ok' });
-              runbar.setStatus('Done - Ready ' + c.ready + ' / Risk ' + c.risk + ' / Errors ' + c.errors + ' / Offline ' + c.offline, bad ? 'st-bad' : 'st-ok');
+              // audit 2026-07-24: every non-READY bucket marks the run bad. NOT ATTESTING, CHECK ERRORS
+              // and anything unbucketed are all "we could not verify this host is compliant" - reported
+              // up a chain of command, that must never close green.
+              var bad = c.risk + c.offline + c.notAttesting + c.errors + c.other;
+              log.append({ text: '[' + ts() + '] FINISHED ' + verb + '. READY=' + c.ready + '  QUARANTINE RISK=' + c.risk + '  NOT ATTESTING=' + c.notAttesting + '  CHECK ERRORS=' + c.errors + '  OFFLINE=' + c.offline + (c.other ? '  OTHER=' + c.other : ''), level: bad ? 'warn' : 'ok' });
+              runbar.setStatus('Done - Ready ' + c.ready + ' / Risk ' + c.risk + ' / NotAttesting ' + c.notAttesting + ' / Errors ' + c.errors + ' / Offline ' + c.offline, bad ? 'st-bad' : 'st-ok');
             }
           }
         });
@@ -906,6 +931,18 @@
           box.appendChild(rdpCb);
           entry.rdpCb = rdpCb;
 
+          // THIRD opt-in (audit 2026-07-25, fable re-audit follow-up): the bundle's Untrusted\
+          // group is pushed into LocalMachine\Disallowed, which BLACKLISTS those certs fleet-wide
+          // - the opposite direction to the roots this card installs, and not what the TASKORD PKI
+          // rule scores. It used to ride along unconditionally; it is now armed on its own, default
+          // OFF, matching the certdeploy tool's pushDisallowed.
+          var distrustCb = ui.checkbox('Also BLACKLIST the bundle Untrusted certs (DISTRUST)', { title: 'Opt-in (default OFF). Adds the bundle Untrusted\\*.cer group to the LocalMachine Disallowed store on every target - a fleet-wide BLACKLIST (DISTRUST) of those certs, NOT a trust add. Unticked, only the Root/CA trust anchors are pushed and the Untrusted certs are never delivered to any host.' });
+          distrustCb._cb.checked = pkiDistrustChecked;
+          distrustCb._cb.onchange = function () { pkiDistrustChecked = distrustCb._cb.checked; };
+          distrustCb.style.margin = '4px 0 0';
+          box.appendChild(distrustCb);
+          entry.distrustCb = distrustCb;
+
           // Prominent one-click: install the DoD trust roots on the flagged hosts in one obvious
           // click (same path + guards as the card's Fix button - type-FIX confirm, admin gate,
           // self-guard - honouring the current bundle folder + the two boxes above).
@@ -975,6 +1012,7 @@
         var enableEnc = key === 'Encryption' && c && c.enableCb && c.enableCb._cb.checked;
         var pkiPrune = key === 'PkiRoots' && c && c.pruneCb && c.pruneCb._cb.checked;
         var pkiRdp = key === 'PkiRoots' && c && c.rdpCb && c.rdpCb._cb.checked;
+        var pkiDistrust = key === 'PkiRoots' && c && c.distrustCb && c.distrustCb._cb.checked;
         var scopeTxt = manual ? 'Target Computer(s)' : 'import-flagged host(s) for ' + PILLAR_TAB[key];
 
         var pf = [
@@ -986,6 +1024,10 @@
         if (key === 'PkiRoots') pf.push({ label: 'Cert bundle: ' + (bundleFolder || 'shipped DoD default (Packages\\DoD-Certs)'), ok: true });
         if (key === 'PkiRoots') pf.push({ label: 'Prune expired retired DoD intermediates: ' + (pkiPrune ? 'YES (opt-in ticked)' : 'no (default off)'), ok: true });
         if (key === 'PkiRoots') pf.push({ label: 'Repair broken RDP listener: ' + (pkiRdp ? 'YES (opt-in ticked)' : 'no (default off)'), ok: true });
+        // audit 2026-07-25: the distrust push is the one trust change that goes the OTHER way -
+        // surface it in the arm dialog exactly like certdeploy does, armed or not.
+        if (key === 'PkiRoots') pf.push({ label: pkiDistrust ? 'BLACKLIST Untrusted certs into Disallowed: YES - this DISTRUSTS them fleet-wide' : 'BLACKLIST Untrusted certs into Disallowed: no (default off) - only Root/CA are pushed', ok: true });
+        if (key === 'PkiRoots') pf.push({ label: 'Trust-anchor guard: a non-CA (leaf) cert is REFUSED from Root/CA and never installed', ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
         var ok = await ctx.arm({
@@ -994,6 +1036,7 @@
           body: 'About to run <b>Fix ' + esc(meta.label) + '</b> on <b>' + hosts.length + '</b> ' + scopeTxt + '.'
             + (manual ? '<br><b>MANUAL mode</b> (no C2C import): this dials exactly the hosts in Target Computers - there is no import allow-list.' : '')
             + '<br>This fixer is <b>verify-first</b>: a host already compliant for this pillar is reported NO CHANGE and left untouched.'
+            + (key === 'PkiRoots' && pkiDistrust ? '<br><b>BLACKLIST armed:</b> the bundle\'s <b>Untrusted\\</b> certs will also be added to the LocalMachine <b>Disallowed</b> store on every target - that <b>DISTRUSTS</b> them fleet-wide (the opposite direction to the roots being installed). Untick it to push Root/CA only.' : '')
             + (enableEnc ? '<br><b>ENABLE BitLocker:</b> this run will START XtsAes256 FULL-VOLUME encryption on <b>every FullyDecrypted FIXED volume</b> of the <b>' + hosts.length + '</b> host(s) - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock). Removable / USB drives are never touched. Escrow-first, fail-closed; the OS volume needs TPM-ready + domain-joined. Encryption runs for hours in the background.' : ''),
           preflight: pf, okText: 'Run Fix ' + meta.label, cancelText: 'Cancel'
         });
@@ -1006,7 +1049,7 @@
         var params = { targets: hosts.join('\n'), confirm: confirmInput.value, threads: threadsFix(), attemptOffline: fixOffline._cb.checked, winrmHeal: fixWinrmHeal._cb.checked };
         if (!manual) params.csvPath = importCsvPath;   // omit csvPath -> engine runs MANUAL mode
         if (key === 'Encryption') params.enableEncryption = enableEnc;
-        if (key === 'PkiRoots') { params.certBundleFolder = bundleFolder; params.prunePki = pkiPrune; params.fixRdp = pkiRdp; }
+        if (key === 'PkiRoots') { params.certBundleFolder = bundleFolder; params.prunePki = pkiPrune; params.fixRdp = pkiRdp; params.pushDisallowed = pkiDistrust; }
         run = ctx.run(meta.action, params, { keyOf: keyByHost, destructive: true });
         bindFixRun();
       }
@@ -1105,6 +1148,9 @@
         var pkiChecked = !!pillarsUsed.PkiRoots;
         var pkiPrune = !!(pkiChecked && ((pkiTab && pkiTab.pruneCb) ? pkiTab.pruneCb._cb.checked : pkiPruneChecked));
         var pkiRdp = !!(pkiChecked && ((pkiTab && pkiTab.rdpCb) ? pkiTab.rdpCb._cb.checked : pkiRdpChecked));
+        // audit 2026-07-25: the distrust push is opt-in here too - a run-all must never blacklist
+        // certs fleet-wide just because a host planned PkiRoots.
+        var pkiDistrust = !!(pkiChecked && ((pkiTab && pkiTab.distrustCb) ? pkiTab.distrustCb._cb.checked : pkiDistrustChecked));
 
         var pf = [
           { label: 'Admin session (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
@@ -1114,6 +1160,7 @@
         if (pillarsUsed.Encryption) pf.push({ label: enableEnc ? 'ENABLE BitLocker: WILL start XtsAes256 encryption on EVERY FullyDecrypted FIXED volume (OS + DATA; removable/USB untouched)' : 'Encryption resume-only (ENABLE not ticked)', ok: true });
         if (pkiChecked) pf.push({ label: bundleFolder ? 'PKI cert bundle: ' + bundleFolder : 'PKI: using shipped DoD default (Packages\\DoD-Certs)', ok: true });
         if (pkiChecked) pf.push({ label: 'PKI companions: prune expired intermediates ' + (pkiPrune ? 'ON' : 'off') + ', repair RDP listener ' + (pkiRdp ? 'ON' : 'off') + ' (opt-in, default off)', ok: true });
+        if (pkiChecked) pf.push({ label: pkiDistrust ? 'PKI: BLACKLIST Untrusted certs into Disallowed is ON - this DISTRUSTS them fleet-wide' : 'PKI: BLACKLIST Untrusted certs into Disallowed is off (default) - only Root/CA are pushed', ok: true });
         if (manual) pf.push({ label: 'MANUAL mode - no C2C import: dials exactly the Target Computers you checked pillars for', ok: true });
         if (fixWinrmHeal._cb.checked) pf.push({ label: 'WinRM-heal (RPC) armed for unreachable hosts', ok: true });
 
@@ -1123,7 +1170,8 @@
           body: 'About to fix <b>' + hosts.length + '</b> host(s) across <b>' + pillarList.length + '</b> pillar(s) (<b>' + info.totalPairs + '</b> host-pillar fix(es)): <b>' + esc(pillarList.join(', ')) + '</b>.'
             + (manual ? '<br><b>MANUAL mode</b> (no C2C import): dials exactly the Target Computers checked under each pillar - no import allow-list.' : '')
             + '<br>Each host is fixed for exactly the pillars it is checked under. Every fixer is <b>verify-first</b> - a host already compliant for a pillar is reported NO CHANGE and left untouched.'
-            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> hosts will START XtsAes256 full-volume encryption on <b>every FullyDecrypted FIXED volume</b> - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock); removable / USB drives are never touched. Runs for hours in the background.' : (pillarsUsed.Encryption ? '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).' : '')),
+            + (enableEnc ? '<br><b>ENABLE BitLocker:</b> hosts will START XtsAes256 full-volume encryption on <b>every FullyDecrypted FIXED volume</b> - the OS volume (TPM) AND fixed DATA volumes (D:, E:, ... via recovery-password + AD/Entra escrow + auto-unlock); removable / USB drives are never touched. Runs for hours in the background.' : (pillarsUsed.Encryption ? '<br>Encryption is resume-only (tick ENABLE BitLocker on the Encryption card to start encryption).' : ''))
+            + (pkiDistrust ? '<br><b>BLACKLIST armed:</b> hosts that plan PkiRoots will also get the bundle\'s <b>Untrusted\\</b> certs added to the LocalMachine <b>Disallowed</b> store - a fleet-wide <b>DISTRUST</b>, the opposite direction to the roots being installed.' : ''),
           preflight: pf, okText: 'RUN ALL', cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: '[' + ts() + '] Run-all cancelled at the arming dialog.', level: 'warn' }); return; }
@@ -1141,6 +1189,7 @@
           certBundleFolder: bundleFolder,
           prunePki: pkiPrune,
           fixRdp: pkiRdp,
+          pushDisallowed: pkiDistrust,
           winrmHeal: fixWinrmHeal._cb.checked,
           confirm: confirmInput.value,
           threads: threadsFix(),
@@ -1164,24 +1213,40 @@
               lockInputs(false);
               var c = fixTally();
               countLine.textContent = c.total + ' / ' + c.total;
-              var bad = c.failed + c.partial;
-              log.append({ text: '[' + ts() + '] FINISHED C2C fix. FIXED=' + c.fixed + '  NO CHANGE=' + c.noChange + '  PARTIAL=' + c.partial + '  FAILED=' + c.failed + '  OFFLINE=' + c.offline + '  SKIPPED=' + c.skipped, level: bad ? 'warn' : 'ok' });
-              runbar.setStatus('Fix done - Fixed ' + c.fixed + ' / Partial ' + c.partial + ' / NoChange ' + c.noChange + ' / Failed ' + c.failed, bad ? 'st-bad' : 'st-ok');
+              // audit 2026-07-24: NOT VERIFIED / any unbucketed status join failed+partial as bad, so an
+              // unconfirmed fix can never close the run green.
+              var bad = c.failed + c.partial + c.notVerified + c.other;
+              // audit 2026-07-25: an IN PROGRESS host is not a failure, but it is not DONE either -
+              // the run closes amber (never green) so nobody reads it as compliant.
+              var unfinished = c.inProgress;
+              log.append({ text: '[' + ts() + '] FINISHED C2C fix. FIXED=' + c.fixed + '  NO CHANGE=' + c.noChange + '  IN PROGRESS=' + c.inProgress + '  PARTIAL=' + c.partial + '  NOT VERIFIED=' + c.notVerified + '  FAILED=' + c.failed + '  OFFLINE=' + c.offline + '  SKIPPED=' + c.skipped + (c.other ? '  OTHER=' + c.other : ''), level: (bad || unfinished) ? 'warn' : 'ok' });
+              runbar.setStatus('Fix done - Fixed ' + c.fixed + ' / Partial ' + c.partial + ' / NotVerified ' + c.notVerified + ' / InProgress ' + c.inProgress + ' / NoChange ' + c.noChange + ' / Failed ' + c.failed, bad ? 'st-bad' : (unfinished ? 'st-warn' : 'st-ok'));
             }
           }
         });
       }
 
+      // audit 2026-07-24: NOT VERIFIED (host rollup :2424 - a fix ran but could NOT be confirmed)
+      // matched no bucket here, so it vanished from the done-line and the counters never reconciled
+      // to total: an unverified host was silently indistinguishable from a compliant one. It now has
+      // its own counter, plus an 'other' catch-all (the module's own tally idiom) so no future status
+      // can disappear either. Both count as bad in the caller - "we could not verify" is never green.
+      // audit 2026-07-25 (fable re-audit follow-up): IN PROGRESS gets its own counter too - the
+      // engine now rolls an all-in-progress host up as IN PROGRESS instead of burying it in
+      // NO CHANGE, and an unfinished remediation must never close the run green.
       function fixTally() {
-        var t = { fixed: 0, noChange: 0, partial: 0, failed: 0, offline: 0, skipped: 0, total: 0 };
+        var t = { fixed: 0, noChange: 0, inProgress: 0, partial: 0, notVerified: 0, failed: 0, offline: 0, skipped: 0, other: 0, total: 0 };
         grid.rows().forEach(function (r) {
           var s = String(r.Status);
           if (s === 'FIXED') t.fixed++;
           else if (s === 'NO CHANGE') t.noChange++;
+          else if (s === 'IN PROGRESS') t.inProgress++;
           else if (s === 'PARTIAL') t.partial++;
+          else if (s === 'NOT VERIFIED') t.notVerified++;
           else if (s === 'FAILED') t.failed++;
           else if (s === 'OFFLINE') t.offline++;
           else if (s === 'SKIPPED') t.skipped++;
+          else t.other++;
         });
         t.total = grid.rows().length;
         return t;

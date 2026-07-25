@@ -530,7 +530,10 @@
         lockUninstButtons(true);
         uninstApi.statusLbl.textContent = 'Scanning...'; uninstApi.statusLbl.className = 'st-info';
         log.banner('SCAN: actionable findings (host class: ' + hostClass() + ')');
-        var counts = { uninstall: 0, review: 0, tanium: 0, unreach: 0, nomatch: 0, error: 0 };
+        // audit 2026-07-24: `abandoned` bucket - the engine emits Decision='Abandoned'
+        // rows (operator cancel / per-host watchdog); without a bucket they vanished
+        // from the completion banner and the fleet read as smaller than it was.
+        var counts = { uninstall: 0, review: 0, tanium: 0, unreach: 0, nomatch: 0, error: 0, abandoned: 0 };
         scanRun = ctx.run('report-scan', reportParams({ hostclass: hostClass(), threads: threadCount() }), { keyOf: keyByRk });
         bindScan(scanRun, counts, false);
       }
@@ -595,7 +598,8 @@
         // The engine re-scans ONLY the selected hosts, then uninstalls ONLY the
         // checked proven candidates (selecthosts + selectkeys). The proven + non-
         // Tanium gate still runs server-side; unchecked rows are never removed.
-        var counts = { ok: 0, warn: 0, fail: 0, skipped: 0, unreach: 0, error: 0 };
+        // audit 2026-07-24: see tallyUninstallRow - Abandoned rows need their own bucket.
+        var counts = { ok: 0, warn: 0, fail: 0, skipped: 0, unreach: 0, error: 0, abandoned: 0 };
         scanRun = ctx.run('report-uninstall', reportParams({ hostclass: hostClass(), threads: threadCount(), dryrun: dry, selecthosts: selHosts, selectkeys: selKeys }), { keyOf: keyByRk });
         bindUninstall(scanRun, counts, dry);
       }
@@ -616,7 +620,7 @@
           final: function () {
             // pre-check ONLY proven-EOL rows (the one-click-removable set)
             grid.selectWhere(isProvenRow);
-            var msg = 'Scan complete: ' + counts.uninstall + ' proven (pre-checked), ' + counts.review + ' review, ' + counts.tanium + ' Tanium, ' + counts.nomatch + ' no-match, ' + counts.unreach + ' unreachable, ' + counts.error + ' error.';
+            var msg = 'Scan complete: ' + counts.uninstall + ' proven (pre-checked), ' + counts.review + ' review, ' + counts.tanium + ' Tanium, ' + counts.nomatch + ' no-match, ' + counts.unreach + ' unreachable, ' + counts.error + ' error, ' + counts.abandoned + ' abandoned.';
             log.banner(msg);
             uninstApi.statusLbl.textContent = counts.uninstall + ' proven candidate(s) pre-checked'; uninstApi.statusLbl.className = counts.uninstall ? 'st-ok' : 'st-warn';
           },
@@ -634,12 +638,20 @@
           case 'Unreachable': c.unreach++; break;
           case 'Error': c.error++; break;
           case 'No match': c.nomatch++; break;
+          // audit 2026-07-24: the engine abandons a host on operator cancel or on the
+          // per-host watchdog and emits Decision='Abandoned'. It matched no case here,
+          // so those hosts fell out of every bucket and the banner under-reported the
+          // fleet - an abandoned host looked like it was never in the run at all.
+          case 'Abandoned': c.abandoned++; break;
         }
       }
       function logScanRow(log, r) {
         var d = String(r.Decision);
         if (d === 'Unreachable') { log.append({ text: '[' + r.Host + '] UNREACHABLE: ' + (r.Detail || ''), level: 'warn' }); return; }
         if (d === 'Error') { log.append({ text: '[' + r.Host + '] ERROR: ' + (r.Detail || ''), level: 'err' }); return; }
+        // audit 2026-07-24: abandoned hosts were NOT scanned - say so explicitly
+        // instead of rendering a bare, dimmed '-> Abandoned' with no product.
+        if (d === 'Abandoned') { log.append({ text: '[' + r.Host + '] ABANDONED (not scanned): ' + (r.Detail || ''), level: 'warn' }); return; }
         if (d === 'No match') { log.append({ text: '[' + r.Host + '] no flagged install in the registry.', level: 'dim' }); return; }
         var lvl = (d === 'Uninstall') ? 'ok' : (d === 'Review' ? 'info' : (d === 'Skipped (Tanium)' ? 'warn' : 'dim'));
         log.append({ text: '[' + r.Host + '] ' + r.Product + (r.Version ? ' (' + r.Version + ')' : '') + '  ->  ' + d, level: lvl });
@@ -659,13 +671,13 @@
           log: function (l) { log.append(l); },
           error: function (e) { log.append({ text: e.text, level: 'err' }); },
           final: function () {
-            var msg = (dry ? 'Plan complete' : 'Uninstall complete') + ': ' + counts.ok + ' OK, ' + counts.warn + ' warn, ' + counts.fail + ' fail, ' + counts.skipped + ' skipped, ' + (counts.unreach + counts.error) + ' unreachable/error.';
+            var msg = (dry ? 'Plan complete' : 'Uninstall complete') + ': ' + counts.ok + ' OK, ' + counts.warn + ' warn, ' + counts.fail + ' fail, ' + counts.skipped + ' skipped, ' + (counts.unreach + counts.error) + ' unreachable/error, ' + counts.abandoned + ' abandoned.';
             log.banner(msg);
             uninstApi.statusLbl.textContent = msg; uninstApi.statusLbl.className = (counts.fail || counts.error) ? 'st-bad' : 'st-ok';
             if (hist) renderHistory();
             ctx.confirm({
               title: dry ? 'Dry run complete' : 'Uninstall complete',
-              body: 'OK: <b>' + counts.ok + '</b><br>Warn: <b>' + counts.warn + '</b><br>Fail: <b>' + counts.fail + '</b><br>Skipped: <b>' + counts.skipped + '</b><br>Unreachable / error: <b>' + (counts.unreach + counts.error) + '</b>',
+              body: 'OK: <b>' + counts.ok + '</b><br>Warn: <b>' + counts.warn + '</b><br>Fail: <b>' + counts.fail + '</b><br>Skipped: <b>' + counts.skipped + '</b><br>Unreachable / error: <b>' + (counts.unreach + counts.error) + '</b><br>Abandoned (cancelled / timed out): <b>' + counts.abandoned + '</b>',
               okText: 'OK', cancelText: null
             });
           },
@@ -676,6 +688,12 @@
         var d = String(r.Decision);
         if (d === 'Unreachable') { c.unreach++; log.append({ text: '[' + r.Host + '] UNREACHABLE: ' + (r.Result || ''), level: 'warn' }); return; }
         if (d === 'Error') { c.error++; log.append({ text: '[' + r.Host + '] ERROR: ' + (r.Result || ''), level: 'err' }); return; }
+        // audit 2026-07-24: Decision='Abandoned' (operator cancel or the per-host
+        // watchdog) matched none of the Result prefixes below (its Result is free text
+        // like 'cancelled by operator'), so it hit the silent `else` and was counted
+        // NOWHERE - the completion dialog under-reported the fleet and an aborted run
+        // could read as all-clear. Own bucket, surfaced in the banner and the dialog.
+        if (d === 'Abandoned') { c.abandoned++; log.append({ text: '[' + r.Host + '] ABANDONED (removal not attempted): ' + (r.Result || ''), level: 'warn' }); return; }
         var res = String(r.Result == null ? '' : r.Result);
         if (res === 'Uninstalling...') { log.append({ text: '[' + r.Host + '] ' + r.Product + ' - uninstalling...', level: 'warn' }); return; }
         var lvl, label;
@@ -897,7 +915,8 @@
         lockManualButtons(true);
         manApi.statusLbl.textContent = 'Scanning...'; manApi.statusLbl.className = 'st-info';
         log.banner('TARGETED SCAN: ' + hosts.length + ' machine(s), ' + rules.length + ' rule(s)');
-        var counts = { match: 0, protectedC: 0, nomatch: 0, unreach: 0, error: 0 };
+        // audit 2026-07-24: `abandoned` bucket, same as the report-tab scan.
+        var counts = { match: 0, protectedC: 0, nomatch: 0, unreach: 0, error: 0, abandoned: 0 };
         manRun = ctx.run('manual-scan', manParams({ threads: threadCount() }), { keyOf: keyByRk });
         bindManualScan(manRun, counts);
       }
@@ -950,7 +969,8 @@
         lockManualButtons(true);
         manApi.statusLbl.textContent = dry ? 'Planning (dry run)...' : 'Uninstalling...'; manApi.statusLbl.className = 'st-info';
         log.banner('TARGETED UNINSTALL (DryRun=' + dry + ')');
-        var counts = { ok: 0, warn: 0, fail: 0, skipped: 0, unreach: 0, error: 0 };
+        // audit 2026-07-24: shares tallyUninstallRow, so it needs the Abandoned bucket too.
+        var counts = { ok: 0, warn: 0, fail: 0, skipped: 0, unreach: 0, error: 0, abandoned: 0 };
         manRun = ctx.run('manual-uninstall', manParams({ threads: threadCount(), dryrun: dry, selecthosts: selHosts, selectkeys: selKeys }), { keyOf: keyByRk });
         bindManualUninstall(manRun, counts, dry);
       }
@@ -966,7 +986,7 @@
           error: function (e) { log.append({ text: e.text, level: 'err' }); },
           final: function () {
             grid.selectWhere(isProvenRow);
-            var msg = 'Targeted scan complete: ' + counts.match + ' match (pre-checked), ' + counts.protectedC + ' protected, ' + counts.nomatch + ' no-match, ' + counts.unreach + ' unreachable, ' + counts.error + ' error.';
+            var msg = 'Targeted scan complete: ' + counts.match + ' match (pre-checked), ' + counts.protectedC + ' protected, ' + counts.nomatch + ' no-match, ' + counts.unreach + ' unreachable, ' + counts.error + ' error, ' + counts.abandoned + ' abandoned.';
             log.banner(msg);
             manApi.statusLbl.textContent = counts.match + ' match(es) pre-checked'; manApi.statusLbl.className = counts.match ? 'st-ok' : 'st-warn';
           },
@@ -981,6 +1001,7 @@
           case 'Unreachable': c.unreach++; break;
           case 'Error': c.error++; break;
           case 'No match': c.nomatch++; break;
+          case 'Abandoned': c.abandoned++; break;   // audit 2026-07-24: same gap as tallyScanRow
         }
       }
       function bindManualUninstall(runHandle, counts, dry) {
@@ -993,13 +1014,13 @@
           log: function (l) { log.append(l); },
           error: function (e) { log.append({ text: e.text, level: 'err' }); },
           final: function () {
-            var msg = (dry ? 'Plan complete' : 'Uninstall complete') + ': ' + counts.ok + ' OK, ' + counts.warn + ' warn, ' + counts.fail + ' fail, ' + counts.skipped + ' skipped, ' + (counts.unreach + counts.error) + ' unreachable/error.';
+            var msg = (dry ? 'Plan complete' : 'Uninstall complete') + ': ' + counts.ok + ' OK, ' + counts.warn + ' warn, ' + counts.fail + ' fail, ' + counts.skipped + ' skipped, ' + (counts.unreach + counts.error) + ' unreachable/error, ' + counts.abandoned + ' abandoned.';
             log.banner(msg);
             manApi.statusLbl.textContent = msg; manApi.statusLbl.className = (counts.fail || counts.error) ? 'st-bad' : 'st-ok';
             if (hist) renderHistory();
             ctx.confirm({
               title: dry ? 'Dry run complete' : 'Uninstall complete',
-              body: 'OK: <b>' + counts.ok + '</b><br>Warn: <b>' + counts.warn + '</b><br>Fail: <b>' + counts.fail + '</b><br>Skipped: <b>' + counts.skipped + '</b><br>Unreachable / error: <b>' + (counts.unreach + counts.error) + '</b>',
+              body: 'OK: <b>' + counts.ok + '</b><br>Warn: <b>' + counts.warn + '</b><br>Fail: <b>' + counts.fail + '</b><br>Skipped: <b>' + counts.skipped + '</b><br>Unreachable / error: <b>' + (counts.unreach + counts.error) + '</b><br>Abandoned (cancelled / timed out): <b>' + counts.abandoned + '</b>',
               okText: 'OK', cancelText: null
             });
           },

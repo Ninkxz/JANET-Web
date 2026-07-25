@@ -21,7 +21,40 @@
 #  Run:  Invoke-Pester -Path .\tests\C2c.Enable.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
+Add-ShimGuard $cm
 
 # Drive the per-host worker with mocked cmdlets. $Scenario tunes the fakes:
 #   happy           - policy ok, no pre-existing protector, Entra escrow succeeds.
@@ -52,6 +85,10 @@ function Invoke-C2cEnable {
         $script:__blankId     = ($Scenario -eq 'bothfailblankid')
         $script:__removeIds   = New-Object System.Collections.ArrayList
 
+        $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command','Get-BitLockerVolume',
+            'Get-Tpm','Get-CimInstance','Get-Item','New-Item',
+            'New-ItemProperty','Add-BitLockerKeyProtector','BackupToAAD-BitLockerKeyProtector','Backup-BitLockerKeyProtector',
+            'Remove-BitLockerKeyProtector','Enable-BitLocker')
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
         function script:Invoke-Command {
@@ -167,12 +204,9 @@ function Invoke-C2cEnable {
                 Leaked         = [bool]($blob -match [regex]::Escape($script:__sentinel))
             }
         } finally {
-            Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
-                function:script:Get-BitLockerVolume, function:script:Get-Tpm, function:script:Get-CimInstance, `
-                function:script:Get-Item, function:script:New-Item, function:script:New-ItemProperty, `
-                function:script:Add-BitLockerKeyProtector, function:script:BackupToAAD-BitLockerKeyProtector, `
-                function:script:Backup-BitLockerKeyProtector, `
-                function:script:Remove-BitLockerKeyProtector, function:script:Enable-BitLocker -ErrorAction SilentlyContinue
+            # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+            # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+            Restore-ShimState $__shims
         }
     } $DoEnable $Scenario
 }

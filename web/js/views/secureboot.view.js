@@ -11,7 +11,7 @@
 
   var HOST_RE = /^[A-Za-z0-9._-]+$/;
   // engine row events are keyed 'Host'; CSV header keeps the desktop label 'Computer'.
-  var EXPORT_COLS = [['Host', 'Computer'], ['Status', 'Status'], ['Manufacturer', 'Manufacturer'], ['Before', 'Before'], ['After', 'After'], ['SetResult', 'SetResult'], ['Error', 'Error']];
+  var EXPORT_COLS = [['Host', 'Computer'], ['Status', 'Status'], ['Manufacturer', 'Manufacturer'], ['Before', 'Before'], ['After', 'After'], ['SetResult', 'SetResult'], ['BitLocker', 'BitLocker'], ['Error', 'Error']];
 
   function statusCellCls(v) {
     switch (String(v)) {
@@ -20,6 +20,9 @@
       case 'DryRun': return 'st-info';
       case 'Running': return 'st-info';
       case 'Timeout': return 'st-warn';
+      // audit 2026-07-24: a safety REFUSAL (brick-safety stop / BitLocker suspend that
+      // would not take) is amber - nothing was written, and the host still needs work.
+      case 'Refused': return 'st-warn';
       case 'Error': return 'st-bad';
       default: return '';
     }
@@ -155,7 +158,10 @@
       setRows.appendChild(jobsWrap);
       settings.appendChild(setRows);
       // Dry Run
-      var dryCb = ui.checkbox('Dry Run - connectivity + manufacturer detection only. No BIOS write.', { color: 'var(--warn)', title: 'Probe reachability + manufacturer via DCOM only; no firmware change.' });
+      // audit 2026-07-24: the tooltip advertised DCOM, which the dry-run worker explicitly
+      // REFUSES to use (AFNET blocks the RPC range, so a DCOM probe called reachable hosts
+      // unreachable). It is a TCP 5985/5986/445 probe + a WinRM Invoke-Command.
+      var dryCb = ui.checkbox('Dry Run - connectivity + manufacturer detection only. No BIOS write.', { color: 'var(--warn)', title: 'Probe TCP reachability (5985/5986/445) + manufacturer over WinRM - never DCOM; no firmware change.' });
       dryCb.style.marginTop = '12px';
       settings.appendChild(dryCb);
       right.appendChild(settings);
@@ -199,13 +205,18 @@
           { key: 'Before', label: 'BEFORE', width: 95 },
           { key: 'After', label: 'AFTER', width: 95 },
           { key: 'SetResult', label: 'RESULT', width: 90 },
+          // audit 2026-07-24: the per-host BitLocker suspend outcome. The operator has to
+          // know whether each written host will come back up without a recovery-key prompt.
+          { key: 'BitLocker', label: 'BITLOCKER', width: 150 },
           { key: 'Error', label: 'ERROR / NOTES' }
         ],
         rowClass: function (r) {
           var s = String(r.Status);
           if (s === 'Success' || s === 'Skipped') return 'row-ok';
           if (s === 'Error') return 'row-bad';
-          if (s === 'Timeout') return 'row-warn';
+          // audit 2026-07-24: 'Refused' used to fall through to '' after being tallied as
+          // a Skipped/green "already enabled" - a host JANET declined to touch is amber.
+          if (s === 'Timeout' || s === 'Refused') return 'row-warn';
           return '';
         }
       });
@@ -230,7 +241,14 @@
       };
 
       function summarize() {
-        var c = { Success: 0, Skipped: 0, Error: 0, Timeout: 0, DryRun: 0 };
+        // audit 2026-07-24: Refused is its own bucket - it was invisible here, so a
+        // refused host silently vanished from the totals it was never part of.
+        // audit 2026-07-25 (fable re-audit follow-up): 'Unknown' (Confirm-SecureBootUEFI
+        // unreadable - no write attempted) is a live status the worker really emits, but it
+        // had no bucket here either, so such a host appeared in NO count and the completion
+        // dialog's parts did not add up to Total. The server tallies it with skipped, so
+        // report it alongside skipped rather than inventing a new line.
+        var c = { Success: 0, Skipped: 0, Unknown: 0, Refused: 0, Error: 0, Timeout: 0, DryRun: 0 };
         grid.rows().forEach(function (r) { if (c[r.Status] != null) c[r.Status]++; });
         return c;
       }
@@ -320,12 +338,23 @@
         // remoteadmin 'RUN' / c2c 'FIX'. The server admin-session gate is the first barrier;
         // this stops an accidental click from writing Secure Boot across a wave of hosts.
         if (!isDry) {
-          var okEnable = await ctx.confirm({
+          // audit 2026-07-24 (S2): this was ctx.confirm, which silently DROPPED the
+          // confirmWord - so the typed-ENABLE gate never rendered and the server-side
+          // check below was auto-satisfied by the hardcoded word. ctx.arm honours it.
+          var okEnable = await ctx.arm({
             title: 'Enable Secure Boot on ' + targets.hosts().length + ' host(s)?',
+            banner: 'UEFI FIRMWARE WRITE - LEAVES EVERY ENABLED HOST PENDING A REBOOT',
             danger: true,
             confirmWord: 'ENABLE',
-            body: 'You are about to write a <b>UEFI Secure Boot firmware setting</b> on ' + targets.hosts().length + ' target host(s). Each enabled host is left <b>PENDING A REBOOT</b>. The JANET dispatcher is auto-excluded (self-guard), and JANET verifies UEFI+GPT boot safety per host and skips anything it cannot confirm safe - but this is a firmware change. Type <b>ENABLE</b> to arm.',
+            body: 'You are about to write a <b>UEFI Secure Boot firmware setting</b> on ' + targets.hosts().length + ' target host(s). Each enabled host is left <b>PENDING A REBOOT</b>. The JANET dispatcher is auto-excluded (self-guard), and JANET verifies UEFI+GPT boot safety and suspends BitLocker per host, refusing (status <b>Refused</b>) anything it cannot confirm safe - but this is a firmware change. Type <b>ENABLE</b> to arm.',
             list: targets.hosts().slice(0, 6),
+            preflight: [
+              { label: targets.hosts().length + ' target host(s)', ok: targets.hosts().length > 0 },
+              // audit 2026-07-24: the module now suspends BitLocker for ONE reboot on every
+              // TPM-sealed volume before the write, and REFUSES any host whose suspend fails.
+              { label: 'BitLocker is suspended for one reboot on TPM-sealed volumes - a host whose suspend fails is REFUSED, not written', ok: true },
+              { label: 'Hosts JANET cannot confirm UEFI+GPT-safe are refused, not forced', ok: true }
+            ],
             okText: 'Enable', cancelText: 'Cancel'
           });
           if (!okEnable) return;
@@ -369,12 +398,14 @@
             var c = summarize();
             var anyErr = (c.Error + c.Timeout) > 0;
             if (isDry) setStatus('Dry run complete - ' + (c.DryRun) + ' reachable, ' + c.Error + ' unreachable.', anyErr ? 'st-warn' : 'st-ok');
-            else setStatus('Complete - ' + c.Success + ' enabled, ' + c.Skipped + ' skipped, ' + (c.Error + c.Timeout) + ' error/timeout.', anyErr ? 'st-bad' : 'st-ok');
+            // audit 2026-07-25: Unknown rides with skipped (matching the server's skipCount)
+            // so every row lands in exactly one bucket and the parts sum to Total.
+            else setStatus('Complete - ' + c.Success + ' enabled, ' + (c.Skipped + c.Unknown) + ' skipped/unknown, ' + c.Refused + ' refused, ' + (c.Error + c.Timeout) + ' error/timeout.', anyErr ? 'st-bad' : (c.Refused ? 'st-warn' : 'st-ok'));
             ctx.confirm({
               title: isDry ? 'Dry Run Complete' : 'Secure Boot - Run Complete',
               body: isDry
                 ? ('Reachable: <b>' + c.DryRun + '</b><br>Unreachable: <b>' + c.Error + '</b><br>Total: <b>' + grid.rows().length + '</b>')
-                : ('Enabled: <b>' + c.Success + '</b><br>Already enabled / skipped: <b>' + c.Skipped + '</b><br>Error / timeout: <b>' + (c.Error + c.Timeout) + '</b><br>Total: <b>' + grid.rows().length + '</b>'),
+                : ('Enabled: <b>' + c.Success + '</b><br>Already enabled / skipped: <b>' + c.Skipped + '</b><br>Unknown (state unreadable - not written): <b>' + c.Unknown + '</b><br>Refused (unsafe - UEFI/GPT or BitLocker): <b>' + c.Refused + '</b><br>Error / timeout: <b>' + (c.Error + c.Timeout) + '</b><br>Total: <b>' + grid.rows().length + '</b>'),
               okText: 'OK', cancelText: null
             });
           }

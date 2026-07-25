@@ -16,6 +16,12 @@
 
   var DEFAULT_TITLE = 'Message from the 48 Communications Squadron';
   var XLSX_HEADERS = ['Timestamp', 'Hostname', 'Pingable', 'Delivered', 'Undelivered', 'Sessions', 'MessageTitle', 'Mode', 'Reason', 'Diagnostic'];
+  // audit 2026-07-24: the engine (JanetWeb.message.psm1 1.3.5) now separates a real
+  // FAILURE from a SKIP - unconfirmed delivery, nobody logged on, and the operator's
+  // own TCP-probe skip all audit as Skipped - and reports a watchdog-/cancel-abandoned
+  // host as 'Timed out'/'Abandoned' instead of claiming an unmeasured 'Unreachable'.
+  // The view must bucket in step or a skip is painted red and exported Undelivered=Yes.
+  var SKIP_STATUS = /^(unknown|skipped|no sessions)$/i;
 
   JanetViews.register('message', {
     mount: function (host, ctx) {
@@ -139,7 +145,7 @@
       var stats = C.StatCards({ cards: [
         { key: 'sent', label: 'SENT', color: 'ok' },
         { key: 'fail', label: 'FAILED', color: 'bad' },
-        { key: 'unconfirmed', label: 'UNCONFIRMED', color: 'gold' },
+        { key: 'unconfirmed', label: 'SKIPPED', color: 'gold' },   // audit 2026-07-24: unconfirmed + nobody-logged-on + probe skips
         { key: 'total', label: 'TOTAL', color: 'accent' }
       ] });
       statCard.appendChild(stats.el);
@@ -173,7 +179,7 @@
           { key: 'Sessions', label: 'SESSIONS', width: 80 },
           { key: 'Status', label: 'STATUS', width: 110, render: function (r) {
               var s = String(r.Status || '');
-              var cls = (s === 'Delivered') ? 'st-ok' : /unknown/i.test(s) ? 'st-warn' : (s ? 'st-bad' : '');
+              var cls = (s === 'Delivered') ? 'st-ok' : SKIP_STATUS.test(s) ? 'st-warn' : (s ? 'st-bad' : '');
               return { text: s, cls: cls };
           } },
           { key: 'Detail', label: 'DETAIL' }
@@ -181,7 +187,7 @@
         rowClass: function (r) {
           var s = String(r.Status || '');
           if (s === 'Delivered') return 'row-ok';
-          if (/unknown/i.test(s)) return 'row-warn';
+          if (SKIP_STATUS.test(s)) return 'row-warn';
           return s ? 'row-bad' : '';
         },
         toolbarButtons: [csvBtn]
@@ -257,22 +263,28 @@
         var hosts = targets.hosts();
         resetRun(hosts.length);
         log.banner('Ping All (' + hosts.length + ' host(s))');
-        var online = 0, offline = 0;
+        var online = 0, offline = 0, unmeasured = 0;
         targets.setPingEnabled(false); targets.setPingLabel('Pinging...');
         pingRun = ctx.run('ping', { targets: hosts.join('\n'), threads: Math.max(1, Math.min(64, parseInt(pingThreads.value, 10) || 32)) });
         if (pingUnsub) pingUnsub();
         pingUnsub = pingRun.subscribe({
           progress: function (p) { prog.setProgress(p.done, p.total); },
           row: function (r) {
+            // audit 2026-07-25 (fable re-audit follow-up): the engine now ships a BLANK
+            // Pingable for a host it never probed (sweep cancelled / worker error), so an
+            // unmeasured host must NOT be logged, painted, or exported as OFFLINE - that is
+            // the same unmeasured-network claim the send path already stopped making.
+            var unknown = (r.Pingable == null || r.Pingable === '');
             var up = (r.Pingable === true || r.Pingable === 'true');
-            if (up) { online++; log.append({ text: '[' + r.Host + '] ONLINE', level: 'ok' }); }
+            if (unknown) { unmeasured++; log.append({ text: '[' + r.Host + '] NOT MEASURED (never probed)', level: 'warn' }); }
+            else if (up) { online++; log.append({ text: '[' + r.Host + '] ONLINE', level: 'ok' }); }
             else { offline++; log.append({ text: '[' + r.Host + '] OFFLINE / not pingable', level: 'err' }); }
-            grid.upsert({ Host: r.Host, Pingable: up });
-            results.push(rowRecord(r.Host, up ? 'Yes' : 'No', 'N/A', 'N/A', 0, '', 'Ping', '', ''));
+            grid.upsert({ Host: r.Host, Pingable: unknown ? '' : up });
+            results.push(rowRecord(r.Host, unknown ? '' : (up ? 'Yes' : 'No'), 'N/A', 'N/A', 0, '', 'Ping', '', ''));
             refreshExportButtons();
           },
           log: function (l) { log.append(l); },
-          final: function () { log.banner('Ping complete: ' + online + ' online, ' + offline + ' offline'); },
+          final: function () { log.banner('Ping complete: ' + online + ' online, ' + offline + ' offline' + (unmeasured ? ', ' + unmeasured + ' not measured' : '')); },
           active: function (a) { if (!a) { targets.setPingEnabled(true); targets.setPingLabel('Ping All'); } }
         });
       }
@@ -315,28 +327,35 @@
             status: function (t) { prog.setPhase(t); },
             progress: function (p) { prog.setProgress(p.done, p.total); },
             row: function (r) {
-              var delivered = (r.Status === 'Delivered');
-              var unconfirmed = (r.Status === 'Unknown');
+              var st = String(r.Status || '');
+              var delivered = (st === 'Delivered');
+              // audit 2026-07-24: the skip bucket is the honest middle ground - msg.exe gave
+              // no clear signal ('Unknown'), nobody was logged on ('No sessions'), or the
+              // operator asked us to skip unreachable hosts ('Skipped'). The engine audits
+              // all three as Skipped, so they are neither SENT nor FAILED here.
+              var skipped = SKIP_STATUS.test(st);
               if (delivered) {
                 stat.sent++; log.append({ text: '[' + r.Host + '] Delivered to ' + (r.Sessions || 0) + ' session(s)', level: 'ok' });
-              } else if (unconfirmed) {
-                // honest middle-ground: msg.exe exit 0 but no clear success signal. Not a
-                // FAILED (the engine audits this Skipped), so surface it as its own bucket.
-                stat.unconfirmed++; log.append({ text: '[' + r.Host + '] delivery unconfirmed - no msg.exe success signal' + (r.Detail ? ' (' + r.Detail + ')' : ''), level: 'warn' });
+              } else if (skipped) {
+                stat.unconfirmed++; log.append({ text: '[' + r.Host + '] SKIPPED (' + st + ')' + (r.Detail ? ' - ' + r.Detail : ''), level: 'warn' });
                 if (r.Diagnostic) log.append({ text: '  diag: ' + r.Diagnostic, level: 'diag' });
               } else {
-                stat.fail++; log.append({ text: '[' + r.Host + '] FAILED: ' + (r.Detail || r.Status || 'unknown'), level: 'err' });
+                stat.fail++; log.append({ text: '[' + r.Host + '] FAILED: ' + (r.Detail || st || 'unknown'), level: 'err' });
                 if (r.Diagnostic) log.append({ text: '  diag: ' + r.Diagnostic, level: 'diag' });
               }
               grid.upsert(r);
               pushStats();
-              results.push(rowRecord(r.Host, (r.Pingable === true || r.Pingable === 'true') ? 'Yes' : 'No',
-                delivered ? 'Yes' : (unconfirmed ? 'Unknown' : 'No'), (delivered || unconfirmed) ? 'No' : 'Yes', r.Sessions || 0,
+              // An abandoned host ships a BLANK Pingable (the probe never ran), so the export
+              // must not turn that into a 'No' reachability claim (audit 2026-07-24).
+              var ping = (r.Pingable === true || r.Pingable === 'true') ? 'Yes'
+                : (r.Pingable == null || r.Pingable === '') ? '' : 'No';
+              results.push(rowRecord(r.Host, ping,
+                delivered ? 'Yes' : (skipped ? st : 'No'), (delivered || skipped) ? 'No' : 'Yes', r.Sessions || 0,
                 lastSendMeta.title, lastSendMeta.mode, r.Detail || '', r.Diagnostic || ''));
               refreshExportButtons();
             },
             log: function (l) { log.append(l); },
-            final: function () { flushStats(); log.banner('Send complete: ' + stat.sent + ' sent, ' + stat.unconfirmed + ' unconfirmed, ' + stat.fail + ' failed'); refreshExportButtons(); },
+            final: function () { flushStats(); log.banner('Send complete: ' + stat.sent + ' sent, ' + stat.unconfirmed + ' skipped, ' + stat.fail + ' failed'); refreshExportButtons(); },
             active: function (a) { runbar.setActive(a); if (!a) runbar.setStatus('Results ready: use the Export buttons to save.', 'st-ok'); }
           });
         });

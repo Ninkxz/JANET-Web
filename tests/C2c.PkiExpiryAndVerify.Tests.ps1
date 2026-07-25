@@ -24,16 +24,51 @@
 #  Run:  Invoke-Pester -Path .\tests\C2c.PkiExpiryAndVerify.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
+Add-ShimGuard $cm
 
 # --- helpers ---------------------------------------------------------------
 # Make a throwaway self-signed cert with a chosen validity; return @{ B64; Thumbprint; Raw }.
 # NotBefore defaults just behind now; for an EXPIRED cert pass BOTH NotBefore and
 # NotAfter in the past (NotBefore < NotAfter) - New-SelfSignedCertificate rejects a
 # NotAfter that precedes NotBefore, so a bare negative NotAfter is not allowed.
+# audit 2026-07-25 (fable re-audit follow-up): CA=true - these fixtures are pushed into the
+# Root/CA TRUST-ANCHOR stores, which Add-C2cBundleToStores now refuses to a non-CA cert.
 function New-TestCertEx {
     param([string]$Subject = 'CN=C2C-ExpTest', [datetime]$NotAfter = (Get-Date).AddDays(1), [datetime]$NotBefore = (Get-Date).AddDays(-1))
-    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyLength 2048 -NotBefore $NotBefore -NotAfter $NotAfter
+    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyUsage CertSign,CRLSign -TextExtension @('2.5.29.19={text}CA=true') -KeyExportPolicy Exportable -KeyLength 2048 -NotBefore $NotBefore -NotAfter $NotAfter
     $raw = $c.RawData
     $tp  = [string]$c.Thumbprint
     Remove-Item ("Cert:\CurrentUser\My\{0}" -f $tp) -Force -ErrorAction SilentlyContinue
@@ -209,6 +244,7 @@ Describe 'C2C fix-pki - REAL worker end-to-end (stripped add -> host NOT VERIFIE
         $c = New-TestCertEx 'CN=WkStripped' (Get-Date).AddDays(1)
         $r = & $cm {
             param($Tp, $B64)
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command')
             function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
@@ -242,7 +278,9 @@ Describe 'C2C fix-pki - REAL worker end-to-end (stripped add -> host NOT VERIFIE
                 $pki = @(@($res.Pillars) | Where-Object { $_.Name -eq 'PkiRoots' })[0]
                 [pscustomobject]@{ Status = [string]$res.Status; PkiResult = $(if ($pki) { [string]$pki.Result } else { '' }); Detail = [string]$res.Detail; PkiDetail = $(if ($pki) { [string]$pki.Detail } else { '' }) }
             } finally {
-                Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $c.Thumbprint $c.B64
         $r.PkiResult | Should Be 'NOT VERIFIED'

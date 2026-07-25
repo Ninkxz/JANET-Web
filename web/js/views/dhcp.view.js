@@ -30,8 +30,15 @@
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
 
       // ---- state ----
-      var connected = false, scopes = [], currentScopeId = null;
+      // connectedServer: the server Connect actually reached. Every subsequent call
+      // targets THIS name, never the live field value (audit 2026-07-24, finding 4).
+      var connected = false, connectedServer = '', scopes = [], currentScopeId = null;
       var originalValues = [], workingValues = [], checked = {};
+      // loadedOptionId: the option ID whose before-state (originalValues) is actually in the
+      // editor - null whenever nothing is loaded. audit 2026-07-25 (fable re-audit follow-up):
+      // APPLY is armed against this, not against whatever ID the box currently reads, so a
+      // freshly typed custom ID can never be paired with the PREVIOUS option's expectedOld.
+      var loadedOptionId = null;
       var readRun = null, readUnsub = null, writeRun = null, writeUnsub = null, writeActive = false, lastResults = [];
 
       var root = el('div'); root.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)';
@@ -154,9 +161,25 @@
       function optChanged() { var v = parseInt(optSelect.value, 10); optIdInput.disabled = (v !== 0); if (v !== 0) optIdInput.value = v; }
       function currentOptionId() { var v = parseInt(optSelect.value, 10); return v === 0 ? Math.max(1, Math.min(254, parseInt(optIdInput.value, 10) || 6)) : v; }
       function setEditorEnabled(on) { loadBtn.disabled = !on; }
+      // audit 2026-07-25 (fable re-audit follow-up): the loaded before-state belongs to ONE
+      // option ID. Typing a new custom ID used to leave it in place, so APPLY could send the
+      // new ID with the OLD option's expectedOld (the divergence guard only catches that when
+      // the two options hold different values - two unset options do not). Anything that can
+      // change the ID now invalidates the editor, and APPLY is gated on a matching load.
+      function optionLoaded() { return loadedOptionId != null && loadedOptionId === currentOptionId(); }
+      function invalidateLoadedOption() {
+        loadedOptionId = null;
+        originalValues = []; workingValues = []; selIdx = -1;
+        renderIpList();   // calls updateApplyState() - APPLY drops out with the load
+        if (currentScopeId) {
+          var ph = el('div'); ph.style.cssText = 'padding:6px 8px;color:var(--warn)';
+          ph.textContent = '(option ID changed - click Load Values for option ' + currentOptionId() + ')';
+          ipList.appendChild(ph);
+        }
+      }
       function updateApplyState() {
         var dirty = !sameOrder(workingValues, originalValues) || removeOptCb._cb.checked;
-        applyBtn.disabled = writeActive || !(connected && currentScopeId && dirty);
+        applyBtn.disabled = writeActive || !optionLoaded() || !(connected && currentScopeId && dirty);
         revertBtn.disabled = !(connected && currentScopeId && !sameOrder(workingValues, originalValues));
       }
       function updateBulk() {
@@ -217,7 +240,7 @@
         // Clear the prior scope's editor state so its IPs do not linger under the
         // new scope's label, then show a transient loading placeholder until the
         // load row arrives (replaced by renderIpList / the failed-load placeholder).
-        originalValues = []; workingValues = []; selIdx = -1; renderIpList();
+        originalValues = []; workingValues = []; selIdx = -1; loadedOptionId = null; renderIpList();
         var ph = el('div'); ph.style.cssText = 'padding:6px 8px;color:var(--muted)'; ph.textContent = 'Loading option ' + currentOptionId() + ' on ' + currentScopeId + '...';
         ipList.appendChild(ph);
         doLoad(true);
@@ -271,7 +294,7 @@
                 connStatus.textContent = 'Connect failed - see log'; connStatus.className = 'st-bad';
                 return;
               }
-              connected = true; disconnectBtn.disabled = false; setEditorEnabled(true);
+              connected = true; connectedServer = server; disconnectBtn.disabled = false; setEditorEnabled(true);
               connStatus.textContent = 'Connected to ' + server + ' - ' + scopes.length + ' scope(s)'; connStatus.className = 'st-ok';
               log.append({ text: 'Connected to ' + server + ' -- ' + scopes.length + ' scope(s) loaded.', level: 'ok' });
               renderScopes();
@@ -280,17 +303,66 @@
         });
       }
       function doDisconnect() {
-        connected = false; scopes = []; checked = {}; currentScopeId = null; originalValues = []; workingValues = []; selIdx = -1;
+        connected = false; connectedServer = ''; scopes = []; checked = {}; currentScopeId = null; originalValues = []; workingValues = []; selIdx = -1; loadedOptionId = null;
         disconnectBtn.disabled = true; setEditorEnabled(false); applyBtn.disabled = true; revertBtn.disabled = true;
         connStatus.textContent = 'Not connected'; connStatus.className = 'muted';
         scopeLabel.textContent = 'No scope selected';
         renderScopes(); renderIpList(); log.append({ text: 'Disconnected.', level: 'warn' });
       }
+      // audit 2026-07-24 (finding 4): load / apply / bulk all read serverInput LIVE, so
+      // editing the field after Connect silently RETARGETED them at a different DHCP
+      // server while the scope list, the checked set and the editor's before-state still
+      // belonged to the connected one -- i.e. an APPLY computed against server A written
+      // to server B, and a bulk run aimed at scope IDs that may not even exist there.
+      // Every call now goes to the server we actually connected to, and we refuse while
+      // the field disagrees (Connect again to retarget). quiet: suppress the modal on the
+      // implicit scope-switch load, which still logs and still refuses.
+      function activeServer(quiet) {
+        if (!connected || !connectedServer) return null;
+        var typed = (serverInput.value || '').trim();
+        if (typed.toLowerCase() === connectedServer.toLowerCase()) return connectedServer;
+        log.append({ text: 'Refused: the DHCP server field says "' + typed + '" but this session is connected to "' + connectedServer + '". Click Connect to retarget.', level: 'err' });
+        if (!quiet) {
+          ctx.confirm({
+            title: 'Server field changed',
+            body: 'The DHCP server field reads <b>' + esc(typed) + '</b> but the scope list and editor state belong to <b>' + esc(connectedServer) + '</b>.<br><br>Click <b>Connect</b> to retarget (this reloads the scope list), or restore the connected name.',
+            okText: 'OK', cancelText: null
+          });
+        }
+        return null;
+      }
+      // Keep the connect strip honest the moment the field diverges, so the refusal is
+      // never the first sign the operator is looking at another server's scope list.
+      function refreshConnStatus() {
+        if (!connected) return;
+        var typed = (serverInput.value || '').trim();
+        if (typed.toLowerCase() === connectedServer.toLowerCase()) {
+          connStatus.textContent = 'Connected to ' + connectedServer + ' - ' + scopes.length + ' scope(s)'; connStatus.className = 'st-ok';
+        } else {
+          connStatus.textContent = 'Connected to ' + connectedServer + ' - field edited, Connect to retarget'; connStatus.className = 'st-warn';
+        }
+      }
       function doLoad(silent) {
         if (!currentScopeId) return;
+        var srv = activeServer(silent);
+        if (!srv) {
+          // The scope-switch path already dropped a "Loading..." placeholder; replace it
+          // so a refused read never sits there pretending a request is in flight.
+          if (silent) {
+            ipList.innerHTML = '';
+            var rph = el('div'); rph.style.cssText = 'padding:6px 8px;color:var(--warn)';
+            rph.textContent = '(not loaded - the server field does not match the connected server)';
+            ipList.appendChild(rph);
+          }
+          applyBtn.disabled = true; revertBtn.disabled = true;
+          return;
+        }
         var opt = currentOptionId();
         var loadErr = false;   // a failed read must NOT masquerade as an empty/unset option
-        readRun = ctx.run('load', { targets: serverInput.value.trim(), scopeId: currentScopeId, optionId: opt }, { keyOf: keyByScope });
+        // Nothing is loaded until THIS read lands: an in-flight (or failed) load must never
+        // leave APPLY armed against the previous option/scope (audit 2026-07-25).
+        loadedOptionId = null;
+        readRun = ctx.run('load', { targets: srv, scopeId: currentScopeId, optionId: opt }, { keyOf: keyByScope });
         if (readUnsub) readUnsub();
         readUnsub = readRun.subscribe({
           error: function (e) { loadErr = true; log.append({ text: e.text, level: 'err' }); },
@@ -306,6 +378,7 @@
             }
             var vals = String(r.Values == null ? '' : r.Values).split(/[,;\s]+/).filter(Boolean);
             originalValues = vals.slice(); workingValues = vals.slice(); selIdx = -1;
+            loadedOptionId = opt;   // the before-state in the editor is THIS option's (audit 2026-07-25)
             renderIpList();
             if (!silent) log.append({ text: 'Loaded option ' + opt + ' on ' + currentScopeId + ' (' + vals.length + ' value(s)).', level: 'ok' });
           },
@@ -329,18 +402,59 @@
       async function doApply() {
         if (writeActive) return;   // a write is already in flight - do not fire a second overlapping commit
         if (!ctx.session.state.credSet) { ctx.confirm({ title: 'Admin session required', body: 'Set ADW credentials (top-right) before committing DHCP changes.', okText: 'OK', cancelText: null }); return; }
+        var srv = activeServer(false);
+        if (!srv) return;   // audit 2026-07-24: never commit to a server other than the connected one
+        // audit 2026-07-25 (fable re-audit follow-up): belt-and-braces behind the disabled
+        // button - expectedOld below is only meaningful for the option it was READ from, so a
+        // commit whose ID no longer matches the loaded one is refused here, not sent.
+        if (!optionLoaded()) { ctx.confirm({ title: 'Option not loaded', body: 'The option ID changed since the values were loaded. Click Load Values for option ' + currentOptionId() + ' first - APPLY sends the loaded before-state as its concurrency guard.', okText: 'OK', cancelText: null }); return; }
         var opt = currentOptionId(), removeOpt = removeOptCb._cb.checked, dry = dryCbSingle._cb.checked;
-        var ok = await ctx.confirm({
-          title: 'Confirm APPLY', danger: !dry,
-          body: 'Server: <b>' + esc(serverInput.value.trim()) + '</b><br>Scope: <b>' + esc(currentScopeId) + '</b><br>Option: <b>' + opt + '</b><br><br>' + diffText() +
+        // audit 2026-07-24 (finding 1): this was ctx.confirm, which silently IGNORES
+        // confirmWord - and the run below sent no `confirm` param at all, so the engine's
+        // typed-APPLY gate refused every single-scope commit ("type APPLY (exactly)").
+        // ctx.arm honours the typed word (pkginstall DEPLOY / secureboot ENABLE idiom):
+        // the dialog IS the UI for that server-side gate, so the two must ship together.
+        var ok = await ctx.arm({
+          title: dry ? 'Confirm APPLY (DRY RUN)' : 'Confirm APPLY',
+          banner: dry ? 'DRY RUN - the diff is previewed, nothing is written' : 'DESTRUCTIVE - REPLACES THE LIVE OPTION VALUE ON THIS SCOPE',
+          danger: !dry,
+          body: 'Server: <b>' + esc(srv) + '</b><br>Scope: <b>' + esc(currentScopeId) + '</b><br>Option: <b>' + opt + '</b><br><br>' + diffText() +
             '<br><br>NEW ORDER (top -> bottom):',
           list: removeOpt ? ['(option will be removed)'] : workingValues.map(function (v, i) { return (i + 1) + '. ' + v; }),
+          confirmWord: dry ? null : 'APPLY',
           okText: dry ? 'Preview' : 'Apply', cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: 'APPLY cancelled by user.', level: 'warn' }); return; }
         log.append({ text: '=== APPLY option ' + opt + ' on ' + currentScopeId + (dry ? ' [DRY RUN]' : '') + ' ===', level: 'banner' });
-        writeRun = ctx.run('apply', { targets: serverInput.value.trim(), scopeId: currentScopeId, optionId: opt, newValues: workingValues.join('\n'), expectedOld: originalValues.join('\n'), removeOption: removeOpt, dryRun: dry }, { keyOf: keyByScope });
-        bindResultLog(function () { if (!dry) { originalValues = workingValues.slice(); updateApplyState(); } });
+        // audit 2026-07-24 (finding 3): 'Remove option' posted the loaded IPs in newValues
+        // alongside removeOption=true, and the engine refuses exactly that combination
+        // ("Clear one or the other") - so the removal the dialog promised was unreachable
+        // from this UI. Removal IS the empty new-values list; send it that way.
+        // confirm: 'APPLY' on the DRY-RUN path is a deliberate, documented trade-off
+        // (audit 2026-07-25, fable re-audit follow-up). The word is sent even though the arm
+        // dialog asked for no typing when dry, so the param is NOT operator evidence on a
+        // preview - it is a protocol constant satisfying the engine's unconditional
+        // -cne 'APPLY' gate. We keep it that way rather than exempting dry runs server-side:
+        //   * the gate is the ONE check that cannot be bypassed by any request shape; adding a
+        //     dryRun-dependent branch to it would make the fail-closed refusal depend on the
+        //     very flag an attacker/typo controls;
+        //   * a dry run cannot write anyway - Get-DhcpDryRunSafe (dhcp.psm1) resolves ANY
+        //     present-but-unrecognized token to DRY, so 'dryRun' can only fail towards preview;
+        //   * arming is still evidenced where it matters: the LIVE path types the word into
+        //     ctx.arm (confirmWord 'APPLY') before this line is ever reached, and the preview
+        //     still passes through a real arm dialog showing server/scope/option/diff.
+        // The residual gap is stated plainly: on a preview, 'confirm' proves nothing.
+        writeRun = ctx.run('apply', { targets: srv, scopeId: currentScopeId, optionId: opt, newValues: removeOpt ? '' : workingValues.join('\n'), expectedOld: originalValues.join('\n'), removeOption: removeOpt, dryRun: dry, confirm: 'APPLY' }, { keyOf: keyByScope });
+        bindResultLog(function () {
+          if (dry) return;
+          // audit 2026-07-24: with the Remove path finally reachable (finding 3), a
+          // committed removal leaves the option UNSET - so the new before-state is empty,
+          // not the working list. Adopting the working list here would post a stale
+          // expectedOld on the next apply and have it refused as 'Stale'.
+          if (removeOpt) { originalValues = []; workingValues = []; selIdx = -1; removeOptCb._cb.checked = false; renderIpList(); }
+          else { originalValues = workingValues.slice(); }
+          updateApplyState();
+        });
       }
       async function doBulk(mode) {
         if (writeActive) return;   // a write is already in flight - do not fire a second overlapping bulk run
@@ -350,16 +464,27 @@
         var ips = (bulkIps.value || '').split(/[,;\s\r\n]+/).filter(Boolean);
         var bad = ips.filter(function (i) { return !isIpv4(i); });
         if (!ips.length || bad.length) { ctx.confirm({ title: 'Check IPs', body: ips.length ? ('Not valid IPv4: ' + bad.map(esc).join(', ')) : 'Enter at least one IP.', okText: 'OK', cancelText: null }); return; }
+        var srv = activeServer(false);
+        if (!srv) return;   // audit 2026-07-24: never bulk-write to a server other than the connected one
         var dry = dryCbBulk._cb.checked, opt = currentOptionId();
         var label = { append: 'APPEND to bottom of', prepend: 'PREPEND to top of', remove: 'REMOVE from' }[mode];
-        var ok = await ctx.confirm({
-          title: 'Confirm BULK ' + mode.toUpperCase(), danger: !dry,
-          body: 'Server: <b>' + esc(serverInput.value.trim()) + '</b><br>Action: <b>' + label + ' option ' + opt + '</b><br>Scopes (' + scopeIds.length + '): ' + esc(scopeIds.join(', ')) + '<br>IPs: ' + esc(ips.join(', ')) + (dry ? '<br><br>[DRY RUN]' : '') + '<br><br>Proceed?',
+        // audit 2026-07-24 (finding 1): ctx.confirm ignores confirmWord and no `confirm`
+        // param was sent, so the engine's typed-APPLY gate refused every bulk run.
+        var ok = await ctx.arm({
+          title: 'Confirm BULK ' + mode.toUpperCase() + (dry ? ' (DRY RUN)' : ''),
+          banner: dry ? 'DRY RUN - per-scope before/after is previewed, nothing is written' : 'DESTRUCTIVE - REWRITES THE LIVE OPTION VALUE ON EVERY CHECKED SCOPE',
+          danger: !dry,
+          body: 'Server: <b>' + esc(srv) + '</b><br>Action: <b>' + label + ' option ' + opt + '</b><br>Scopes (' + scopeIds.length + '): ' + esc(scopeIds.join(', ')) + '<br>IPs: ' + esc(ips.join(', ')) + (dry ? '<br><br>[DRY RUN]' : '') + '<br><br>Proceed?',
+          confirmWord: dry ? null : 'APPLY',
           okText: dry ? 'Preview' : 'Proceed', cancelText: 'Cancel'
         });
         if (!ok) { log.append({ text: 'BULK ' + mode.toUpperCase() + ' cancelled by user.', level: 'warn' }); return; }
         log.append({ text: '=== BULK ' + mode.toUpperCase() + ' option ' + opt + ' on ' + scopeIds.length + ' scope(s)' + (dry ? ' [DRY RUN]' : '') + ' ===', level: 'banner' });
-        writeRun = ctx.run('bulk-' + mode, { targets: serverInput.value.trim(), scopeIds: scopeIds.join('\n'), optionId: opt, ipAddresses: ips.join('\n'), dryRun: dry }, { keyOf: keyByScope });
+        // confirm: same deliberate trade-off as doApply above (audit 2026-07-25) - on a DRY
+        // RUN this word is a protocol constant for the engine's unconditional gate, not
+        // operator evidence; the live path types it into ctx.arm first. Keeping the gate
+        // dryRun-independent is worth more than making a preview prove arming.
+        writeRun = ctx.run('bulk-' + mode, { targets: srv, scopeIds: scopeIds.join('\n'), optionId: opt, ipAddresses: ips.join('\n'), dryRun: dry, confirm: 'APPLY' }, { keyOf: keyByScope });
         bindResultLog(null);
       }
       // Union of the apply (Host,ScopeId,OptionId,Status,OldValues,NewValues,Added,
@@ -414,9 +539,16 @@
       // wire
       connectBtn.onclick = doConnect;
       disconnectBtn.onclick = doDisconnect;
+      serverInput.addEventListener('input', refreshConnStatus);   // audit 2026-07-24: surface a retarget-in-waiting immediately
       loadBtn.onclick = function () { doLoad(false); };
       optSelect.addEventListener('change', function () { optChanged(); updateBulk(); if (currentScopeId) doLoad(true); });
-      optIdInput.addEventListener('input', function () { updateBulk(); });
+      // audit 2026-07-25 (fable re-audit follow-up): this used to be updateBulk() ALONE, so a
+      // custom option ID typed after Load left the previous option's before-state armed under a
+      // new ID. Every keystroke invalidates the editor (a partial ID like '6' -> '66' must not
+      // stay 'loaded'); the commit edge ('change' - blur/Enter) then reloads for the typed ID,
+      // exactly like the dropdown does. No per-keystroke remote read.
+      optIdInput.addEventListener('input', function () { updateBulk(); if (!optionLoaded()) invalidateLoadedOption(); });
+      optIdInput.addEventListener('change', function () { updateBulk(); if (currentScopeId && !optionLoaded()) doLoad(true); });
       ipList.addEventListener('click', updateApplyState);
       removeOptCb._cb.addEventListener('change', updateApplyState);
       renderScopes(); renderIpList(); updateBulk();

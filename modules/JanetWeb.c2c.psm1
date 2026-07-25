@@ -29,6 +29,24 @@
 #          so you can load machines and run a manual C2C patch without an import (fix-lockscreen already did
 #          this). Every guard is unchanged (FIX confirm, self-guard, wrong-box abort, verify-first). Reachability
 #          also probes WinRM HTTPS 5986 (after HTTP 5985), auto-switching that host's session to -UseSSL.
+#  v1.15.13 (audit 2026-07-24) fail-closes the AntiMalware FIXER on an UNREADABLE signature age -
+#          the exact state the scan side already fails closed on ($sigFresh) - which used to skip the
+#          update chain and book "already protected / NO CHANGE"; and declares the run-all prunePki /
+#          fixRdp inputs the view already posts and the engine already reads.
+#  v1.16.0 (audit 2026-07-25, fable re-audit follow-up) closes the certdeploy PARITY gaps on the
+#          fix-pki path and two honesty gaps in the rollup:
+#            * TRUST-ANCHOR GUARD (Test-C2cIsCa, copied from certdeploy's Test-CertDeployIsCa):
+#              a NON-CA (leaf/end-entity) cert is REFUSED from LocalMachine Root/CA, so an
+#              operator-supplied certBundleFolder can no longer push a leaf as a fleet-wide
+#              trust anchor. Disallowed (a blacklist, not an anchor) is deliberately NOT guarded.
+#            * DISTRUST GATE: the Untrusted\ -> Disallowed push BLACKLISTS certs fleet-wide, the
+#              opposite direction to the rest of the fix, so it is now the SAME explicit,
+#              double-gated, default-OFF pushDisallowed opt-in certdeploy uses (admin side omits
+#              the group from the bundle JSON; the remote worker re-asserts before opening a store).
+#            * an all-IN PROGRESS host rolls up IN PROGRESS (it used to book the clean-looking
+#              NO CHANGE -> audit Skipped while the scan would still FAIL the box).
+#            * 'Java|NOCHANGE' no longer claims 'NO OLD JAVA' - after the vendor gate a NOCHANGE
+#              can mean "found N OLD item(s), removed NOTHING".
 #
 #  Verdict (computed admin-side, quarantine-tier only):
 #    QUARANTINE RISK  = >= 1 quarantine-tier FAIL   (Detail lists the failing pillars)
@@ -52,7 +70,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.15.12'
+        version  = '1.16.0'
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all.'
         actions  = @(
@@ -165,15 +183,22 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-pki'
                 label       = 'Fix PKI Trust Roots'
-                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. Two PKI-Fix-ScanFix v1.9 companions are OPT-IN via their own boxes (both default OFF; the core additive bundle install above always runs): (a) prunePki - EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) fixRdp - a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Server Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Each companion runs only when its box is ticked. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (certificate store). Install the DoD trust bundle into the LocalMachine certificate stores on each target, ADDITIVELY. The engine reads the bundle folder ADMIN-SIDE once, before dialing any host: <folder>\root\*.cer -> Root store, <folder>\Intermediate\*.cer -> CA (intermediate) store, <folder>\Untrusted\*.cer -> Disallowed store, and any loose *.cer directly under <folder> -> Root (case-insensitive). If the folder is missing or yields ZERO certs the action ABORTS and dials nothing. Per host, over one WinRM round-trip, each store is opened ReadWrite and only certs whose thumbprint is NOT already present are added - the bundle install itself never removes anything. TRUST-ANCHOR GUARD: a cert without BasicConstraints CA=true is REFUSED from Root/CA (result REJECTED (non-CA) - it is never installed), so an operator-chosen bundle folder cannot push a leaf/end-entity cert as a fleet-wide trust anchor; the Disallowed blacklist is not a trust anchor and is not guarded. THIRD INDEPENDENT OPT-IN (default OFF): pushDisallowed also pushes the bundle Untrusted\ group into the LocalMachine Disallowed store - that BLACKLISTS (DISTRUSTS) those certs fleet-wide, the opposite direction to the rest of this fix, so it is armed separately and never rides along silently; unticked, ONLY Root/CA are pushed. Two PKI-Fix-ScanFix v1.9 companions are OPT-IN via their own boxes (both default OFF; the core additive bundle install above always runs): (a) prunePki - EXPIRED retired DoD intermediates are pruned from the CA store ONLY when their subject matches the retired DOD EMAIL/ID/SW/DERILITY CA-n allowlist AND they are not one of the four legacy-keep intermediates this tool intentionally pushes (everything else expired - roots, machine identity, timestamping - is never touched); (b) fixRdp - a BROKEN RDP-tcp listener certificate (self-signed / expired / missing) is rebound to the newest valid CA-issued My-store cert with the Server Authentication EKU matching the host - the replacement is located BEFORE anything is cleared (no candidate = left untouched, SKIP) and a healthy CA-issued listener is never touched. Each companion runs only when its box is ticked. Result ROOTS INSTALLED (added N of M) / ROOTS ALREADY PRESENT (all M present) / EXPIRED PRUNED / RDP CERT REBOUND / FAIL. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
-                confirm     = 'Fix the PKI Trust Roots pillar on the import-flagged host(s) you checked? This adds DoD trust bundle certificates to the LocalMachine stores. Proceed?'
+                # audit 2026-07-25 (fable re-audit follow-up): the old confirm said only "adds
+                # certificates" while the Untrusted\ group silently BLACKLISTED certs fleet-wide.
+                # It now names BOTH directions, exactly like the certdeploy deploy confirm.
+                confirm     = 'Fix the PKI Trust Roots pillar on the import-flagged host(s) you checked? This ADDITIVELY adds the DoD trust bundle roots to LocalMachine Root/CA (never removes anything). If "Also BLACKLIST the bundle Untrusted certs" is ticked it ALSO adds those certs to the LocalMachine Disallowed store, which DISTRUSTS them fleet-wide. Proceed?'
                 columns     = @('Host','Ping','Status','Detail')
                 inputs      = @(
                     @{ name='targets';          label='Checked host(s) - a subset of the PKI Trust Roots hosts the import flagged'; type='hostlist'; required=$true },
                     @{ name='csvPath';          label='C2C Compliance CSV (per-pillar targets are re-derived from this import)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='certBundleFolder'; label='DoD trust bundle folder (server-readable path, e.g. a UNC path with root\*.cer, Intermediate\*.cer, Untrusted\*.cer)'; type='text'; required=$true },
+                    # audit 2026-07-25 (fable re-audit follow-up): the Disallowed (Untrusted\) push is a
+                    # fleet-wide DISTRUST, not a trust add - armed like every other trust-changing extra
+                    # here (explicit, default OFF), matching the certdeploy deploy input of the same name.
+                    @{ name='pushDisallowed';   label='Also BLACKLIST the bundle Untrusted certs into the Disallowed store (DISTRUST - default OFF)'; type='bool'; required=$false; default=$false },
                     @{ name='prunePki';         label='Prune expired retired DoD intermediates (CA store; the 4 legacy-keeps never touched)'; type='bool'; required=$false; default=$false },
                     @{ name='fixRdp';           label='Repair broken RDP listener (self-signed/expired/missing -> rebind CA-issued; healthy untouched)'; type='bool'; required=$false; default=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
@@ -201,7 +226,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-java'
                 label       = 'Fix Java (remove outdated)'
-                description = 'DESTRUCTIVE (uninstall + registry + filesystem). Java-Cleanup-ScanFix v1.1 port: C2C/vulnerability scanners flag hosts on stale Java registry keys even after the product is gone, and on genuinely old installs. Per host, over one WinRM round-trip, three evidence sources are scanned and anything OLDER than Java 8 Update 491 is removed: (1) INSTALLED PRODUCTS - the 64- and 32-bit Uninstall registry hives, Oracle/Sun PUBLISHER ONLY (OpenJDK / Temurin / Corretto are NEVER touched), uninstalled via msiexec /x {GUID} /qn /norestart (exit 0 and 3010=reboot-pending are success; a non-MSI entry is flagged for manual review); (2) REGISTRY RESIDUE - old version subkeys under HKLM JavaSoft (native + WOW6432Node) removed, a CurrentVersion value pointing at a removed version repointed to the newest remaining one, a product key emptied BY THIS CLEANUP dropped; (3) FILESYSTEM RESIDUE - old folders under Program Files\Java (both hives; in-use folders report FAILED). Verdicts: OLD (below 1.8.0_491) removed; OK (1.8.0_491+, any modern JDK 9/11/17/21) kept; UNKNOWN (unparseable version) NEVER auto-removed - listed for manual review. No reboots are forced. Result JAVA CLEANED / NO OLD JAVA / FAIL. An OPT-IN utility fix, NOT a scored C2C pillar and NOT part of run-all (it clears Vulnerability/AQC findings on the next scanner pass). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (uninstall + registry + filesystem). Java-Cleanup-ScanFix v1.1 port: C2C/vulnerability scanners flag hosts on stale Java registry keys even after the product is gone, and on genuinely old installs. Per host, over one WinRM round-trip, three evidence sources are scanned and anything OLDER than Java 8 Update 491 is removed: (1) INSTALLED PRODUCTS - the 64- and 32-bit Uninstall registry hives, Oracle/Sun PUBLISHER ONLY (OpenJDK / Temurin / Corretto are NEVER touched), uninstalled via msiexec /x {GUID} /qn /norestart (exit 0 and 3010=reboot-pending are success; a non-MSI entry is flagged for manual review); (2) REGISTRY RESIDUE - old version subkeys under HKLM JavaSoft (native + WOW6432Node) removed, a CurrentVersion value pointing at a removed version repointed to the newest remaining one, a product key emptied BY THIS CLEANUP dropped; (3) FILESYSTEM RESIDUE - old folders under Program Files\Java (both hives; in-use folders report FAILED). Verdicts: OLD (below 1.8.0_491) removed; OK (1.8.0_491+, any modern JDK 9/11/17/21) kept; UNKNOWN (unparseable version) NEVER auto-removed - listed for manual review. No reboots are forced. Result JAVA CLEANED / NO JAVA REMOVED / FAIL (audit 2026-07-25: the no-op label states only that nothing was removed - after the vendor gate it can also mean OLD items were FOUND but left because their publisher is not Oracle/Sun; the row Detail names which). An OPT-IN utility fix, NOT a scored C2C pillar and NOT part of run-all (it clears Vulnerability/AQC findings on the next scanner pass). Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Remove all Oracle/Sun Java OLDER than 8u491 (installed products, JavaSoft registry residue, Program Files folders) from the target host(s)? OpenJDK/Temurin/Corretto and unknown versions are never touched. Proceed?'
@@ -217,7 +242,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'run-all'
                 label       = 'RUN ALL - Fix Imported Non-Compliant Hosts'
-                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The plan is re-derived from the imported CSV (csvPath) ADMIN-SIDE and the client "plan" input (the JSON array the view built from the operator''s per-pillar host checkboxes, [{host,pillars:[...]}, ...]) is INTERSECTED against it: a client host/pillar pair the import did not flag is dropped with a warn, and a host absent from the import is dropped entirely. With no csvPath (or a CSV that parses to zero findings) the run is refused - nothing is dialed. Per host only its intersected pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If a host plans PkiRoots and a valid cert bundle folder was supplied it is installed; if PkiRoots is planned but no bundle was given it is SKIPPED for that host (info note) without aborting the run. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
+                description = 'DESTRUCTIVE. Fix each imported non-compliant host''s OWN failed endpoint-fixable pillars only, in one pass. The plan is re-derived from the imported CSV (csvPath) ADMIN-SIDE and the client "plan" input (the JSON array the view built from the operator''s per-pillar host checkboxes, [{host,pillars:[...]}, ...]) is INTERSECTED against it: a client host/pillar pair the import did not flag is dropped with a warn, and a host absent from the import is dropped entirely. With no csvPath (or a CSV that parses to zero findings) the run is refused - nothing is dialed. Per host only its intersected pillars run. Unknown / non-endpoint-fixable pillar names are dropped per host (Vuln / OSVersion / STIG route elsewhere); a host left with zero fixable pillars is reported and never dialed. If a host plans PkiRoots and a valid cert bundle folder was supplied it is installed (Root/CA only - the bundle Untrusted\ group is a fleet-wide BLACKLIST and rides along ONLY when the separate pushDisallowed opt-in is ticked, default OFF - and a non-CA cert is refused from Root/CA by the trust-anchor guard); if PkiRoots is planned but no bundle was given it is SKIPPED for that host (info note) without aborting the run. Same safety as the per-pillar fixes: self-guard drops the dispatcher host, wrong-box DNS mismatch aborts a host, per-host watchdog + operator cancel, and the operator must type FIX to confirm. Encryption only STARTS on a decrypted volume if "ENABLE BitLocker" is ticked.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Run ALL fixes across the imported non-compliant hosts (each host, its own failed pillars, re-derived from the CSV and intersected with your per-pillar selections)? This changes machines. Proceed?'
@@ -227,6 +252,15 @@ function Get-JanetToolManifest {
                     @{ name='csvPath';          label='C2C Compliance CSV (the plan is re-derived from this import and the client plan intersected against it)'; type='file'; filter='CSV files (*.csv)|*.csv|All files (*.*)|*.*'; required=$false },
                     @{ name='enableEncryption'; label='ENABLE BitLocker on decrypted FIXED volumes (OS + data; only if a host plans Encryption)'; type='bool'; required=$false; default=$false },
                     @{ name='certBundleFolder'; label='DoD trust bundle folder (optional; needed only if a host plans PkiRoots. The two PkiRoots companions - prunePki / fixRdp - are opt-in via the PkiRoots card boxes and default OFF)'; type='text'; required=$false },
+                    # audit 2026-07-24: the two PkiRoots companions were UNDECLARED here although the view
+                    # posts them on every run-all and Invoke-C2cFixAction reads them - an undeclared input
+                    # is invisible to the manifest-driven surfaces (generic/custom-view input rendering,
+                    # docs, param validation). Same names/defaults as fix-pki so the two stay in lockstep.
+                    # audit 2026-07-25 (fable re-audit follow-up): same DISTRUST gate as fix-pki - the
+                    # Untrusted\ -> Disallowed blacklist push never rides along with a run-all unarmed.
+                    @{ name='pushDisallowed';   label='Also BLACKLIST the bundle Untrusted certs into the Disallowed store (DISTRUST - default OFF) - applies only to hosts that plan PkiRoots'; type='bool'; required=$false; default=$false },
+                    @{ name='prunePki';         label='Prune expired retired DoD intermediates (CA store; the 4 legacy-keeps never touched) - applies only to hosts that plan PkiRoots'; type='bool'; required=$false; default=$false },
+                    @{ name='fixRdp';           label='Repair broken RDP listener (self-signed/expired/missing -> rebind CA-issued; healthy untouched) - applies only to hosts that plan PkiRoots'; type='bool'; required=$false; default=$false },
                     @{ name='confirm';          label='Type FIX to confirm'; type='text'; required=$true },
                     @{ name='winrmHeal';        label='Recover WinRM via RPC if 5985 down (best-effort, often blocked)'; type='bool'; required=$false; default=$false },
                     @{ name='threads';          label='Parallel hosts (1-16)'; type='int'; required=$false; default=8 },
@@ -412,6 +446,11 @@ function Get-C2cHostAuditResult {
         'NO CHANGE'    { 'Skipped' }
         'SKIPPED'      { 'Skipped' }
         'OFFLINE'      { 'Skipped' }
+        # audit 2026-07-25 (fable re-audit follow-up): IN PROGRESS is now a first-class host status
+        # (the rollup no longer buries an all-in-progress host in NO CHANGE). Spelled out here so it
+        # can never drift into the clean 'Skipped' bucket: the remediation has NOT completed, the box
+        # would still fail the scan, and "could not confirm compliant" is never booked as clean.
+        'IN PROGRESS'  { 'Failure' }
         default        { 'Failure' }   # PARTIAL (has a FAIL), FAILED, NOT VERIFIED -> Failure
     }
 }
@@ -471,6 +510,35 @@ function Invoke-JanetC2cWinrmHeal {
 # added thumbprints ABSENT on re-read (added but stripped). Backward-compatible: a
 # custom $StoreOpener with NO $VerifyOpener trusts the add (legacy fake-store callers).
 $script:C2cAddCertsSrc = @'
+# TRUST-ANCHOR GUARD (audit 2026-07-25, fable re-audit follow-up - security PARITY with
+# certdeploy's Test-CertDeployIsCa, deliberately duplicated because a pool/remote runspace
+# cannot see the other module's functions). A CA-cert test gating what may land in a
+# TRUST-ANCHOR store (Root, CA/Intermediate): parse the X509BasicConstraintsExtension
+# (OID 2.5.29.19) and return $true ONLY when CertificateAuthority is true. FAIL-CLOSED - an
+# ABSENT BasicConstraints extension (or any parse error) is NOT a CA: a legit modern CA cert
+# carries BasicConstraints CA=true, a leaf/end-entity does not. WHY it matters here: the
+# fix-pki certBundleFolder is operator-supplied (a UNC path), so without this a leaf cert
+# dropped in root\ would be installed as a fleet-wide trust anchor. The four allowlisted
+# legacy DoD intermediates are real CAs, so the allowlist keeps pushing exactly as before.
+# Pure (no store I/O) -> directly unit-testable. Applied to Root/CA ONLY; the Disallowed
+# (Untrusted) store is a BLACKLIST, not a trust anchor, so a non-CA cert there is legitimate.
+function Test-C2cIsCa {
+    param($Cert)
+    if (-not $Cert) { return $false }
+    try {
+        foreach ($ext in $Cert.Extensions) {
+            if ([string]$ext.Oid.Value -eq '2.5.29.19') {
+                $bc = $ext -as [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]
+                if (-not $bc) {
+                    $bc = New-Object System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension
+                    $bc.CopyFrom($ext)
+                }
+                return [bool]$bc.CertificateAuthority
+            }
+        }
+    } catch { return $false }
+    return $false   # no BasicConstraints extension -> fail-closed, NOT a CA
+}
 function Add-C2cBundleToStores {
     param($Bundle, [scriptblock]$StoreOpener, [scriptblock]$VerifyOpener)
     $customOpener = [bool]$StoreOpener
@@ -500,9 +568,16 @@ function Add-C2cBundleToStores {
     }
     $added = 0; $already = 0; $total = 0; $failDetail = ''
     $verified = 0
+    # audit 2026-07-25 (fable re-audit follow-up): trust-anchor guard accounting - certs REFUSED
+    # from Root/CA because they are not CAs. Reported apart from FailDetail (nothing errored; we
+    # deliberately declined to trust them) but still out of the clean bucket, see the classifier.
+    $rejected = 0; $rejectDetail = ''
     $perStore = New-Object System.Collections.ArrayList
     $notVerified = New-Object System.Collections.ArrayList
-    foreach ($sm in @(@{ Prop='Root'; Store='Root' }, @{ Prop='CA'; Store='CA' }, @{ Prop='Disallowed'; Store='Disallowed' })) {
+    # Anchor=$true marks a TRUST-ANCHOR store (Root, CA/Intermediate): only actual CA certs may
+    # land there. Disallowed is the Untrusted BLACKLIST (Anchor=$false) - a non-CA cert there is
+    # legitimate (it is what you normally blacklist), so the CA guard is NOT applied to it.
+    foreach ($sm in @(@{ Prop='Root'; Store='Root'; Anchor=$true }, @{ Prop='CA'; Store='CA'; Anchor=$true }, @{ Prop='Disallowed'; Store='Disallowed'; Anchor=$false })) {
         $items = @()
         try { $items = @($Bundle.($sm.Prop)) | Where-Object { $_ } } catch { $items = @() }
         if ($items.Count -eq 0) { continue }
@@ -520,6 +595,17 @@ function Add-C2cBundleToStores {
                 try {
                     $raw  = [Convert]::FromBase64String([string]$it.b)
                     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$raw)
+                    # TRUST-ANCHOR GUARD (audit 2026-07-25): for Root/CA only, refuse a cert that is
+                    # NOT an actual CA (no BasicConstraints CA=true) - an operator-chosen bundle folder
+                    # must not be able to push a leaf/end-entity cert as a fleet-wide trust anchor.
+                    # Keep adding the valid CAs alongside it (one bad .cer never blocks the real roots).
+                    if ($sm.Anchor -and -not (Test-C2cIsCa $cert)) {
+                        $rejected++
+                        $rsubj = [string]$cert.Subject
+                        $m = [regex]::Match($rsubj, '(?i)CN=([^,]+)'); if ($m.Success) { $rsubj = $m.Groups[1].Value.Trim() }
+                        $rejectDetail += "rejected non-CA cert '$rsubj' ($tp) from $($sm.Store) - not a CA certificate; "
+                        continue
+                    }
                     $st.Add($cert)
                     if ($tp) { [void]$present.Add($tp); [void]$addedThumbs.Add($tp) }
                     $sAdd++; $added++
@@ -550,11 +636,12 @@ function Add-C2cBundleToStores {
             }
         }
     }
-    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified) }
+    return @{ Added=$added; Already=$already; Total=$total; PerStore=@($perStore); FailDetail=$failDetail; Verified=$verified; NotVerified=@($notVerified); Rejected=$rejected; RejectDetail=$rejectDetail }
 }
 # Classify an Add-C2cBundleToStores result into the raw PkiRoots token the fix worker
 # emits (and the label map keys on): any .Add error -> FAIL; else added-but-absent on
-# re-read -> NOT VERIFIED; else 1+ added -> FIXED; else nothing to add -> NOCHANGE.
+# re-read -> NOT VERIFIED; else a non-CA anchor refused by the trust-anchor guard (and so
+# ABSENT) -> REJECTED; else 1+ added -> FIXED; else nothing to add -> NOCHANGE.
 # This is the SINGLE classifier both the remote fix worker (fixSb) and the unit tests
 # call, so a mis-classification fails a test.
 function Get-C2cPkiRootsResultToken {
@@ -562,6 +649,11 @@ function Get-C2cPkiRootsResultToken {
     if (-not $AddResult) { return 'FAIL' }
     if ([string]$AddResult.FailDetail) { return 'FAIL' }
     if (@($AddResult.NotVerified).Count -gt 0) { return 'NOT VERIFIED' }
+    # audit 2026-07-25 (fable re-audit follow-up, certdeploy parity): a wanted anchor REFUSED by
+    # the trust-anchor guard is ABSENT from the store - the fix did NOT achieve "all present", so
+    # it must never read FIXED/NOCHANGE (which roll up clean). REJECTED is its own token and the
+    # host rollup counts it with the failures, even if other certs added fine this session.
+    if ([int]$AddResult.Rejected -gt 0) { return 'REJECTED' }
     if ([int]$AddResult.Added -gt 0)   { return 'FIXED' }
     return 'NOCHANGE'
 }
@@ -585,11 +677,17 @@ function Get-C2cPillarLabel {
         'Encryption|NOCHANGE'  { 'ALREADY ENCRYPTED' }
         'PkiRoots|FIXED'       { 'ROOTS INSTALLED' }
         'PkiRoots|NOCHANGE'    { 'ROOTS ALREADY PRESENT' }
+        # audit 2026-07-25: the trust-anchor guard refused a non-CA cert destined for Root/CA.
+        'PkiRoots|REJECTED'    { 'REJECTED (non-CA)' }
         'PkiExpired|FIXED'     { 'EXPIRED PRUNED' }
         'PkiRdp|FIXED'         { 'RDP CERT REBOUND' }
         'MdeOnboard|FIXED'     { 'MDE ONBOARDED' }
         'Java|FIXED'           { 'JAVA CLEANED' }
-        'Java|NOCHANGE'        { 'NO OLD JAVA' }
+        # audit 2026-07-25 (fable re-audit follow-up): 'NO OLD JAVA' asserted the OPPOSITE of its
+        # own Detail once the javafix vendor gate landed - a NOCHANGE now also covers "found N OLD
+        # item(s) but removed NOTHING (non-Oracle/Sun publisher)". The label states only what is
+        # actually known: nothing was removed. The Detail still says WHY.
+        'Java|NOCHANGE'        { 'NO JAVA REMOVED' }
         'Lockscreen|FIXED'     { 'CACHE FIX APPLIED' }
         'Lockscreen|NOCHANGE'  { 'ALREADY SET' }
         default                { [string]$Result }
@@ -1333,7 +1431,7 @@ function Get-C2cBool {
 # BitLocker / restarted Defender on the box running JANET could disrupt the server
 # mid-run, so the dispatcher is dropped from every fix run.
 function Get-JanetC2cLocalIdentity {
-    if ($script:C2cLocalIdentity) { return $script:C2cLocalIdentity }
+    if ($script:C2cLocalIdentity) { return ,$script:C2cLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -1351,7 +1449,7 @@ function Get-JanetC2cLocalIdentity {
         }
     } catch {}
     $script:C2cLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 function Test-JanetC2cHostIsSelf {
@@ -1386,7 +1484,9 @@ function Get-C2cShortHost {
 # fixes run inside ONE Invoke-Command round-trip (fix-then-verify); the host-level
 # status is computed here (admin-side).
 $script:C2cFixBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$OfflineDefPath, [string]$OfflineDefSha256)
+    # NB: $PushDisallowed is LAST on purpose - the param list is positional at the AddArgument
+    # site and in the test drivers, so new params are only ever APPENDED.
+    param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, [string[]]$Pillars, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [bool]$WinrmHeal, [string]$WinrmHealSrc, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$DoPrune, [bool]$DoRdp, [string]$OfflineDefPath, [string]$OfflineDefSha256, [bool]$PushDisallowed)
 
     # Per-host pillar set (may differ per host in run-all). Normalize to a clean
     # [string] array even if a single-element array crossed a boundary as a scalar.
@@ -1457,7 +1557,7 @@ $script:C2cFixBlock = {
     $fixSb = {
         # Pillars cross as a '|'-delimited string (never an array) so no ArgumentList
         # flattening/serialization ambiguity over the WinRM boundary.
-        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$DoPrune, [bool]$DoRdp)
+        param([string]$PillarCsv, [bool]$DoEnable, [string]$TaniumService, [string]$TaniumInstalledSrc, [string]$BundleJson, [string]$AddCertsSrc, [int]$SigMaxAgeHours, [string]$MdeOrgId, [string]$MdeBlob, [string]$JavaSrc, [bool]$DoPrune, [bool]$DoRdp, [bool]$PushDisallowed)
         if ($SigMaxAgeHours -le 0) { $SigMaxAgeHours = 24 }
         $Pillars = @(($PillarCsv -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
         if ([string]::IsNullOrWhiteSpace($TaniumService)) { $TaniumService = 'Tanium Client' }
@@ -1962,7 +2062,13 @@ $script:C2cFixBlock = {
                     # stopped update service is a common silent cause of "completed with errors"),
                     # then a SOURCE CHAIN - default (WSUS/ConfigMgr on this network) -> Microsoft
                     # Update direct -> the MMPC HTTP source. Success = age drops under budget.
-                    if (($null -ne $ageHours) -and ($ageHours -gt $SigMaxAgeHours)) {
+                    # audit 2026-07-24: an UNREADABLE age ($null) used to SKIP this whole block and fall
+                    # through to the NOCHANGE "already protected" verdict - yet $null is EXACTLY the state
+                    # the scan's freshness gate fails closed on ($sigFresh = age -ne $null -and < 168h).
+                    # Unreadable is now treated like stale: the source chain runs, giving the host a real
+                    # chance to recover a readable timestamp, and the verdict below fails closed if it does not.
+                    $sigUnreadable = ($null -eq $ageHours)
+                    if ($sigUnreadable -or ($ageHours -gt $SigMaxAgeHours)) {
                         foreach ($usvc in @('wuauserv', 'BITS')) {
                             $u = Get-Service -Name $usvc -ErrorAction SilentlyContinue
                             if ($u -and $u.Status -ne 'Running') { try { Start-Service -Name $usvc -ErrorAction Stop } catch {} }
@@ -1990,7 +2096,7 @@ $script:C2cFixBlock = {
                                 $evS = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 2001 } -MaxEvents 1 -ErrorAction Stop
                                 if ($evS -and ("$($evS.Message)" -match '(0x[0-9A-Fa-f]{8})')) { $sigDiag = " (last update error $($Matches[1]))" }
                             } catch {}
-                            $failDet += "sig update failed via all sources [$($sigTried -join ', ')]$sigDiag; "
+                            $failDet += "$(if ($sigUnreadable) { 'signature age UNREADABLE on entry - ' } else { '' })sig update failed via all sources [$($sigTried -join ', ')]$sigDiag; "
                         }
                     }
                     Start-Sleep -Milliseconds 300
@@ -2031,9 +2137,15 @@ $script:C2cFixBlock = {
                     # reflect the true state (FAIL). RTP-on Active or a compliant Passive/EDR box
                     # can still report FIXED / NOCHANGE below.
                     $rtpStillOff = ($isActiveNow -and (-not $rtpNow))
-                    if ($failDet -or $rtpStillOff) {
+                    # audit 2026-07-24: fail closed when the FINAL age is STILL unreadable. "We could not
+                    # read the signature state" is not "protected" - the scan FAILs this host, and this
+                    # tool's output is reported up a chain of command, so the fixer must never book it
+                    # NOCHANGE/already-protected. Mirrors the scan's null-age-is-stale gate.
+                    $sigUnknownNow = ($null -eq $ageNow)
+                    if ($failDet -or $rtpStillOff -or $sigUnknownNow) {
                         $why = $failDet.TrimEnd('; ')
                         if ($rtpStillOff) { if ($why) { $why += '; ' }; $why += 'Active but RTP still off after heal' }
+                        if ($sigUnknownNow) { if ($why) { $why += '; ' }; $why += 'signature age UNREADABLE - protection NOT confirmed (fail-closed, matches the scan)' }
                         & $add 'AntiMalware' 'heal' 'FAIL' ($why + '; ' + $stateTxt + $noteTxt)
                     }
                     elseif ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + '; ' + $stateTxt + $noteTxt) }
@@ -2168,21 +2280,32 @@ $script:C2cFixBlock = {
                 } elseif (-not (Get-Command Add-C2cBundleToStores -ErrorAction SilentlyContinue)) {
                     & $add 'PkiRoots' 'none' 'FAIL' 'cert-store installer helper unavailable on target'
                 } else {
+                    # DISALLOWED (DISTRUST) GATE, audit 2026-07-25 - SECOND, remote-side assertion
+                    # (certdeploy parity). The admin side already omits the group from $BundleJson
+                    # when the operator did not arm it; re-assert HERE, before any store is opened,
+                    # so no stale/edited payload can blacklist certs on a host that was never armed
+                    # for it (same belt-and-braces idiom as the wrong-box abort).
+                    if (-not $PushDisallowed) { try { $bundle.Disallowed = @() } catch {} }
+                    $storeScope = if ($PushDisallowed) { 'Root/CA/Disallowed' } else { 'Root/CA' }
                     $ar = Add-C2cBundleToStores -Bundle $bundle
                     $storeTxt = (@($ar.PerStore) -join ', ')
                     # Classify via the shared helper (dot-sourced from $AddCertsSrc above) -
                     # the exact token the label map keys on. Inline fallback if unavailable.
                     $tok = if (Get-Command Get-C2cPkiRootsResultToken -ErrorAction SilentlyContinue) { Get-C2cPkiRootsResultToken $ar }
-                           elseif ([string]$ar.FailDetail) { 'FAIL' } elseif (@($ar.NotVerified).Count -gt 0) { 'NOT VERIFIED' } elseif ([int]$ar.Added -gt 0) { 'FIXED' } else { 'NOCHANGE' }
+                           elseif ([string]$ar.FailDetail) { 'FAIL' } elseif (@($ar.NotVerified).Count -gt 0) { 'NOT VERIFIED' } elseif ([int]$ar.Rejected -gt 0) { 'REJECTED' } elseif ([int]$ar.Added -gt 0) { 'FIXED' } else { 'NOCHANGE' }
                     if ($tok -eq 'FAIL') {
                         & $add 'PkiRoots' 'addstore' 'FAIL' ("added $($ar.Added) of $($ar.Total); errors: " + ([string]$ar.FailDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
                     } elseif ($tok -eq 'NOT VERIFIED') {
                         $nv = @($ar.NotVerified)
                         & $add 'PkiRoots' 'addstore' 'NOT VERIFIED' ("added $($ar.Added) of $($ar.Total) but $($nv.Count) absent on re-read - a reconciler/policy may be stripping in-session (thumbs: $($nv -join ', '))" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                    } elseif ($tok -eq 'REJECTED') {
+                        # audit 2026-07-25: the trust-anchor guard declined to trust a non-CA cert.
+                        # It is ABSENT from the store, so this is NOT a clean outcome (see the rollup).
+                        & $add 'PkiRoots' 'addstore' 'REJECTED' ("refused $([int]$ar.Rejected) non-CA cert(s) destined for a trust-anchor store (ABSENT, NOT installed); added $($ar.Added) of $($ar.Total) across $storeScope. " + ([string]$ar.RejectDetail).TrimEnd('; ') + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
                     } elseif ($tok -eq 'FIXED') {
-                        & $add 'PkiRoots' 'addstore' 'FIXED' ("added $($ar.Added) of $($ar.Total) across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                        & $add 'PkiRoots' 'addstore' 'FIXED' ("added $($ar.Added) of $($ar.Total) across $storeScope" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
                     } else {
-                        & $add 'PkiRoots' 'none' 'NOCHANGE' ("all $($ar.Total) already present across Root/CA/Disallowed" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
+                        & $add 'PkiRoots' 'none' 'NOCHANGE' ("all $($ar.Total) already present across $storeScope" + $(if ($storeTxt) { " [$storeTxt]" } else { '' }))
                     }
                 }
             } catch { & $add 'PkiRoots' 'error' 'FAIL' $_.Exception.Message }
@@ -2348,7 +2471,7 @@ $script:C2cFixBlock = {
     try {
         # Pass the pillar set as a '|'-delimited string (all-scalar ArgumentList) so it
         # crosses the WinRM boundary intact; the remote block splits it back to an array.
-        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours, $MdeOrgId, $MdeBlob, $JavaSrc, $DoPrune, $DoRdp -ErrorAction Stop
+        $fix = Invoke-Command -Session $sess -ScriptBlock $fixSb -ArgumentList ($Pillars -join '|'), $DoEnable, $TaniumService, $TaniumInstalledSrc, $BundleJson, $AddCertsSrc, $SigMaxAgeHours, $MdeOrgId, $MdeBlob, $JavaSrc, $DoPrune, $DoRdp, $PushDisallowed -ErrorAction Stop
 
         # ---- Offline definition rung (Defender-ScanFix v2.1 LAST rung) --------------
         # Only when a validated Microsoft-signed mpam-fe.exe is staged admin-side AND the
@@ -2415,15 +2538,27 @@ $script:C2cFixBlock = {
     # re-read) is its own bucket - louder than a plain FIXED/NO CHANGE, but not a hard FAIL
     # (the add DID succeed, a reconciler stripped it). A real FAIL still wins; FAIL+NOT
     # VERIFIED -> PARTIAL.
+    #
+    # audit 2026-07-25 (fable re-audit follow-up), two additions:
+    #   * REJECTED (PkiRoots: the trust-anchor guard refused a non-CA cert, which is therefore
+    #     ABSENT) counts WITH the failures - the wanted anchor is not installed, so the host must
+    #     never book a clean FIXED/NO CHANGE (-> audit Skipped) for a push that did not land.
+    #   * IN PROGRESS (Encryption still encrypting, MdeOnboard OrgId not yet populated) matched NO
+    #     bucket, so an all-IN PROGRESS host fell through to 'NO CHANGE' -> audit 'Skipped' -> blue
+    #     st-info, reading "already compliant" while the C2C scan would still FAIL the box (the
+    #     TASKORD-scored OrgId / Protection value is not there yet). It now has its own honest,
+    #     non-green rollup state: the work is UNFINISHED, not a no-op.
     $fixed  = @($pillarResults | Where-Object { $_.Result -eq 'FIXED' -or $_.Result -eq 'STARTED' -or $_.Result -eq 'KICKED' }).Count
-    $failed = @($pillarResults | Where-Object { $_.Result -eq 'FAIL'   }).Count
+    $failed = @($pillarResults | Where-Object { $_.Result -eq 'FAIL' -or $_.Result -eq 'REJECTED' }).Count
     $notVer = @($pillarResults | Where-Object { $_.Result -eq 'NOT VERIFIED' }).Count
     $skip   = @($pillarResults | Where-Object { $_.Result -eq 'SKIP'   }).Count
+    $inProg = @($pillarResults | Where-Object { $_.Result -eq 'IN PROGRESS' }).Count
     $tot    = $pillarResults.Count
     if     ($failed -ge 1 -and $failed -eq $tot)  { $r.Status = 'FAILED' }
     elseif ($notVer -ge 1 -and $failed -eq 0)     { $r.Status = 'NOT VERIFIED' }
     elseif ($fixed -ge 1 -and $failed -eq 0)      { $r.Status = 'FIXED' }
     elseif ($failed -ge 1)                        { $r.Status = 'PARTIAL' }
+    elseif ($inProg -ge 1)                        { $r.Status = 'IN PROGRESS' }  # unfinished remediation - NOT compliant yet
     elseif ($skip -ge 1 -and $skip -eq $tot)      { $r.Status = 'SKIPPED' }   # e.g. Lockscreen with no default image on the target
     else                                          { $r.Status = 'NO CHANGE' }
 
@@ -2769,12 +2904,16 @@ function Resolve-C2cDefenderPackage {
 
 # Serialize a bundle to the compact JSON the PkiRoots worker consumes (thumbprint + b64
 # per store). @()-wrapped so ConvertFrom-Json single-element arrays round-trip safely.
+# audit 2026-07-25 (fable re-audit follow-up, certdeploy parity): the Untrusted\ -> Disallowed
+# group is a fleet-wide BLACKLIST (distrust), not a trust add, so it is FAIL-CLOSED here - the
+# group is delivered to the worker ONLY when the caller passes -IncludeDisallowed (the fix-pki /
+# run-all pushDisallowed opt-in). The worker re-asserts the same gate before it opens a store.
 function Convert-C2cBundleToJson {
-    param($Bundle)
+    param($Bundle, [bool]$IncludeDisallowed = $false)
     $payload = @{
         Root       = @(@($Bundle.Root)       | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
         CA         = @(@($Bundle.CA)         | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
-        Disallowed = @(@($Bundle.Disallowed) | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } })
+        Disallowed = @(if ($IncludeDisallowed) { @($Bundle.Disallowed) | ForEach-Object { @{ t=[string]$_.Thumbprint; b=[string]$_.B64 } } })
     }
     return ($payload | ConvertTo-Json -Depth 5 -Compress)
 }
@@ -2812,6 +2951,15 @@ function Invoke-C2cFixAction {
     # param contract with the certdeploy tool so the two stay consistent.
     $doPrune        = Get-C2cBool $Params['prunePki'] $false
     $doRdp          = Get-C2cBool $Params['fixRdp'] $false
+    # DISALLOWED (DISTRUST) GATE, audit 2026-07-25 (fable re-audit follow-up). POLICY: the
+    # Untrusted\ -> LocalMachine\Disallowed push BLACKLISTS certs fleet-wide - a trust change in
+    # the OPPOSITE direction to the roots this fixer exists to install, and NOT required by the
+    # TASKORD PKI Trust Roots rule (that rule scores MISSING ROOTS). The bundle folder is
+    # operator-supplied, so an Untrusted\ folder could distrust arbitrary certs across the fleet
+    # from a "fix the roots" button. It is therefore armed exactly like certdeploy's deploy:
+    # explicit, default OFF, double-gated (the group is not even serialized into the bundle JSON
+    # unless armed, and the remote worker re-asserts before opening a store).
+    $pushDisallowed = Get-C2cBool $Params['pushDisallowed'] $false
 
     # Baseline (fresh) for the Tanium service name used by the Monitoring fixer.
     $baseline = Get-C2cBaseline
@@ -2875,9 +3023,20 @@ function Invoke-C2cFixAction {
                     $legSubjects = (@($bundle.LegacyAllowed | ForEach-Object { [string]$_.Subject }) -join ', ')
                     & $send @{ type='log'; level='warn'; text="[LEGACY] $($bundle.LegacyAllowedCount) expired-but-allowlisted intermediate(s) WILL be pushed (LegacyIntermediates - legacy chain/signature validation): $legSubjects" }
                 }
-                $bundleJson = Convert-C2cBundleToJson $bundle
+                $bundleJson = Convert-C2cBundleToJson $bundle $pushDisallowed
                 $bundleOk   = $true
                 & $send @{ type='log'; level='info'; text="Cert bundle: $($bundle.CertCount) cert(s) [Root $(@($bundle.Root).Count)/CA $(@($bundle.CA).Count)/Disallowed $(@($bundle.Disallowed).Count)] from $($bundle.Folder) [$bundleSource]." }
+                # audit 2026-07-25: say out loud which way the Disallowed group went this run - an
+                # armed BLACKLIST is the loudest thing this fixer can do, and an un-armed one
+                # explains why a later read-only check still reports those certs as absent.
+                $disN = @($bundle.Disallowed).Count
+                if ($disN -gt 0) {
+                    if ($pushDisallowed) {
+                        & $send @{ type='log'; level='warn'; text="[DISTRUST] pushDisallowed is ARMED: $disN cert(s) from the bundle Untrusted\ folder WILL be added to the LocalMachine Disallowed store - that BLACKLISTS them fleet-wide (nothing is removed, but those certs stop being usable on every target)." }
+                    } else {
+                        & $send @{ type='log'; level='info'; text="[DISTRUST] pushDisallowed is OFF (default): the $disN Untrusted\ blacklist cert(s) are NOT delivered to any host - only Root/CA are pushed." }
+                    }
+                }
             } elseif ($ActionId -eq 'fix-pki') {
                 & $send @{ type='log'; level='err'; text="Fix PKI Trust Roots aborted: $($bundle.Error). Nothing was dialed." }
                 return @{ rows=@(); summary=@{ total=0; rejected=$true } }
@@ -3118,7 +3277,7 @@ function Invoke-C2cFixAction {
         [void]$ps.AddArgument(@($job.Pillars)); [void]$ps.AddArgument($doEnable); [void]$ps.AddArgument($taniumService); [void]$ps.AddArgument($script:C2cTaniumInstalledSrc)
         [void]$ps.AddArgument($bundleJson); [void]$ps.AddArgument($healThis); [void]$ps.AddArgument($script:C2cWinrmHealSrc); [void]$ps.AddArgument($script:C2cAddCertsSrc)
         [void]$ps.AddArgument([int]$sigMaxHours)
-        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($doPrune); [void]$ps.AddArgument($doRdp); [void]$ps.AddArgument([string]$offlineDefPath); [void]$ps.AddArgument([string]$offlineDefSha256)
+        [void]$ps.AddArgument([string]$script:C2cMdeOrgId); [void]$ps.AddArgument([string]$script:C2cMdeOnboardingBlob); [void]$ps.AddArgument([string]$script:C2cJavaSrc); [void]$ps.AddArgument($doPrune); [void]$ps.AddArgument($doRdp); [void]$ps.AddArgument([string]$offlineDefPath); [void]$ps.AddArgument([string]$offlineDefSha256); [void]$ps.AddArgument($pushDisallowed)
         [void]$jobs.Add([pscustomobject]@{ Host=[string]$job.Host; PS=$ps; Async=$ps.BeginInvoke(); StartedAt=$null })
     }
 
@@ -3142,7 +3301,9 @@ function Invoke-C2cFixAction {
                 $pn = [string]$p.Name; if (-not $pn) { continue }
                 $pr = [string]$p.Result
                 if (-not $perPillar.ContainsKey($pn)) { $perPillar[$pn] = @{ fixed=0; nochange=0; unverified=0; fail=0 } }
-                if     ($pr -eq 'FAIL')                                        { $perPillar[$pn].fail++ }
+                # audit 2026-07-25: REJECTED (non-CA anchor refused, so ABSENT) tallies as a fail -
+                # the pillar did not achieve its goal on that host.
+                if     (@('FAIL','REJECTED') -contains $pr)                    { $perPillar[$pn].fail++ }
                 elseif (@('FIXED','STARTED','KICKED') -contains $pr)           { $perPillar[$pn].fixed++ }
                 elseif (@('NOT VERIFIED','SKIP','IN PROGRESS') -contains $pr)  { $perPillar[$pn].unverified++ }
                 else                                                           { $perPillar[$pn].nochange++ }
@@ -3233,12 +3394,16 @@ function Invoke-C2cFixAction {
     # six counters above never reconciled to total. Explicit counter + an 'other'
     # catch-all (scan-tally idiom) so any future status can't silently disappear either.
     $cNotVer  = @($rows | Where-Object { $_.Status -eq 'NOT VERIFIED' }).Count
-    $cOther   = $rows.Count - $cFixed - $cNoChange - $cPartial - $cFailed - $cOffline - $cSkipped - $cNotVer
+    # audit 2026-07-25 (fable re-audit follow-up): IN PROGRESS is now its own host rollup status
+    # (an unfinished remediation, never the clean-looking NO CHANGE) - give it its own counter so
+    # it neither hides in NO CHANGE nor silently inflates the 'Other' catch-all.
+    $cInProg  = @($rows | Where-Object { $_.Status -eq 'IN PROGRESS' }).Count
+    $cOther   = $rows.Count - $cFixed - $cNoChange - $cPartial - $cFailed - $cOffline - $cSkipped - $cNotVer - $cInProg
 
     $ppTxt = (@($perPillar.Keys | Sort-Object | ForEach-Object { "{0} fixed {1}/nochange {2}/unverified-skip {3}/fail {4}" -f $_, $perPillar[$_].fixed, $perPillar[$_].nochange, $perPillar[$_].unverified, $perPillar[$_].fail }) -join ' | ')
-    & $send @{ type='log'; level='ok'; text="$verb done - FIXED: $cFixed, NO CHANGE: $cNoChange, PARTIAL: $cPartial, NOT VERIFIED: $cNotVer, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped$(if ($cOther -gt 0) { ", Other: $cOther" } else { '' }).$(if ($ppTxt) { "  Per-pillar: $ppTxt" } else { '' })" }
-    & $send @{ type='status'; text="Done. $cFixed fixed, $cPartial partial, $cNotVer not-verified, $cNoChange no-change, $cFailed failed of $($rows.Count) row(s)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; partial=$cPartial; notVerified=$cNotVer; failed=$cFailed; offline=$cOffline; skipped=$cSkipped; other=$cOther; selfSkipped=$selfSkipped.Count; perPillar=$perPillar } }
+    & $send @{ type='log'; level='ok'; text="$verb done - FIXED: $cFixed, NO CHANGE: $cNoChange, IN PROGRESS: $cInProg, PARTIAL: $cPartial, NOT VERIFIED: $cNotVer, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped$(if ($cOther -gt 0) { ", Other: $cOther" } else { '' }).$(if ($ppTxt) { "  Per-pillar: $ppTxt" } else { '' })" }
+    & $send @{ type='status'; text="Done. $cFixed fixed, $cPartial partial, $cNotVer not-verified, $cInProg in-progress, $cNoChange no-change, $cFailed failed of $($rows.Count) row(s)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; inProgress=$cInProg; partial=$cPartial; notVerified=$cNotVer; failed=$cFailed; offline=$cOffline; skipped=$cSkipped; other=$cOther; selfSkipped=$selfSkipped.Count; perPillar=$perPillar } }
 }
 
 # =============================================================================

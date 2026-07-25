@@ -26,6 +26,11 @@
   // Two feature-update targets this tool understands - MinBuild is the Windows build
   // number that OS build must meet/exceed to count as "already on target".
   var VERSION_MINBUILD = { '24H2': 26100, '25H2': 26200 };
+  // audit 2026-07-24: mirror of $script:WinUpgradeMinDiskGB. The UI was flagging anything
+  // under 64 GB FREE as low disk / red, which is Win11's TOTAL-storage minimum, not a
+  // free-space need - it painted healthy hosts red and disagreed with the engine's own
+  // verdict. Keep this in sync with the module constant (25 GB free).
+  var MIN_FREE_GB = 25;
 
   // Operation metadata: radio value -> action id, label, plain-language Guide copy.
   var OPS = {
@@ -83,7 +88,7 @@
       guide: function () {
         return 'DIAGNOSE runs a comprehensive READ-ONLY scan on each PC and changes NOTHING. It reports:\n\n'
           + '  - System info + current OS build (24H2 = build 26100+, 25H2 = build 26200+).\n'
-          + '  - Hardware compatibility: CPU (supported-model list), TPM 2.0+, Secure Boot, RAM (4 GB+), disk (64 GB+ free).\n'
+          + '  - Hardware compatibility: CPU (supported-model list), TPM 2.0+, Secure Boot, RAM (4 GB+), disk (' + MIN_FREE_GB + ' GB+ free).\n'
           + '  - Registry state: the Target Release Version policy and the CPU/TPM MoSetup bypass.\n'
           + '  - Deferrals + blocks: DeferFeatureUpdates, DisableDualScan, pause windows, WSUS mode.\n'
           + '  - Windows Update health (services, SoftwareDistribution) and SCCM client + feature-update deployment visibility.\n\n'
@@ -203,7 +208,12 @@
       case 'DONE':
       case 'RESET':
       case 'READY':
+      // audit 2026-07-24: the diagnose verdict is version-derived ("ON " + version), so a
+      // 25H2 scan emits 'ON 25H2' - it fell through to default and rendered uncoloured
+      // (an already-on-target host looked like an unknown state). Any target added to
+      // $script:WinUpgradeTargets needs its 'ON <ver>' case here too.
       case 'ON 24H2':
+      case 'ON 25H2':
       case 'CLEAN':
       case 'REPAIRED':
       case 'FIXED':
@@ -236,6 +246,13 @@
       case 'FAILED':
       case 'OFFLINE':
       case 'Offline':
+      // audit 2026-07-24: hard failures that rendered uncoloured. PIN FAILED = upgrade-drive
+      // aborted because the pin did not apply (nothing was triggered); WRONG BOX = the dialed
+      // host answered as a different machine and the remote block aborted itself. Both are
+      // red, not "unknown".
+      case 'PIN FAILED':
+      case 'WRONG BOX':
+      case 'WrongBox':
       // os-audit verdict FAIL + install-updates hard failures.
       case 'FAIL':
       case 'InstallFailed':
@@ -803,6 +820,12 @@
           active: function (a) {
             runbar.setActive(a); pingBtn.disabled = a; checkBtn.disabled = a;
             if (!a) {
+              // audit 2026-07-24: the grid's loading state is only cleared by the FIRST row
+              // (resultsgrid.upsert), so an error-report run that ends with zero rows - a
+              // refused version, every host unreachable, an early error - left the grid
+              // spinning "Loading..." forever instead of showing the empty-state text.
+              // Terminal = not active, so clear it here unconditionally.
+              if (grid.setLoading) grid.setLoading(false);
               lockInputs(false);
               var c = summarize();
               countLine.textContent = c.total + ' / ' + c.total;
@@ -1046,16 +1069,16 @@
         var fProg = C.ProgressStatusStrip({ showCount: true });
         fProg.el.style.flex = '1'; fHead.appendChild(fProg.el);
         var fExport = ui.ghostButton('Export CSV', { size: 'sm', title: 'Export the fleet-status rows to CSV.' });
-        var fCleanup = ui.ghostButton('Clean Up (low disk)', { size: 'sm', title: 'Hand every host under 64 GB free to Workstation Patching > Cleanup (temp files / ccmcache / stale profiles) to reclaim space before the upgrade.' });
+        var fCleanup = ui.ghostButton('Clean Up (low disk)', { size: 'sm', title: 'Hand every host under ' + MIN_FREE_GB + ' GB free to Workstation Patching > Cleanup (temp files / ccmcache / stale profiles) to reclaim space before the upgrade.' });
         var fClear = ui.button('Clear', { variant: 'danger', size: 'sm', title: 'Clear the fleet-status grid.' });
         fHead.appendChild(fExport); fHead.appendChild(fCleanup); fHead.appendChild(fClear);
         fCleanup.onclick = function () {
-          var low = fGrid.rows().filter(function (r) { var g = parseFloat(r.FreeGB); return !isNaN(g) && g >= 0 && g < 64; }).map(function (r) { return String(r.Host); });
+          var low = fGrid.rows().filter(function (r) { var g = parseFloat(r.FreeGB); return !isNaN(g) && g >= 0 && g < MIN_FREE_GB; }).map(function (r) { return String(r.Host); });
           if (!low.length) {
-            ctx.confirm({ title: 'No Low-Disk Hosts', body: 'No scanned host is under 64 GB free. Scan Fleet first if the grid is empty.', okText: 'OK', cancelText: null });
+            ctx.confirm({ title: 'No Low-Disk Hosts', body: 'No scanned host is under ' + MIN_FREE_GB + ' GB free. Scan Fleet first if the grid is empty.', okText: 'OK', cancelText: null });
             return;
           }
-          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(low, 'Windows Upgrade: low disk (<64 GB free)'); } catch (e) {} }
+          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(low, 'Windows Upgrade: low disk (<' + MIN_FREE_GB + ' GB free)'); } catch (e) {} }
           log.append({ text: '[' + ts() + '] Handed ' + low.length + ' low-disk host(s) to Workstation Patching > Cleanup.', level: 'info' });
           ctx.openTool('wpt', 'cleanup');
         };
@@ -1073,7 +1096,7 @@
             { key: 'OsBuild', label: 'BUILD', width: 80, render: function (r) { var b = parseInt(r.OsBuild, 10); return { text: (b > 0 ? String(b) : ''), cls: (b >= (VERSION_MINBUILD[fVersion.value] || 26100) ? 'st-ok' : 'cell-dim') }; } },
             // System-drive free space from the scan: the upgrade needs 64+ GB free (module
             // MinDisk gate); -1 = not read (offline / pre-FreeGB scan). Red = cannot take it.
-            { key: 'FreeGB', label: 'DISK FREE', width: 90, render: function (r) { var g = parseFloat(r.FreeGB); if (isNaN(g) || g < 0) { return { text: '', cls: 'cell-dim' }; } return { text: g.toFixed(1) + ' GB', cls: (g < 64 ? 'st-bad' : 'st-ok'), title: (g < 64 ? 'Below the 64 GB free the upgrade needs - use Clean Up (low disk).' : 'Enough free space for the feature update.') }; } },
+            { key: 'FreeGB', label: 'DISK FREE', width: 90, render: function (r) { var g = parseFloat(r.FreeGB); if (isNaN(g) || g < 0) { return { text: '', cls: 'cell-dim' }; } return { text: g.toFixed(1) + ' GB', cls: (g < MIN_FREE_GB ? 'st-bad' : 'st-ok'), title: (g < MIN_FREE_GB ? 'Below the ' + MIN_FREE_GB + ' GB free the upgrade needs - use Clean Up (low disk).' : 'Enough free space for the feature update.') }; } },
             { key: 'Win24H2Status', label: 'STATUS', width: 210, render: function (r) { return fleetStatusCell(r.Win24H2Status); } },
             { key: 'Eligible', label: 'ELIGIBLE', width: 84, render: function (r) { return yesNoDim(r.Eligible, false); } },
             { key: 'BlockReason', label: 'BLOCK REASON', render: function (r) { var t = String(r.BlockReason == null ? '' : r.BlockReason); return { text: t, title: t, cls: t ? 'st-bad' : 'cell-dim' }; } },
@@ -1684,7 +1707,9 @@
               row: function (r) { eGrid.upsert(r); },
               log: function (l) { log.append(l); },
               error: function (e) { dStatus.textContent = (e && e.text) || 'Error'; dStatus.className = 'st-bad'; log.append({ text: (e && e.text) || 'error', level: 'err' }); },
-              active: function (a) { errorReportBtn.disabled = a; lockOtherRunbars(null, a); lockPanel(a); },
+              // audit 2026-07-24: clear the spinner on the terminal edge - only the first
+              // upserted row cleared it, so a zero-row run spun "Loading..." forever.
+              active: function (a) { if (!a && eGrid.setLoading) eGrid.setLoading(false); errorReportBtn.disabled = a; lockOtherRunbars(null, a); lockPanel(a); },
               final: function () {
                 var n = eGrid.rows().length;
                 var done = 'Done - ' + n + ' issue(s) found across ' + hosts.length + ' computer(s).';

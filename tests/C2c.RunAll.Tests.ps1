@@ -15,7 +15,40 @@
 #  Run:  Invoke-Pester -Path .\tests\C2c.RunAll.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
+Add-ShimGuard $cm
 
 # v1.10.0: run-all is import-scoped - it re-derives the plan from a CSV (csvPath) and
 # INTERSECTS the client plan against it. For these tests (which assert the client-plan
@@ -111,6 +144,8 @@ function Invoke-C2cMonitoring {
     param([string]$Scenario)
     & $cm {
         param($Scenario)
+        $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command','Get-ItemProperty',
+            'Get-Service','Set-Service','Start-Service')
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
         function script:Invoke-Command {
@@ -154,8 +189,9 @@ function Invoke-C2cMonitoring {
                 MonDetail = $(if ($mon) { [string]$mon.Detail } else { '' })
             }
         } finally {
-            Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
-                function:script:Get-ItemProperty, function:script:Get-Service, function:script:Set-Service, function:script:Start-Service -ErrorAction SilentlyContinue
+            # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+            # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+            Restore-ShimState $__shims
         }
     } $Scenario
 }
@@ -169,6 +205,8 @@ function Invoke-C2cScanMonitoring {
     param([string]$Scenario)
     & $cm {
         param($Scenario)
+        $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command','Get-ItemProperty',
+            'Get-Service')
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
         function script:Invoke-Command {
@@ -197,8 +235,9 @@ function Invoke-C2cScanMonitoring {
                 MonDetail = $(if ($mon) { [string]$mon.Detail } else { '' })
             }
         } finally {
-            Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
-                function:script:Get-ItemProperty, function:script:Get-Service -ErrorAction SilentlyContinue
+            # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+            # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+            Restore-ShimState $__shims
         }
     } $Scenario
 }
@@ -417,6 +456,53 @@ Describe 'C2C Monitoring - read-only scan check #1 (installed AND service runnin
 }
 
 # -----------------------------------------------------------------------------
+Describe 'C2C run-all manifest - every input the view posts and the engine reads is DECLARED (audit 2026-07-24)' {
+
+    # The view's RUN ALL always posts prunePki + fixRdp (the PkiRoots card boxes) and
+    # Invoke-C2cFixAction reads both via Get-C2cBool, but the run-all manifest declared
+    # neither - an undeclared input is invisible to every manifest-driven surface. Pin the
+    # whole posted set so a future input cannot drift out of the manifest again.
+    $ra = @(@((& $cm { Get-JanetToolManifest }).actions) | Where-Object { $_.id -eq 'run-all' })[0]
+    $names = @(@($ra.inputs) | ForEach-Object { [string]$_.name })
+
+    It 'declares the run-all action' { $ra | Should Not BeNullOrEmpty }
+    It 'declares prunePki (bool, default OFF) - the expired-intermediate prune companion' {
+        ($names -contains 'prunePki') | Should Be $true
+        $i = @(@($ra.inputs) | Where-Object { $_.name -eq 'prunePki' })[0]
+        [string]$i.type     | Should Be 'bool'
+        [bool]$i.default    | Should Be $false
+    }
+    It 'declares fixRdp (bool, default OFF) - the broken-RDP-listener rebind companion' {
+        ($names -contains 'fixRdp') | Should Be $true
+        $i = @(@($ra.inputs) | Where-Object { $_.name -eq 'fixRdp' })[0]
+        [string]$i.type     | Should Be 'bool'
+        [bool]$i.default    | Should Be $false
+    }
+    It 'still declares the rest of the posted set (plan/csvPath/enableEncryption/certBundleFolder/confirm/winrmHeal/threads/attemptOffline)' {
+        foreach ($n in @('plan','csvPath','enableEncryption','certBundleFolder','confirm','winrmHeal','threads','attemptOffline')) {
+            ($names -contains $n) | Should Be $true
+        }
+    }
+}
+
+Describe 'c2c 1.16.0 - run-all prunePki/fixRdp/pushDisallowed declaration + the AntiMalware unreadable-sig fail-close' {
+    # audit 2026-07-25 (fable re-audit follow-up): 1.15.13 -> 1.16.0 (trust-anchor guard on the
+    # fix-pki push, the pushDisallowed distrust gate, the IN PROGRESS rollup state, the Java label).
+    It 'manifest version is exactly 1.16.0 (newest bump holds the exact pin)' {
+        $man = & $cm { Get-JanetToolManifest }
+        [string]$man.version | Should Be '1.16.0'
+    }
+    It 'run-all declares pushDisallowed as a bool input defaulting to OFF (parity with fix-pki / certdeploy)' {
+        $man = & $cm { Get-JanetToolManifest }
+        $ra  = @($man.actions | Where-Object { $_.id -eq 'run-all' })[0]
+        $pd  = @($ra.inputs | Where-Object { $_.name -eq 'pushDisallowed' })[0]
+        $pd            | Should Not BeNullOrEmpty
+        $pd.type       | Should Be 'bool'
+        [bool]$pd.default | Should Be $false
+    }
+}
+
+# -----------------------------------------------------------------------------
 Describe 'C2C Tanium-installed probe - the single-source uninstall-registry helper' {
 
     # Dot-source the shared source string (the exact text both call sites run) and
@@ -426,6 +512,7 @@ Describe 'C2C Tanium-installed probe - the single-source uninstall-registry help
         & $cm {
             param($Installed, $DisplayName, $Version)
             $script:__inst = $Installed; $script:__dn = $DisplayName; $script:__ver = $Version
+            $__shims = Save-ShimState @('Get-ItemProperty')
             function script:Get-ItemProperty {
                 param($Path, $LiteralPath, $ErrorAction)
                 if ($script:__inst) { return [pscustomobject]@{ DisplayName = $script:__dn; DisplayVersion = $script:__ver } }
@@ -435,7 +522,9 @@ Describe 'C2C Tanium-installed probe - the single-source uninstall-registry help
                 . ([scriptblock]::Create($script:C2cTaniumInstalledSrc))
                 Get-C2cTaniumInstalled
             } finally {
-                Remove-Item function:script:Get-ItemProperty -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $Installed $DisplayName $Version
     }

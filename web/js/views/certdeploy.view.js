@@ -9,12 +9,23 @@
 
    CHECK  (action 'check')            - read-only; reports which hosts are missing
                                         which roots (+ expired-in-bundle count).
-                                        No admin session, no confirm.
+                                        No admin session, no confirm. MISSING counts
+                                        TRUST ANCHORS only; a host with every anchor
+                                        present but no Untrusted/blacklist certs reads
+                                        BLACKLIST NOT ARMED n - its own state, because
+                                        Deploy pushes those only with the default-OFF
+                                        pushDisallowed opt-in (audit 2026-07-25).
    DEPLOY (action 'deploy')           - destructive; admin-session gated + a type-
                                         DEPLOY arm dialog stating it ADDITIVELY
                                         installs the DoD roots and never removes.
                                         Expired certs are skipped by default; an
                                         "Include expired certs" checkbox opts in.
+                                        The bundle's Untrusted group is a fleet-wide
+                                        BLACKLIST (Disallowed store) rather than a
+                                        trust add, so it has its OWN opt-in checkbox
+                                        (default off) and is labelled DISTRUSTED -
+                                        never "trusted" - in the row detail
+                                        (audit 2026-07-24).
                                         Two independent opt-in checkboxes
                                         (default off) each arm a PKI-Fix-ScanFix
                                         v1.9 companion after the install:
@@ -38,12 +49,24 @@
   var HOST_RE = /^[A-Za-z0-9._-]+$/;
   var EXPORT_COLS = [['Host', 'Host'], ['Ping', 'Ping'], ['Status', 'Status'], ['Missing', 'Missing'], ['Legacy', 'Legacy'], ['Detail', 'Detail']];
 
+  // audit 2026-07-24: Deploy's NOT VERIFIED (added, then absent on the re-read - a reconciler
+  // may be stripping it) and REJECTED (non-CA) (a wanted anchor refused and ABSENT) used to hit
+  // no branch here, so the two worst deploy outcomes on a TRUST-STORE tool rendered as plain
+  // unstyled rows. Both are hard failures -> st-bad/row-bad, same as FAILED.
+  function isDeployBadStatus(s) { return s === 'NOT VERIFIED' || s.indexOf('REJECTED') === 0; }
+  // audit 2026-07-25 (fable re-audit follow-up), two colour fixes here:
+  //   * 'Cancelled' rendered RED (st-bad) in this grid but AMBER in the scan grid below for the
+  //     same operator action. An operator cancel is not a probe failure - amber in BOTH grids.
+  //   * 'BLACKLIST NOT ARMED n' is the check's new distinct state (every trust anchor present;
+  //     only the default-OFF Disallowed blacklist push is absent). It is NOT a missing root, so
+  //     it must not read red or share the MISSING amber-with-a-shortfall wording - info-blue.
   function statusCellCls(v) {
     var s = String(v == null ? '' : v);
     if (s === 'ALL PRESENT' || s === 'ROOTS INSTALLED' || s === 'ROOTS ALREADY PRESENT') return 'st-ok';
     if (s.indexOf('MISSING') === 0) return 'st-warn';
-    if (s === 'OFFLINE' || s === 'SKIPPED') return 'st-warn';
-    if (s === 'CHECK ERROR' || s === 'FAILED' || s === 'Cancelled') return 'st-bad';
+    if (s.indexOf('BLACKLIST NOT ARMED') === 0) return 'st-info';
+    if (s === 'OFFLINE' || s === 'SKIPPED' || s === 'Cancelled') return 'st-warn';
+    if (s === 'CHECK ERROR' || s === 'FAILED' || isDeployBadStatus(s)) return 'st-bad';
     if (s === 'Queued') return 'st-info';
     return '';
   }
@@ -51,8 +74,9 @@
     var s = String(v == null ? '' : v);
     if (s === 'ALL PRESENT' || s === 'ROOTS INSTALLED' || s === 'ROOTS ALREADY PRESENT') return 'row-ok';
     if (s.indexOf('MISSING') === 0) return 'row-warn';
-    if (s === 'OFFLINE' || s === 'SKIPPED') return 'row-warn';
-    if (s === 'CHECK ERROR' || s === 'FAILED' || s === 'Cancelled') return 'row-bad';
+    if (s.indexOf('BLACKLIST NOT ARMED') === 0) return '';
+    if (s === 'OFFLINE' || s === 'SKIPPED' || s === 'Cancelled') return 'row-warn';
+    if (s === 'CHECK ERROR' || s === 'FAILED' || isDeployBadStatus(s)) return 'row-bad';
     return '';
   }
   function reconcilerCls(v) {
@@ -60,6 +84,7 @@
     if (s === 'None detected') return 'st-ok';
     if (s === 'InstallRoot' || s === 'GPO' || s === 'InstallRoot+GPO') return 'st-warn';
     if (s === 'OFFLINE') return 'st-warn';
+    if (s === 'Cancelled') return 'st-warn';   // audit 2026-07-24: operator cancel, not a probe failure
     if (s === 'CHECK ERROR') return 'st-bad';
     return '';
   }
@@ -114,6 +139,11 @@
       optCard.appendChild(offlineCb);
       var includeExpiredCb = ui.checkbox('Include expired certs (dead anchors - normally skipped)', { title: 'Also push certificates whose NotAfter has already passed. Off by default - expired certs are dead trust anchors and are excluded from the bundle read + push unless ticked.' });
       optCard.appendChild(includeExpiredCb);
+      // audit 2026-07-24: the Untrusted\ -> Disallowed push BLACKLISTS certs fleet-wide (a DISTRUST,
+      // the opposite direction to the rest of the deploy) and is NOT covered by "never removes
+      // anything" - so it is armed explicitly, default OFF, like the other trust-changing extras.
+      var disallowCb = ui.checkbox('Also BLACKLIST the bundle Untrusted certs (Disallowed store - DISTRUST)', { title: 'Also push the bundle Untrusted\\*.cer group into the LocalMachine Disallowed store. That BLACKLISTS those certificates on every target - nothing is removed, but the certs stop being usable fleet-wide. Off by default: unticked, only Root/CA are pushed and the read-only Check will keep reporting the Untrusted certs as MISSING.' });
+      optCard.appendChild(disallowCb);
       var pruneCb = ui.checkbox('Prune expired retired DoD intermediates (CA store; 4 legacy-keeps untouched)', { title: 'After the additive install, also prune EXPIRED retired DOD EMAIL/ID/SW/DERILITY intermediates from the CA store only (the four legacy-keep intermediates this tool intentionally pushes are never touched, nor is any other expired cert). Off by default: unticked, Deploy removes nothing. Independent of the RDP repair.' });
       optCard.appendChild(pruneCb);
       var rdpCb = ui.checkbox('Repair broken RDP listener (rebind CA-issued; healthy untouched)', { title: 'After the additive install, also rebind a broken (self-signed/expired/missing) RDP-tcp listener to the newest valid CA-issued My-store cert for the host - the replacement is located first (no candidate = left untouched), a healthy CA-issued listener is never touched. Off by default. Independent of the intermediate prune.' });
@@ -142,7 +172,7 @@
       });
       var deployRunbar = C.RunBar({
         label: 'DEPLOY TRUST CERTS', cancelLabel: 'CANCEL DEPLOY', morphToCancel: true,
-        title: 'Destructive: additively install the DoD roots into LocalMachine Root/CA/Disallowed (never removes). Needs an admin session.',
+        title: 'Destructive: additively install the DoD roots into LocalMachine Root/CA (never removes). The Untrusted -> Disallowed BLACKLIST push is a separate opt-in (default off). Needs an admin session.',
         guards: [
           function () { return targets.hosts().length ? null : 'No Hosts|Add at least one host to the list first.'; },
           function () { var bad = targets.hosts().filter(function (h) { return !HOST_RE.test(h); }); return bad.length ? ('Invalid Target Name|Not valid hostnames: ' + bad.slice(0, 5).map(esc).join(', ') + '.') : null; },
@@ -183,7 +213,7 @@
       var stats = C.StatCards({ cards: [
         { key: 'hosts', label: 'HOSTS', color: 'cyan' },
         { key: 'ok', label: 'ALL PRESENT / INSTALLED', color: 'ok' },
-        { key: 'missing', label: 'MISSING / FAILED', color: 'gold' },
+        { key: 'missing', label: 'MISSING / FAILED / NOT VERIFIED', color: 'gold' },   // audit 2026-07-24: NOT VERIFIED + REJECTED land here
         { key: 'errors', label: 'OFFLINE / ERRORS', color: 'accent' }
       ] });
       right.appendChild(stats.el);
@@ -264,7 +294,7 @@
       function isScanRunning() { return !!(scanRun && scanRun.state && scanRun.state.active); }
       function threads() { var n = parseInt(threadsIn.value, 10); if (isNaN(n) || n < 1) n = 16; if (n > 32) n = 32; return n; }
       // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
-      var lockInputs = ctx.util.lockable([offlineCb._cb, threadsIn, clearBtn, bundleInput, importBtn, includeExpiredCb._cb, pruneCb._cb, rdpCb._cb]);
+      var lockInputs = ctx.util.lockable([offlineCb._cb, threadsIn, clearBtn, bundleInput, importBtn, includeExpiredCb._cb, disallowCb._cb, pruneCb._cb, rdpCb._cb]);
       clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); stats.reset(); expiredBadge.textContent = ''; setStatus('Ready'); };
       exportBtn.onclick = function () {
         var rows = grid.rows();
@@ -280,8 +310,15 @@
           if (s === 'Queued') return;
           total++;
           if (s === 'ALL PRESENT' || s === 'ROOTS INSTALLED' || s === 'ROOTS ALREADY PRESENT') okC++;
-          else if (s.indexOf('MISSING') === 0 || s === 'FAILED') miss++;
+          // audit 2026-07-24: NOT VERIFIED / REJECTED (non-CA) fell into NO bucket, so a fleet
+          // where every deploy failed to persist closed the strip GREEN at 0/0/0. They are
+          // failures - "the cert did not land" is the whole point of this tool. Mirror in tallyBucket().
+          else if (s.indexOf('MISSING') === 0 || s === 'FAILED' || isDeployBadStatus(s)) miss++;
           else if (s === 'OFFLINE' || s === 'CHECK ERROR' || s === 'SKIPPED' || s === 'Cancelled') err++;
+          // audit 2026-07-25: 'BLACKLIST NOT ARMED n' deliberately falls through to no bucket - the
+          // host's trust anchors are ALL present (not missing) and nothing failed to read (not an
+          // error); it only reports that the default-OFF Disallowed push was never armed. The run's
+          // final log names it from the summary (sum.blacklistNotArmed) instead.
         });
         return { hosts: total, ok: okC, missing: miss, errors: err };
       }
@@ -297,9 +334,9 @@
         var s = String(status);
         if (s === 'Queued') return null;
         if (s === 'ALL PRESENT' || s === 'ROOTS INSTALLED' || s === 'ROOTS ALREADY PRESENT') return 'ok';
-        if (s.indexOf('MISSING') === 0 || s === 'FAILED') return 'missing';
+        if (s.indexOf('MISSING') === 0 || s === 'FAILED' || isDeployBadStatus(s)) return 'missing';   // audit 2026-07-24: mirrors summarize()
         if (s === 'OFFLINE' || s === 'CHECK ERROR' || s === 'SKIPPED' || s === 'Cancelled') return 'errors';
-        return 'other';
+        return 'other';   // incl. audit 2026-07-25 'BLACKLIST NOT ARMED n' - neither missing nor error
       }
       function tallyRow(r) {
         var k = String(r.Host == null ? '' : r.Host);
@@ -327,20 +364,39 @@
               lockInputs(false);
               var c = summarize(); stats.setAll(c);
               var bad = c.missing + c.errors;
-              setStatus(verb + ' complete - ' + c.ok + ' ' + finalNoun + ', ' + c.missing + ' missing/failed, ' + c.errors + ' offline/error', bad ? 'st-warn' : 'st-ok');
-              actlog.append({ text: '[' + ts() + '] FINISHED ' + verb + '. OK=' + c.ok + '  MISSING/FAILED=' + c.missing + '  OFFLINE/ERROR=' + c.errors, level: bad ? 'warn' : 'ok' });
+              setStatus(verb + ' complete - ' + c.ok + ' ' + finalNoun + ', ' + c.missing + ' missing/failed/not-verified, ' + c.errors + ' offline/error', bad ? 'st-warn' : 'st-ok');
+              actlog.append({ text: '[' + ts() + '] FINISHED ' + verb + '. OK=' + c.ok + '  MISSING/FAILED/NOT-VERIFIED=' + c.missing + '  OFFLINE/ERROR=' + c.errors, level: bad ? 'warn' : 'ok' });
             }
           },
           final: function (res) {
             var sum = (res && res.summary) || {};
-            var ec = sum.ExpiredCount || 0;
+            // audit 2026-07-24: the module summary returns lowercase expiredCount (+ the new
+            // expiredSubjects list) - never ExpiredCount/Expired, so this badge and its log line
+            // were dead code that could never fire. Read the ACTUAL contract keys.
+            var ec = Number(sum.expiredCount || 0) || 0;
+            // expiredExcluded is 0 on an includeExpired run - say "pushed", not "skipped".
+            var excluded = (sum.expiredExcluded == null) ? ec : (Number(sum.expiredExcluded) || 0);
+            var word = excluded > 0 ? 'skipped' : 'INCLUDED - pushed';
             if (ec > 0) {
-              expiredBadge.textContent = ec + ' expired in bundle (skipped)';
+              expiredBadge.textContent = ec + ' expired in bundle (' + word + ')';
               expiredBadge.className = 'st-warn';
-              var subs = (sum.Expired || []).map(function (x) { return x && x.Subject; }).filter(function (s) { return !!s; });
-              actlog.append({ text: '[' + ts() + '] ' + ec + ' expired cert(s) in bundle (skipped): ' + subs.slice(0, 5).join(', ') + (subs.length > 5 ? ' ...' : ''), level: 'warn' });
+              var subs = (sum.expiredSubjects || []).map(function (x) { return x == null ? '' : String(x); }).filter(function (s) { return !!s; });
+              actlog.append({ text: '[' + ts() + '] ' + ec + ' expired cert(s) in bundle (' + word + '): ' + subs.slice(0, 5).join(', ') + (subs.length > 5 ? ' ...' : ''), level: 'warn' });
             } else {
               expiredBadge.textContent = ''; expiredBadge.className = 'muted';
+            }
+            // audit 2026-07-24: name the blacklist certs the un-armed Disallowed gate held back, so
+            // the operator is not left wondering why they never landed.
+            // audit 2026-07-25: Check no longer calls that shortfall MISSING (it is its own
+            // BLACKLIST NOT ARMED state) - the old wording promised the opposite, so it is corrected.
+            var dx = Number(sum.disallowedExcluded || 0) || 0;
+            if (dx > 0) {
+              actlog.append({ text: '[' + ts() + '] ' + dx + ' Untrusted/blacklist cert(s) were NOT pushed - the "BLACKLIST the bundle Untrusted certs" opt-in is off (Check reports this as BLACKLIST NOT ARMED, not as missing roots).', level: 'info' });
+            }
+            // audit 2026-07-25: the check run's distrust shortfall, reported apart from missing roots.
+            var bna = Number(sum.blacklistNotArmed || 0) || 0;
+            if (bna > 0) {
+              actlog.append({ text: '[' + ts() + '] ' + bna + ' host(s) have EVERY trust anchor present but no Untrusted/blacklist certs - Deploy pushes those only with the pushDisallowed opt-in armed (default OFF). Not a missing-roots shortfall.', level: 'info' });
             }
           }
         });
@@ -369,12 +425,18 @@
         var hosts = targets.hosts();
         var folderTxt = String(bundleInput.value || '').trim() || 'the shipped Packages\\DoD-Certs bundle';
         var includeExpired = !!includeExpiredCb._cb.checked;
+        var pushDisallowed = !!disallowCb._cb.checked;
         var prunePki = !!pruneCb._cb.checked;
         var fixRdp = !!rdpCb._cb.checked;
         var runCompanions = prunePki || fixRdp;
         var expiredTxt = includeExpired
           ? 'Expired certs in the bundle are <b>INCLUDED</b> - dead trust anchors WILL be pushed (each flagged EXPIRED - dead trust anchor).'
           : 'Expired certs in the bundle are <b>skipped by default</b> - not pushed.';
+        // audit 2026-07-24: the dialog used to promise "never removes anything" while silently
+        // BLACKLISTING the bundle Untrusted certs. State the distrust in the operator's face.
+        var disallowTxt = pushDisallowed
+          ? 'The bundle <b>Untrusted</b> group is <b>ARMED</b>: those certs are added to the LocalMachine <b>Disallowed</b> store, which <b>DISTRUSTS them fleet-wide</b> on every target. Nothing is removed, but those certificates stop being usable.'
+          : 'The bundle <b>Untrusted</b> group is <b>off</b> - only <b>Root / CA</b> are pushed, nothing is blacklisted (Check will keep reporting those certs MISSING).';
         var companionsTxt;
         if (runCompanions) {
           var parts = [];
@@ -387,9 +449,10 @@
         var ok = await ctx.arm({
           title: 'Arm DEPLOY TRUST CERTS',
           banner: 'DESTRUCTIVE - THIS WRITES TO THE LOCALMACHINE CERT STORES',
-          body: 'About to <b>additively install</b> the DoD/LTMA trust roots from <b>' + esc(folderTxt) + '</b> into the <b>LocalMachine Root / CA / Disallowed</b> stores on <b>' + hosts.length + ' host(s)</b> over WinRM.'
+          body: 'About to <b>additively install</b> the DoD/LTMA trust roots from <b>' + esc(folderTxt) + '</b> into the <b>LocalMachine ' + (pushDisallowed ? 'Root / CA / Disallowed' : 'Root / CA') + '</b> store(s) on <b>' + hosts.length + ' host(s)</b> over WinRM.'
             + '<br>It adds only the roots that are <b>not already present</b> and <b>never removes</b> anything - a host that already has every root is reported ROOTS ALREADY PRESENT and left untouched.'
             + '<br>' + expiredTxt
+            + '<br>' + disallowTxt
             + '<br>' + companionsTxt
             + '<br>The JANET dispatcher host is self-guarded out of the run.',
           preflight: [
@@ -397,6 +460,7 @@
             { label: 'Bundle: ' + folderTxt, ok: true },
             { label: runCompanions ? 'Install is additive, BUT companions armed below may remove/rebind certs' : 'Additive install - never removes a certificate', ok: true },
             { label: includeExpired ? 'Expired certs: INCLUDED (dead anchors will be pushed)' : 'Expired certs: excluded (skipped by default)', ok: true },
+            { label: pushDisallowed ? 'Untrusted -> Disallowed BLACKLIST: ARMED (those certs get DISTRUSTED fleet-wide)' : 'Untrusted -> Disallowed blacklist: off (Root/CA only)', ok: true },
             { label: prunePki ? 'Prune expired retired DoD intermediates: ENABLED (CA store; 4 legacy-keeps untouched)' : 'Prune expired retired DoD intermediates: off', ok: true },
             { label: fixRdp ? 'Repair broken RDP listener: ENABLED (rebind CA-issued; healthy untouched)' : 'Repair broken RDP listener: off', ok: true }
           ],
@@ -405,7 +469,7 @@
         if (!ok) { actlog.append({ text: '[' + ts() + '] Deploy cancelled at the arming dialog.', level: 'warn' }); return; }
         grid.clear(); prog.reset(); stats.reset(); tallyReset();
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Missing: '', Legacy: '', Detail: 'Queued' }); });
-        actlog.append({ text: '[' + ts() + '] Deploy Trust Certs on ' + hosts.length + ' host(s) (additive; never removes).', level: 'accent' });
+        actlog.append({ text: '[' + ts() + '] Deploy Trust Certs on ' + hosts.length + ' host(s) (additive; never removes)' + (pushDisallowed ? ' + Untrusted BLACKLIST push into Disallowed (DISTRUST).' : '.'), level: 'accent' });
         lockInputs(true);
         run = ctx.run('deploy', {
           targets: hosts.join('\n'),
@@ -413,6 +477,7 @@
           confirm: 'DEPLOY',
           attemptOffline: !!offlineCb._cb.checked,
           includeExpired: includeExpired,
+          pushDisallowed: pushDisallowed,
           prunePki: prunePki,
           fixRdp: fixRdp,
           threads: threads()

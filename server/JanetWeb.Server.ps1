@@ -42,7 +42,16 @@
 function Get-JanetWebAssetPath {
     param([Parameter(Mandatory)][string]$WebDir, [string]$UrlPath)
     $rel = if ($UrlPath -eq '/' -or [string]::IsNullOrEmpty($UrlPath)) { 'index.html' } else { $UrlPath.TrimStart('/') }
-    $leaf = [System.IO.Path]::GetFileName($rel)
+    # audit 2026-07-24 (P3): leaf extraction was [IO.Path]::GetFileName, which on .NET
+    # Framework THROWS "Illegal characters in path" for a URL containing < > | or " -
+    # the throw unwound to the accept loop's catch, so a malformed URL got a 500 plus a
+    # console stack trace instead of a clean 404. Switched to the same pure regex
+    # leaf-strip Get-JanetWebSafeUploadName already uses (drop everything up to and
+    # including the last / or \): cwd-independent, never throws, identical result for
+    # every legal path. Behavior is otherwise unchanged - an illegal-char name simply
+    # falls through to the Resolve-Path try/catch below and returns $null (404). The
+    # 404 body is the fixed 'not found' string, so no filesystem path is echoed back.
+    $leaf = $rel -replace '^.*[\\/]', ''
     if ($leaf -and $leaf.StartsWith('_')) { return $null }
     $full = Join-Path $WebDir ($rel -replace '/', '\')
     $resolved = $null
@@ -155,9 +164,48 @@ function Start-JanetWebServer {
     # Browser-uploaded files land here (one guid subdir per upload). Wiped on each
     # launch so a session never reuses stale temp files. Engines receive the
     # server-side path exactly as if a dialog had returned it.
-    $uploadsDir = Join-Path $env:TEMP 'JanetWeb\uploads'
+    #   audit 2026-07-24 (P3): the directory used to be the SHARED %TEMP%\JanetWeb\uploads
+    #   and the launch-time wipe below deleted it wholesale - which destroyed a
+    #   CONCURRENTLY RUNNING instance's live uploads. Two instances genuinely do coexist:
+    #   Resolve-JanetFreePort in the launcher auto-advances 8089..8100 when the port is
+    #   busy, so a second launch starts happily beside the first. The port is unique per
+    #   live instance (http.sys guarantees it - a second bind on the same port fails), so
+    #   scoping the folder per port makes the wipe touch only OUR files. Uploads are
+    #   short-lived scratch consumed by the current session, so nothing needs to be shared
+    #   across instances.
+    $uploadsRoot = Join-Path $env:TEMP 'JanetWeb'
+    $uploadsDir  = Join-Path $uploadsRoot ('uploads-{0}' -f $Port)
     try { if (Test-Path -LiteralPath $uploadsDir) { Remove-Item -LiteralPath $uploadsDir -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
     try { New-Item -ItemType Directory -Path $uploadsDir -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+    # Age-based reap of OTHER instances' leftovers (and the pre-fix shared 'uploads'
+    # folder), so per-port scoping doesn't just trade one bug for unbounded temp growth.
+    # Never touches our own folder.
+    #   audit 2026-07-25 (fable re-audit follow-up): age alone was NOT safe, and the
+    #   comment here claimed it was ("a still-running peer's folder is younger than 24 h
+    #   even if idle"). False: LastWriteTime is stamped at the peer's LAUNCH and on each
+    #   upload, so a peer running longer than a day with no upload in the last 24 h had
+    #   its LIVE uploads-<port> directory deleted out from under it by a new instance's
+    #   launch. A port-scoped folder is now reaped only when it is BOTH older than 24 h
+    #   AND its port is not currently bound: http.sys holds the port for the whole life
+    #   of a peer (that is exactly why the folder is keyed by port), so a bound port is
+    #   proof of life no idle period can fake. If the listener table can't be read we
+    #   leave the port-scoped folders alone and let a later launch reap them - a day of
+    #   extra temp files is cheaper than eating a live session's uploads. The legacy
+    #   portless 'uploads' folder is never live under this build, so age alone retires it.
+    try {
+        $listenPorts = $null
+        try { $listenPorts = @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { [int]$_.Port }) } catch { $listenPorts = $null }
+        Get-ChildItem -LiteralPath $uploadsRoot -Directory -Filter 'uploads*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $uploadsDir -and $_.LastWriteTime -lt (Get-Date).AddHours(-24) } |
+            Where-Object {
+                if ($_.Name -match '^uploads-(\d+)$') {
+                    if ($null -eq $listenPorts) { return $false }               # liveness unknowable -> keep
+                    return (-not ($listenPorts -contains [int]$Matches[1]))     # port bound = peer alive -> keep
+                }
+                return $true                                                    # legacy portless folder
+            } |
+            ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+    } catch {}
 
     # Server-persisted TargetManager saved groups (was browser localStorage). Lives
     # in the in-repo JanetLocal runtime-state dir so named host groups survive a
@@ -463,6 +511,16 @@ function Start-JanetWebServer {
                         $mtime = [System.IO.File]::GetLastWriteTimeUtc($asset)
                         $mtime = $mtime.AddTicks(-($mtime.Ticks % [TimeSpan]::TicksPerSecond))
                         try { $resp.Headers['Last-Modified'] = $mtime.ToString('r') } catch {}
+                        # audit 2026-07-24 (P2): Last-Modified WITHOUT Cache-Control licenses
+                        # the browser's heuristic freshness rule (~10% of the file's age), so
+                        # after a version bump an operator kept getting STALE js/css out of
+                        # cache against fresh HTML - a half-updated UI that is near-impossible
+                        # to diagnose from the field. 'no-cache' does NOT forbid caching: it
+                        # forbids serving from cache WITHOUT revalidating, so the stored copy
+                        # plus If-Modified-Since still produces the bodyless 304 below on every
+                        # warm reload. We're on loopback, so a mandatory revalidation round-trip
+                        # is free and correctness wins over cache efficiency.
+                        try { $resp.Headers['Cache-Control'] = 'no-cache' } catch {}
                         $ims = [datetime]::MinValue
                         $imsOk = [datetime]::TryParse([string]$req.Headers['If-Modified-Since'], [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal), [ref]$ims)
                         if ($imsOk -and $ims -ge $mtime) {

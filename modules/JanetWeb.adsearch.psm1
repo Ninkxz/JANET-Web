@@ -17,13 +17,35 @@
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
+#
+#  v3.4.1 (audit 2026-07-25, fable re-audit follow-up):
+#    P4 A FAILED ranged-member re-read no longer DISCARDS the page AD already handed
+#       back. Get-AdRangedMemberValues now reports Complete alongside its values and
+#       Merge-AdRangedMemberValues keeps the longer set, so a first-page throw can no
+#       longer put a 1500+ member group back at MemberCount 0 (the v3.4.0 P2 symptom,
+#       on an error path). A known-incomplete enumeration is flagged _memberTruncated
+#       and warned in the handler instead of passing a PARTIAL list off as the whole.
+#
+#  v3.4.0 (audit 2026-07-24) - correctness pass over the engine:
+#    P1 Search Users no longer emits unconditional (givenName=*)/(sn=*) PRESENCE
+#       clauses, which hid every account without those attributes (.adm/.adw admin
+#       and service accounts) even on an exact EDIPI match.
+#    P2 Group member RANGE retrieval (member;range=0-1499) - groups over 1500
+#       members reported MemberCount 0 with an empty member list.
+#    P2 LastPC counts a DC that cleanly returned "no matching events" as SCANNED
+#       (was filed as a DC error, understating coverage), and an all-DCs-denied
+#       zero-hit scan now audits as a FAILURE instead of "no results".
+#    P3 ClientTimeout + ServerTimeLimit on every DirectorySearcher; IDisposable
+#       searchers / result collections / directory entries are disposed; Base Users
+#       renders the REPLICATED lastLogonTimestamp; Search Manager warns when the
+#       display-name wildcard matched more than one manager.
 # =============================================================================
 
 function Get-JanetToolManifest {
     @{
         id       = 'adsearch'
         name     = 'AD Search'
-        version  = '3.3.6'
+        version  = '3.4.1'
         category = 'Reporting'
         summary  = 'Search Active Directory for users, computers, groups, org boxes, email, managers, bulk computers, base users, and last-PC logon (DC Security-log scan). RSAT-free ADSI; read-only.'
         actions  = @(
@@ -213,6 +235,54 @@ function Test-AdSearchDnInLocalDomain {
 }
 
 # -----------------------------------------------------------------------------
+#  Search Users LDAP-filter builder (audit 2026-07-24 P1).
+#
+#  Same runspace story as the DN guard above: the engine runs in a BARE child
+#  runspace, so it carries a byte-identical INLINE copy of both functions below and
+#  this module-level pair exists so the filter is unit-testable offline. Keep the
+#  copies in lockstep - Adsearch.UserFilter.Tests.ps1 fails the moment they drift.
+function Escape-LdapFilterValue {
+    param([string]$Value)
+    if ($null -eq $Value) { return '' }
+    $r = $Value -replace '\\', '\5c'
+    $r = $r     -replace '\*', '\2a'
+    $r = $r     -replace '\(', '\28'
+    $r = $r     -replace '\)', '\29'
+    $r = $r     -replace "`0", '\00'
+    return $r
+}
+function New-AdUserLdapFilter {
+    # audit 2026-07-24 (P1): emit a clause ONLY for a field the operator actually
+    # filled in. The old single-line filter always appended (givenName=<v>*) and
+    # (sn=<v>*); with the field blank those collapse to (givenName=*) / (sn=*), which
+    # in LDAP are PRESENCE tests - so every account that simply has no givenName/sn
+    # (.adm / .adw admin accounts, service accounts, org boxes) was filtered out even
+    # on an exact EDIPI search, and the operator concluded the account did not exist.
+    # Values stay RFC-4515 escaped exactly as before: only clause SELECTION changed.
+    param([string]$FirstName, [string]$LastName, [string]$Edipi)
+    $fn = "$FirstName".Trim(); $ln = "$LastName".Trim(); $ed = "$Edipi".Trim()
+    $f = "(&(objectCategory=person)(objectClass=user)"
+    if ($fn) { $f += "(givenName=$(Escape-LdapFilterValue $fn)*)" }
+    if ($ln) { $f += "(sn=$(Escape-LdapFilterValue $ln)*)" }
+    if ($ed) { $f += "(samaccountname=$(Escape-LdapFilterValue $ed)*)" }
+    $f += ")"
+    return $f
+}
+
+# -----------------------------------------------------------------------------
+#  Pure LastPC coverage verdict (audit 2026-07-24 P2). A zero-hit scan in which NOT
+#  ONE DC was successfully queried (every DC unreachable / access-denied / timed out)
+#  is a FAILURE, not "no results" - the old code audited it Skipped with failed=0 and
+#  painted "Done. No results.", telling the operator the person had not logged on
+#  anywhere when in truth nothing was ever read. A scan that DID reach at least one
+#  DC and found nothing stays a genuine (non-failure) empty result.
+function Test-AdLastPcAllDenied {
+    param([int]$DcsScanned, [int]$DcsTotal)
+    if ($DcsTotal -le 0) { return $false }
+    return ($DcsScanned -le 0)
+}
+
+# -----------------------------------------------------------------------------
 #  The search engine, lifted verbatim from Start-AsyncSearch's $scriptBlock
 #  (Tools\ADSearchTool.ps1 lines 1298-1957). Returns an array of result
 #  hashtables. Escape-LdapFilterValue and Parse-OUFromDN are defined inline so
@@ -230,6 +300,27 @@ $script:AdSearchEngine = {
         $r = $r     -replace '\)', '\29'
         $r = $r     -replace "`0", '\00'
         return $r
+    }
+
+    # Search Users filter builder (audit 2026-07-24 P1). BYTE-IDENTICAL copy of the
+    # module-level New-AdUserLdapFilter - inlined for the same bare-runspace reason as
+    # Escape-LdapFilterValue above; the module copy is the unit-tested one.
+    function New-AdUserLdapFilter {
+        # audit 2026-07-24 (P1): emit a clause ONLY for a field the operator actually
+        # filled in. The old single-line filter always appended (givenName=<v>*) and
+        # (sn=<v>*); with the field blank those collapse to (givenName=*) / (sn=*), which
+        # in LDAP are PRESENCE tests - so every account that simply has no givenName/sn
+        # (.adm / .adw admin accounts, service accounts, org boxes) was filtered out even
+        # on an exact EDIPI search, and the operator concluded the account did not exist.
+        # Values stay RFC-4515 escaped exactly as before: only clause SELECTION changed.
+        param([string]$FirstName, [string]$LastName, [string]$Edipi)
+        $fn = "$FirstName".Trim(); $ln = "$LastName".Trim(); $ed = "$Edipi".Trim()
+        $f = "(&(objectCategory=person)(objectClass=user)"
+        if ($fn) { $f += "(givenName=$(Escape-LdapFilterValue $fn)*)" }
+        if ($ln) { $f += "(sn=$(Escape-LdapFilterValue $ln)*)" }
+        if ($ed) { $f += "(samaccountname=$(Escape-LdapFilterValue $ed)*)" }
+        $f += ")"
+        return $f
     }
 
     # Bind-redirect guard for the SearchBase (audit P2 + P3). BYTE-IDENTICAL copy of
@@ -338,6 +429,115 @@ $script:AdSearchEngine = {
         foreach ($a in $Attrs) { [void]$Searcher.PropertiesToLoad.Add($a) }
     }
 
+    # audit 2026-07-24 (P3): NO searcher carried a time limit, so a wedged or crawling
+    # DC could block FindAll() indefinitely - and because FindAll() blocks INSIDE this
+    # child runspace, the handler's BeginStop cancel cannot interrupt it (a stop lands
+    # only between pipeline statements). These two caps are the only thing that can end
+    # such a call: ServerTimeLimit is the LDAP server-side search budget, ClientTimeout
+    # the hard local wait after which the call throws (surfaced as a normal engine
+    # error). Applied to every DirectorySearcher the engine builds.
+    function Set-AdSearchTimeout {
+        param($Searcher)
+        try { $Searcher.ServerTimeLimit = [TimeSpan]::FromSeconds(90) }  catch {}
+        try { $Searcher.ClientTimeout   = [TimeSpan]::FromSeconds(120) } catch {}
+    }
+
+    # audit 2026-07-24 (P3): SearchResultCollection, DirectorySearcher and
+    # DirectoryEntry are ALL IDisposable and hold unmanaged LDAP/COM handles. The
+    # engine abandoned every FindAll() collection (13 sites) and, in Base Users, three
+    # objects per child OU - so a whole-base export pinned hundreds of live handles
+    # until the GC finalizer eventually ran. Null-safe and swallowing: disposal must
+    # never turn a good search into an error.
+    function Close-AdDisposable {
+        param($Obj)
+        if ($null -eq $Obj) { return }
+        try { $Obj.Dispose() } catch {}
+    }
+
+    # audit 2026-07-24 (P2): AD caps a multi-valued attribute at MaxValRange (1500 by
+    # default); past that it returns the values under a RANGED key
+    # ('member;range=0-1499') INSTEAD of 'member'. A plain 'member' read therefore came
+    # back empty and every group over 1500 members rendered MemberCount 0 with no
+    # members at all. Page the ranges (0-1499, 1500-2999, ...) with a base-scope
+    # re-read of the group until the directory answers with the '*' terminator range,
+    # which marks the final page.
+    # audit 2026-07-25 (fable re-audit follow-up): report COMPLETENESS alongside the
+    # values. This used to return a bare array, so a page that THREW (or the 200-page
+    # guard tripping) was indistinguishable from a clean end-of-attribute - the caller
+    # then swapped the directory's already-fetched first page for @() and the group
+    # rendered MemberCount 0 again, i.e. the exact pre-fix symptom on an error path.
+    # Complete=$false means "what you got is a PARTIAL set", which the caller must
+    # neither trust nor let overwrite a longer page it already holds.
+    function Get-AdRangedMemberValues {
+        param([string]$Dn)
+        $all = New-Object System.Collections.ArrayList
+        $lo  = 0
+        $guard = 0
+        $complete = $false
+        while ($guard -lt 200) {
+            $guard++
+            $entry = $null; $rs = $null; $col = $null; $more = $false; $failed = $false
+            try {
+                # A DN may legally contain '/', which ADSI reads as a path separator in an
+                # LDAP:// URL - escape it. This is a BIND path, not a filter, and the DN
+                # comes from the directory itself (never operator input).
+                $entry = New-AdEntry ("LDAP://" + ($Dn -replace '/', '\/'))
+                $rs = New-Object System.DirectoryServices.DirectorySearcher $entry
+                $rs.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+                $rs.SearchScope = [System.DirectoryServices.SearchScope]::Base
+                $rs.Filter = '(objectClass=*)'
+                Set-AdSearchTimeout $rs
+                Set-AdLoad $rs @("member;range=$lo-*")
+                $col = $rs.FindAll()
+                $hit = $null
+                foreach ($r in $col) { $hit = $r; break }
+                if ($null -ne $hit) {
+                    $key = $null
+                    foreach ($k in $hit.Properties.PropertyNames) {
+                        if ("$k" -eq 'member' -or "$k" -like 'member;range=*') { $key = "$k"; break }
+                    }
+                    if ($null -ne $key) {
+                        $vals = @($hit.Properties[$key])
+                        foreach ($v in $vals) { [void]$all.Add("$v") }
+                        # '<attr>;range=<lo>-*' is the directory's end-of-attribute marker;
+                        # anything else means another page is waiting.
+                        if ($key -ne 'member' -and -not $key.EndsWith('-*') -and $vals.Count -gt 0) {
+                            $lo += $vals.Count
+                            $more = $true
+                        }
+                    }
+                }
+            } catch { $more = $false; $failed = $true } finally {
+                Close-AdDisposable $col
+                Close-AdDisposable $rs
+                Close-AdDisposable $entry
+            }
+            # A throw leaves the enumeration KNOWN-INCOMPLETE; only reaching the
+            # directory's end-of-attribute terminator without error means "that's all".
+            if ($failed) { break }
+            if (-not $more) { $complete = $true; break }
+        }
+        return @{ Members = $all.ToArray(); Complete = $complete }
+    }
+
+    # audit 2026-07-25 (fable re-audit follow-up): decide what the group actually keeps.
+    # The ranged key AD handed back ALREADY holds the first page (up to MaxValRange
+    # values), so a re-read that came back SHORTER (a first-page throw returns none)
+    # must never replace it - dropping 1500 fetched DNs for @() is how the group went
+    # back to MemberCount 0. BYTE-IDENTICAL copy of the module-level
+    # Merge-AdRangedMemberValues - inlined for the same bare-runspace reason as
+    # Escape-LdapFilterValue above; the module copy is the unit-tested one.
+    # The paged read is authoritative only when it is at least as long as the page we
+    # already had; Truncated then mirrors the enumeration's own state. Shorter than the
+    # seed => pages were lost, so keep the fetched page and flag it as partial.
+    function Merge-AdRangedMemberValues {
+        param([object[]]$SeedPage, [object[]]$Paged, [bool]$Complete)
+        $seed = @(@($SeedPage) | Where-Object { $null -ne $_ })
+        $full = @(@($Paged)    | Where-Object { $null -ne $_ })
+        if ($full.Count -ge $seed.Count) { return @{ Members = $full; Truncated = (-not $Complete) } }
+        return @{ Members = $seed; Truncated = $true }
+    }
+
     $root = New-AdEntry ''
     $searcher = [ADSISEARCHER]$root
     # Do NOT auto-follow a directory-returned EXTERNAL referral to another server:
@@ -345,6 +545,7 @@ $script:AdSearchEngine = {
     # DN guard never vetted (loop-7 AD-bind hardening capstone). Inert in a single
     # AD domain (no referrals); closes the residual redirect.
     $searcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+    Set-AdSearchTimeout $searcher   # audit 2026-07-24 (P3): bound a blocked FindAll()
     $searcher.PageSize = 15000
     # Cap any single wildcard search at 2000 objects so a broad filter cannot dump
     # the whole directory (the handler also rejects all-wildcard user/computer
@@ -407,7 +608,10 @@ $script:AdSearchEngine = {
     $orgboxAttrs     = @('name','displayname','mail','title','lockouttime','lastlogontimestamp','othertelephone','manager','msexchdelegatelistlink','whencreated','whenchanged','distinguishedname','memberof')
     $emailAttrs      = @('samaccountname','displayname','employeeid','givenname','initials','sn','o','c','employeetype','proxyaddresses','mail','title','department','company','manager','lockouttime','lastlogontimestamp','userprincipalname','physicaldeliveryofficename','telephonenumber','mobile','distinguishedname','memberof')
     $bulkAttrs       = @('name','distinguishedname','lastlogontimestamp','location','operatingsystem','operatingsystemversion','dnshostname','whencreated','whenchanged','memberof')
-    $baseUserAttrs   = @('samaccountname','displayname','cn','distinguishedname','location','mail','title','employeeid','manager','department','company','paygrade','physicaldeliveryofficename','telephonenumber','othertelephone','mobile','l','c','lockouttime','lastlogon','logoncount','whencreated','whenchanged','memberof')
+    # audit 2026-07-24 (P3): lastLogonTimestamp added - lastLogon is per-DC and NOT
+    # replicated, so Base Users rendered "never" for accounts that log on daily.
+    # lastLogon is kept only as the fallback when the replicated value is absent.
+    $baseUserAttrs   = @('samaccountname','displayname','cn','distinguishedname','location','mail','title','employeeid','manager','department','company','paygrade','physicaldeliveryofficename','telephonenumber','othertelephone','mobile','l','c','lockouttime','lastlogontimestamp','lastlogon','logoncount','whencreated','whenchanged','memberof')
     $lastPcUserAttrs = @('samaccountname','displayname','distinguishedname')
 
     switch ($SearchType) {
@@ -416,110 +620,165 @@ $script:AdSearchEngine = {
             $lastName  = $SearchParams.LastName
             $edipi     = $SearchParams.EDIPI
             Set-AdLoad $searcher $userAttrs
-            $searcher.filter = "(&(objectCategory=person)(objectClass=user)(givenName=$(Escape-LdapFilterValue $firstName)*)(sn=$(Escape-LdapFilterValue $lastName)*)(samaccountname=$(Escape-LdapFilterValue $edipi)*))"
-            $adResults = $searcher.FindAll()
-            foreach ($user in $adResults) {
-                if ($results.Count -ge $adSizeCap) { break }
-                $props = @{}
-                foreach ($key in $user.Properties.PropertyNames) {
-                    $val = $user.Properties[$key]
-                    if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+            # audit 2026-07-24 (P1): only the fields the operator filled in become
+            # clauses - a blank one used to become a (givenName=*) PRESENCE test that
+            # hid every attribute-less admin / service account. See New-AdUserLdapFilter.
+            $searcher.filter = New-AdUserLdapFilter -FirstName $firstName -LastName $lastName -Edipi $edipi
+            $adResults = $null
+            try {
+                $adResults = $searcher.FindAll()
+                foreach ($user in $adResults) {
+                    if ($results.Count -ge $adSizeCap) { break }
+                    $props = @{}
+                    foreach ($key in $user.Properties.PropertyNames) {
+                        $val = $user.Properties[$key]
+                        if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+                    }
+                    $results += $props
                 }
-                $results += $props
-            }
+            } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
         }
         "Computer" {
             $computerName = $SearchParams.ComputerName
             Set-AdLoad $searcher $computerAttrs
             $searcher.filter = "(&(objectCategory=Computer)(name=$(Escape-LdapFilterValue $computerName)*))"
-            $adResults = $searcher.FindAll()
-            foreach ($computer in $adResults) {
-                if ($results.Count -ge $adSizeCap) { break }
-                $props = @{}
-                foreach ($key in $computer.Properties.PropertyNames) {
-                    $val = $computer.Properties[$key]
-                    if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+            $adResults = $null
+            try {
+                $adResults = $searcher.FindAll()
+                foreach ($computer in $adResults) {
+                    if ($results.Count -ge $adSizeCap) { break }
+                    $props = @{}
+                    foreach ($key in $computer.Properties.PropertyNames) {
+                        $val = $computer.Properties[$key]
+                        if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+                    }
+                    $results += $props
                 }
-                $results += $props
-            }
+            } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
         }
         "Group" {
             $groupName = $SearchParams.GroupName
             Set-AdLoad $searcher $groupAttrs
             $searcher.filter = "(&(objectCategory=group)(name=$(Escape-LdapFilterValue $groupName)*))"
-            $adResults = $searcher.FindAll()
-            foreach ($group in $adResults) {
-                if ($results.Count -ge $adSizeCap) { break }
-                $props = @{}
-                foreach ($key in $group.Properties.PropertyNames) {
-                    $val = $group.Properties[$key]
-                    if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+            $adResults = $null
+            try {
+                $adResults = $searcher.FindAll()
+                foreach ($group in $adResults) {
+                    if ($results.Count -ge $adSizeCap) { break }
+                    $props = @{}
+                    $ranged = $null
+                    foreach ($key in $group.Properties.PropertyNames) {
+                        # audit 2026-07-24 (P2): past MaxValRange (1500) AD substitutes a
+                        # RANGED key for 'member', so the plain read below found nothing and
+                        # the group reported 0 members. Note the key and re-read the full set.
+                        if ("$key" -like 'member;range=*') { $ranged = "$key" }
+                        $val = $group.Properties[$key]
+                        if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+                    }
+                    if ($ranged) {
+                        # audit 2026-07-25 (fable re-audit follow-up): the ranged key is not a
+                        # placeholder - it CARRIES the directory's first page. Re-read for the
+                        # remaining pages, but fall back to that page when the re-read comes back
+                        # shorter (a first-page throw yields none), instead of discarding 1500
+                        # already-fetched DNs and reporting MemberCount 0. When the enumeration is
+                        # known-incomplete, flag it so the handler warns rather than passing a
+                        # PARTIAL membership off as the whole - same contract as _userTruncated.
+                        $seedPage = @($props[$ranged])
+                        $paged    = Get-AdRangedMemberValues ("$($group.Properties['distinguishedname'][0])")
+                        $merged   = Merge-AdRangedMemberValues -SeedPage $seedPage -Paged @($paged.Members) -Complete ([bool]$paged.Complete)
+                        $props.Remove($ranged)
+                        $props['member'] = @($merged.Members)
+                        if ($merged.Truncated) { $props['_memberTruncated'] = $true }
+                    }
+                    $results += $props
                 }
-                $results += $props
-            }
+            } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
         }
         "OrgBox" {
             $orgBoxName = $SearchParams.OrgBoxName
             Set-AdLoad $searcher $orgboxAttrs
             $searcher.filter = "(&(objectCategory=person)(objectClass=user)(name=$(Escape-LdapFilterValue $orgBoxName)*))"
-            $adResults = $searcher.FindAll()
-            foreach ($orgBox in $adResults) {
-                if ($results.Count -ge $adSizeCap) { break }
-                $props = @{}
-                foreach ($key in $orgBox.Properties.PropertyNames) {
-                    $val = $orgBox.Properties[$key]
-                    if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+            $adResults = $null
+            try {
+                $adResults = $searcher.FindAll()
+                foreach ($orgBox in $adResults) {
+                    if ($results.Count -ge $adSizeCap) { break }
+                    $props = @{}
+                    foreach ($key in $orgBox.Properties.PropertyNames) {
+                        $val = $orgBox.Properties[$key]
+                        if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+                    }
+                    $results += $props
                 }
-                $results += $props
-            }
+            } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
         }
         "Email" {
             $emailAddress = $SearchParams.EmailAddress
             Set-AdLoad $searcher $emailAttrs
             $searcher.filter = "(&(objectCategory=person)(objectClass=user)(mail=$(Escape-LdapFilterValue $emailAddress)*))"
-            $adResults = $searcher.FindAll()
-            foreach ($user in $adResults) {
-                if ($results.Count -ge $adSizeCap) { break }
-                $props = @{}
-                foreach ($key in $user.Properties.PropertyNames) {
-                    $val = $user.Properties[$key]
-                    if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+            $adResults = $null
+            try {
+                $adResults = $searcher.FindAll()
+                foreach ($user in $adResults) {
+                    if ($results.Count -ge $adSizeCap) { break }
+                    $props = @{}
+                    foreach ($key in $user.Properties.PropertyNames) {
+                        $val = $user.Properties[$key]
+                        if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+                    }
+                    $results += $props
                 }
-                $results += $props
-            }
+            } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
         }
         "Manager" {
             $managerName = $SearchParams.ManagerName
             Set-AdLoad $searcher $userAttrs
             $searcher.filter = "(&(objectCategory=person)(objectClass=user)(displayName=$(Escape-LdapFilterValue $managerName)*))"
-            $managerResults = $searcher.FindAll()
-            if ($managerResults.Count -gt 0) {
-                $managerDN = $managerResults[0].Properties["distinguishedname"][0]
-                $reportSearcher = [ADSISEARCHER]$root
-                $reportSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
-                $reportSearcher.PageSize = 15000
-                Set-AdLoad $reportSearcher $userAttrs
-                $reportSearcher.filter = "(&(objectCategory=person)(objectClass=user)(manager=$(Escape-LdapFilterValue $managerDN)))"
-                $reportResults = $reportSearcher.FindAll()
-                $managerProps = @{}
-                foreach ($key in $managerResults[0].Properties.PropertyNames) {
-                    $val = $managerResults[0].Properties[$key]
-                    if ($val.Count -eq 1) { $managerProps[$key] = $val[0] } else { $managerProps[$key] = @($val) }
-                }
-                $managerProps["_isManager"] = $true
-                $managerProps["_directReportCount"] = $reportResults.Count
-                $results += $managerProps
-                foreach ($report in $reportResults) {
-                    $props = @{}
-                    foreach ($key in $report.Properties.PropertyNames) {
-                        $val = $report.Properties[$key]
-                        if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+            $managerResults = $null
+            try {
+                $managerResults = $searcher.FindAll()
+                if ($managerResults.Count -gt 0) {
+                    $managerDN = $managerResults[0].Properties["distinguishedname"][0]
+                    $reportSearcher = $null; $reportResults = $null
+                    try {
+                        $reportSearcher = [ADSISEARCHER]$root
+                        $reportSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+                        Set-AdSearchTimeout $reportSearcher   # audit 2026-07-24 (P3)
+                        $reportSearcher.PageSize = 15000
+                        Set-AdLoad $reportSearcher $userAttrs
+                        $reportSearcher.filter = "(&(objectCategory=person)(objectClass=user)(manager=$(Escape-LdapFilterValue $managerDN)))"
+                        $reportResults = $reportSearcher.FindAll()
+                        $managerProps = @{}
+                        foreach ($key in $managerResults[0].Properties.PropertyNames) {
+                            $val = $managerResults[0].Properties[$key]
+                            if ($val.Count -eq 1) { $managerProps[$key] = $val[0] } else { $managerProps[$key] = @($val) }
+                        }
+                        $managerProps["_isManager"] = $true
+                        $managerProps["_directReportCount"] = $reportResults.Count
+                        # audit 2026-07-24 (P3): the display-name term is wildcard-suffixed, so
+                        # it can match N managers - we silently took [0] and listed THAT
+                        # person's reports with no hint the pick was arbitrary. Carry the match
+                        # count out so the handler can warn, exactly as LastPC's _userTruncated does.
+                        $managerProps["_managerMatchCount"] = $managerResults.Count
+                        $managerProps["_managerAmbiguous"]  = ($managerResults.Count -gt 1)
+                        $results += $managerProps
+                        foreach ($report in $reportResults) {
+                            $props = @{}
+                            foreach ($key in $report.Properties.PropertyNames) {
+                                $val = $report.Properties[$key]
+                                if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
+                            }
+                            $props["_isManager"] = $false
+                            $results += $props
+                        }
+                    } finally {
+                        Close-AdDisposable $reportResults    # audit 2026-07-24 (P3)
+                        Close-AdDisposable $reportSearcher
                     }
-                    $props["_isManager"] = $false
-                    $results += $props
                 }
-            }
-            return $results
+            } finally { Close-AdDisposable $managerResults }   # audit 2026-07-24 (P3)
+            # (the arm's old `return $results` was redundant - the switch falls through
+            #  to the same return below, which now also disposes the shared searcher.)
         }
         "BulkComputer" {
             $machineList = $SearchParams.MachineList
@@ -570,6 +829,7 @@ $script:AdSearchEngine = {
                     $searcher.Filter = "(&(objectCategory=Computer)(|$filterParts))"
                 }
 
+                $adResults = $null
                 try {
                     $adResults = $searcher.FindAll()
                     foreach ($entry in $adResults) {
@@ -606,6 +866,7 @@ $script:AdSearchEngine = {
                 } catch {
                     foreach ($name in $batch) {
                         $searcher.Filter = "(&(objectCategory=Computer)(name=$(Escape-LdapFilterValue $name)))"
+                        $fallbackResults = $null
                         try {
                             $fallbackResults = $searcher.FindAll()
                             if ($fallbackResults.Count -gt 0) {
@@ -636,9 +897,9 @@ $script:AdSearchEngine = {
                                     $results += $props
                                 }
                             }
-                        } catch {}
+                        } catch {} finally { Close-AdDisposable $fallbackResults }   # audit 2026-07-24 (P3)
                     }
-                }
+                } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
             }
 
             foreach ($name in $machineList) {
@@ -670,57 +931,89 @@ $script:AdSearchEngine = {
 
             $ouSearcher = [ADSISEARCHER]$root
             $ouSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+            Set-AdSearchTimeout $ouSearcher   # audit 2026-07-24 (P3)
             $ouSearcher.PageSize = 1000
             Set-AdLoad $ouSearcher @('distinguishedname')
             $ouSearcher.Filter = "(&(objectCategory=organizationalUnit)(name=$(Escape-LdapFilterValue $baseName)*))"
             $baseOUs = @()
+            $baseOUResults = $null
             try {
                 $baseOUResults = $ouSearcher.FindAll()
                 foreach ($ou in $baseOUResults) {
                     $baseOUs += "$($ou.Properties['distinguishedname'][0])"
                 }
-            } catch {}
+            } catch {} finally {
+                Close-AdDisposable $baseOUResults    # audit 2026-07-24 (P3)
+                Close-AdDisposable $ouSearcher
+            }
 
             foreach ($baseOUDN in $baseOUs) {
-                $childSearcher = New-Object System.DirectoryServices.DirectorySearcher
-                $childSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
-                $childSearcher.SearchRoot = New-AdEntry "LDAP://$baseOUDN"
-                $childSearcher.PageSize = 1000
-                $childSearcher.SearchScope = "Subtree"
-                Set-AdLoad $childSearcher @('distinguishedname','name')
-                $childSearcher.Filter = "(&(objectCategory=organizationalUnit)(|(name=*Users*)(name=*Administrative*)(name=*AFB*)))"
+                # audit 2026-07-24 (P3): this loop built a DirectorySearcher + a
+                # DirectoryEntry SearchRoot + a SearchResultCollection PER BASE OU and
+                # another THREE per child OU, and released none of them - a whole-base
+                # export pinned hundreds of unmanaged LDAP handles for the run. Each set
+                # is now disposed in a finally as soon as its subtree has been harvested.
+                $childSearcher = $null; $childRoot = $null; $childOUs = $null
                 try {
+                    $childRoot = New-AdEntry "LDAP://$baseOUDN"
+                    $childSearcher = New-Object System.DirectoryServices.DirectorySearcher
+                    $childSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+                    Set-AdSearchTimeout $childSearcher   # audit 2026-07-24 (P3)
+                    $childSearcher.SearchRoot = $childRoot
+                    $childSearcher.PageSize = 1000
+                    $childSearcher.SearchScope = "Subtree"
+                    Set-AdLoad $childSearcher @('distinguishedname','name')
+                    $childSearcher.Filter = "(&(objectCategory=organizationalUnit)(|(name=*Users*)(name=*Administrative*)(name=*AFB*)))"
                     $childOUs = $childSearcher.FindAll()
                     foreach ($childOU in $childOUs) {
                         $childOUDN = "$($childOU.Properties['distinguishedname'][0])"
                         $childOUName = "$($childOU.Properties['name'][0])"
                         [void]$searchedOUs.Add($childOUDN)
 
-                        $userSearcher = New-Object System.DirectoryServices.DirectorySearcher
-                        $userSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
-                        $userSearcher.SearchRoot = New-AdEntry "LDAP://$childOUDN"
-                        $userSearcher.PageSize = 15000
-                        $userSearcher.SearchScope = "Subtree"
-                        Set-AdLoad $userSearcher $baseUserAttrs
-
-                        if ($childOUName -match "Users") {
-                            $userSearcher.Filter = "(&(objectCategory=person)(objectClass=user))"
-                        } else {
-                            $userSearcher.Filter = "(&(objectCategory=person)(objectClass=user)(|(samaccountname=*.adw)(samaccountname=*.adf)(samaccountname=*.adm)(samaccountname=*.ada)(samaccountname=*.adn)(samaccountname=*.SA)))"
-                        }
+                        $userSearcher = $null; $userRoot = $null; $userResults = $null
                         try {
+                            $userRoot = New-AdEntry "LDAP://$childOUDN"
+                            $userSearcher = New-Object System.DirectoryServices.DirectorySearcher
+                            $userSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+                            Set-AdSearchTimeout $userSearcher   # audit 2026-07-24 (P3)
+                            $userSearcher.SearchRoot = $userRoot
+                            $userSearcher.PageSize = 15000
+                            $userSearcher.SearchScope = "Subtree"
+                            Set-AdLoad $userSearcher $baseUserAttrs
+
+                            if ($childOUName -match "Users") {
+                                $userSearcher.Filter = "(&(objectCategory=person)(objectClass=user))"
+                            } else {
+                                $userSearcher.Filter = "(&(objectCategory=person)(objectClass=user)(|(samaccountname=*.adw)(samaccountname=*.adf)(samaccountname=*.adm)(samaccountname=*.ada)(samaccountname=*.adn)(samaccountname=*.SA)))"
+                            }
                             $userResults = $userSearcher.FindAll()
                             foreach ($user in $userResults) {
                                 $dn = "$($user.Properties['distinguishedname'][0])"
                                 if (-not $seenDNs.ContainsKey($dn)) {
                                     $seenDNs[$dn] = $true
-                                    [void]$allFound.Add($user)
+                                    # audit 2026-07-24 (P3): materialize the properties HERE
+                                    # rather than parking the live SearchResult, so the result
+                                    # collection can be disposed the moment this OU is done.
+                                    $uProps = @{}
+                                    foreach ($key in $user.Properties.PropertyNames) {
+                                        $val = $user.Properties[$key]
+                                        if ($val.Count -eq 1) { $uProps[$key] = $val[0] } else { $uProps[$key] = @($val) }
+                                    }
+                                    [void]$allFound.Add($uProps)
                                     $dnSourceOU[$dn] = $childOUDN   # audit 2026-07-23: precomputed _sourceOU
                                 }
                             }
-                        } catch {}
+                        } catch {} finally {
+                            Close-AdDisposable $userResults
+                            Close-AdDisposable $userSearcher
+                            Close-AdDisposable $userRoot
+                        }
                     }
-                } catch {}
+                } catch {} finally {
+                    Close-AdDisposable $childOUs
+                    Close-AdDisposable $childSearcher
+                    Close-AdDisposable $childRoot
+                }
             }
 
             if ($searchedOUs.Count -eq 0) {
@@ -747,13 +1040,9 @@ $script:AdSearchEngine = {
             # was O(n^2) array re-copy on the one uncapped path); assigned back to
             # $results by the sort below.
             $buRows = [System.Collections.ArrayList]::new()
-            foreach ($user in $allFound) {
-                $props = @{}
-                foreach ($key in $user.Properties.PropertyNames) {
-                    $val = $user.Properties[$key]
-                    if ($val.Count -eq 1) { $props[$key] = $val[0] } else { $props[$key] = @($val) }
-                }
-
+            # audit 2026-07-24 (P3): $allFound now holds the already-materialized
+            # property hashtables (see the harvest loop), not live SearchResult objects.
+            foreach ($props in $allFound) {
                 $isPriv = $false
                 $privReason = ""
                 $sam = "$($props.samaccountname)"
@@ -832,36 +1121,44 @@ $script:AdSearchEngine = {
 
             # Escape operator input (parity with the other search types) - prevents a
             # malformed/injected LDAP filter from a name with ( ) * \ characters.
-            $userFilter = "(&(objectCategory=person)(objectClass=user)"
-            if ($firstName) { $userFilter += "(givenName=$(Escape-LdapFilterValue $firstName)*)" }
-            if ($lastName)  { $userFilter += "(sn=$(Escape-LdapFilterValue $lastName)*)" }
-            if ($edipi)     { $userFilter += "(samaccountname=$(Escape-LdapFilterValue $edipi)*)" }
-            $userFilter += ")"
+            # audit 2026-07-24 (P1): now the SAME builder Search Users uses, so both
+            # actions resolve an account by exactly the fields the operator supplied.
             Set-AdLoad $searcher $lastPcUserAttrs
-            $searcher.filter = $userFilter
-            $userResults = $searcher.FindAll()
-            if ($userResults.Count -eq 0) {
-                return @(@{ _Error = "No matching user found.`n`nFirst Name: $firstName`nLast Name: $lastName`nEDIPI: $edipi" })
-            }
+            $searcher.filter = New-AdUserLdapFilter -FirstName $firstName -LastName $lastName -Edipi $edipi
 
+            # audit 2026-07-24 (P3): materialize the matched users into plain hashtables
+            # and release the result collection right away - nothing downstream needs a
+            # live SearchResult, and the arm has several early returns that would
+            # otherwise abandon it.
             $maxUsers = 5
             $matchedUsers = @()
-            $u_i = 0
-            foreach ($u in $userResults) {
-                if ($u_i -ge $maxUsers) { break }
-                $matchedUsers += $u
-                $u_i++
+            $userMatchCount = 0
+            $userResults = $null
+            try {
+                $userResults = $searcher.FindAll()
+                $userMatchCount = $userResults.Count
+                foreach ($u in $userResults) {
+                    if ($matchedUsers.Count -ge $maxUsers) { break }
+                    $matchedUsers += @{
+                        Sam     = "$($u.Properties['samaccountname'][0])"
+                        Display = "$($u.Properties['displayname'][0])"
+                        Dn      = "$($u.Properties['distinguishedname'][0])"
+                    }
+                }
+            } finally { Close-AdDisposable $userResults }
+            if ($userMatchCount -eq 0) {
+                return @(@{ _Error = "No matching user found.`n`nFirst Name: $firstName`nLast Name: $lastName`nEDIPI: $edipi" })
             }
-            $truncated = ($userResults.Count -gt $maxUsers)
+            $truncated = ($userMatchCount -gt $maxUsers)
 
             $samToDisplay = @{}
             $samToDN      = @{}
             $samEsc       = @()
             foreach ($mu in $matchedUsers) {
-                $sam = "$($mu.Properties['samaccountname'][0])"
+                $sam = $mu.Sam
                 if ($sam -eq "") { continue }
-                $samToDisplay[$sam] = "$($mu.Properties['displayname'][0])"
-                $samToDN[$sam]      = "$($mu.Properties['distinguishedname'][0])"
+                $samToDisplay[$sam] = $mu.Display
+                $samToDN[$sam]      = $mu.Dn
                 # audit#15: escape for XML ( & < > ) but NOT the apostrophe. A
                 # sAMAccountName may legally contain ' ; escaping it to &apos; only
                 # deferred the problem - the XML parser de-escapes it back to ' BEFORE
@@ -877,13 +1174,21 @@ $script:AdSearchEngine = {
 
             $dcSearcher = [ADSISEARCHER]$root
             $dcSearcher.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+            Set-AdSearchTimeout $dcSearcher   # audit 2026-07-24 (P3)
             $dcSearcher.PageSize = 500
             Set-AdLoad $dcSearcher @('dnshostname')
             $dcSearcher.Filter = "(&(objectCategory=Computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))"
             $dcs = @()
-            foreach ($dc in $dcSearcher.FindAll()) {
-                $h = "$($dc.Properties['dnshostname'][0])"
-                if ($h -ne "") { $dcs += $h }
+            $dcResults = $null
+            try {
+                $dcResults = $dcSearcher.FindAll()
+                foreach ($dc in $dcResults) {
+                    $h = "$($dc.Properties['dnshostname'][0])"
+                    if ($h -ne "") { $dcs += $h }
+                }
+            } finally {
+                Close-AdDisposable $dcResults    # audit 2026-07-24 (P3)
+                Close-AdDisposable $dcSearcher
             }
             if ($dcs.Count -eq 0) {
                 return @(@{ _Error = "No domain controllers were discovered via LDAP."; _Failure = $true })
@@ -965,6 +1270,14 @@ $script:AdSearchEngine = {
                     if ($reachable) { break }
                 }
                 if (-not $reachable) { return @{ DC = $c; Reachable = $false; Events = $null; Error = 'unreachable (WinRM/SMB)' } }
+                # audit 2026-07-24 (P2): Get-WinEvent -ErrorAction Stop THROWS when the log
+                # simply holds no matching event, so a DC that answered perfectly well with
+                # "nothing here" used to come back as an Error - filed as a DC failure,
+                # excluded from $dcsScanned, and (when every DC was clean) topped off with a
+                # bogus "you lack permission" hint. Recognize that one message and report it
+                # as a successful, empty scan (Error = $null, NoMatch = $true); a real
+                # access-denied / RPC failure still returns its Error untouched.
+                $noMatchRx = 'No events were found that match'
                 try {
                     $icArgs = @{ ComputerName = $c; ErrorAction = 'Stop'; ArgumentList = $x;
                                  ScriptBlock = { param($xf) Get-WinEvent -FilterXml $xf -MaxEvents 2000 -ErrorAction Stop } }
@@ -973,12 +1286,18 @@ $script:AdSearchEngine = {
                     $ev = Invoke-Command @icArgs
                     return @{ DC = $c; Reachable = $true; Events = $ev; Error = $null }
                 } catch {
+                    if ("$($_.Exception.Message)" -match $noMatchRx) {
+                        return @{ DC = $c; Reachable = $true; Events = $null; Error = $null; NoMatch = $true }
+                    }
                     try {
                         $gwArgs = @{ ComputerName = $c; FilterXml = $x; MaxEvents = 2000; ErrorAction = 'Stop' }
                         if ($cred) { $gwArgs['Credential'] = $cred }
                         $ev = Get-WinEvent @gwArgs
                         return @{ DC = $c; Reachable = $true; Events = $ev; Error = $null }
                     } catch {
+                        if ("$($_.Exception.Message)" -match $noMatchRx) {
+                            return @{ DC = $c; Reachable = $true; Events = $null; Error = $null; NoMatch = $true }
+                        }
                         return @{ DC = $c; Reachable = $true; Events = $null; Error = "$($_.Exception.Message)" }
                     }
                 }
@@ -1010,10 +1329,16 @@ $script:AdSearchEngine = {
                             if ($null -eq $res) { $res = @{ DC = $j.DC; Reachable = $true; Events = $null; Error = 'no result' } }
                             $dc = $res.DC
                             $events = $res.Events
+                            # audit 2026-07-24 (P2): coverage is decided by whether the QUERY
+                            # succeeded, not by whether it returned rows. The old test
+                            # ($null -ne $events) filed a clean but empty DC as an ERROR and
+                            # never counted it, so a fully successful domain-wide scan
+                            # reported e.g. "0 of 12 DC(s)" and warned about permissions.
                             if ($res.Reachable -ne $true) {
                                 [void]$dcErrors.Add("$dc :: $($res.Error)")
-                            } elseif ($null -ne $events) {
+                            } elseif ($null -eq $res.Error) {
                                 $dcsScanned++
+                                if ($null -eq $events) { $events = @() }
                                 foreach ($evt in $events) {
                                     try {
                                         $xml = [xml]$evt.ToXml()
@@ -1026,7 +1351,7 @@ $script:AdSearchEngine = {
 
                                         $matchedSam = $null
                                         foreach ($mu in $matchedUsers) {
-                                            $sam = "$($mu.Properties['samaccountname'][0])"
+                                            $sam = $mu.Sam   # audit 2026-07-24 (P3): materialized, not a live SearchResult
                                             if ($sam -eq "") { continue }
                                             if ($tu -ieq $sam -or $tu -ilike "$sam@*") {
                                                 $matchedSam = $sam
@@ -1098,18 +1423,31 @@ $script:AdSearchEngine = {
             }
 
             if ($allHits.Count -eq 0) {
-                $msg = "No matching logon events found across $dcsScanned of $($dcs.Count) DC(s) in the last $daysBack day(s)."
+                # audit 2026-07-24 (P2): a zero-hit scan is only a genuine "nothing found"
+                # when at least ONE DC was actually read. If every DC was unreachable /
+                # denied / timed out, NOTHING was searched - say so plainly and carry the
+                # coverage numbers out so the handler can audit it as a FAILURE (it used to
+                # be Skipped with failed=0 and rendered as "Done. No results.", telling the
+                # operator the person had not logged on anywhere).
+                $allDenied = ($dcsScanned -le 0)
+                if ($allDenied) {
+                    $msg = "Scan FAILED: none of the $($dcs.Count) domain controller(s) could be queried, so no Security log was searched."
+                } else {
+                    $msg = "No matching logon events found across $dcsScanned of $($dcs.Count) DC(s) in the last $daysBack day(s)."
+                }
                 if ($timedOut) { $msg += "`n`n** Scan stopped at the $scanSeconds-second time limit - only $dcsScanned of $($dcs.Count) DC(s) were scanned. Raise 'Max scan seconds' or reduce 'Days Back' to cover more DCs. **" }
                 $msg += "`n`nMatched user(s):"
                 foreach ($mu in $matchedUsers) {
-                    $msg += "`n  $($mu.Properties['displayname'][0])  ($($mu.Properties['samaccountname'][0]))"
+                    $msg += "`n  $($mu.Display)  ($($mu.Sam))"
                 }
                 if ($dcErrors.Count -gt 0) {
                     $msg += "`n`nDC errors:"
                     foreach ($e in $dcErrors) { $msg += "`n  $e" }
                     $msg += "`n`nIf every DC failed with 'access denied' you do not have permission to read the Security log on the DCs.  Re-launch from a privileged account."
                 }
-                return @(@{ _Error = $msg })
+                # _dcsScanned/_dcsTotal let the handler apply Test-AdLastPcAllDenied (the
+                # single, unit-tested copy of the rule) rather than duplicating it here.
+                return @(@{ _Error = $msg; _dcsScanned = $dcsScanned; _dcsTotal = $dcs.Count })
             }
 
             $resolvedIp = @{}
@@ -1164,6 +1502,16 @@ $script:AdSearchEngine = {
             }
         }
     }
+
+    # audit 2026-07-24 (P3): release the shared searcher, its (possibly reassigned)
+    # SearchRoot and the domain-root entry on the normal exit. The remaining early
+    # `return @{_Error=...}` paths are hard-failure exits whose child runspace the
+    # handler tears down microseconds later, which reclaims the same handles.
+    if ($searcher -and $searcher.SearchRoot -and -not [object]::ReferenceEquals($searcher.SearchRoot, $root)) {
+        Close-AdDisposable $searcher.SearchRoot
+    }
+    Close-AdDisposable $searcher
+    Close-AdDisposable $root
     return $results
 }
 
@@ -1200,15 +1548,70 @@ function Get-AdCn {
     if ($m.Success) { return ($m.Groups[1].Value -replace '\\(.)', '$1') }
     return $Dn
 }
+function Get-AdCnJoin {
+    # CN-strip a LIST of DN values and join for the popup. Split out of Get-AdCnList
+    # (audit 2026-07-24) because the ranged group-member path has values in hand
+    # rather than a property key to look up.
+    param([object[]]$Values, [int]$Max = 60)
+    $arr = @($Values)
+    $names = @($arr | ForEach-Object { Get-AdCn ([string]$_) } | Where-Object { $_ -ne '' })
+    if ($names.Count -gt $Max) { $names = @($names | Select-Object -First $Max) + @("...(+$($arr.Count - $Max) more)") }
+    return ($names -join '; ')
+}
 function Get-AdCnList {
     # CN-strip every DN in a (possibly multi-valued) property and join for the popup.
     param([hashtable]$Props, [string]$Key, [int]$Max = 60)
     if ($null -eq $Props -or -not $Props.ContainsKey($Key)) { return '' }
     $v = $Props[$Key]; if ($null -eq $v) { return '' }
-    $arr = @($v)
-    $names = @($arr | ForEach-Object { Get-AdCn ([string]$_) } | Where-Object { $_ -ne '' })
-    if ($names.Count -gt $Max) { $names = @($names | Select-Object -First $Max) + @("...(+$($arr.Count - $Max) more)") }
-    return ($names -join '; ')
+    return (Get-AdCnJoin @($v) $Max)
+}
+function Get-AdMemberValues {
+    # audit 2026-07-24 (P2): read 'member' OR the RANGED key AD substitutes for it once
+    # a group passes MaxValRange ('member;range=0-1499'). The engine now pages the
+    # ranges itself, but the projector keeps this fallback so a ranged key that ever
+    # reaches it still counts and lists members instead of rendering MemberCount 0 with
+    # an empty Members cell - which is exactly how a 1500+ member group used to look.
+    param([hashtable]$Props)
+    if ($null -eq $Props) { return @() }
+    $keys = @('member') + @($Props.Keys | Where-Object { "$_" -like 'member;range=*' } | Sort-Object)
+    foreach ($k in $keys) {
+        if ($Props.ContainsKey($k)) {
+            $v = $Props[$k]
+            if ($null -ne $v) { return @($v) }
+        }
+    }
+    return @()
+}
+function Merge-AdRangedMemberValues {
+    # audit 2026-07-25 (fable re-audit follow-up): pick between the ranged page AD
+    # already handed us and the engine's own paged re-read. The ranged key
+    # ('member;range=0-1499') is NOT a placeholder - it carries up to MaxValRange real
+    # values - so a re-read that failed on its very first page (which yields none) must
+    # never overwrite it, or the group renders MemberCount 0 with no members, i.e. the
+    # exact symptom the range paging was added to fix, now on an error path. When the
+    # kept set is known-incomplete, Truncated says so, so the caller can warn instead of
+    # presenting a PARTIAL membership as the whole one.
+    # BYTE-IDENTICAL twin of the copy inlined in $script:AdSearchEngine (which must run
+    # inside a bare child runspace); this module copy is the unit-tested one.
+    param([object[]]$SeedPage, [object[]]$Paged, [bool]$Complete)
+    $seed = @(@($SeedPage) | Where-Object { $null -ne $_ })
+    $full = @(@($Paged)    | Where-Object { $null -ne $_ })
+    if ($full.Count -ge $seed.Count) { return @{ Members = $full; Truncated = (-not $Complete) } }
+    return @{ Members = $seed; Truncated = $true }
+}
+function Get-AdLastLogonString {
+    # audit 2026-07-24 (P3): prefer the REPLICATED lastLogonTimestamp. lastLogon is
+    # maintained per-DC and never replicates, so reading it off whichever DC answered
+    # renders "never" for accounts that log on every day - which is what Base Users did
+    # while every other action already used lastLogonTimestamp. lastLogon is consulted
+    # only when the replicated value is missing or itself says never.
+    param([hashtable]$P)
+    $ts = Format-AdFileTime $P 'lastlogontimestamp'
+    if ($ts -ne '' -and $ts -ne 'never') { return $ts }
+    $ll = Format-AdFileTime $P 'lastlogon'
+    if ($ll -ne '' -and $ll -ne 'never') { return $ll }
+    if ($ts -ne '') { return $ts }
+    return $ll
 }
 function Format-AdFileTime {
     # lastLogon / lastLogonTimestamp are Int64 FILETIME ticks; 0/empty = never.
@@ -1315,15 +1718,19 @@ function ConvertTo-AdGridRow {
             }
         }
         'search-group' {
+            # audit 2026-07-24 (P2): count/list through Get-AdMemberValues so a RANGED
+            # 'member;range=0-1499' key (any group over 1500 members) is honoured -
+            # a plain 'member' read reported MemberCount 0 with no members at all.
+            $members = @(Get-AdMemberValues $P)
             return [ordered]@{
                 Host              = (Get-AdPropString $P 'name')
                 Name              = (Get-AdPropString $P 'name')
-                MemberCount       = (Get-AdRowCount $P 'member')
+                MemberCount       = $members.Count
                 ManagedBy         = (Get-AdCn (Get-AdPropString $P 'managedby'))
                 WhenCreated       = (Get-AdPropString $P 'whencreated')
                 WhenChanged       = (Get-AdPropString $P 'whenchanged')
                 OU                = (Get-AdOuFromDn (Get-AdPropString $P 'distinguishedname'))
-                Members           = (Get-AdCnList $P 'member')
+                Members           = (Get-AdCnJoin $members)
                 DistinguishedName = (Get-AdPropString $P 'distinguishedname')
             }
         }
@@ -1491,7 +1898,7 @@ function ConvertTo-AdGridRow {
                 Base              = (Get-AdPropString $P 'l')
                 Country           = (Get-AdPropString $P 'c')
                 LockedOut         = (Get-AdLockedOut $P)
-                LastLogon         = (Format-AdFileTime $P 'lastlogon')
+                LastLogon         = (Get-AdLastLogonString $P)   # audit 2026-07-24 (P3): replicated lastLogonTimestamp, was the per-DC lastLogon ("never")
                 LogonCount        = (Get-AdPropString $P 'logoncount')
                 WhenCreated       = (Get-AdPropString $P 'whencreated')
                 WhenChanged       = (Get-AdPropString $P 'whenchanged')
@@ -1763,6 +2170,15 @@ function Invoke-JanetToolAction {
         # failure, not a 'nothing found' outcome: the engine tags those with _Failure,
         # so audit them Failure. Genuine empty-result conditions stay Skipped.
         $isFail = ($rawResults[0].ContainsKey('_Failure') -and $rawResults[0]['_Failure'] -eq $true)
+        # audit 2026-07-24 (P2): a LastPC scan that found nothing because EVERY DC was
+        # unreachable / access-denied / timed out searched nothing at all - that is a
+        # FAILURE, not an empty result. It used to audit Skipped with failed=0 and paint
+        # 'Done. No results.', which reads as 'this person logged on nowhere'. The engine
+        # hands out the coverage numbers; the verdict itself lives in one unit-tested
+        # predicate so the rule cannot drift between engine and handler.
+        if (-not $isFail -and $rawResults[0].ContainsKey('_dcsTotal')) {
+            $isFail = Test-AdLastPcAllDenied -DcsScanned ([int]$rawResults[0]['_dcsScanned']) -DcsTotal ([int]$rawResults[0]['_dcsTotal'])
+        }
         if ($isFail) {
             & $send @{ type='log'; level='err'; text=$msg }
             & $send @{ type='audit'; action='TouchHost'; target=[string]$auditTarget; result='Failure'; itemCount=0; detail=("error: $msg") }
@@ -1836,6 +2252,38 @@ function Invoke-JanetToolAction {
             $summary['timedOut']      = [bool]$meta['_timedOut']
             $summary['scanSeconds']   = [int]$meta['_scanSeconds']
         }
+    } elseif ($ActionId -eq 'search-manager') {
+        # audit 2026-07-24 (P3): the manager display-name term is wildcard-suffixed, so
+        # 'smith' can match several people; the engine takes [0] and lists THAT person's
+        # direct reports. Warn exactly the way LastPC warns on _userTruncated, so the
+        # operator knows the pick was arbitrary instead of trusting a wrong org chart.
+        $mMeta = $null
+        foreach ($res in $rawResults) {
+            if ($res -is [hashtable] -and $res.ContainsKey('_managerMatchCount')) { $mMeta = $res; break }
+        }
+        if ($mMeta -and $mMeta['_managerAmbiguous'] -eq $true) {
+            $mgrName = Get-AdDisplayName $mMeta
+            & $send @{ type='log'; level='warn'; text="$([int]$mMeta['_managerMatchCount']) managers matched that display name; only the FIRST ($mgrName) was used for the direct-report list. Refine the name if this is the wrong person." }
+            $summary['managerAmbiguous'] = $true
+            $summary['managerMatches']   = [int]$mMeta['_managerMatchCount']
+        }
+    } elseif ($ActionId -eq 'search-group') {
+        # audit 2026-07-25 (fable re-audit follow-up): a group whose member RANGE paging
+        # did not run to the directory's end-of-attribute terminator (a page threw, or the
+        # 200-page guard tripped) is showing a PARTIAL membership. Say so - a silently
+        # short member list reads as a real, smaller group. Warn exactly the way LastPC
+        # warns on _userTruncated.
+        $partialGroups = New-Object System.Collections.ArrayList
+        foreach ($res in $rawResults) {
+            if ($res -is [hashtable] -and $res['_memberTruncated'] -eq $true) {
+                [void]$partialGroups.Add((Get-AdPropString $res 'name'))
+            }
+        }
+        if ($partialGroups.Count -gt 0) {
+            & $send @{ type='log'; level='warn'; text="Member list INCOMPLETE for $($partialGroups.Count) group(s) ($($partialGroups -join ', ')) - the directory stopped answering mid-enumeration, so MemberCount is a LOWER BOUND. Re-run to get the full membership." }
+            $summary['memberTruncated']       = $true
+            $summary['memberTruncatedGroups'] = $partialGroups.Count
+        }
     } elseif ($ActionId -eq 'search-bulk-computer') {
         $active = 0; $stale = 0; $notFound = 0
         foreach ($res in $rawResults) {
@@ -1892,4 +2340,10 @@ function Invoke-JanetToolAction {
     return @{ rows = @($rows); summary = $summary }
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Test-AdSearchDnInLocalDomain
+# audit 2026-07-24: New-AdUserLdapFilter / Test-AdLastPcAllDenied / Get-AdMemberValues /
+# ConvertTo-AdGridRow are exported so the fixed behaviours are unit-testable offline
+# (Escape-LdapFilterValue stays internal - it is reached through the filter builder).
+# audit 2026-07-25 (fable re-audit follow-up): Merge-AdRangedMemberValues joins them -
+# it is the twin of the engine's inlined copy, so the keep-the-fetched-page rule is
+# pinned by a test instead of only living inside the child runspace.
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Test-AdSearchDnInLocalDomain, New-AdUserLdapFilter, Test-AdLastPcAllDenied, Get-AdMemberValues, Merge-AdRangedMemberValues, Get-AdLastLogonString, ConvertTo-AdGridRow

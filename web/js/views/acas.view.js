@@ -27,7 +27,11 @@
    group-findings (per-card finding drill-down) and list-profiles (Backbone).
    Card runs dispatch against the EXPLICIT affected-host list analyze returns
    (operator can review it): one card -> run-vulnerability(targets=hosts); the
-   checked / runnable sets -> run-all-parallel / run-all-sequential(jobs).
+   runnable set -> run-all-sequential(jobs).
+   audit 2026-07-24 (P4): the three by-id actions the server whitelists but nothing
+   reached are now wired - the CHECKED cards go to patch-selected (cross-card
+   (profile,host) dedup, host sets re-derived server-side by group Key) and the
+   Reboot-category card buttons go to reboot-selected / verify-selected.
    ========================================================================== */
 (function () {
   'use strict';
@@ -67,7 +71,9 @@
     var s = String(v || '').toUpperCase();
     if (s === 'OK') return 'st-ok';
     if (s === 'FAIL') return 'st-bad';
-    if (s === 'SKIP') return 'st-warn';
+    // audit 2026-07-24: UNCONFIRMED (a trigger that was accepted but NOT verified - MECM
+    // InstallUpdates / UsoClient / an unchanged version) is amber like SKIP, never blank.
+    if (s === 'SKIP' || s === 'UNCONFIRMED') return 'st-warn';
     return '';
   }
   // run-result rows all carry the same Host across (profile,host) tuples; key by
@@ -89,6 +95,10 @@
       var csvName = '';                 // friendly file name
       var cards = [];                   // analyze-remediation group descriptors
       var cardState = {};               // key -> { checked, profile }  (operator picks)
+      // audit 2026-07-24 (P1): the analyze KEV state - 'hits' / 'clear' / 'unavailable'
+      // ('' before the first analyze). 'unavailable' means the CISA catalog could not be
+      // read, so NO card's KEV badge is meaningful; the cards panel says so out loud.
+      var kevState = '', kevCatalog = '';
       var importedHosts = [];           // affected short hostnames harvested from import-acas
       var run = null, unsub = null;     // current RunController handle + its unsubscribe
       var hostLookupUnsub = null, groupUnsub = null, backboneUnsub = null, kbScanUnsub = null;  // read-only side-runs
@@ -374,7 +384,7 @@
         }).then(function (ok) {
           if (!ok) return;
           csvPath = ''; csvName = ''; importedHosts = [];
-          cards = []; cardState = {};
+          cards = []; cardState = {}; kevState = ''; kevCatalog = '';
           stat.findings = 0; stat.patchable = 0; stat.reboot = 0; stat.patched = 0; stat.failed = 0;
           if (importGrid) importGrid.clear();
           if (importProg) importProg.reset();
@@ -522,7 +532,7 @@
             { key: 'Version After', label: 'AFTER', width: 110 },
             { key: 'Detail', label: 'DETAIL' }
           ],
-          rowClass: function (r) { var s = String(r.Result || '').toUpperCase(); if (s === 'OK') return 'row-ok'; if (s === 'FAIL') return 'row-bad'; if (s === 'SKIP') return 'row-warn'; return ''; }
+          rowClass: function (r) { var s = String(r.Result || '').toUpperCase(); if (s === 'OK') return 'row-ok'; if (s === 'FAIL') return 'row-bad'; if (s === 'SKIP' || s === 'UNCONFIRMED') return 'row-warn'; return ''; }   // audit 2026-07-24: UNCONFIRMED is amber, not unstyled
         });
         var rgh = el('div'); rgh.style.cssText = 'flex:1;min-height:0;display:flex'; rgh.appendChild(resultsGrid.el);
         resCard.appendChild(rgh);
@@ -564,6 +574,10 @@
         // KEV-first badge at the point of remediation: this group carries a CISA
         // known-exploited CVE (shorter BOD-mandated SLA) — remediate first.
         if (c.inKev) { var kp = ui.pill('KEV'); kp.style.cssText += ';background:var(--sev-crit,#E0505A);color:#0a0a0e;font-weight:700;border:1px solid var(--sev-crit,#E0505A)'; kp.title = 'CISA Known-Exploited Vulnerability — remediate first'; badges.appendChild(kp); }
+        // audit 2026-07-24 (P1): the KEV catalog could not be read for this analyze, so the
+        // ABSENCE of a KEV badge proves nothing. Say so on the card instead of letting it
+        // read as "not known-exploited".
+        else if (c.kevKnown === false) { var ku = ui.pill('KEV ?'); ku.style.cssText += ';background:transparent;border:1px dashed var(--amber);color:var(--amber)'; ku.title = 'KEV catalog unavailable — exploitation status UNKNOWN for this card (refresh JanetLocal\\KevCatalog.txt via the KEV tool, then re-Analyze).'; badges.appendChild(ku); }
         var catPill = ui.pill(CAT_LABEL[c.category] || c.category);
         catPill.style.cssText += ';background:var(--panel-light);color:var(--muted)';
         badges.appendChild(catPill);
@@ -670,6 +684,15 @@
         if (!updaterBody) return;
         updaterBody.innerHTML = '';
         if (cards.length === 0) { updaterBody.appendChild(emptyHint('No cards yet. Import a CSV, then Analyze.')); return; }
+        // audit 2026-07-24 (P1): "catalog unavailable" is its OWN state and must be visible.
+        // Without this strip the KEV column/badges are simply absent, which reads as
+        // "nothing here is being actively exploited" - the exact false all-clear.
+        if (kevState === 'unavailable') {
+          var kb = el('div');
+          kb.style.cssText = 'font-size:11.5px;padding:6px 8px;border:1px dashed var(--amber);border-radius:3px;color:var(--amber)';
+          kb.textContent = 'KEV catalog unavailable (' + (kevCatalog || 'unknown') + ') - known-exploited badging is OFF. An un-badged card is NOT evidence the vulnerability is un-exploited. Refresh JanetLocal\\KevCatalog.txt with the KEV tool, then re-Analyze.';
+          updaterBody.appendChild(kb);
+        }
         // group by category, ordered Patchable-first
         var byCat = {};
         cards.forEach(function (c) { (byCat[c.category] = byCat[c.category] || []).push(c); });
@@ -677,7 +700,10 @@
         CAT_ORDER.concat(Object.keys(byCat)).forEach(function (cat) {
           if (seen[cat] || !byCat[cat]) return; seen[cat] = true;
           var kevN = byCat[cat].filter(function (c) { return c.inKev; }).length;
-          var hdr = el('div', 'j-eyebrow', (CAT_LABEL[cat] || cat) + '  (' + byCat[cat].length + (kevN ? (', ' + kevN + ' KEV') : '') + ')');
+          // audit 2026-07-24 (P1): with no catalog the count is unknowable - say 'KEV n/a',
+          // never omit it (an omitted count reads as zero known-exploited).
+          var kevTxt = (kevState === 'unavailable') ? ', KEV n/a' : (kevN ? (', ' + kevN + ' KEV') : '');
+          var hdr = el('div', 'j-eyebrow', (CAT_LABEL[cat] || cat) + '  (' + byCat[cat].length + kevTxt + ')');
           hdr.style.cssText += ';margin:4px 0 2px';
           updaterBody.appendChild(hdr);
           // KEV-first within each category: known-exploited groups lead (audit "KEV first").
@@ -706,6 +732,10 @@
             cardState = {};
             cards.forEach(function (c) { cardState[c.key] = { checked: false, profile: (c.profiles && c.profiles[0]) || '' }; });
             var s = (res && res.summary) || {};
+            // audit 2026-07-24 (P1): carry the engine's KEV catalog state; a server that
+            // did not send one is treated as unavailable (fail-closed), never as clear.
+            kevCatalog = s.kevCatalog != null ? String(s.kevCatalog) : '';
+            kevState = s.kevState != null ? String(s.kevState) : (kevCatalog === 'ok' ? 'clear' : 'unavailable');
             stat.findings = s.findings != null ? s.findings : stat.findings;
             stat.patchable = s.patchable != null ? s.patchable : cards.filter(function (c) { return c.runnable; }).length;
             stat.reboot = s.reboot != null ? s.reboot : cards.filter(function (c) { return c.category === 'Reboot'; }).length;
@@ -815,12 +845,14 @@
         });
       }
 
-      // ---- per-card Reboot / Verify (Reboot-category cards) -> schedule-reboot / verify-post-reboot ----
+      // ---- per-card Reboot / Verify (Reboot-category cards) -> reboot-selected / verify-selected ----
       function doRebootOne(c, verifyOnly, warningText) {
         if (runActive()) { ctx.confirm({ title: 'Run in progress', body: 'A run is already in progress. Wait for it to finish or Cancel it.', okText: 'OK', cancelText: null }); return; }
         if (!verifyOnly && !credGuard('scheduling reboots')) return;
         var hosts = hostsOf(c);
         if (!hosts.length) { ctx.confirm({ title: 'No affected hosts', body: 'No affected hosts resolved for this card. Re-run Analyze / Refresh Cards.', okText: 'OK', cancelText: null }); return; }
+        // reboot-selected / verify-selected re-derive the host set from the CSV by group Key.
+        if (!csvPath) { ctx.confirm({ title: 'No CSV imported', body: 'The in-card reboot actions re-derive the affected hosts from the imported CSV. Import + Analyze first.', okText: 'OK', cancelText: null }); return; }
         ctx.confirm({
           title: (verifyOnly ? 'Verify post-reboot' : 'Schedule reboot') + ' - ' + hosts.length + ' host(s)',
           danger: !verifyOnly,
@@ -830,8 +862,13 @@
           okText: verifyOnly ? 'Verify' : 'Schedule Reboot', cancelText: 'Cancel'
         }).then(function (ok) {
           if (!ok) return;
-          var action = verifyOnly ? 'verify-post-reboot' : 'schedule-reboot';
-          var params = { targets: hosts.join('\n'), vulnDisplay: c.plugin, threads: 20 };
+          // audit 2026-07-24 (P4): dispatch the IN-CARD actions the server whitelists
+          // (reboot-selected / verify-selected) instead of the generic targets-blob pair.
+          // The engine re-derives the group's host set from the CSV by Key and re-runs the
+          // host-token whitelist on it, so the browser cannot widen the wave; `hosts` is
+          // sent only as the operator-reviewed filter (intersected server-side).
+          var action = verifyOnly ? 'verify-selected' : 'reboot-selected';
+          var params = { csvPaths: csvPath, key: c.key, hosts: hosts, vulnDisplay: c.plugin, threads: 20 };
           if (!verifyOnly) params.warningText = warningText || '';
           run = ctx.run(action, params, { keyOf: keyHost });
           bindRebootResults({ verifyOnly: verifyOnly, bannerTxt: (verifyOnly ? 'VERIFY REBOOT' : 'SCHEDULE REBOOT') + ' [' + c.plugin + '] on ' + hosts.length + ' host(s)' });
@@ -871,22 +908,31 @@
         });
       }
 
-      // ---- Patch / Verify the CHECKED cards -> run-all-parallel over each card's explicit host set ----
+      // ---- Patch / Verify the CHECKED cards -> patch-selected (cross-card dedup) ----
       function doPatchSelected(verifyOnly) {
         if (runActive()) { ctx.confirm({ title: 'Run in progress', body: 'A run is already in progress.', okText: 'OK', cancelText: null }); return; }
         var chosen = cards.filter(function (c) { return c.runnable && cardState[c.key] && cardState[c.key].checked && hostsOf(c).length; });
         if (chosen.length === 0) { ctx.confirm({ title: 'Nothing selected', body: 'Check at least one runnable card (with affected hosts).', okText: 'OK', cancelText: null }); return; }
+        // patch-selected re-derives each group's host set from the CSV by Key.
+        if (!csvPath) { ctx.confirm({ title: 'No CSV imported', body: 'Patch / Verify Selected re-derives the affected hosts from the imported CSV. Import + Analyze first.', okText: 'OK', cancelText: null }); return; }
         if (!verifyOnly && !credGuard('patching')) return;
-        var jobs = chosen.map(jobLine).join('\n');
+        // audit 2026-07-24 (P4): the checked cards now go to the server-whitelisted
+        // 'patch-selected' (was run-all-parallel with a jobs blob). run-all-parallel treats
+        // each job line independently, so two cards that resolve to the SAME profile on the
+        // same host pushed that remediation TWICE; patch-selected de-dupes the (profile,host)
+        // tuples ACROSS cards, re-derives each host set from the CSV by Key, and books one
+        // fan-out per group (per-group Runs-CSV fidelity). `hosts` carries the operator-
+        // reviewed target list as a filter - the engine intersects, never widens.
+        var selections = chosen.map(function (c) { return { key: c.key, profile: profOf(c), hosts: hostsOf(c) }; });
         ctx.confirm({
           title: (verifyOnly ? 'Verify' : 'Patch') + ' selected (' + chosen.length + ')',
           danger: !verifyOnly,
-          body: (verifyOnly ? 'Verify' : 'Patch') + ' <b>' + chosen.length + '</b> selected card(s) against their affected host sets, in parallel?',
+          body: (verifyOnly ? 'Verify' : 'Patch') + ' <b>' + chosen.length + '</b> selected card(s) against their affected host sets? Duplicate (profile, host) work across cards runs once.',
           list: chosen.slice(0, 6).map(function (c) { return profOf(c) + '  (' + hostsOf(c).length + ' host(s))'; }),
           okText: verifyOnly ? 'Verify' : 'Patch', cancelText: 'Cancel'
         }).then(function (ok) {
           if (!ok) return;
-          run = ctx.run('run-all-parallel', { jobs: jobs, verifyOnly: verifyOnly, threads: 20, perHostTimeout: perHostTimeoutVal(), log4jSource: log4jSrcVal() }, { keyOf: keyHostProfile });
+          run = ctx.run('patch-selected', { csvPaths: csvPath, selections: selections, verifyOnly: verifyOnly, threads: 20, perHostTimeout: perHostTimeoutVal(), log4jSource: log4jSrcVal() }, { keyOf: keyHostProfile });
           bindRunResults({ bannerTxt: (verifyOnly ? 'VERIFY' : 'PATCH') + ' SELECTED: ' + chosen.length + ' card(s)' });
         });
       }
@@ -1161,7 +1207,7 @@
             { key: 'Result', label: 'RESULT', width: 80, render: function (r) { return { text: String(r.Result || ''), cls: resultCls(r.Result) }; } },
             { key: 'Detail', label: 'DETAIL' }
           ],
-          rowClass: function (r) { var s = String(r.Result || '').toUpperCase(); if (s === 'OK') return 'row-ok'; if (s === 'FAIL') return 'row-bad'; if (s === 'SKIP') return 'row-warn'; return ''; }
+          rowClass: function (r) { var s = String(r.Result || '').toUpperCase(); if (s === 'OK') return 'row-ok'; if (s === 'FAIL') return 'row-bad'; if (s === 'SKIP' || s === 'UNCONFIRMED') return 'row-warn'; return ''; }   // audit 2026-07-24: UNCONFIRMED is amber, not unstyled
         });
         var rghh = el('div'); rghh.style.cssText = 'flex:1;min-height:0;display:flex'; rghh.appendChild(kbResGrid.el); resCard.appendChild(rghh);
         split.appendChild(resCard);

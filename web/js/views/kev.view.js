@@ -30,6 +30,30 @@
   // of a divergent local copy that missed the apostrophe. One esc, one behavior.
   var esc = Janet.util.esc;
 
+  // Catalog freshness, rendered from the summary the engine now ships (audit
+  // 2026-07-24). A months-old snapshot used to be invisible in the UI, so a green
+  // "nothing on KEV" result looked authoritative when it was merely old. Age is
+  // always shown; past the engine's staleness threshold (summary.stale) it is
+  // shown as a warning, because "no overlap" then means "nothing known as of then".
+  function catAgeText(s) {
+    if (!s || !s.updated) return 'age unknown';
+    var d = (s.ageDays == null || s.ageDays < 0) ? null : s.ageDays;
+    var when = 'updated ' + s.updated;
+    if (d == null) return when;
+    if (d === 0) return when + ' (today)';
+    return when + ' (' + d + ' day' + (d === 1 ? '' : 's') + ' old)';
+  }
+  function catAgeCls(s) { return (s && s.stale) ? 'st-warn' : 'muted'; }
+
+  // add-kev streams one { CVE, Status } row per input token; map the status to a log
+  // level so the per-CVE outcome is visible instead of collapsing into the counts.
+  function addStatusLevel(st) {
+    var s = String(st == null ? '' : st).toLowerCase();
+    if (s.indexOf('added') === 0) return 'ok';
+    if (s.indexOf('invalid') === 0) return 'err';
+    return 'warn';
+  }
+
   function sevCls(v) {
     var s = String(v == null ? '' : v).toLowerCase();
     if (s.indexOf('crit') === 0) return 'st-bad';
@@ -149,6 +173,10 @@
             { key: 'Year', label: 'YEAR', width: 70 },
             { key: 'Severity', label: 'SEVERITY', width: 100, render: function (r) { return { text: String(r.Severity == null ? '' : r.Severity), cls: sevCls(r.Severity) }; } },
             { key: 'Score', label: 'SCORE', width: 75 },
+            // audit 2026-07-24: the manifest has always declared IAVA and the engine has
+            // always emitted it - the grid just never rendered it, so the IAVA/bulletin
+            // badge the operator needs for the ticket was invisible.
+            { key: 'IAVA', label: 'IAVA', width: 130, render: function (r) { var v = String(r.IAVA == null ? '' : r.IAVA); return { text: v, cls: v ? 'st-warn' : 'cell-dim' }; } },
             { key: 'InKEV', label: 'ON KEV?', width: 120, render: function (r) { var on = r.InKEV === 'Listed (KEV)'; return { text: String(r.InKEV || ''), cls: on ? 'st-bad' : 'cell-dim' }; } }
           ],
           rowClass: function (r) { return r.InKEV === 'Listed (KEV)' ? 'row-bad' : ''; }
@@ -164,7 +192,7 @@
         exportBtn.onclick = function () {
           var rows = grid.rows();
           if (!rows.length) { ctx.confirm({ title: 'Nothing to export', body: 'Run a cross-reference first.', okText: 'OK', cancelText: null }); return; }
-          var cols = [['CVE', 'CVE'], ['Year', 'Year'], ['Severity', 'Severity'], ['Score', 'Score'], ['InKEV', 'On KEV']];
+          var cols = [['CVE', 'CVE'], ['Year', 'Year'], ['Severity', 'Severity'], ['Score', 'Score'], ['IAVA', 'IAVA'], ['InKEV', 'On KEV']];
           ctx.util.exportCsv('KEV_CrossRef', cols, rows);
         };
 
@@ -190,9 +218,19 @@
             final: function (res) {
               recount();
               var s = (res && res.summary) || {};
-              kevLine.textContent = 'KEV catalog: ' + (s.kev == null ? '?' : s.kev) + ' CVE(s)';
-              if (s.empty) { setStatus('KEV catalog is EMPTY - this is NOT an all-clear. Populate it on the KEV Catalog tab, then re-run.', 'st-bad'); return; }
+              kevLine.textContent = 'KEV catalog: ' + (s.kev == null ? '?' : s.kev) + ' CVE(s) - ' + catAgeText(s);
+              kevLine.className = catAgeCls(s);
+              // audit 2026-07-24: no usable catalog = UNKNOWN, and the engine now sends no
+              // rows at all, so the grid/stat cards stay empty rather than reading clean.
+              if (s.empty || s.unknown) {
+                setStatus('KEV catalog is ' + (s.unreadable ? 'UNREADABLE' : 'EMPTY') + ' - result is UNKNOWN, not clean. Nothing was cross-referenced. Populate/restore it on the KEV Catalog tab, then re-run.', 'st-bad');
+                return;
+              }
               var ov = s.overlap || 0;
+              if (ov === 0 && s.stale) {
+                setStatus('No KEV overlap in ' + (s.total || 0) + ' CVE(s) - but the catalog is ' + catAgeText(s) + '. NOT an all-clear.', 'st-warn');
+                return;
+              }
               setStatus('Done - ' + ov + ' of ' + (s.total || 0) + ' machine CVE(s) on the KEV list.', ov > 0 ? 'st-warn' : 'st-ok');
             }
           });
@@ -202,7 +240,13 @@
         // populate the KEV count up-front (silent list-kev)
         var lr = ctx.run('list-kev', {}, { keyOf: function (ev) { return ev._rk; } });
         var n = 0;
-        track(lr.subscribe({ row: function () { n++; }, final: function (res) { var c = (res && res.summary && res.summary.total != null) ? res.summary.total : n; kevLine.textContent = 'KEV catalog: ' + c + ' CVE(s) (JanetLocal\\KevCatalog.txt - ships in take-to-work)'; } }));
+        track(lr.subscribe({ row: function () { n++; }, final: function (res) {
+          var s = (res && res.summary) || {};
+          var c = (s.total != null) ? s.total : n;
+          // Age up front, before the operator even runs a cross-reference (audit 2026-07-24).
+          kevLine.textContent = 'KEV catalog: ' + c + ' CVE(s), ' + catAgeText(s) + (s.stale ? ' - STALE, refresh it' : '') + ' (JanetLocal\\KevCatalog.txt)';
+          kevLine.className = catAgeCls(s);
+        } }));
 
         updCount();
       }
@@ -259,7 +303,14 @@
           catUnsub = lr.subscribe({
             row: function (r) { grid.upsert(r); n++; },
             log: function (l) { actlog.append(l); },
-            final: function (res) { var c = (res && res.summary && res.summary.total != null) ? res.summary.total : n; countLine.textContent = c + ' CVE(s) in the KEV catalog - JanetLocal\\KevCatalog.txt'; }
+            final: function (res) {
+              var s = (res && res.summary) || {};
+              var c = (s.total != null) ? s.total : n;
+              // audit 2026-07-24: surface the snapshot's vintage next to the count - the
+              // count alone says nothing about whether the list is current.
+              countLine.textContent = c + ' CVE(s) in the KEV catalog - ' + catAgeText(s) + (s.stale ? ' - STALE, refresh it' : '') + ' - JanetLocal\\KevCatalog.txt';
+              countLine.className = catAgeCls(s);
+            }
           });
           track(catUnsub);
         }
@@ -279,13 +330,21 @@
           var ar = ctx.run('add-kev', { cves: raw }, { keyOf: function (ev) { return ev._rk; } });
           if (addUnsub) addUnsub();   // replace, don't stack, on repeated adds
           addUnsub = ar.subscribe({
+            // audit 2026-07-24: add-kev streams one { CVE, Status } row per token and the
+            // view used to drop them all, so "Already in KEV" / "Invalid format" collapsed
+            // into a bare count and the operator could not tell WHICH CVE was rejected.
+            row: function (r) { actlog.append({ text: String(r.CVE || '') + ' - ' + String(r.Status || ''), level: addStatusLevel(r.Status) }); },
             log: function (l) { actlog.append(l); },
             error: function (e) { addStatus.textContent = e.text || 'Save error'; addStatus.className = 'st-bad'; },
             active: function (a) { addBtn.disabled = a; },
             final: function (res) {
               var s = (res && res.summary) || {};
               if (s.saveError) { addStatus.textContent = 'Save FAILED - catalog unchanged.'; addStatus.className = 'st-bad'; return; }
-              addStatus.textContent = 'Added ' + (s.added || 0) + ', skipped ' + (s.duplicate || 0) + ' dup, ' + (s.invalid || 0) + ' invalid.';
+              // audit 2026-07-25 (fable re-audit follow-up): add-kev reports the catalog's
+              // vintage like list-kev / xref do - and it is the PRE-ADD vintage, because
+              // writing the file resets its timestamp without refreshing the CISA snapshot.
+              addStatus.textContent = 'Added ' + (s.added || 0) + ', skipped ' + (s.duplicate || 0) + ' dup, ' + (s.invalid || 0) + ' invalid'
+                + (s.updated ? ' - snapshot before this add: ' + catAgeText(s) + (s.stale ? ' (STALE)' : '') : '') + '.';
               addStatus.className = (s.added > 0) ? 'st-ok' : 'st-warn';
               if (s.added > 0) { addInput.value = ''; loadCatalog(); }
             }

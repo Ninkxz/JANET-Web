@@ -23,11 +23,21 @@
 
   // Engine streams one row per HOST that mutates through its lifecycle; phase
   // values ('Probing','Repairing','Copying','Deploying') and terminal values
-  // ('Success','Failed','Deferred','Skipped','Rejected','Queued') all arrive as
-  // Status on the SAME Host key. Colour is hand-written per status (never regex).
+  // ('Success','Success (warnings)','AlreadyInstalled','Failed','Deferred',
+  // 'Skipped','Rejected','Queued') all arrive as Status on the SAME Host key.
+  // Colour is hand-written per status (never regex).
+  // audit 2026-07-24: 'Success (warnings)' (PSADT exited 0/1641/3010 but its output
+  // carried ERROR/FAILED lines - a soft failure) and 'AlreadyInstalled' (every MSI
+  // returned 1638: the install did NOT run and the installed version was never
+  // verified compliant) are BOTH terminal statuses the module emits and buckets, but
+  // this view had neither - so those hosts stayed uncoloured, never tallied, and the
+  // final "ok+fail+deferred+skipped of total" line silently under-counted. They are
+  // the two states most worth seeing, so they get warn colour, not the quiet ones.
   function statusCellCls(v) {
     switch (String(v)) {
       case 'Success': return 'st-ok';
+      case 'Success (warnings)': return 'st-warn';
+      case 'AlreadyInstalled': return 'st-warn';
       case 'Failed': return 'st-bad';
       case 'Rejected': return 'st-bad';
       case 'Deferred': return 'st-warn';
@@ -47,12 +57,15 @@
       case 'Failed': return 'row-bad';
       case 'Rejected': return 'row-bad';
       case 'Deferred': return 'row-warn';
+      case 'Success (warnings)': return 'row-warn';
+      case 'AlreadyInstalled': return 'row-warn';
       default: return '';        // in-flight phases stay neutral
     }
   }
   function isTerminal(v) {
     var s = String(v);
-    return s === 'Success' || s === 'Failed' || s === 'Deferred' || s === 'Skipped' || s === 'Rejected';
+    return s === 'Success' || s === 'Success (warnings)' || s === 'AlreadyInstalled' ||
+           s === 'Failed' || s === 'Deferred' || s === 'Skipped' || s === 'Rejected';
   }
 
   JanetViews.register('pkginstall', {
@@ -157,6 +170,20 @@
       var threadsInput = ui.number({ value: 8, min: 1, max: 32, title: 'Concurrent hosts (1-32).' }); threadsInput.style.width = '90px';
       parWrap.appendChild(threadsInput);
       actionCard.appendChild(parWrap);
+
+      // INSTALL TIMEOUT (audit 2026-07-24). The manifest declares installTimeoutMin
+      // (default 30, bound 1-240) and the module sizes both the WinRM OperationTimeout
+      // and the per-host wall-clock watchdog from it - but a CUSTOM view does not get
+      // manifest inputs rendered for it, so this control never existed and the param
+      // was never posted. A large package (Office/Adobe/.NET/VS) therefore tripped the
+      // unraisable 30-min cap and booked a FALSE Failed row (and a false audit Failure)
+      // on a host where the install actually completed. Wired explicitly here.
+      var toWrap = el('div');
+      toWrap.appendChild(ui.eyebrow('INSTALL TIMEOUT (MIN)'));
+      var timeoutInput = ui.number({ value: 30, min: 1, max: 240, title: 'Per-host install budget in minutes (1-240, default 30). Raise it for large packages - the deploy streams no output while it runs, so a package that outlives this cap is reported Failed even though it may have completed.' });
+      timeoutInput.style.width = '90px';
+      toWrap.appendChild(timeoutInput);
+      actionCard.appendChild(toWrap);
 
       var statusLine = el('span', 'muted', 'Ready'); statusLine.style.minWidth = '160px';
       actionCard.appendChild(statusLine);
@@ -330,7 +357,7 @@
 
       // audit 2026-07-23 deferred pass: S3 lockInputs consolidation (retryBtn keeps
       // its has-failed condition as the one custom trailing line)
-      var lockCore = ctx.util.lockable([pkgSelect, refreshBtn, customInput, nameInput, threadsInput, btnPsadt, btnMsi, msiArgsInput, msiAll, msiNone]);
+      var lockCore = ctx.util.lockable([pkgSelect, refreshBtn, customInput, nameInput, threadsInput, timeoutInput, btnPsadt, btnMsi, msiArgsInput, msiAll, msiNone]);
       function lockInputs(on) {
         lockCore(on);
         retryBtn.disabled = on || !hasFailed();
@@ -347,13 +374,17 @@
         var pkgPath = resolvedPkgPath();
         var pkgName = (nameInput.value || '').trim();
         var threads = Math.max(1, Math.min(32, parseInt(threadsInput.value, 10) || 8));
+        // audit 2026-07-24: clamped client-side to the module's own 1..240 bound so the
+        // dialog never advertises a budget the server would silently re-clamp.
+        var timeoutMin = Math.max(1, Math.min(240, parseInt(timeoutInput.value, 10) || 30));
         var msis = checkedMsis();
         var pkgLabel = pkgName || (selectedPkg() ? selectedPkg().name : pkgPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop());
         var modeLabel = (mode === 'msi') ? 'MSI bundle' : 'PSADT package';
 
         var bodyHtml = 'Deploy <b>' + esc(pkgLabel) + '</b> (' + modeLabel + ') to <b>' + hosts.length + '</b> target(s)?'
           + '<br>Path: <b>' + esc(pkgPath) + '</b>'
-          + '<br>Parallel: <b>' + threads + '</b>';
+          + '<br>Parallel: <b>' + threads + '</b>'
+          + '<br>Install timeout: <b>' + timeoutMin + '</b> min/host';
         if (mode === 'msi') bodyHtml += '<br>MSIs: <b>' + msis.length + '</b>  |  args: <b>' + esc(msiArgsInput.value) + '</b>';
         bodyHtml += '<br><br>This installs software on remote machines. First few targets:';
 
@@ -370,7 +401,7 @@
 
           grid.clear(); resetTally(hosts.length);
           log.banner("=== Deploying '" + pkgLabel + "' to " + hosts.length + ' target(s) ===');
-          log.append({ text: 'Mode: ' + modeLabel + '  |  Path: ' + pkgPath + '  |  Parallel: ' + threads, level: 'mode' });
+          log.append({ text: 'Mode: ' + modeLabel + '  |  Path: ' + pkgPath + '  |  Parallel: ' + threads + '  |  Install timeout: ' + timeoutMin + ' min/host', level: 'mode' });
           if (mode === 'msi') {
             log.append({ text: 'MSI args: ' + msiArgsInput.value, level: 'dim' });
             msis.forEach(function (m) { log.append({ text: '  + ' + m, level: 'dim' }); });
@@ -385,6 +416,7 @@
             packagePathManual: '',     // pkgPath already resolves custom override
             packageName: pkgName,
             threads: threads,
+            installTimeoutMin: timeoutMin,   // audit 2026-07-24: was never posted at all
             confirm: 'DEPLOY'          // operator typed it in the ArmingDialog above
           };
           if (mode === 'msi') { params.msiList = msis.join('\n'); params.msiArgs = msiArgsInput.value; }
@@ -398,9 +430,17 @@
               grid.upsert(r);
               if (isTerminal(r.Status)) {
                 var s = String(r.Status);
-                if (s === 'Success') { stat.ok++; log.append({ text: '[' + r.Host + '] SUCCESS' + (r.ExitCode !== '' && r.ExitCode != null ? ' (exit=' + r.ExitCode + ')' : ''), level: 'ok' }); }
+                var exitTag = (r.ExitCode !== '' && r.ExitCode != null) ? ' (exit=' + r.ExitCode + ')' : '';
+                // audit 2026-07-24: bucket the two newly-terminal statuses the way the
+                // module itself does, so the tally reconciles against total:
+                // 'Success (warnings)' -> okCount (its exit code DID succeed, the soft
+                // failure is surfaced by the status/colour/warn log), 'AlreadyInstalled'
+                // -> skipCount (1638: nothing installed, version unverified - the module
+                // audits it Skipped and must never book it as a patched host).
+                if (s === 'Success') { stat.ok++; log.append({ text: '[' + r.Host + '] SUCCESS' + exitTag, level: 'ok' }); }
+                else if (s === 'Success (warnings)') { stat.ok++; log.append({ text: '[' + r.Host + '] SUCCESS (WARNINGS)' + exitTag + ': ' + (r.Detail || ''), level: 'warn' }); }
                 else if (s === 'Deferred') { stat.deferred++; log.append({ text: '[' + r.Host + '] ' + s + ': ' + (r.Detail || ''), level: 'warn' }); }
-                else if (s === 'Skipped') { stat.skipped++; log.append({ text: '[' + r.Host + '] ' + s + ': ' + (r.Detail || ''), level: 'warn' }); }
+                else if (s === 'Skipped' || s === 'AlreadyInstalled') { stat.skipped++; log.append({ text: '[' + r.Host + '] ' + s + ': ' + (r.Detail || ''), level: 'warn' }); }
                 else { stat.fail++; log.append({ text: '[' + r.Host + '] ' + s.toUpperCase() + ': ' + (r.Detail || ''), level: 'err' }); }
                 pushStats();
               }

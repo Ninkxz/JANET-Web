@@ -26,7 +26,7 @@ Describe 'Write-JanetWebUsageSnapshot - live usage rows without a server stop' {
         [pscustomobject]@{
             Lock           = (New-Object object)
             OnShare        = $false
-            NetRoot        = 'X:\__no_such_share__'
+            NetRoot        = 'C:\__janetweb_no_such_share__'
             JanetLocal     = $script:__tmpRoot
             Operator       = 'Test Operator'
             Edipi          = '0000000000'
@@ -68,24 +68,31 @@ Describe 'Write-JanetWebUsageSnapshot - live usage rows without a server stop' {
         Write-JanetAction -Context $ctx -Tool 'wpt' -Action 'TouchHost'   -Target 'HOSTC' -Result 'Success'
         Write-JanetWebUsageSnapshot -Context $ctx -MinIntervalSec 0
         $rows = @(Get-UsageLines | Select-String -SimpleMatch 'Snapshot')
-        $rows.Count | Should Be 2
+        # 2 per-tool rows + the aggregate JANET-WEB row (which mirrors the SessionEnd
+        # rollup: readers that scope to JANET Web filter Tool='JANET-WEB', and the
+        # per-tool rows carry DESKTOP tool names, so they cannot serve that scoping).
+        $rows.Count | Should Be 3
         # c2c row: cumulative 2 hosts / 3 vulns / 1 failure
         $c2c = @($rows | Where-Object { $_ -match ',c2c,' })[0].ToString()
         $c2c | Should Match 'Snapshot,2,3,1'
         # wpt maps to the desktop WPT folder name
         @($rows | Where-Object { $_ -match ',WPT,' }).Count | Should Be 1
+        # aggregate row: 3 distinct hosts across both tools, 3 vulns, 1 failure
+        $agg = @($rows | Where-Object { $_ -match ',JANET-WEB,' })
+        $agg.Count | Should Be 1
+        $agg[0].ToString() | Should Match 'Snapshot,3,3,1'
     }
 
     It 'does NOT re-emit while nothing new was tallied (UsageDirty cleared)' {
         Write-JanetWebUsageSnapshot -Context $ctx -MinIntervalSec 0
-        @(Get-UsageLines | Select-String -SimpleMatch 'Snapshot').Count | Should Be 2
+        @(Get-UsageLines | Select-String -SimpleMatch 'Snapshot').Count | Should Be 3
     }
 
     It 'honours the minimum interval (fresh activity but too soon -> no row)' {
         Write-JanetAction -Context $ctx -Tool 'c2c' -Action 'TouchHost' -Target 'HOSTD' -Result 'Success'
         $ctx.LastSnapshotAt = Get-Date   # just snapped
         Write-JanetWebUsageSnapshot -Context $ctx -MinIntervalSec 300
-        @(Get-UsageLines | Select-String -SimpleMatch 'Snapshot').Count | Should Be 2
+        @(Get-UsageLines | Select-String -SimpleMatch 'Snapshot').Count | Should Be 3
     }
 
     It 're-emits UPDATED cumulative counts once the interval elapses' {

@@ -19,8 +19,8 @@
   // --- dispatch-restart row Status -> stat bucket + cell colour ------------
   // (engine status set: Pending | In-Flight | Consent-Launching/Awaiting-Consent/
   //  Consent-Polling/Consent-Approved | Dispatched | Already-Scheduled | Declined |
-  //  Failed | Unreachable | Skipped-Server | Consent-Unverified | Cancelled |
-  //  Aborted | Abort Failed | Dry-Run | No-Pending)
+  //  Failed | Unreachable | Skipped-Server | Consent-Unverified | Timeout |
+  //  Cancelled | Aborted | Abort Failed | Dry-Run | No-Pending)
   function dispatchBucket(status) {
     var s = String(status || '');
     if (s === 'Pending') return 'pending';
@@ -28,7 +28,12 @@
     if (s === 'In-Flight' || s === 'Consent-Approved') return 'inflight';
     if (s === 'Dispatched' || s === 'Already-Scheduled') return 'sent';
     if (s === 'Declined') return 'declined';
-    if (s === 'Failed' || s === 'Unreachable' || s === 'Abort Failed' || s === 'Consent-Unverified') return 'failed';
+    // audit 2026-07-24: 'Timeout' is what the engine emits for a host it ABANDONS - the
+    // wave's wall-clock backstop or the per-host watchdog - and it books that host as a
+    // FAILURE. With no bucket here it fell through to 'pending' below, so an abandoned
+    // host sat in PENDING for the rest of the run and logDispatchRow's default dropped
+    // its line entirely: the operator never saw the host had been given up on.
+    if (s === 'Failed' || s === 'Unreachable' || s === 'Abort Failed' || s === 'Consent-Unverified' || s === 'Timeout') return 'failed';
     if (s === 'Aborted') return 'aborted';
     if (s === 'Skipped-Server' || s === 'Cancelled') return 'skipped';
     if (s === 'Dry-Run' || s === 'No-Pending' || s === 'Skipped') return 'skipped';
@@ -350,7 +355,10 @@
         var testHost = ui.input({ placeholder: 'hostname', title: 'Synchronous single-host restart test (returns exit code + hint).' }); testHost.style.width = '180px';
         var testBtn = ui.button('Test single host...', { variant: 'gold', size: 'sm', title: 'Fire one synchronous shutdown /r and show the exit code + error hint.' });
         testBtn.onclick = function () { doTestSingle(testHost.value); };
-        var testDry = ui.checkbox('Dry run', { color: 'var(--warn)', title: 'Preview only - no machine is contacted and nothing reboots.' });
+        // audit 2026-07-24 (S3): defaults to CHECKED. This box previously defaulted off,
+        // so a button labelled "Test single host..." rebooted a production machine on one
+        // click with no dialog at all. Safe reading of "test" is now the default one.
+        var testDry = ui.checkbox('Dry run', { checked: true, color: 'var(--warn)', title: 'Preview only - no machine is contacted and nothing reboots.' });
         refs.testDry = testDry;
         var testOut = el('span', 'muted'); testOut.style.cssText = 'font-family:var(--mono);font-size:12px';
         refs.testOut = testOut;
@@ -576,10 +584,33 @@
       }
 
       // ---- Single-host test (Targets tab) ----
-      function doTestSingle(hostname) {
+      async function doTestSingle(hostname) {
         var h = String(hostname || '').trim();
         if (!h) { ctx.confirm({ title: 'Hostname required', body: 'Enter a hostname to test.', okText: 'OK', cancelText: null }); return; }
         var testDryRun = refs.testDry ? refs.testDry._cb.checked : false;
+        // audit 2026-07-24 (S3): the LIVE single-host test had NO confirmation of any kind -
+        // it called ctx.run directly. Every other reboot path in this view is behind ctx.arm
+        // with a typed word; this one reboots a named production box on one click. Gate it.
+        // Dry runs stay ungated (nothing is contacted).
+        if (!testDryRun) {
+          var okTest = await ctx.arm({
+            title: 'Restart ' + h + ' now?',
+            banner: 'LIVE SINGLE-HOST RESTART - THIS MACHINE WILL REBOOT',
+            danger: true,
+            confirmWord: 'RESTART',
+            body: 'This is a <b>live</b> restart of <b>' + Janet.util.esc(h) + '</b>, not a preview. The host is given a 60-second lead and then reboots. Tick <b>Dry run</b> beside the button if you only want to check reachability and the exit code.',
+            preflight: [
+              { label: 'Target: ' + h, ok: true },
+              { label: 'Admin credential set (' + (ctx.session.state.user || 'session') + ')', ok: !!ctx.session.state.credSet },
+              { label: 'LIVE - this machine WILL restart in 60 seconds', ok: false }
+            ],
+            okText: 'Restart ' + h, cancelText: 'Cancel'
+          });
+          if (!okTest) {
+            if (refs.dispatchLog) refs.dispatchLog.append({ text: '[' + ts() + '] Single-host test cancelled at the arming dialog.', level: 'warn' });
+            return;
+          }
+        }
         if (refs.testOut) { refs.testOut.textContent = (testDryRun ? 'Dry-run check of ' : 'Testing ') + h + '...'; refs.testOut.className = 'st-info'; }
         var tr = ctx.run('test-single-host', { hostname: h, leadSeconds: 60, message: 'TEST: this machine will restart shortly.', dryRun: testDryRun });
         if (testUnsub) testUnsub();
@@ -759,7 +790,9 @@
           case 'sent': lvl = 'ok'; tag = (r.Status === 'Already-Scheduled') ? 'ALREADY' : 'SENT'; break;
           case 'declined': lvl = 'warn'; tag = 'DECLINED'; break;
           case 'aborted': lvl = 'warn'; tag = 'ABORTED'; break;
-          case 'failed': lvl = 'err'; tag = (r.Status === 'Unreachable') ? 'UNREACHABLE' : 'FAIL'; break;
+          // audit 2026-07-24: a watchdog-abandoned host gets its own TIMEOUT tag; it used
+          // to hit the 'Pending' default below and never reach the log at all.
+          case 'failed': lvl = 'err'; tag = (r.Status === 'Unreachable') ? 'UNREACHABLE' : (r.Status === 'Timeout') ? 'TIMEOUT' : 'FAIL'; break;
           case 'skipped': lvl = 'dim'; tag = (r.Status === 'Cancelled') ? 'CANCELLED' : 'SKIPPED'; break;
           case 'consent': lvl = 'info'; tag = 'PROMPT'; break;
           case 'inflight': lvl = 'info'; tag = 'IN-FLIGHT'; break;

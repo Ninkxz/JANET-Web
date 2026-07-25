@@ -54,9 +54,9 @@ Describe 'winupgrade AutoFix - the inline verdict mirror also treats unknown sfc
     }
 }
 
-Describe 'winupgrade - manifest exact version pin (newest bump = loop-37 repair-verdict fail-close)' {
-    It 'winupgrade is at v0.5.6' {
+Describe 'winupgrade - manifest exact version pin (newest bump = audit 2026-07-25 wrong-box residual pass)' {
+    It 'winupgrade is at v0.5.8' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '0.5.6'
+        [string]$mani.version | Should Be '0.5.8'
     }
 }

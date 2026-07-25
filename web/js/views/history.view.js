@@ -21,7 +21,14 @@
     if (s === 'skipped') return 'st-warn';
     return '';
   }
+  // audit 2026-07-24: the server also emits UNKNOWN verdicts ('UNKNOWN (capped)' when
+  // the read ceiling tripped, 'UNKNOWN (read error)' when the audit source could not be
+  // read). Both fell through to the default here - no colour at all - so the cell that
+  // means "we could not tell" rendered exactly like plain text and read as benign.
+  // Match on the prefix so any future UNKNOWN variant is still coloured.
+  function isUnknownVerdict(v) { return String(v == null ? '' : v).indexOf('UNKNOWN') === 0; }
   function verdictCls(v) {
+    if (isUnknownVerdict(v)) return 'st-warn';
     switch (String(v)) {
       case 'FRESH': return 'st-ok';
       case 'STALE': return 'st-warn';
@@ -30,6 +37,7 @@
     }
   }
   function verdictRow(v) {
+    if (isUnknownVerdict(v)) return 'row-warn';
     switch (String(v)) {
       case 'FRESH': return 'row-ok';
       case 'STALE': return 'row-warn';
@@ -171,8 +179,10 @@
             },
             onFinal: function (s) {
               stats.setAll({ total: s.total || cTotal, tools: s.tools != null ? s.tools : Object.keys(cTools).length, fails: s.failures != null ? s.failures : cFail });
-              var cap = s.capped ? ' (row cap hit)' : '';
-              setLine(statusLine, 'Done - ' + (s.total || 0) + ' row(s) for ' + (s.host || '') + cap, (s.total ? 'st-ok' : 'st-warn'));
+              // audit 2026-07-24: a zero-row timeline over a source that failed to read is
+              // UNKNOWN, not a clean "this host has no history" - never let it read as ok.
+              var cap = (s.capped ? ' (row cap hit)' : '') + (s.readFailed ? ' (READ ERRORS - incomplete)' : '');
+              setLine(statusLine, 'Done - ' + (s.total || 0) + ' row(s) for ' + (s.host || '') + cap, s.readFailed ? 'st-bad' : (s.total ? 'st-ok' : 'st-warn'));
             }
           });
         }
@@ -241,8 +251,8 @@
             },
             onFinal: function (s) {
               stats.setAll({ total: s.total != null ? s.total : cTotal, fails: s.failures != null ? s.failures : cFail, ops: s.operators != null ? s.operators : Object.keys(cOps).length });
-              var cap = s.capped ? ' (row cap hit)' : '';
-              setLine(statusLine, 'Done - ' + (s.total || 0) + ' row(s), ' + (s.failPct || 0) + '% fail' + cap, (s.failures ? 'st-warn' : 'st-ok'));
+              var cap = (s.capped ? ' (row cap hit)' : '') + (s.readFailed ? ' (READ ERRORS - incomplete)' : '');   // audit 2026-07-24
+              setLine(statusLine, 'Done - ' + (s.total || 0) + ' row(s), ' + (s.failPct || 0) + '% fail' + cap, s.readFailed ? 'st-bad' : (s.failures ? 'st-warn' : 'st-ok'));
             }
           });
         }
@@ -305,7 +315,7 @@
             onReset: function () { stats.reset(); },
             onFinal: function (s) {
               stats.setAll({ ops: s.operators || 0, actions: s.actions || 0, fails: s.failures || 0 });
-              setLine(statusLine, 'Done - ' + (s.operators || 0) + ' operator(s), ' + (s.actions || 0) + ' action(s)', (s.operators ? 'st-ok' : 'st-warn'));
+              setLine(statusLine, 'Done - ' + (s.operators || 0) + ' operator(s), ' + (s.actions || 0) + ' action(s)' + (s.readFailed ? ' (READ ERRORS - incomplete)' : ''), s.readFailed ? 'st-bad' : (s.operators ? 'st-ok' : 'st-warn'));   // audit 2026-07-24
             }
           });
         }
@@ -358,7 +368,10 @@
           { key: 'total', label: 'HOSTS', color: 'cyan' },
           { key: 'fresh', label: 'FRESH', color: 'ok' },
           { key: 'stale', label: 'STALE', color: 'gold' },
-          { key: 'never', label: 'NEVER TOUCHED', color: 'bad' }
+          { key: 'never', label: 'NEVER TOUCHED', color: 'bad' },
+          // audit 2026-07-24: UNKNOWN had no tile, so a run where EVERY host came back
+          // UNKNOWN showed four zero/near-zero tiles and looked like a clean sweep.
+          { key: 'unknown', label: 'UNKNOWN', color: 'accent' }
         ] });
         right.appendChild(stats.el);
 
@@ -369,7 +382,7 @@
         head.appendChild(exportBtn); head.appendChild(clearBtn);
         right.appendChild(head);
 
-        var results = ui.namedCard('STALENESS BOARD', 'FRESH within threshold; STALE if the last touch is older; NEVER TOUCHED if no audit row inside the lookback window.');
+        var results = ui.namedCard('STALENESS BOARD', 'FRESH within threshold; STALE if the last touch is older; NEVER TOUCHED if no audit row inside the lookback window; UNKNOWN when the read was capped or the audit source could not be read - UNKNOWN is not a pass.');
         results.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
         var grid = C.ResultsGrid({
           title: 'Staleness board', keyMode: { rk: true }, popOut: true, selectable: false,
@@ -391,23 +404,31 @@
         exportBtn.onclick = function () { exportGrid(grid, EXPORT, 'PatchHistory_Staleness'); };
         clearBtn.onclick = function () { grid.clear(); stats.reset(); setLine(statusLine, 'Ready'); };
 
-        var cFresh = 0, cStale = 0, cNever = 0, cTotal = 0;
+        var cFresh = 0, cStale = 0, cNever = 0, cUnknown = 0, cTotal = 0;
         function doStale() {
           startRun({
             action: 'stale-hosts', label: 'CHECK STALENESS', runbar: runbar, grid: grid, statusEl: statusLine,
             params: { targets: targets.hosts().join('\n'), thresholdDays: intOr(thrIn, 30), lookbackMonths: intOr(lookIn, 12) },
-            onReset: function () { stats.reset(); cFresh = 0; cStale = 0; cNever = 0; cTotal = 0; },
+            onReset: function () { stats.reset(); cFresh = 0; cStale = 0; cNever = 0; cUnknown = 0; cTotal = 0; },
             onRow: function (r) {
               cTotal++;
               if (r.Verdict === 'FRESH') cFresh++;
               else if (r.Verdict === 'STALE') cStale++;
               else if (r.Verdict === 'NEVER TOUCHED') cNever++;
-              stats.setAll({ total: cTotal, fresh: cFresh, stale: cStale, never: cNever });
+              else if (isUnknownVerdict(r.Verdict)) cUnknown++;
+              stats.setAll({ total: cTotal, fresh: cFresh, stale: cStale, never: cNever, unknown: cUnknown });
             },
             onFinal: function (s) {
-              stats.setAll({ total: s.total != null ? s.total : cTotal, fresh: s.fresh != null ? s.fresh : cFresh, stale: s.stale != null ? s.stale : cStale, never: s.never != null ? s.never : cNever });
+              var unk = s.unknown != null ? s.unknown : cUnknown;
+              stats.setAll({ total: s.total != null ? s.total : cTotal, fresh: s.fresh != null ? s.fresh : cFresh, stale: s.stale != null ? s.stale : cStale, never: s.never != null ? s.never : cNever, unknown: unk });
+              // audit 2026-07-24: a fully-capped (or unreadable-source) run has stale=0
+              // and never=0, so the old bad-count made the line GREEN on a run that
+              // established nothing at all. UNKNOWN is not a pass - show it, and never
+              // go green while any host is unresolved or the source failed to read.
               var bad = (s.stale || 0) + (s.never || 0);
-              setLine(statusLine, 'Done - Fresh ' + (s.fresh || 0) + ' / Stale ' + (s.stale || 0) + ' / Never ' + (s.never || 0), bad ? 'st-warn' : 'st-ok');
+              var txt = 'Done - Fresh ' + (s.fresh || 0) + ' / Stale ' + (s.stale || 0) + ' / Never ' + (s.never || 0) + ' / Unknown ' + unk;
+              if (s.readErrors) txt += ' (' + s.readErrors + ' read error(s))';
+              setLine(statusLine, txt, s.readFailed ? 'st-bad' : ((bad || unk) ? 'st-warn' : 'st-ok'));
             }
           });
         }

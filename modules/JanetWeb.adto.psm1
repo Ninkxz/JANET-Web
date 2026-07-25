@@ -15,6 +15,30 @@
 #  Contract:
 #    Get-JanetToolManifest                                   -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
+#
+#  v0.2.8 (audit 2026-07-25, fable re-audit follow-up):
+#    P4  a CANCELLED fix / IAO-validate run no longer paints a GREEN "<verb> done"
+#        headline + "<verb> complete" dialog over the engine's honest
+#        "Cancelled. X fixed of Y" status (web/js/views/adto.view.js). The view now
+#        reads summary.cancelled (and the run-state's own 'cancelled' status, for a
+#        hard-killed job that never emits a final event) and says PARTIAL WRITE
+#        instead of success. Engine unchanged - it was already telling the truth.
+#
+#  v0.2.7 (audit 2026-07-24): safety + cancel pass.
+#    P2  a never-logged-on object is aged from whenCreated (plus a new-object grace
+#        floor), so a freshly PRE-STAGED computer / user is no longer "maximally
+#        stale" and auto-DISABLED by the fixer on its first scan.
+#    P2  __job operator-cancel bridge across scan + fix + validate (adto was the only
+#        module in the suite without one, so CANCEL SCAN was inert and a destructive
+#        bulk write could not be aborted), plus a DirectorySearcher time limit.
+#    P3  the loop54 uacUnreadable fail-closed guard now covers Computer/Server too -
+#        that branch derived $disabled from a UAC it had never read.
+#    P3  DirectoryEntry / DirectorySearcher / SearchResultCollection are disposed,
+#        including on the error path (each leaked an LDAP connection per run).
+#    P3  the fix/validate REJECTED text names an unset USERDNSDOMAIN as the cause
+#        instead of blaming the operator's (perfectly valid) DN.
+#    P4  dead local $needIao removed; the Object column keeps an RFC-4514 escaped
+#        comma instead of truncating the CN at it.
 # =============================================================================
 
 # userAccountControl bit flags (the ones the TO checks key off).
@@ -51,6 +75,12 @@ function Get-AdToBaselinePath { Join-Path (Split-Path $PSScriptRoot -Parent) 'Ja
 function Get-AdToBaseline {
     $def = @{
         inactiveDays = 45; staleComputerDays = 90; recertifyDays = 365
+        # audit 2026-07-24 (P2): objects YOUNGER than this are never flagged inactive/stale.
+        # A pre-staged computer or a just-created user has lastLogon=0 by definition, and the
+        # fixer auto-DISABLES both inactiveEnabled and staleObject - disabling a brand-new
+        # account is a self-inflicted outage. A genuinely dormant new object is caught a
+        # grace window later. 0 disables the floor (pre-0.2.7 behaviour).
+        newObjectGraceDays = 30
         recertifyAttribute = 'info'; recertifyStampPrefix = 'TO-VALIDATED:'; serverOsPattern = 'Server'
         iaoValidators = @()   # sAMAccountNames allowed to run validate-iao (empty = nobody yet; fail closed)
         adminSamPatterns = @('\.adm$', '^adm[-_]', '[-_]adm$', '^da[-_]', '^ea[-_]', 'admin')
@@ -75,7 +105,7 @@ function Get-AdToBaseline {
     if (Test-Path -LiteralPath $path) {
         try {
             $j = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-            foreach ($k in 'inactiveDays','staleComputerDays','recertifyDays','recertifyAttribute','recertifyStampPrefix','serverOsPattern') {
+            foreach ($k in 'inactiveDays','staleComputerDays','recertifyDays','newObjectGraceDays','recertifyAttribute','recertifyStampPrefix','serverOsPattern') {
                 if ($null -ne $j.$k) { $def[$k] = $j.$k }
             }
             foreach ($k in 'adminSamPatterns','serviceSamPatterns','serviceOuPatterns','adminOuPatterns','iaoValidators') {
@@ -147,6 +177,58 @@ function Get-AdToRecertDate {
     return $null
 }
 
+# --- Pure: normalize an AD whenCreated value to a UTC datetime -----------------
+# audit 2026-07-24 (P2): the object-age floor needs a creation date it can trust.
+# DirectorySearcher hands whenCreated back as a System.DateTime whose Kind is
+# Unspecified but whose VALUE is already UTC (so ToUniversalTime() would wrongly
+# shift it by the host's offset); a raw/serialized read can instead be an LDAP
+# GeneralizedTime string ('20260722103000.0Z'). Returns $null when the value cannot
+# be dated, so the caller can fail toward its previous behaviour rather than invent
+# an age for an object it knows nothing about.
+function Get-AdToWhenCreated {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) {
+        $dt = [datetime]$Value
+        if ($dt.Kind -eq [System.DateTimeKind]::Local) { return $dt.ToUniversalTime() }
+        return [datetime]::SpecifyKind($dt, [System.DateTimeKind]::Utc)
+    }
+    $s = ([string]$Value).Trim()
+    if (-not $s) { return $null }
+    $d = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $m = [regex]::Match($s, '^(\d{14})')
+    if ($m.Success) {
+        if ([datetime]::TryParseExact($m.Groups[1].Value, 'yyyyMMddHHmmss', $inv, $styles, [ref]$d)) { return $d }
+        return $null
+    }
+    if ([datetime]::TryParse($s, $inv, $styles, [ref]$d)) { return $d }
+    return $null
+}
+
+# --- Pure: the display 'Object' name = the leading RDN value of a DN -----------
+# audit 2026-07-24 (P4): (($dn -split ',')[0] -replace '^CN=','') truncated a CN that
+# carries an RFC-4514 ESCAPED comma - 'CN=Smith\, John,OU=x,DC=..' showed (and was
+# AUDITED) as 'Smith\'. That escaping is exactly what the DN guard deliberately
+# ALLOWS, so a legitimately-planned object was mislabelled in the destructive fix /
+# validate result grid. Consume only UNESCAPED commas ('\\.' swallows any escape pair,
+# including an escaped backslash), then unescape the value for display.
+function Get-AdToShortName {
+    param([string]$Dn)
+    if (-not $Dn) { return '' }
+    $rdn = [regex]::Match($Dn, '^(?:[^\\,]|\\.)*').Value
+    return (($rdn -replace '^CN=', '') -replace '\\(.)', '$1')
+}
+
+# Dispose an AD object (DirectoryEntry / DirectorySearcher / SearchResultCollection)
+# that MAY be a test shim rather than the real disposable type. audit 2026-07-24 (P3).
+function Close-AdToDisposable {
+    param($Obj)
+    if ($null -eq $Obj) { return }
+    if ($Obj -is [System.IDisposable]) { try { $Obj.Dispose() } catch {} }
+}
+
 # --- Pure: evaluate ONE object against the TO ----------------------------------
 # Returns @{ Status='COMPLIANT'|'NON-COMPLIANT'; Rules=@(names); RequiresIao=bool;
 #            Detail='reason -> fix; ...' }. $Now is injectable for testability.
@@ -163,7 +245,8 @@ function Test-AdToCompliance {
 
     $hits = New-Object System.Collections.ArrayList
     $parts = New-Object System.Collections.ArrayList
-    $needIao = $false
+    # audit 2026-07-24 (P4): the local $needIao was dead - $fire writes (and the return
+    # reads) the module-scope $script:__needIao that shadows it. Removed.
 
     $fire = {
         param($rule, $whyArgs)
@@ -179,16 +262,31 @@ function Test-AdToCompliance {
     }
     $script:__needIao = $false
 
+    # Days since the object was CREATED; +Inf when whenCreated is absent/unreadable, so an
+    # object we cannot date behaves exactly as it did before 0.2.7 (fail-toward-flagged: the
+    # scan still surfaces it for a human, it just isn't silently aged).
+    $created = Get-AdToWhenCreated $Obj.WhenCreated
+    $objAgeDays = if ($created) { ($Now - $created).TotalDays } else { [double]::PositiveInfinity }
+    # audit 2026-07-24 (P2): "never logged on" is NOT "maximally stale". A PRE-STAGED computer
+    # account and a user created this morning both have lastLogon=0 by definition, and the old
+    # +Inf made them the stalest objects in the domain - inactiveEnabled / staleObject fired,
+    # and BOTH map to a set-ACCOUNTDISABLE in $script:AdToUacFix, so the fixer disabled a
+    # brand-new account before anyone had a chance to use it. Age a never-logged-on object from
+    # its creation date (its TRUE idle age) instead; only an undatable object stays +Inf.
     $ageDays = {
         param($ticks)
         $t = 0L; [void][int64]::TryParse([string]$ticks, [ref]$t)
-        if ($t -le 0) { return [double]::PositiveInfinity }   # never logged on = maximally stale
-        try { return ($Now - [datetime]::FromFileTimeUtc($t)).TotalDays } catch { return [double]::PositiveInfinity }
+        if ($t -le 0) { return $objAgeDays }   # never logged on -> idle since creation
+        try { return ($Now - [datetime]::FromFileTimeUtc($t)).TotalDays } catch { return $objAgeDays }
     }
+    # ...and a hard floor on top of it: inside the grace window nothing is flagged
+    # inactive/stale however low the thresholds are tuned. An absent knob ([double]$null = 0)
+    # disables the floor, so a hand-built baseline keeps the old behaviour.
+    $isNewObject = ($objAgeDays -lt [double]$b.newObjectGraceDays)
 
     if ($Category -in @('User','Admin','Service')) {
         if (-not $uacReadable) { [void]$hits.Add('uacUnreadable'); [void]$parts.Add('userAccountControl absent/unreadable -> UAC compliance NOT confirmed (fail-closed)') }
-        if (-not $disabled -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.inactiveDays) { & $fire 'inactiveEnabled' @($b.inactiveDays) }
+        if (-not $disabled -and -not $isNewObject -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.inactiveDays) { & $fire 'inactiveEnabled' @($b.inactiveDays) }
         if ($uacReadable -and (($uac -band $script:AdToUac.DONT_EXPIRE_PASSWORD) -ne 0)) { & $fire 'passwordNeverExpires' $null }
         if ($uacReadable -and (($uac -band $script:AdToUac.PASSWD_NOTREQD) -ne 0))       { & $fire 'passwordNotRequired' $null }
         if ($uacReadable -and (($uac -band $script:AdToUac.ENCRYPTED_TEXT_PWD) -ne 0))   { & $fire 'reversibleEncryption' $null }
@@ -200,7 +298,16 @@ function Test-AdToCompliance {
         if ($null -eq $recert -or ($Now - $recert).TotalDays -gt [double]$b.recertifyDays) { & $fire 'recertifyOverdue' @($b.recertifyDays, $b.recertifyStampPrefix) }
     }
     if ($Category -in @('Computer','Server')) {
-        if (-not $disabled -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.staleComputerDays) { & $fire 'staleObject' @($b.staleComputerDays) }
+        # audit 2026-07-24 (P3): loop54's fail-closed uacUnreadable hit was wired ONLY into the
+        # User/Admin/Service branch above, yet $disabled here is derived from the SAME UAC that
+        # folds to 0 when it is ACL-hidden or absent - so an unreadable computer/server object
+        # read as "enabled, no bad bits" and, if it had logged on recently, scanned COMPLIANT
+        # with no trace. Fire the same fail-closed hit, and do NOT assert staleness off a UAC we
+        # never read: the object is already NON-COMPLIANT, and staleObject is the rule that
+        # auto-DISABLES (a disabled-but-unreadable machine would otherwise be "re-disabled" on
+        # an unverified enabled/disabled reading).
+        if (-not $uacReadable) { [void]$hits.Add('uacUnreadable'); [void]$parts.Add('userAccountControl absent/unreadable -> UAC compliance NOT confirmed (fail-closed)') }
+        if ($uacReadable -and -not $disabled -and -not $isNewObject -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.staleComputerDays) { & $fire 'staleObject' @($b.staleComputerDays) }
     }
 
     $status = if ($hits.Count -gt 0) { 'NON-COMPLIANT' } else { 'COMPLIANT' }
@@ -321,7 +428,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.6'
+        version  = '0.2.8'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(
@@ -392,6 +499,9 @@ function ConvertTo-AdToObject {
         ServicePrincipalName = @($p['serviceprincipalname'])
         AdminCount           = [int]("0" + [string](& $get 'admincount'))
         LastLogonTicks       = $ll
+        # audit 2026-07-24 (P2): carry whenCreated so Test-AdToCompliance can age a
+        # never-logged-on object from its creation date instead of calling it +Inf stale.
+        WhenCreated          = (& $get 'whencreated')
         Description          = [string](& $get 'description')
         Manager              = [string](& $get 'manager')
         RecertValue          = [string](& $get $RecertAttribute)
@@ -401,8 +511,20 @@ function ConvertTo-AdToObject {
 function Invoke-JanetToolAction {
     param([string]$ActionId, [hashtable]$Params, $Credential, [scriptblock]$Emit)
     $send = { param($e) if ($Emit) { & $Emit $e } }
-    if ($ActionId -eq 'fix')          { return Invoke-AdToFix      -Params $Params -Credential $Credential -Send $send }
-    if ($ActionId -eq 'validate-iao') { return Invoke-AdToValidate -Params $Params -Credential $Credential -Send $send }
+
+    # Operator-cancel bridge (audit 2026-07-24): the server injects the synchronized job
+    # hashtable as $Params['__job']; its 'Cancel' flag (set by POST /job/<id>/cancel) lets a
+    # running action break. adto was the ONLY module in the suite that never read it, so the
+    # view's CANCEL SCAN button was inert - and, far worse, a bulk fix / IAO validate walking
+    # a plan and COMMITTING userAccountControl object by object could not be stopped once
+    # armed. Absent in direct/test calls -> $cancelCheck returns $false. GetNewClosure() so
+    # the closure keeps $cancelJob when it is handed to the fix/validate functions.
+    $cancelJob = $null
+    if ($Params -and $Params.ContainsKey('__job')) { $cancelJob = $Params['__job'] }
+    $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }.GetNewClosure()
+
+    if ($ActionId -eq 'fix')          { return Invoke-AdToFix      -Params $Params -Credential $Credential -Send $send -CancelCheck $cancelCheck }
+    if ($ActionId -eq 'validate-iao') { return Invoke-AdToValidate -Params $Params -Credential $Credential -Send $send -CancelCheck $cancelCheck }
     if ($ActionId -ne 'scan') { & $send @{ type='log'; level='warn'; text="Unknown action '$ActionId'." }; return @{ rows=@(); summary=@{ total=0 } } }
 
     $baseline = Get-AdToBaseline
@@ -425,58 +547,78 @@ function Invoke-JanetToolAction {
     & $send @{ type='status'; text="AD TO scan starting (baseline: $($baseline.Source))..." }
     & $send @{ type='log'; level='info'; text="AD TO compliance scan. Baseline: $($baseline.Source). Inactive>$($baseline.inactiveDays)d, stale>$($baseline.staleComputerDays)d, recert>$($baseline.recertifyDays)d." }
 
-    # Bind (honour the session credential; else current Kerberos identity).
-    $root = $null
-    try {
-        if ($Credential -is [System.Management.Automation.PSCredential]) {
-            $path = if ($searchBase) { "LDAP://$searchBase" } else { 'LDAP://RootDSE' }
-            if (-not $searchBase) {
-                $rootDse = New-Object System.DirectoryServices.DirectoryEntry('LDAP://RootDSE', $Credential.UserName, $Credential.GetNetworkCredential().Password)
-                $searchBase = [string]$rootDse.Properties['defaultNamingContext'][0]
-            }
-            $root = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$searchBase", $Credential.UserName, $Credential.GetNetworkCredential().Password)
-        } else {
-            $root = if ($searchBase) { [ADSI]"LDAP://$searchBase" } else { [ADSI]'' }
-        }
-    } catch { & $send @{ type='log'; level='err'; text="AD bind failed: $($_.Exception.Message)" }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
-
-    $ds = New-Object System.DirectoryServices.DirectorySearcher($root)
-    # Do NOT auto-follow a directory-returned EXTERNAL referral to another server:
-    # even a local-domain-rooted scan could otherwise be redirected to a host the DN
-    # guard never vetted (loop-7 AD-bind hardening capstone). Inert in a single AD
-    # domain (no referrals); closes the residual redirect.
-    $ds.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
-    $ds.Filter = '(|(&(objectCategory=person)(objectClass=user))(objectCategory=computer))'
-    $ds.PageSize = 1000
-    foreach ($a in 'samaccountname','distinguishedname','objectclass','operatingsystem','useraccountcontrol','serviceprincipalname','admincount','lastlogontimestamp','lastlogon','description','manager',$baseline.recertifyAttribute) { [void]$ds.PropertiesToLoad.Add($a) }
-
     $rows = New-Object System.Collections.ArrayList
     $byCat = @{}; foreach ($c in $script:AdToCategories) { $byCat[$c] = @{ total=0; bad=0 } }
-    $iaoCount = 0; $total = 0; $bad = 0
+    $iaoCount = 0; $total = 0; $bad = 0; $cancelled = $false
     $now = [datetime]::UtcNow
 
+    # audit 2026-07-24 (P3): the RootDSE/root DirectoryEntry, the DirectorySearcher and the
+    # SearchResultCollection were NEVER disposed - and the search catch below returned with the
+    # collection still open - so every scan leaked an unmanaged LDAP connection + handles for the
+    # life of the (long-running) server process. Hold them in one scope and dispose in a finally,
+    # which also runs on the early returns below.
+    $rootDse = $null; $root = $null; $ds = $null; $results = $null
     try {
-        $results = $ds.FindAll()
-        foreach ($sr in $results) {
-            $obj = ConvertTo-AdToObject $sr -RecertAttribute ([string]$baseline.recertifyAttribute)   # audit 2026-07-23: no per-object baseline re-read
-            $cat = Get-AdToCategory -Obj $obj -Baseline $baseline
-            if ($wantCats.Count -gt 0 -and $wantCats -notcontains $cat) { continue }
-            $ev = Test-AdToCompliance -Obj $obj -Category $cat -Baseline $baseline -Now $now
-            $total++; $byCat[$cat].total++
-            if ($ev.Status -eq 'NON-COMPLIANT') { $bad++; $byCat[$cat].bad++; if ($ev.RequiresIao) { $iaoCount++ } }
-            if ($onlyBad -and $ev.Status -eq 'COMPLIANT') { continue }
-            $row = @{ Object=$obj.SamAccountName; Category=$cat; Status=$ev.Status; Rules=(@($ev.Rules) -join ', '); Detail=$ev.Detail; DN=$obj.DistinguishedName }
-            [void]$rows.Add($row)
-            & $send (@{ type='row' } + $row)
-            if ($total % 250 -eq 0) { & $send @{ type='progress'; done=$total; total=$total } }
-        }
-        $results.Dispose()
-    } catch { & $send @{ type='log'; level='err'; text="AD search failed: $($_.Exception.Message)" }; return @{ rows=@($rows); summary=@{ total=$total; rejected=$true } } }
+        # Bind (honour the session credential; else current Kerberos identity).
+        try {
+            if ($Credential -is [System.Management.Automation.PSCredential]) {
+                if (-not $searchBase) {
+                    $rootDse = New-Object System.DirectoryServices.DirectoryEntry('LDAP://RootDSE', $Credential.UserName, $Credential.GetNetworkCredential().Password)
+                    $searchBase = [string]$rootDse.Properties['defaultNamingContext'][0]
+                }
+                $root = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$searchBase", $Credential.UserName, $Credential.GetNetworkCredential().Password)
+            } else {
+                $root = if ($searchBase) { [ADSI]"LDAP://$searchBase" } else { [ADSI]'' }
+            }
+        } catch { & $send @{ type='log'; level='err'; text="AD bind failed: $($_.Exception.Message)" }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
 
+        $ds = New-Object System.DirectoryServices.DirectorySearcher($root)
+        # Do NOT auto-follow a directory-returned EXTERNAL referral to another server:
+        # even a local-domain-rooted scan could otherwise be redirected to a host the DN
+        # guard never vetted (loop-7 AD-bind hardening capstone). Inert in a single AD
+        # domain (no referrals); closes the residual redirect.
+        $ds.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+        $ds.Filter = '(|(&(objectCategory=person)(objectClass=user))(objectCategory=computer))'
+        $ds.PageSize = 1000
+        # audit 2026-07-24 (P2): bound the search. There was NO timeout at all, so a wedged or
+        # hostile DC could block inside FindAll()/the page fetch forever, pinning the job runspace
+        # with no way out - the operator's Cancel cannot interrupt a blocking LDAP call, it can
+        # only be honoured between objects (below). ServerPageTimeLimit bounds each 1000-object
+        # page; ClientTimeout bounds the whole search.
+        $ds.ServerPageTimeLimit = [timespan]::FromSeconds(120)
+        $ds.ClientTimeout       = [timespan]::FromMinutes(15)
+        foreach ($a in 'samaccountname','distinguishedname','objectclass','operatingsystem','useraccountcontrol','serviceprincipalname','admincount','lastlogontimestamp','lastlogon','whencreated','description','manager',$baseline.recertifyAttribute) { [void]$ds.PropertiesToLoad.Add($a) }
+
+        try {
+            $results = $ds.FindAll()
+            foreach ($sr in $results) {
+                # audit 2026-07-24 (P2): honour the operator's Cancel between objects (the scan is
+                # read-only, so stopping here is always safe; the rows already emitted stand).
+                if (& $cancelCheck) { $cancelled = $true; & $send @{ type='log'; level='warn'; text='Scan cancelled by operator - the counts below cover only the objects scanned so far.' }; break }
+                $obj = ConvertTo-AdToObject $sr -RecertAttribute ([string]$baseline.recertifyAttribute)   # audit 2026-07-23: no per-object baseline re-read
+                $cat = Get-AdToCategory -Obj $obj -Baseline $baseline
+                if ($wantCats.Count -gt 0 -and $wantCats -notcontains $cat) { continue }
+                $ev = Test-AdToCompliance -Obj $obj -Category $cat -Baseline $baseline -Now $now
+                $total++; $byCat[$cat].total++
+                if ($ev.Status -eq 'NON-COMPLIANT') { $bad++; $byCat[$cat].bad++; if ($ev.RequiresIao) { $iaoCount++ } }
+                if ($onlyBad -and $ev.Status -eq 'COMPLIANT') { continue }
+                $row = @{ Object=$obj.SamAccountName; Category=$cat; Status=$ev.Status; Rules=(@($ev.Rules) -join ', '); Detail=$ev.Detail; DN=$obj.DistinguishedName }
+                [void]$rows.Add($row)
+                & $send (@{ type='row' } + $row)
+                if ($total % 250 -eq 0) { & $send @{ type='progress'; done=$total; total=$total } }
+            }
+        } catch { & $send @{ type='log'; level='err'; text="AD search failed: $($_.Exception.Message)" }; return @{ rows=@($rows); summary=@{ total=$total; rejected=$true } } }
+    } finally {
+        # order matters: the result collection first, then the searcher, then the entries.
+        Close-AdToDisposable $results; Close-AdToDisposable $ds
+        Close-AdToDisposable $root;    Close-AdToDisposable $rootDse
+    }
+
+    $verb = if ($cancelled) { 'CANCELLED' } else { 'done' }
     $catLine = (@($script:AdToCategories | ForEach-Object { "{0} {1}/{2}" -f $_, $byCat[$_].bad, $byCat[$_].total }) -join '  |  ')
-    & $send @{ type='log'; level=($(if($bad){'warn'}else{'ok'})); text="AD TO scan done. $bad NON-COMPLIANT of $total. By category (bad/total): $catLine. $iaoCount need IAO validation." }
-    & $send @{ type='status'; text="Done. $bad non-compliant of $total AD object(s)." }
-    return @{ rows=@($rows); summary=@{ total=$total; nonCompliant=$bad; iaoRequired=$iaoCount; byCategory=$byCat; source=$baseline.Source } }
+    & $send @{ type='log'; level=($(if($bad -or $cancelled){'warn'}else{'ok'})); text="AD TO scan $verb. $bad NON-COMPLIANT of $total. By category (bad/total): $catLine. $iaoCount need IAO validation." }
+    & $send @{ type='status'; text="$(if ($cancelled) { 'Cancelled' } else { 'Done' }). $bad non-compliant of $total AD object(s)." }
+    return @{ rows=@($rows); summary=@{ total=$total; nonCompliant=$bad; iaoRequired=$iaoCount; byCategory=$byCat; source=$baseline.Source; cancelled=$cancelled } }
 }
 
 # Bind a DirectoryEntry for a DN, honouring the session credential (service account).
@@ -490,32 +632,52 @@ function New-AdToEntry {
 
 # --- Action: fix (destructive, admin-gated) - UAC-flip remediations only --------
 function Invoke-AdToFix {
-    param([hashtable]$Params, $Credential, [scriptblock]$Send)
-    if ([string]$Params['confirm'] -ne 'FIX') { & $Send @{ type='log'; level='err'; text='Refused: type FIX (exactly) in Confirm to arm the fix.' }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
+    param([hashtable]$Params, $Credential, [scriptblock]$Send, [scriptblock]$CancelCheck)
+    if ([string]$Params['confirm'] -cne 'FIX') { & $Send @{ type='log'; level='err'; text='Refused: type FIX (exactly) in Confirm to arm the fix.' }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
     $plan = @(); try { $plan = @(ConvertFrom-Json ([string]$Params['plan'])) } catch { & $Send @{ type='log'; level='err'; text="Plan JSON parse failed: $($_.Exception.Message)" }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
     if ($plan.Count -eq 0) { & $Send @{ type='log'; level='warn'; text='Empty plan - nothing to fix.' }; return @{ rows=@(); summary=@{ total=0 } } }
 
     $expectDom = Get-AdToExpectedDomainSuffix   # this host's domain DN suffix, computed once
-    $rows = New-Object System.Collections.ArrayList; $i = 0
+    # audit 2026-07-24 (P3): with USERDNSDOMAIN unset the suffix is blank and the guard fails
+    # closed for EVERY dn. Say so ONCE up front - the per-row text used to blame the operator's
+    # (perfectly valid) DN and sent them hunting a typo that was never there.
+    if (-not $expectDom) { & $Send @{ type='log'; level='err'; text="This host's USERDNSDOMAIN is not set, so no plan dn can be proven to be in the local domain - the bind-redirect guard will REJECT every object. This is a JANET host environment problem, not a problem with the plan." } }
+    $rows = New-Object System.Collections.ArrayList; $i = 0; $cancelled = $false
     foreach ($e in $plan) {
+        # audit 2026-07-24 (P2): honour the operator's Cancel BETWEEN objects. This loop COMMITS
+        # userAccountControl per object, so an aborted bulk run must stop cleanly before the next
+        # bind - never mid-commit. Objects already written keep their rows + audit events.
+        if ($CancelCheck -and (& $CancelCheck)) {
+            $cancelled = $true
+            & $Send @{ type='log'; level='warn'; text=("Fix CANCELLED by operator after {0} of {1} planned object(s) - the remainder were NOT touched." -f $i, $plan.Count) }
+            break
+        }
         $i++; & $Send @{ type='progress'; done=$i; total=$plan.Count }
         $dn = [string]$e.dn; if (-not $dn) { continue }
-        $short = (($dn -split ',')[0] -replace '^CN=', '')
+        $short = Get-AdToShortName $dn   # audit 2026-07-24 (P4): RFC-4514 escaped-comma safe
         # New-AdToEntry binds LDAP://$dn with the CREDENTIAL: a dn from the client plan that is not a
         # plain distinguished name (e.g. 'evildc/DC=x') OR a bare foreign domain (e.g. DC=evil,DC=com,
         # which serverless-binds the attacker's DC) would redirect that credentialed bind. Refuse
         # anything that is not a plain DN ending at THIS host's domain before touching the directory
         # (block '/', allow RFC-escaped '\'; same hardened guard as the scan site - audit P2 + P3).
         if (-not (Test-AdToDnInLocalDomain -Value $dn -ExpectDomainSuffix $expectDom)) {
-            $row = @{ Object=$short; Category=''; Status='REJECTED'; Applied=''; Detail='refused: dn is not a plain distinguished name in this host''s domain (bind-redirect guard)'; DN=$dn }
+            # audit 2026-07-24 (P3): name the REAL cause. The scan path at the top of the file
+            # already distinguishes these two; the write paths blamed the dn either way.
+            $why = if (-not $expectDom) {
+                "refused: this host's USERDNSDOMAIN is not set, so NO dn can be proven in-domain (bind-redirect guard fails closed) - the plan dn is not at fault"
+            } else {
+                "refused: dn is not a plain distinguished name in this host's domain ($expectDom) (bind-redirect guard)"
+            }
+            $row = @{ Object=$short; Category=''; Status='REJECTED'; Applied=''; Detail=$why; DN=$dn }
             [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
             # Audit the redirect refusal (loop12 F3): a plan steering a credentialed write at a
             # foreign/redirected DN is a security-relevant event and must leave an audit trail,
             # not just a UI row.
-            & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result='Skipped'; itemCount=0; detail='[REJECTED] bind-redirect guard: dn not a plain distinguished name in this domain' }
+            & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result='Skipped'; itemCount=0; detail=("[REJECTED] bind-redirect guard: {0}" -f $why) }
             continue
         }
         $rules = @($e.rules)
+        $de = $null
         try {
             $de  = New-AdToEntry -Dn $dn -Credential $Credential
             # loop53 (F1): a NULL / absent / unreadable userAccountControl must NOT coerce to 0. A non-account
@@ -561,27 +723,34 @@ function Invoke-AdToFix {
             } else {
                 $de.Properties['userAccountControl'].Value = $fx.Uac
                 $de.CommitChanges()
-                $ver = [int]("0" + [string]((New-AdToEntry -Dn $dn -Credential $Credential).Properties['userAccountControl'].Value))
+                # audit 2026-07-24 (P3): the verification re-read bound a SECOND DirectoryEntry and
+                # dropped it on the floor - one leaked LDAP connection per FIXED object.
+                $ver = 0; $vde = $null
+                try {
+                    $vde = New-AdToEntry -Dn $dn -Credential $Credential
+                    $ver = [int]("0" + [string]$vde.Properties['userAccountControl'].Value)
+                } finally { Close-AdToDisposable $vde }
                 $ok  = ($ver -eq $fx.Uac)
                 $row = @{ Object=$short; Category=''; Status=($(if ($ok) { 'FIXED' } else { 'FAILED' })); Applied=(@($fx.Applied) -join ', '); Detail=("UAC {0} -> {1}{2}" -f $cur, $fx.Uac, $skipNote); DN=$dn }
             }
         } catch { $row = @{ Object=$short; Category=''; Status='FAILED'; Applied=''; Detail=("LDAP write failed: {0}" -f $_.Exception.Message); DN=$dn } }
+        finally { Close-AdToDisposable $de }   # audit 2026-07-24 (P3): also runs on the 'continue' paths above
         [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
         $appliedN = if ([string]$row.Applied) { @([string]$row.Applied -split ',').Count } else { 0 }
         $auditRes = switch ([string]$row.Status) { 'FIXED' { 'Success' } 'FAILED' { 'Failure' } default { 'Skipped' } }
         & $Send @{ type='audit'; action='AdToFix'; target=[string]$dn; result=$auditRes; itemCount=$appliedN; detail=("[{0}] {1}" -f $row.Status, $row.Detail) }
     }
     $fixed = @($rows | Where-Object { $_.Status -eq 'FIXED' }).Count
-    & $Send @{ type='status'; text="Done. $fixed fixed of $($rows.Count) object(s)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$fixed } }
+    & $Send @{ type='status'; text="$(if ($cancelled) { 'Cancelled' } else { 'Done' }). $fixed fixed of $($rows.Count) object(s)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$fixed; planned=$plan.Count; cancelled=$cancelled } }
 }
 
 # --- Action: validate-iao (destructive, IAO EXPRESS PERMISSION ONLY) ------------
 # The first RBAC instance in the suite: refused server-side unless the operator is on
 # the baseline iaoValidators allow-list. Writes ONLY the recert stamp, nothing else.
 function Invoke-AdToValidate {
-    param([hashtable]$Params, $Credential, [scriptblock]$Send)
-    if ([string]$Params['confirm'] -ne 'VALIDATE') { & $Send @{ type='log'; level='err'; text='Refused: type VALIDATE (exactly) in Confirm to arm.' }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
+    param([hashtable]$Params, $Credential, [scriptblock]$Send, [scriptblock]$CancelCheck)
+    if ([string]$Params['confirm'] -cne 'VALIDATE') { & $Send @{ type='log'; level='err'; text='Refused: type VALIDATE (exactly) in Confirm to arm.' }; return @{ rows=@(); summary=@{ total=0; rejected=$true } } }
     $baseline = Get-AdToBaseline
     # IAO identity = the WINDOWS identity that launched JANET (the individual operator), NOT the
     # target-reaching session credential (which is a shared service/admin account under the
@@ -601,22 +770,39 @@ function Invoke-AdToValidate {
     $byId  = (([string]$who) -split '\\')[-1]
     & $Send @{ type='log'; level='info'; text=("IAO '{0}' validating {1} account(s); stamping '{2}' into '{3}'." -f $byId, $plan.Count, $baseline.recertifyStampPrefix, $attr) }
     $expectDom = Get-AdToExpectedDomainSuffix   # this host's domain DN suffix, computed once
-    $rows = New-Object System.Collections.ArrayList; $i = 0
+    # audit 2026-07-24 (P3): same up-front honesty as the fix path - a blank suffix means the
+    # guard rejects EVERY dn for a host-environment reason, not because the IAO's plan is wrong.
+    if (-not $expectDom) { & $Send @{ type='log'; level='err'; text="This host's USERDNSDOMAIN is not set, so no plan dn can be proven to be in the local domain - the bind-redirect guard will REJECT every object. This is a JANET host environment problem, not a problem with the plan." } }
+    $rows = New-Object System.Collections.ArrayList; $i = 0; $cancelled = $false
     foreach ($e in $plan) {
+        # audit 2026-07-24 (P2): honour the operator's Cancel between objects - this loop COMMITS
+        # a recert stamp per object and must be abortable without stopping mid-write.
+        if ($CancelCheck -and (& $CancelCheck)) {
+            $cancelled = $true
+            & $Send @{ type='log'; level='warn'; text=("IAO validation CANCELLED by operator after {0} of {1} planned object(s) - the remainder were NOT stamped." -f $i, $plan.Count) }
+            break
+        }
         $i++; & $Send @{ type='progress'; done=$i; total=$plan.Count }
         $dn = [string]$e.dn; if (-not $dn) { continue }
-        $short = (($dn -split ',')[0] -replace '^CN=', '')
+        $short = Get-AdToShortName $dn   # audit 2026-07-24 (P4): RFC-4514 escaped-comma safe
         # Same hardened bind-redirect guard as the fix + scan paths: New-AdToEntry binds LDAP://$dn
         # with the credential, so refuse any plan dn that is not a plain distinguished name ending at
         # THIS host's domain (block '/' and foreign domains; allow RFC-escaped '\') before binding.
         if (-not (Test-AdToDnInLocalDomain -Value $dn -ExpectDomainSuffix $expectDom)) {
-            $row = @{ Object=$short; Status='REJECTED'; Detail='refused: dn is not a plain distinguished name in this host''s domain (bind-redirect guard)'; DN=$dn }
+            # audit 2026-07-24 (P3): name the REAL cause (unset USERDNSDOMAIN vs a bad dn).
+            $why = if (-not $expectDom) {
+                "refused: this host's USERDNSDOMAIN is not set, so NO dn can be proven in-domain (bind-redirect guard fails closed) - the plan dn is not at fault"
+            } else {
+                "refused: dn is not a plain distinguished name in this host's domain ($expectDom) (bind-redirect guard)"
+            }
+            $row = @{ Object=$short; Status='REJECTED'; Detail=$why; DN=$dn }
             [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
             # Audit the redirect refusal (loop12 F3): same rationale as the fix path.
-            & $Send @{ type='audit'; action='AdToIaoValidate'; target=[string]$dn; result='Skipped'; itemCount=0; detail='[REJECTED] bind-redirect guard: dn not a plain distinguished name in this domain' }
+            & $Send @{ type='audit'; action='AdToIaoValidate'; target=[string]$dn; result='Skipped'; itemCount=0; detail=("[REJECTED] bind-redirect guard: {0}" -f $why) }
             continue
         }
         $stamp = New-AdToRecertStamp -Prefix ([string]$baseline.recertifyStampPrefix) -Date (Get-Date) -By $byId
+        $de = $null
         try {
             $de = New-AdToEntry -Dn $dn -Credential $Credential
             # APPEND the stamp - preserve any existing content in the attribute, replacing only a
@@ -630,19 +816,25 @@ function Invoke-AdToValidate {
             # persisted before reporting VALIDATED. A referral/replication quirk could let
             # CommitChanges() return without persisting; reporting a clean IAO recert on an
             # unpersisted stamp is the fail-open class the c2c persistence-verify work closed.
-            $after = [string]((New-AdToEntry -Dn $dn -Credential $Credential).Properties[$attr].Value)
+            # audit 2026-07-24 (P3): dispose the re-read entry - one leaked LDAP connection per object.
+            $after = ''; $vde = $null
+            try {
+                $vde = New-AdToEntry -Dn $dn -Credential $Credential
+                $after = [string]$vde.Properties[$attr].Value
+            } finally { Close-AdToDisposable $vde }
             if ($after -match [regex]::Escape($stamp)) {
                 $row = @{ Object=$short; Status='VALIDATED'; Detail=("stamped '{0}' into {1}" -f $stamp, $attr); DN=$dn }
             } else {
                 $row = @{ Object=$short; Status='FAILED'; Detail=("stamp not present on re-read - commit did not persist into '{0}'" -f $attr); DN=$dn }
             }
         } catch { $row = @{ Object=$short; Status='FAILED'; Detail=("LDAP write failed: {0}" -f $_.Exception.Message); DN=$dn } }
+        finally { Close-AdToDisposable $de }   # audit 2026-07-24 (P3)
         [void]$rows.Add($row); & $Send (@{ type='row' } + $row)
         & $Send @{ type='audit'; action='AdToIaoValidate'; target=[string]$dn; result=$(if ([string]$row.Status -eq 'VALIDATED') { 'Success' } else { 'Failure' }); itemCount=1; detail=("IAO '{0}': {1}" -f $byId, $row.Detail) }
     }
     $ok = @($rows | Where-Object { $_.Status -eq 'VALIDATED' }).Count
-    & $Send @{ type='status'; text="Done. $ok validated of $($rows.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$rows.Count; validated=$ok } }
+    & $Send @{ type='status'; text="$(if ($cancelled) { 'Cancelled' } else { 'Done' }). $ok validated of $($rows.Count)." }
+    return @{ rows=@($rows); summary=@{ total=$rows.Count; validated=$ok; planned=$plan.Count; cancelled=$cancelled } }
 }
 
-Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Get-AdToBaseline, Get-AdToCategory, Get-AdToRecertDate, Test-AdToCompliance, Get-AdToFixedUac, Test-AdToIaoAuthorized, New-AdToRecertStamp, Test-AdToDnInLocalDomain, Get-AdToExpectedDomainSuffix
+Export-ModuleMember -Function Get-JanetToolManifest, Invoke-JanetToolAction, Get-AdToBaseline, Get-AdToCategory, Get-AdToRecertDate, Get-AdToWhenCreated, Get-AdToShortName, Test-AdToCompliance, Get-AdToFixedUac, Test-AdToIaoAuthorized, New-AdToRecertStamp, Test-AdToDnInLocalDomain, Get-AdToExpectedDomainSuffix

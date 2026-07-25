@@ -22,6 +22,38 @@
 #  Run:  Invoke-Pester -Path .\tests\FixGuards.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 
 function New-FakeCred {
     New-Object System.Management.Automation.PSCredential('tester', (ConvertTo-SecureString 'x' -AsPlainText -Force))
@@ -31,12 +63,14 @@ function New-FakeCred {
 Describe 'ACAS reboot DNS-mismatch hard-abort (AcasRebootWorker)' {
 
     $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Force -PassThru
+    Add-ShimGuard $m
 
     function Invoke-AcasReboot {
         param([string]$ProbeName, [string]$Target)
         & $m {
             param($ProbeName, $Target)
             $script:__destr = $false
+            $__shims = Save-ShimState @('Invoke-Command')
             function script:Invoke-Command {
                 param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $Session, $SessionOption)
                 if ($ScriptBlock -and ($ScriptBlock.ToString().Trim() -eq '$env:COMPUTERNAME')) { return $ProbeName }   # ambient-path standalone probe (still in the module)
@@ -60,7 +94,7 @@ Describe 'ACAS reboot DNS-mismatch hard-abort (AcasRebootWorker)' {
                 $cred = New-Object System.Management.Automation.PSCredential('tester', (ConvertTo-SecureString 'x' -AsPlainText -Force))
                 $out = & $script:AcasRebootWorker -Target $Target -WarnMsg 'test' -Cred $cred
                 [pscustomobject]@{ Result = [string]$out; Destr = [bool]$script:__destr }
-            } finally { Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $ProbeName $Target
     }
 
@@ -90,12 +124,14 @@ Describe 'ACAS reboot DNS-mismatch hard-abort (AcasRebootWorker)' {
 Describe 'ACAS update DNS-mismatch hard-abort (AcasUpdateWorker)' {
 
     $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Force -PassThru
+    Add-ShimGuard $m
 
     function Invoke-AcasUpdate {
         param([string]$ProbeName, [string]$Target)
         & $m {
             param($ProbeName, $Target)
             $script:__destr = $false
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command')
             function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) return ([pscustomobject]@{ Id = 1; Name = 'shim' }) }
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
@@ -119,7 +155,7 @@ Describe 'ACAS update DNS-mismatch hard-abort (AcasUpdateWorker)' {
                 $profiles = @{ 'FakeProf' = @{ Script = { $script:__destr = $true; 'did-update' }; Verify = $null } }
                 $out = & $script:AcasUpdateWorker -TargetIn $Target -ProfileIn 'FakeProf' -UpdateProfilesTable $profiles -VerifyOnlyIn $false -CredIn $cred -StageSource ''
                 [pscustomobject]@{ Result = [string]$out; Destr = [bool]$script:__destr }
-            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -ErrorAction SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $ProbeName $Target
     }
 
@@ -147,12 +183,14 @@ Describe 'ACAS update DNS-mismatch hard-abort (AcasUpdateWorker)' {
 Describe 'UPR uninstall DNS-mismatch hard-abort (UprWorkerBlock)' {
 
     $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Force -PassThru
+    Add-ShimGuard $m
 
     function Invoke-UprUninstall {
         param([string]$ProbeName, [string]$Target)
         & $m {
             param($ProbeName, $Target)
             $script:__destr = $false
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command')
             function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) return ([pscustomobject]@{ Id = 1; Name = 'shim' }) }
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
@@ -171,7 +209,7 @@ Describe 'UPR uninstall DNS-mismatch hard-abort (UprWorkerBlock)' {
                 $out = & $script:UprWorkerBlock -ConnectTarget $Target -Profiles @($prof) -Cred $null -Auth 'Negotiate' -DoUninstall $true -DryRun $false -RemoveSet $null
                 $cand = @($out.Candidates)[0]
                 [pscustomobject]@{ Error = [string]$out.Error; CandResult = [string]$cand.Result; Destr = [bool]$script:__destr }
-            } finally { Remove-Item function:script:Invoke-Command, function:script:New-PSSession, function:script:Remove-PSSession -ErrorAction SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $ProbeName $Target
     }
 
@@ -202,12 +240,14 @@ Describe 'UPR uninstall DNS-mismatch hard-abort (UprWorkerBlock)' {
 Describe 'WPT maintenance-lock DNS-mismatch hard-abort (WptMaintLockBlock)' {
 
     $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Force -PassThru
+    Add-ShimGuard $m
 
     function Invoke-WptMaintLock {
         param([string]$ProbeName, [string]$Computer)
         & $m {
             param($ProbeName, $Computer)
             $script:__destr = $false
+            $__shims = Save-ShimState @('Invoke-Command')
             function script:Invoke-Command {
                 param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction, $Credential, $Authentication, $SessionOption)
                 # audit 2026-07-23: harness updated for the folded guard - the standalone
@@ -229,7 +269,7 @@ Describe 'WPT maintenance-lock DNS-mismatch hard-abort (WptMaintLockBlock)' {
             try {
                 $out = & $script:WptMaintLockBlock -Computer $Computer -Cred $null -Auth 'Default' -Caption 'C' -Message 'M' -HardLock $true
                 [pscustomobject]@{ Success = [bool]$out.Success; Mode = [string]$out.Mode; Detail = [string]$out.Detail; Destr = [bool]$script:__destr }
-            } finally { Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $ProbeName $Computer
     }
 

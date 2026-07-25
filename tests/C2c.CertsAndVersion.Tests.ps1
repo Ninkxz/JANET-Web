@@ -14,13 +14,50 @@
 #  Run:  Invoke-Pester -Path .\tests\C2c.CertsAndVersion.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
+Add-ShimGuard $cm
 
 # --- helpers ---------------------------------------------------------------
-# Make a throwaway self-signed cert; return @{ B64; Thumbprint; Raw }.
+# Make a throwaway self-signed CA cert; return @{ B64; Thumbprint; Raw }.
+# audit 2026-07-25 (fable re-audit follow-up): these fixtures stand in for DoD TRUST ANCHORS
+# pushed into Root/CA, so they must carry BasicConstraints CA=true - Add-C2cBundleToStores now
+# refuses a non-CA cert into a trust-anchor store (Test-C2cIsCa). A plain self-signed cert (the
+# old fixture) is a LEAF and is correctly rejected; see C2c.CaGuardAndRollup.Tests.ps1.
 function New-TestCert {
     param([string]$Subject = 'CN=C2C-Test')
-    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
+    $c = New-SelfSignedCertificate -Subject $Subject -CertStoreLocation 'Cert:\CurrentUser\My' -KeyUsage CertSign,CRLSign -TextExtension @('2.5.29.19={text}CA=true') -KeyExportPolicy Exportable -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
     $raw = $c.RawData
     $tp  = [string]$c.Thumbprint
     Remove-Item ("Cert:\CurrentUser\My\{0}" -f $tp) -Force -ErrorAction SilentlyContinue
@@ -152,6 +189,7 @@ Describe 'C2C Get-C2cInstalledProduct - matches across BOTH uninstall hives' {
         & $cm {
             param($Match, $Hive)
             $script:__hive = $Hive
+            $__shims = Save-ShimState @('Get-ItemProperty')
             function script:Get-ItemProperty {
                 param($Path, $LiteralPath, $ErrorAction)
                 $isWow = ([string]$Path -match 'WOW6432Node')
@@ -162,7 +200,7 @@ Describe 'C2C Get-C2cInstalledProduct - matches across BOTH uninstall hives' {
             try {
                 . ([scriptblock]::Create($script:C2cInstalledProductSrc))
                 Get-C2cInstalledProduct -Match $Match
-            } finally { Remove-Item function:script:Get-ItemProperty -ErrorAction SilentlyContinue }
+            } finally { Restore-ShimState $__shims }   # audit 2026-07-25: the old 'Remove-Item function:script:X' spelling was inert (see Add-ShimGuard) - the shim leaked
         } $Match $Hive
     }
 
@@ -194,6 +232,7 @@ Describe 'C2C version-check - the version matrix (System.Version + ordinal fallb
         & $cm {
             param($Installed, $Version, $Target)
             $script:__inst = ($Installed -eq 'yes'); $script:__ver = $Version
+            $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command','Get-ItemProperty')
             function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id=1; Name='shim' } }
             function script:Remove-PSSession { param($Session, $ErrorAction) }
             function script:Invoke-Command {
@@ -210,7 +249,9 @@ Describe 'C2C version-check - the version matrix (System.Version + ordinal fallb
                 $res = & $script:C2cVersionBlock $env:COMPUTERNAME $null 'Default' $true 'Google Chrome' $Target $false '' $script:C2cInstalledProductSrc
                 [pscustomobject]@{ Status=[string]$res.Status; Installed=[string]$res.Installed; Version=[string]$res.Version }
             } finally {
-                Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, function:script:Get-ItemProperty -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $Installed $Version $Target
     }
@@ -245,6 +286,7 @@ Describe 'C2C winrm-heal - Invoke-JanetC2cWinrmHeal RPC bucketing' {
             param($Scenario)
             $script:__scn = $Scenario
             $script:__pc  = 0
+            $__shims = Save-ShimState @('Get-Service','Start-Service','Set-Service')
             function script:Get-Service {
                 param($ComputerName, $Name, $ErrorAction)
                 if ($script:__scn -eq 'offline') { throw 'RPC server unavailable (test)' }
@@ -263,7 +305,9 @@ Describe 'C2C winrm-heal - Invoke-JanetC2cWinrmHeal RPC bucketing' {
                 $h = Invoke-JanetC2cWinrmHeal -Computer 'FAKEHOST' -Probe $probe
                 [pscustomobject]@{ Bucket=[string]$h.Bucket; Detail=[string]$h.Detail }
             } finally {
-                Remove-Item function:script:Get-Service, function:script:Start-Service, function:script:Set-Service -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
             }
         } $Scenario
     }
@@ -390,6 +434,7 @@ function Invoke-C2cPkiWorker {
     param([string]$Scenario, [string]$Tp, [string]$B64)
     & $cm {
         param($Scenario, $Tp, $B64)
+        $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command')
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
         function script:Invoke-Command {
@@ -425,7 +470,9 @@ function Invoke-C2cPkiWorker {
                 Report    = [string]$res.Report
             }
         } finally {
-            Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command -ErrorAction SilentlyContinue
+            # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+            # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+            Restore-ShimState $__shims
         }
     } $Scenario $Tp $B64
 }

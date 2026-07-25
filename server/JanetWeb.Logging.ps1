@@ -164,6 +164,18 @@ function Test-JanetWebHostReachable {
 
 # Cached (~30s) ping gate for the per-row share writers: a dead share is detected
 # cheaply before each append attempt without paying a probe per row.
+#
+# SCOPE (audit 2026-07-25 (fable re-audit follow-up) - documentation, no behaviour
+# change): this cache and the re-arm timestamp below are $script:-scoped, and this
+# file is dot-sourced SEPARATELY into the accept loop and into every worker runspace.
+# So they are PER-RUNSPACE, not process-wide: each runspace pays its own first probe
+# and keeps its own 30s / 120s clock. Do not read them as shared state. The only
+# genuinely shared thing is $Context.OnShare, which lives in the synchronized context
+# hashtable and is always mutated under $Context.Lock. Consequence to expect: after a
+# re-arm, a runspace that has not re-probed can still see a stale local decision for
+# up to one interval, and the OnShare flag can flap briefly while runspaces converge.
+# That is bounded (<=30s) and self-correcting, and it is safe by construction - the
+# pessimistic answer only spools a row locally, and the local spool replays.
 $script:JanetWebShareProbeAt = [datetime]::MinValue
 $script:JanetWebShareProbeOk = $false
 function Test-JanetWebShareCached {
@@ -174,6 +186,42 @@ function Test-JanetWebShareCached {
     $script:JanetWebShareProbeAt = $now
     $script:JanetWebShareProbeOk = $ok
     return $ok
+}
+
+# Re-arm probe for a session that was demoted to local-only.
+# WHY (audit 2026-07-24): Add-JanetWebCsvRow / Add-JanetWebTextLine set
+# OnShare=$false after ONE transient blip and NOTHING ever set it back, so a
+# multi-hour session that lost the share for five seconds spooled every later row
+# locally and only reached the share at the NEXT server launch. Re-probe at most
+# every $script:JanetWebShareRearmSec and promote the session back when the share
+# is WRITABLE again (a visible-but-read-only share must NOT re-arm - the same bar
+# New-JanetWebLogContext uses at session start).
+# Rows already spooled stay spooled: they replay - exactly once now, see
+# Invoke-JanetWebReplay - at the next launch. Replaying them from here would mean
+# every worker runspace doing bulk file I/O at once, racing each other's renames.
+# NEVER THROWS (runs on the accept loop / worker path).
+# The rate-limit timestamp is PER-RUNSPACE (see the scope note on the probe cache
+# above), so the re-arm probe is paid once per runspace per interval, not once per
+# process - deliberate: it keeps the check lock-free and every outcome is safe.
+$script:JanetWebShareRearmAt  = [datetime]::MinValue
+$script:JanetWebShareRearmSec = 120
+function Test-JanetWebShareRearm {
+    param($Context)
+    try {
+        if (-not $Context -or $Context.OnShare) { return }
+        $now = Get-Date
+        if (($now - $script:JanetWebShareRearmAt).TotalSeconds -lt $script:JanetWebShareRearmSec) { return }
+        $script:JanetWebShareRearmAt = $now
+        # Drop the 30s reachability cache first: a 'down' answer cached during the
+        # outage would otherwise answer this probe and block the re-arm forever.
+        $script:JanetWebShareProbeAt = [datetime]::MinValue
+        $probe = Test-JanetWebShareWritable -Root $Context.NetRoot
+        if (-not $probe.Writable) { return }
+        # Flip the SHARED flag under the context lock (same discipline as every other
+        # OnShare mutation); the slow probe above deliberately ran OUTSIDE the lock.
+        [System.Threading.Monitor]::Enter($Context.Lock)
+        try { $Context.OnShare = $true } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
+    } catch {}
 }
 
 function Test-JanetWebShareWritable {
@@ -249,7 +297,7 @@ function New-JanetWebLogContext {
         UserFolder = (Get-JanetWebUserFolderName)
         NemesisFolder = ([string]$ident.NemesisFolder)   # ACAS per-operator folder "<edipi> - <DisplayName>"
         SourceHost = $env:COMPUTERNAME
-        Month      = ($now.ToString('yyyy-MM'))
+        # NOTE: 'Month' is deliberately NOT a stored key - see the ScriptProperty below.
         LogStamp   = ($now.ToString('yyyy-MM-dd_HH-mm-ss'))   # per-session .log filename stamp
         OnShare    = $reachable
         ShareWarning = $(if ($reachable) { '' } else { "Log share unavailable ($($probe.Reason)). Session logs + CSV telemetry are saved locally only at '$janetLocal'." })
@@ -271,16 +319,33 @@ function New-JanetWebLogContext {
         Lock       = (New-Object object)
     })
 
+    # Month resolves at READ time, not at session start (audit 2026-07-24). It was a
+    # frozen string, so on a server left running across a month rollover the reader
+    # that uses it (/api/logs/tail -> "$($lc.Month)_detail.csv") pointed at LAST
+    # month's file while the writers - which all format the month per row - had moved
+    # on, and the audit viewer went blank. A ScriptProperty keeps the ONE consumer's
+    # "$($ctx.Month)" syntax working unchanged (verified through a worker runspace:
+    # instance members ride along with the object) with no key for a stale value to
+    # live in. Best-effort: if Add-Member ever fails, fall back to the old frozen key
+    # rather than leaving the property undefined.
+    try { $ctx | Add-Member -MemberType ScriptProperty -Name Month -Value { (Get-Date).ToString('yyyy-MM') } -Force -ErrorAction Stop }
+    catch { $ctx['Month'] = $now.ToString('yyyy-MM') }
+
     # Share is back -> flush any rows captured locally during a prior outage.
     if ($reachable) { try { Invoke-JanetWebReplay -Context $ctx } catch {} }
     return $ctx
 }
 
 function Protect-JanetWebCsvField {
-    # Formula-injection guard (leading = + - @ TAB gets an apostrophe prefix);
+    # Formula-injection guard (leading = + - @ TAB CR gets an apostrophe prefix);
     # intentionally diverges from the desktop suite pending a suite-wide fix.
+    # audit 2026-07-24: the CR sigil was missing here while all three sibling guards
+    # (wpt Protect-WptCsvField, reports ConvertTo-ReportsCsvCell, reports IAVM map)
+    # carry it. Today both callers normalise CR/LF before calling in, so nothing
+    # leaks - this closes the DRIFT so a future caller that hands over raw text
+    # inherits the same guard the siblings give.
     param([string]$Value)
-    if ($Value -and $Value -match '^[=+\-@\t]') { return ("'" + $Value) }
+    if ($Value -and $Value -match '^[=+\-@\t\r]') { return ("'" + $Value) }
     return $Value
 }
 
@@ -311,12 +376,21 @@ function Invoke-JanetWebHeaderEnsure {
     #                               returned and left the file headerless)
     #   3. first line matches    -> no-op, return original
     #   4. stale header, rotation succeeds -> rename to <base>.legacy_<unix>.csv,
-    #      fresh header, return original (6 tries, 200ms backoff capped at 4000ms
-    #      to survive a peer tool's transient append lock)
+    #      fresh header, return original (-RotateRetries tries, -RotateBackoffMs
+    #      backoff doubling up to 4000ms, to survive a peer tool's transient
+    #      append lock)
     #   5. rotation stays locked -> route rows to a sister <base>.r<unix>.csv
     #      (reusing an existing matching sister) so new-schema rows don't get
     #      appended under the old header. Throws on I/O failure; callers retry/spool.
-    param([string]$Path, [string]$Header)
+    #
+    # audit 2026-07-24: the retry ladder is now caller-tunable because it re-runs PER
+    # ROW and the sleeping version (6 tries / 6.2s, twice per row = 12.4s) ran inside
+    # Add-JanetWebCsvRow's context lock - the same lock the single-threaded accept
+    # thread takes - so one locked stale-header file stalled the whole server. Callers
+    # holding the lock pass -RotateBackoffMs 0 (no sleep at all); the un-locked replay
+    # path keeps the patient ladder. Case 5 is the safety net either way: rows land
+    # under a CORRECT header in a sister CSV instead of being lost or mis-columned.
+    param([string]$Path, [string]$Header, [int]$RotateRetries = 6, [int]$RotateBackoffMs = 200)
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)) {
         if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
@@ -336,11 +410,13 @@ function Invoke-JanetWebHeaderEnsure {
     $base       = [System.IO.Path]::GetFileNameWithoutExtension($Path)
     $legacyName = "$base.legacy_$stamp.csv"
     $rotated    = $false
-    $delay      = 200
-    for ($attempt = 1; $attempt -le 6; $attempt++) {
+    $delay      = $RotateBackoffMs
+    $tries      = if ($RotateRetries -lt 1) { 1 } else { $RotateRetries }
+    for ($attempt = 1; $attempt -le $tries; $attempt++) {
         try { Rename-Item -LiteralPath $Path -NewName $legacyName -ErrorAction Stop; $rotated = $true; break }
         catch {
-            if ($attempt -lt 6) { Start-Sleep -Milliseconds $delay; $delay = [Math]::Min($delay * 2, 4000) }
+            # Sleep ONLY when the caller allows it (audit 2026-07-24 - see the header).
+            if ($attempt -lt $tries -and $delay -gt 0) { Start-Sleep -Milliseconds $delay; $delay = [Math]::Min($delay * 2, 4000) }
         }
     }
     if ($rotated -or -not (Test-Path -LiteralPath $Path)) {
@@ -387,31 +463,76 @@ function Add-JanetWebCsvRow {
     # lost (replayed next run). Header-ensure may redirect to a sister CSV when a
     # stale-schema file stays locked - always append to the path it returns.
     param([string]$NetworkPath, [string]$LocalPath, [string]$Header, [string]$Line, $Context)
+    # Rate-limited re-arm BEFORE the lock (audit 2026-07-24): a demoted session can
+    # come back to the share, and the probe can block on SMB for seconds, so it must
+    # not run while holding the lock the accept thread needs.
+    Test-JanetWebShareRearm -Context $Context
     [System.Threading.Monitor]::Enter($Context.Lock)
     try {
         if ($Context.OnShare) {
             if (-not (Test-JanetWebShareCached -Root $Context.NetRoot)) {
-                $Context.OnShare = $false   # share went away mid-session -> spool locally
+                $Context.OnShare = $false   # share went away mid-session -> spool locally (re-armed by Test-JanetWebShareRearm)
             } else {
                 for ($try = 0; $try -lt 2; $try++) {
                     try {
-                        $target = Invoke-JanetWebHeaderEnsure -Path $NetworkPath -Header $Header
+                        # -RotateBackoffMs 0: never sleep in the header-rotation ladder while
+                        # this lock is held (audit 2026-07-24) - it stalled the accept thread
+                        # for up to 12.4s PER ROW. Two immediate rename attempts, then the
+                        # sister-CSV fallback keeps the row under a correct header.
+                        $target = Invoke-JanetWebHeaderEnsure -Path $NetworkPath -Header $Header -RotateRetries 2 -RotateBackoffMs 0
                         Add-Content -LiteralPath $target -Value $Line -Encoding UTF8 -ErrorAction Stop
                         return
-                    } catch { Start-Sleep -Milliseconds (60 * ($try + 1)) }
+                    } catch {
+                        # Back off WITHOUT holding the lock: Monitor::Wait releases it for the
+                        # timeout and re-acquires before we continue (audit 2026-07-24), so a
+                        # transient append lock no longer blocks the accept thread. Nothing
+                        # pulses this object - the wait always ends on the timeout.
+                        try { [void][System.Threading.Monitor]::Wait($Context.Lock, (60 * ($try + 1))) }
+                        catch { Start-Sleep -Milliseconds (60 * ($try + 1)) }
+                    }
                 }
-                $Context.OnShare = $false   # share went away mid-session -> spool locally
+                $Context.OnShare = $false   # share went away mid-session -> spool locally (re-armed by Test-JanetWebShareRearm)
             }
         }
         # local spool
         try {
-            $target = Invoke-JanetWebHeaderEnsure -Path $LocalPath -Header $Header
+            # Same no-sleep-under-the-lock rule as the share path above (audit 2026-07-24).
+            $target = Invoke-JanetWebHeaderEnsure -Path $LocalPath -Header $Header -RotateRetries 2 -RotateBackoffMs 0
             Add-Content -LiteralPath $target -Value $Line -Encoding UTF8 -ErrorAction Stop
         } catch {
             Write-Warning "JanetWeb: local spool write failed for '$LocalPath' - audit row not persisted: $($_.Exception.Message)"
             Write-JanetWebLostRowSentinel -LocalPath $LocalPath -Line $Line
         }
     } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
+}
+
+function Test-JanetWebHostTarget {
+    <#  Is this audit -Target an actual MACHINE (so it belongs in a "hosts touched"
+        count), or a non-host target that must not inflate it?
+
+        audit 2026-07-24: the AGGREGATE Context.Hosts set had NO filter at all while
+        the per-tool tally two lines below it carried a 2-literal blacklist, so the
+        headline "hosts touched" number counted things that are not machines:
+          reports -> "Dirty30 (12 hosts)", "Dirty 30 LDAP lookup (5 names)",
+                     "C:\out\Dirty30.html", "AcasWeekly_2026-07.csv"
+          engine  -> 'N/A' (the failed-action row), '(custom command)', '(start)'
+        Both call sites now share THIS predicate, so the aggregate and the per-tool
+        rollups agree on what a host is.
+
+        Deliberately conservative - it only rejects shapes a NetBIOS name / FQDN /
+        IPv4 literal can never have, so a real machine is never dropped:
+        whitespace, a parenthesised label, a drive/UNC/URL path, or a report
+        filename extension. 'HOST\Product' (upr) still counts: it is host-bearing,
+        exactly as the server's TouchedHosts emit treats it. #>
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    $t = ([string]$Target).Trim()
+    if ($t -eq 'N/A' -or $t -eq '(custom command)') { return $false }   # the historical 2-literal blacklist
+    if ($t -match '\s')          { return $false }   # "Dirty30 (12 hosts)" - no host name contains a space
+    if ($t.StartsWith('('))      { return $false }   # '(start)' / '(end)' / other sentinel labels
+    if ($t.StartsWith('\\') -or $t -match '^[A-Za-z]:[\\/]' -or $t -match '://' -or $t.Contains('/')) { return $false }  # UNC / drive path / URL
+    if ($t -match '\.(csv|xlsx?|html?|pdf|log|txt|json|zip|xml|nessus)$') { return $false }   # bare report filename
+    return $true
 }
 
 function Write-JanetAction {
@@ -439,17 +560,21 @@ function Write-JanetAction {
         # mutated under the context lock (writers run on concurrent runspaces).
         [System.Threading.Monitor]::Enter($Context.Lock)
         try {
-            [void]$Context.Hosts.Add($Target)
+            # audit 2026-07-24: the aggregate host set gets the SAME non-host filter the
+            # per-tool tally uses (report labels / file paths / 'N/A' are not machines).
+            $isHost = Test-JanetWebHostTarget -Target $Target
+            if ($isHost) { [void]$Context.Hosts.Add($Target) }
             if ($Result -eq 'Failure') { $Context.Failures++ }
             if ($Action -eq 'VulnPatched' -and $Result -ne 'Failure') { $Context.Vulns += [int]$ItemCount }
             # Per-tool tally for the per-tool SessionEnd rollup. Skip non-host targets
-            # ('N/A', '(custom command)', '') in the host count so it stays a real machine count.
+            # ('N/A', '(custom command)', report labels, file paths) in the host count so
+            # it stays a real machine count.
             $pt = $Context.PerTool[$toolName]
             if (-not $pt) {
                 $pt = @{ Hosts = (New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)); Vulns = 0; Failures = 0; First = (Get-Date); Last = (Get-Date) }
                 $Context.PerTool[$toolName] = $pt
             }
-            if ($Target -and $Target -ne 'N/A' -and $Target -ne '(custom command)') { [void]$pt.Hosts.Add($Target) }
+            if ($isHost) { [void]$pt.Hosts.Add($Target) }
             if ($Result -eq 'Failure') { $pt.Failures++ }
             if ($Action -eq 'VulnPatched' -and $Result -ne 'Failure') { $pt.Vulns += [int]$ItemCount }
             $pt.Last = Get-Date
@@ -539,6 +664,7 @@ function Write-JanetWebUsageSnapshot {
 
         # Snapshot PerTool under the lock (same idiom as the SessionEnd rollup).
         $snap = @()
+        $aggHosts = 0; $aggVulns = 0; $aggFails = 0
         [System.Threading.Monitor]::Enter($Context.Lock)
         try {
             foreach ($e in $Context.PerTool.GetEnumerator()) {
@@ -551,6 +677,10 @@ function Write-JanetWebUsageSnapshot {
                     DurMin = [math]::Round(($pt.Last - $pt.First).TotalMinutes, 1)
                 }
             }
+            # Session-wide totals for the aggregate row, read under the same lock.
+            $aggHosts = $Context.Hosts.Count
+            $aggVulns = [int]$Context.Vulns
+            $aggFails = [int]$Context.Failures
             $Context.UsageDirty = $false
             $Context.LastSnapshotAt = Get-Date
         } finally { [System.Threading.Monitor]::Exit($Context.Lock) }
@@ -568,6 +698,24 @@ function Write-JanetWebUsageSnapshot {
             )
             Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
         }
+
+        # Aggregate 'JANET-WEB' snapshot row - MIRRORS the SessionEnd rollup, which has
+        # always written per-tool rows PLUS an aggregate row.
+        #
+        # audit 2026-07-24 (S4): without this, a live session had no aggregate row at all,
+        # and readers that (correctly) scope themselves to JANET Web by filtering
+        # Tool='JANET-WEB' - reports fleet-activity Pass A - could not see a running session
+        # no matter what RowType they accepted. Per-tool rows are NOT usable for that scoping,
+        # because Resolve-JanetWebToolName deliberately maps web tools onto the DESKTOP tool
+        # names ('WPT', 'ACAS_Nemesis', ...) so both suites share one per-tool audit trail.
+        # The dashboard is unaffected: it already ranks SessionEnd above Snapshot per
+        # (SessionId,Tool), so this row supersedes cleanly and cannot double-count.
+        $durMin = [math]::Round(((Get-Date) - $Context.StartedAt).TotalMinutes, 1)
+        $aggLine = ConvertTo-JanetWebCsvLine @(
+            $ts, $Context.SessionId, $Context.Operator, $Context.Asi,
+            'JANET-WEB', $Context.Version, 'Snapshot', $aggHosts, $aggVulns, $aggFails, $durMin, ''
+        )
+        Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $aggLine -Context $Context
     } catch {}
 }
 
@@ -577,6 +725,7 @@ function Add-JanetWebTextLine {
     # seeded with a multi-line header block on first create (not a CSV header) and
     # never header-rotated.
     param([string]$NetworkPath, [string]$LocalPath, [string[]]$HeaderBlock, [string]$Line, $Context)
+    Test-JanetWebShareRearm -Context $Context   # audit 2026-07-24 (see Add-JanetWebCsvRow)
     [System.Threading.Monitor]::Enter($Context.Lock)
     try {
         if ($Context.OnShare) {
@@ -590,7 +739,11 @@ function Add-JanetWebTextLine {
                         if (-not (Test-Path -LiteralPath $NetworkPath) -and $HeaderBlock) { Set-Content -LiteralPath $NetworkPath -Value $HeaderBlock -Encoding UTF8 -ErrorAction Stop }
                         Add-Content -LiteralPath $NetworkPath -Value $Line -Encoding UTF8 -ErrorAction Stop
                         return
-                    } catch { Start-Sleep -Milliseconds (60 * ($try + 1)) }
+                    } catch {
+                        # Back off WITHOUT holding the lock (audit 2026-07-24, as above).
+                        try { [void][System.Threading.Monitor]::Wait($Context.Lock, (60 * ($try + 1))) }
+                        catch { Start-Sleep -Milliseconds (60 * ($try + 1)) }
+                    }
                 }
                 $Context.OnShare = $false
             }
@@ -640,17 +793,25 @@ function Write-JanetWebRun {
         $header = 'Timestamp,User,Edipi,SessionId,Host,RowType,Action,Scope,Profile,Mode,HostsTotal,Success,Failed,DurationSec,Notes,GroupKey,GroupSize'
         $ts = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 
+        # audit 2026-07-24: Edipi + SourceHost go through the SAME min escaper as every
+        # sibling field on the row. They are environment-derived (USERNAME / COMPUTERNAME
+        # and an AD-shaped identity), so an embedded comma or CR/LF would desync the
+        # column count or forge a whole extra audit row - the escaper only protects a row
+        # if it is applied uniformly.
+        $edipiF = ConvertTo-JanetWebMinField $Context.Edipi
+        $srcF   = ConvertTo-JanetWebMinField $Context.SourceHost
+
         $members = @($GroupMembers | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         $rows = @()
         if ($members.Count -gt 0) {
             $size = $members.Count
             foreach ($m in $members) {
-                $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
+                $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $edipiF, $Context.SessionId, $srcF,
                     (ConvertTo-JanetWebMinField $RowType), (ConvertTo-JanetWebMinField $Action), (ConvertTo-JanetWebMinField $m), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
                     $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetWebMinField $Notes), (ConvertTo-JanetWebMinField $GroupKey), $size)
             }
         } else {
-            $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi, $Context.SessionId, $Context.SourceHost,
+            $rows += ,@($ts, (ConvertTo-JanetWebMinField $Context.Operator), $edipiF, $Context.SessionId, $srcF,
                 (ConvertTo-JanetWebMinField $RowType), (ConvertTo-JanetWebMinField $Action), (ConvertTo-JanetWebMinField $Scope), (ConvertTo-JanetWebMinField $Profile), (ConvertTo-JanetWebMinField $Mode),
                 $HostsTotal, $Success, $Failed, $DurationSec, (ConvertTo-JanetWebMinField $Notes), (ConvertTo-JanetWebMinField $GroupKey), 1)
         }
@@ -695,9 +856,11 @@ function Write-JanetWebTouchedHost {
         $netFile   = Join-Path (Join-Path (Join-Path $Context.NetRoot    $toolName) $opFolder) $fileName
         $localFile = Join-Path (Join-Path (Join-Path $Context.JanetLocal $toolName) $opFolder) $fileName
         $header = 'Timestamp,Operator,Edipi,SessionId,SourceHost,Action,TargetHost,Result,Detail'
+        # audit 2026-07-24: Edipi + SourceHost through the SAME escaper as their row
+        # siblings (see Write-JanetWebRun) - an unescaped field is a log-injection seam.
         $line = @(
-            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), (ConvertTo-JanetWebMinField $Context.Operator), $Context.Edipi,
-            $Context.SessionId, $Context.SourceHost, (ConvertTo-JanetWebMinField $Action),
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), (ConvertTo-JanetWebMinField $Context.Operator), (ConvertTo-JanetWebMinField $Context.Edipi),
+            $Context.SessionId, (ConvertTo-JanetWebMinField $Context.SourceHost), (ConvertTo-JanetWebMinField $Action),
             (ConvertTo-JanetWebMinField $TargetHost), (ConvertTo-JanetWebMinField $Result), (ConvertTo-JanetWebMinField $Detail)
         ) -join ','
         Add-JanetWebCsvRow -NetworkPath $netFile -LocalPath $localFile -Header $header -Line $line -Context $Context
@@ -775,6 +938,26 @@ function Invoke-JanetWebReplay {
     # share, then rename the local copies <name>.replayed_<stamp> as a paper trail
     # (mirrors the desktop replay-on-launch). Skips already-replayed files and
     # rotated *.legacy_*.csv archives.
+    #
+    # audit 2026-07-24: that rename was the ONLY "already replayed" marker and its
+    # failure was swallowed, so one locked/denied rename silently re-uploaded the
+    # WHOLE spool file at the next launch - duplicate rows in the audit trail of
+    # record, with nothing to tell a lead the duplicates were an artifact. Now:
+    #   * a '<name>.replayed' sidecar receipt is written when the rename fails, and
+    #     any file carrying one is SKIPPED on the next pass (idempotent),
+    #   * the rename is retried before falling back to the receipt,
+    #   * if BOTH fail, the possible duplication is REPORTED (warning + the same
+    #     %TEMP% sentinel the lost-row path uses) instead of happening silently.
+    # Append-then-mark ordering is deliberate: the residual crash window (rows up,
+    # process dies before marking) re-uploads and is reported, never loses rows.
+    #
+    # audit 2026-07-25 (fable re-audit follow-up): the receipt now has a LIFECYCLE.
+    # It records replayedLines=<n> so a later pass replays only the tail (both the CSV
+    # and the whole-file .log branch - the .log count is a whole-file line count because
+    # its header block is part of the body), and it is DELETED as soon as the rename
+    # that retires the spool file finally succeeds. Without that delete the receipt
+    # outlived its file and made the next pass skip <n> brand-new rows in the recreated
+    # spool file - silent loss, the failure mode the receipt exists to prevent.
     param([Parameter(Mandatory)] $Context)
     $local = $Context.JanetLocal
     if (-not $local -or -not (Test-Path -LiteralPath $local)) { return }
@@ -786,29 +969,107 @@ function Invoke-JanetWebReplay {
                 ($_.Extension -eq '.csv' -or $_.Extension -eq '.log') -and
                 $_.Name -notlike '*.replayed_*' -and $_.Name -notlike '*.legacy_*'
             })) {
+            # Idempotence guard: a receipt means this file's rows already went up
+            # (the rename that normally retires it could not be applied).
+            #
+            # CORRECTION (fable re-audit): the receipt used to be a bare "skip this file
+            # FOREVER" marker, which turned a visible duplication bug into a SILENT LOSS one.
+            # The spool path is deterministic (per month), so a file that survived the rename
+            # keeps receiving NEW rows the next time OnShare demotes to local-only - and every
+            # future replay skipped it on sight, so those rows never reached the share and
+            # nothing said so. Losing audit rows silently is strictly worse than duplicating
+            # them loudly. The receipt now records HOW MANY data lines were replayed, so a
+            # later pass replays only the tail and re-stamps.
+            $receipt = $f.FullName + '.replayed'
+            $alreadyDone = 0
+            if (Test-Path -LiteralPath $receipt -ErrorAction SilentlyContinue) {
+                $counted = $false
+                try {
+                    $rl = @(Get-Content -LiteralPath $receipt -Encoding UTF8 -ErrorAction Stop)
+                    foreach ($line in $rl) { if ($line -match '^\s*replayedLines\s*=\s*(\d+)\s*$') { $alreadyDone = [int]$Matches[1]; $counted = $true } }
+                } catch { $alreadyDone = -1 }   # unreadable receipt: fail CLOSED, skip (old behaviour)
+                if ($alreadyDone -lt 0) { continue }
+                # A readable receipt with NO replayedLines= is a pre-fix (bare "skip me")
+                # receipt. We cannot know how much of the file went up, so we replay it
+                # whole - duplicating LOUDLY beats losing silently, the same call the
+                # count itself was introduced to make - and we say so.
+                # (audit 2026-07-25 (fable re-audit follow-up).)
+                if (-not $counted) { Write-Warning "JanetWeb: replay receipt '$receipt' carries no replayedLines count - replaying '$($f.Name)' in full; rows may DUPLICATE (never lost)." }
+            }
             $rel = $f.FullName.Substring($local.TrimEnd('\').Length).TrimStart('\')
             $isUsage = ($rel -like '_Rollup\*' -or $f.Name -like '*_usage*.csv')
             $netFile = if ($isUsage) { Join-Path $Context.NetRoot $f.Name } else { Join-Path $Context.NetRoot $rel }
             try {
                 $netDir = Split-Path -Parent $netFile
                 if ($netDir -and -not (Test-Path -LiteralPath $netDir)) { New-Item -ItemType Directory -Path $netDir -Force -ErrorAction Stop | Out-Null }
+                # $alreadyDone = data lines a PREVIOUS pass already pushed for this same file
+                # (non-zero only when that pass could not retire it). Replay just the tail.
+                # A spool file only ever GROWS between passes, so a count larger than what
+                # the file now holds means the receipt does not belong to these bytes (a
+                # recreated spool file at the same deterministic path). Replay from the top
+                # rather than skipping brand-new rows. (audit 2026-07-25 (fable re-audit
+                # follow-up); the receipt cleanup below is the primary guard.)
+                $sentCount = 0
                 if ($f.Extension -eq '.log') {
                     # narrative transcript: header block is part of the body - append the
                     # whole file (NOT skip-1, which would lose the 3-line session header).
-                    $all = Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction Stop
-                    if (@($all).Count -gt 0) { Add-Content -LiteralPath $netFile -Value $all -Encoding UTF8 -ErrorAction Stop }
+                    # So the count stamped below is a WHOLE-FILE line count, and the skip
+                    # here is over the whole file too - the two must stay the same basis.
+                    $all = @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction Stop)
+                    $skip = if ($alreadyDone -gt $all.Count) { 0 } else { $alreadyDone }
+                    $tail = @($all | Select-Object -Skip $skip)
+                    if ($tail.Count -gt 0) { Add-Content -LiteralPath $netFile -Value $tail -Encoding UTF8 -ErrorAction Stop }
+                    $sentCount = $all.Count
                 } else {
                     $lines = @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction Stop)
                     if ($lines.Count -gt 0) {
                         $header = $lines[0]
-                        # creates/repairs the dest header; may redirect to a sister CSV
+                        # creates/repairs the dest header; may redirect to a sister CSV.
+                        # This path holds NO lock, so it keeps the patient rotation ladder.
                         $dest = Invoke-JanetWebHeaderEnsure -Path $netFile -Header $header
                         $data = @($lines | Select-Object -Skip 1 | Where-Object { $_ -ne '' })
-                        if ($data.Count -gt 0) { Add-Content -LiteralPath $dest -Value $data -Encoding UTF8 -ErrorAction Stop }
+                        $skip = if ($alreadyDone -gt $data.Count) { 0 } else { $alreadyDone }
+                        $tail = @($data | Select-Object -Skip $skip)
+                        if ($tail.Count -gt 0) { Add-Content -LiteralPath $dest -Value $tail -Encoding UTF8 -ErrorAction Stop }
+                        $sentCount = $data.Count
                     }
                 }
+                # Rows are on the share now - retire the local copy so it can never be
+                # replayed twice. Two rename attempts (a peer runspace / AV can hold the
+                # handle for a moment), then the sidecar receipt, then a loud report.
                 $rstamp = [int][double]((Get-Date) - (Get-Date '1970-01-01')).TotalSeconds
-                try { Rename-Item -LiteralPath $f.FullName -NewName ($f.Name + ".replayed_$rstamp") -ErrorAction Stop } catch {}
+                $retired = $false
+                for ($rt = 0; $rt -lt 2 -and -not $retired; $rt++) {
+                    try { Rename-Item -LiteralPath $f.FullName -NewName ($f.Name + ".replayed_$rstamp") -ErrorAction Stop; $retired = $true }
+                    catch { if ($rt -eq 0) { Start-Sleep -Milliseconds 150 } }   # no lock held on this path
+                }
+                if ($retired) {
+                    # The spool file is gone, so its receipt MUST go with it (audit
+                    # 2026-07-25 (fable re-audit follow-up)): spool paths are deterministic
+                    # (per month for the CSVs, per session stamp for the .log), so the next
+                    # local-only stretch recreates this exact path - and a leftover receipt
+                    # would make the next pass skip that many BRAND-NEW rows. That is silent
+                    # loss, the one failure the receipt exists to prevent. Best-effort; if
+                    # the delete loses too, the count sanity check above still catches the
+                    # common shape (a shorter recreated file).
+                    try { if (Test-Path -LiteralPath $receipt -ErrorAction SilentlyContinue) { Remove-Item -LiteralPath $receipt -Force -ErrorAction SilentlyContinue } } catch {}
+                } else {
+                    try {
+                        # replayedLines is load-bearing, not a comment: the next pass replays
+                        # only lines BEYOND this count, so rows appended to this same spool file
+                        # after a later share demotion still reach the share exactly once.
+                        Set-Content -LiteralPath $receipt -Encoding UTF8 -ErrorAction Stop -Value @(
+                            "replayed $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -> $netFile",
+                            "rename to *.replayed_$rstamp failed; this receipt is what stops a duplicate replay.",
+                            "replayedLines=$sentCount"
+                        )
+                    } catch {
+                        # Neither marker landed: the next launch WILL re-upload this file.
+                        # Say so, in both operator-visible places, rather than doubling rows silently.
+                        Write-Warning "JanetWeb: replayed '$($f.FullName)' to '$netFile' but could not retire the local copy - the next launch may DUPLICATE these rows."
+                        Write-JanetWebLostRowSentinel -LocalPath $f.FullName -Line "DUPLICATE-RISK: replayed to '$netFile' but neither the rename nor the .replayed receipt could be written"
+                    }
+                }
             } catch {}
         }
     } catch {}

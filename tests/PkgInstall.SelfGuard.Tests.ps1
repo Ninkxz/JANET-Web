@@ -110,12 +110,16 @@ Describe 'pkginstall 2.5.11 - deploy confirm-word gate (fail-closed)' {
         @($o.Result.rows).Count          | Should Be 0
         @($o.Events | Where-Object { $_.type -eq 'log' -and $_.level -eq 'err' -and $_.text -match 'type DEPLOY' }).Count | Should BeGreaterThan 0
     }
-    It 'refuses a wrong confirm-word (must be the DEPLOY word; case-insensitive like adto/secureboot)' {
+    It 'refuses a wrong confirm-word, and refuses the right word in the WRONG CASE' {
         $o = Invoke-Pkg 'deploy-msi-bundle' @{ targets = 'WS-REMOTE-1'; confirm = 'INSTALL' }
         [bool]$o.Result.summary.rejected | Should Be $true
-        # case-insensitive convention: 'deploy' (lowercase) IS accepted, matching adto's -ne 'FIX'
+        # audit 2026-07-24 (fable re-audit F3): this test previously asserted the OPPOSITE -
+        # that lowercase 'deploy' IS accepted, described as a "case-insensitive convention".
+        # It was pinning a weaker gate than the operator-facing text promises ("type DEPLOY
+        # exactly"), and a probe confirmed the sibling remoteadmin gate accepted 'run'. All
+        # eight server-side confirm gates are now -cne, so the typed word means what it says.
         $o2 = Invoke-Pkg 'deploy-msi-bundle' @{ targets = '127.0.0.1'; confirm = 'deploy' }
-        [bool]$o2.Result.summary.rejected | Should Be $false
+        [bool]$o2.Result.summary.rejected | Should Be $true
     }
     It 'the correct DEPLOY confirm passes the gate (reaches the self-guard, not rejected)' {
         $o = Invoke-Pkg 'deploy-psadt' @{ targets = '127.0.0.1'; confirm = 'DEPLOY' }

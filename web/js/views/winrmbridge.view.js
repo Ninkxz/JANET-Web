@@ -13,13 +13,21 @@
   var EXPORT_COLS = [['Host', 'Host'], ['Ping', 'Ping'], ['State', 'State'], ['Reverts', 'Reverts'], ['Detail', 'Detail']];
 
   function stateOf(r) { return r.Status != null && r.Status !== '' ? String(r.Status) : String(r.Bridge == null ? '' : r.Bridge); }
+  // audit 2026-07-24: the engine's state vocabulary grew with the honesty fixes -
+  // LEFTOVER (5986 still listening past its revert window) is now actually emitted,
+  // ARMED (revert task present, nothing listening), PENDING (task registered but the
+  // immediate start could not be confirmed) and NO-DCOM / UNKNOWN (TCP 135 closed or the
+  // DCOM read failed - nothing was measured, so it must not read as ok).
+  // audit 2026-07-25 (fable re-audit follow-up): REVIEW joins it - 5986 answering with NO
+  // JANET task is unattributable (a production listener, or a leftover whose tasks are already
+  // gone), and the engine no longer calls that 'none'. It must never render as an ok row.
   function stateCls(s) {
     s = String(s);
     if (s === 'ACTIVE' || s === 'BRIDGING') return 'st-info';
     if (s === 'REVERTING') return 'st-info';
     if (s === 'none') return 'st-ok';
-    if (s === 'OFFLINE' || s === 'FAILED') return 'st-bad';
-    if (s === 'SKIPPED' || s === 'LEFTOVER') return 'st-warn';
+    if (s === 'OFFLINE' || s === 'FAILED' || s === 'NO-DCOM') return 'st-bad';
+    if (s === 'SKIPPED' || s === 'LEFTOVER' || s === 'ARMED' || s === 'PENDING' || s === 'UNKNOWN' || s === 'REVIEW') return 'st-warn';
     return '';
   }
 
@@ -46,9 +54,8 @@
       var rmWrap = el('div'); rmWrap.appendChild(ui.label('Auto-revert after (min)'));
       var revMin = ui.number({ value: 90, min: 5, max: 1440, title: 'Minutes until the bridge self-reverts on the target (floor 5). Also reverts at every startup.' }); revMin.style.width = '90px';
       rmWrap.appendChild(revMin); row1.appendChild(rmWrap);
-      var thWrap = el('div'); thWrap.appendChild(ui.label('Parallel hosts'));
-      var threads = ui.number({ value: 8, min: 1, max: 32, title: 'Concurrent hosts.' }); threads.style.width = '80px';
-      thWrap.appendChild(threads); row1.appendChild(thWrap);
+      // audit 2026-07-24: the 'Parallel hosts' box was removed - the engine's DCOM loop is
+      // strictly SERIAL, so the value was posted and silently ignored (a knob that lied).
       sCard.appendChild(row1);
       var cRow = el('div'); cRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap';
       cRow.appendChild(ui.label('Confirm:'));
@@ -56,7 +63,7 @@
       confirmInput.placeholder = 'ENABLE or REVERT'; confirmInput.style.width = '150px';
       cRow.appendChild(confirmInput);
       sCard.appendChild(cRow);
-      var warn = el('div', 'muted', 'Enable / Revert are destructive and need a live admin session (a service account with local admin on the targets). Check is read-only.');
+      var warn = el('div', 'muted', 'Enable / Revert are destructive and need a live admin session (a service account with local admin on the targets). Check is read-only. Hosts are processed one at a time (serial DCOM bootstrap); the temporary 5986 rule is scoped to this JANET dispatcher on the Domain profile only.');
       warn.style.cssText = 'font-size:11px;line-height:1.4;margin-top:8px'; sCard.appendChild(warn);
       left.appendChild(sCard);
       workRow.appendChild(left);
@@ -85,7 +92,7 @@
           { key: 'Reverts', label: 'REVERTS', width: 150, render: function (r) { return { text: r.Reverts == null ? '' : String(r.Reverts) }; } },
           { key: 'Detail', label: 'DETAIL', render: function (r) { var t = r.Detail == null ? '' : String(r.Detail); return { text: t, title: t }; } }
         ],
-        rowClass: function (r) { var s = stateOf(r); if (s === 'OFFLINE' || s === 'FAILED') return 'row-bad'; if (s === 'SKIPPED' || s === 'LEFTOVER') return 'row-warn'; return ''; }
+        rowClass: function (r) { var s = stateOf(r); if (s === 'OFFLINE' || s === 'FAILED') return 'row-bad'; if (s === 'SKIPPED' || s === 'LEFTOVER' || s === 'REVIEW') return 'row-warn'; return ''; }
       });
       var gridHolder = el('div'); gridHolder.style.cssText = 'flex:1;min-height:0;display:flex'; gridHolder.appendChild(grid.el);
       results.appendChild(gridHolder);
@@ -101,7 +108,7 @@
       // behaviour
       function setStatus(t, cls) { statusLine.textContent = t == null ? '' : String(t); statusLine.className = cls || 'muted'; }
       function isRunning() { return !!(run && run.state && run.state.active); }
-      var lockInputs = ctx.util.lockable([revMin, threads, confirmInput, checkBtn, enableBtn, revertBtn, clearBtn]);   // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
+      var lockInputs = ctx.util.lockable([revMin, confirmInput, checkBtn, enableBtn, revertBtn, clearBtn]);   // audit 2026-07-23 deferred pass: S3 lockInputs consolidation
       function validHosts() { var h = targets.hosts(); var bad = h.filter(function (x) { return !HOST_RE.test(x); }); return { hosts: h, bad: bad }; }
 
       clearBtn.onclick = function () { if (isRunning()) return; grid.clear(); prog.reset(); setStatus('Ready'); };
@@ -138,7 +145,7 @@
         if (isRunning()) return;
         var hosts = preflight(null); if (!hosts) return;
         grid.clear(); prog.reset(); lockInputs(true); setStatus('Checking...', 'st-info');
-        run = ctx.run('check', { targets: hosts.join('\n'), threads: parseInt(threads.value, 10) || 16 }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: false });
+        run = ctx.run('check', { targets: hosts.join('\n') }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: false });
         bindRun('Check');
       }
       async function startEnable() {
@@ -147,16 +154,18 @@
         var mins = Math.max(5, parseInt(revMin.value, 10) || 90);
         var ok = await ctx.arm({
           title: 'Arm Enable WinRM Bridge', banner: 'DESTRUCTIVE - OPENS A TEMPORARY NETWORK LISTENER',
-          body: 'About to open a temporary <b>5986 HTTPS</b> listener on <b>' + hosts.length + '</b> host(s) over DCOM. It arms a <b>self-revert first</b> (auto-reverts in <b>' + mins + ' min</b> and at every startup) then opens the listener + firewall rule. GPO stays authoritative.',
+          body: 'About to open a temporary <b>5986 HTTPS</b> listener on <b>' + hosts.length + '</b> host(s) over DCOM. It arms a <b>self-revert first</b> (auto-reverts in <b>' + mins + ' min</b> and at every startup) then opens the listener + a firewall rule scoped to <b>this dispatcher, Domain profile only</b>. GPO stays authoritative.',
           preflight: [
             { label: hosts.length + ' host(s)', ok: true },
             { label: 'Service account has local admin on targets (DCOM)', ok: !!ctx.session.state.credSet },
-            { label: 'Revert-first: auto-reverts in ' + mins + ' min + at startup', ok: true }
+            { label: 'Revert-first: auto-reverts in ' + mins + ' min + at startup', ok: true },
+            // audit 2026-07-24: the rule is no longer Any/Any/Any - say so at arming time.
+            { label: 'Temp 5986 rule scoped to this dispatcher + Domain profile', ok: true }
           ], okText: 'Enable Bridge', cancelText: 'Cancel'
         });
         if (!ok) { actlog.append({ text: 'Enable cancelled at arming.', level: 'warn' }); return; }
         grid.clear(); prog.reset(); lockInputs(true); setStatus('Enabling...', 'st-info');
-        run = ctx.run('enable', { targets: hosts.join('\n'), revertMinutes: mins, confirm: confirmInput.value, threads: parseInt(threads.value, 10) || 8 }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: true });
+        run = ctx.run('enable', { targets: hosts.join('\n'), revertMinutes: mins, confirm: confirmInput.value }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: true });
         bindRun('Enable');
       }
       async function startRevert() {
@@ -164,12 +173,15 @@
         var hosts = preflight('REVERT'); if (!hosts) return;
         var ok = await ctx.arm({
           title: 'Arm Revert WinRM Bridge', banner: 'DESTRUCTIVE - REMOVES THE BRIDGE NOW',
-          body: 'About to force-remove the WinRM Bridge on <b>' + hosts.length + '</b> host(s): listener + firewall rule + temp cert + tasks, over DCOM.',
+          // audit 2026-07-25 (fable re-audit follow-up): the firewall rule + tasks now come down
+          // even when the temp cert is gone, and a listener the target cannot attribute is left
+          // in place + reported (with the revert task kept armed) rather than silently skipped.
+          body: 'About to force-remove the WinRM Bridge on <b>' + hosts.length + '</b> host(s): our listener + firewall rule + temp cert + tasks, over DCOM.<br><br>A 5986 listener the target cannot positively attribute to this tool is <b>left in place</b> and reported (Check flags it) - it is never removed blind.',
           preflight: [{ label: hosts.length + ' host(s)', ok: true }, { label: 'Admin session', ok: !!ctx.session.state.credSet }], okText: 'Revert Now', cancelText: 'Cancel'
         });
         if (!ok) { actlog.append({ text: 'Revert cancelled at arming.', level: 'warn' }); return; }
         grid.clear(); prog.reset(); lockInputs(true); setStatus('Reverting...', 'st-info');
-        run = ctx.run('revert', { targets: hosts.join('\n'), confirm: confirmInput.value, threads: parseInt(threads.value, 10) || 8 }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: true });
+        run = ctx.run('revert', { targets: hosts.join('\n'), confirm: confirmInput.value }, { keyOf: function (ev) { return ev.Host != null ? String(ev.Host) : null; }, destructive: true });
         bindRun('Revert');
       }
 

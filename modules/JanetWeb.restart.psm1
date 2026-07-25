@@ -34,6 +34,32 @@
 #    Get-JanetToolManifest                          -> tool + action descriptors
 #    Invoke-JanetToolAction -ActionId -Params -Credential -Emit  -> { rows; summary }
 #  -Emit event shapes consumed by the UI: status / progress / row / log / audit.
+#
+#  Changelog
+#    1.5.0-beta13  audit 2026-07-25 (fable re-audit follow-up): (1) the /c message
+#                  sanitiser now collapses NUL and the rest of the C0 controls, not
+#                  just CR/LF/TAB - a U+0000 truncated the Win32 command line and
+#                  dropped /f (truncate-before-escape ordering preserved); (2) the
+#                  never-restart Exceptions parse tolerates whole-line '#'/';'
+#                  comments and '(annotation)' suffixes before it rejects, so a
+#                  commented host list no longer hard-aborts the whole dispatch
+#                  wave while genuinely malformed entries still fail closed.
+#    1.5.0-beta12  audit 2026-07-24 fix pass: (1) the shutdown.exe /c countdown
+#                  message is quoted ONCE at module scope per the
+#                  CommandLineToArgvW rules (ConvertTo-RrsShutdownMessageArg) and
+#                  handed to both remote blocks pre-quoted - a backslash before a
+#                  quote used to close the /c token and let the message ADD
+#                  arguments (/s, /t 0) or drop /f; (2) verify-boottime resolves a
+#                  bare HH:mm reference to the NEAREST occurrence, so a
+#                  cross-midnight wave no longer reports the whole fleet "Did NOT
+#                  restart - confirmed"; (3) an Exceptions (never-restart) entry
+#                  that fails the host-token filter now aborts the wave loudly
+#                  instead of being dropped in silence and rebooted; (4) the
+#                  consent staging directory keeps its admin-only DACL and only a
+#                  results/ subdir is user-writable (the executed agent script is
+#                  no longer modifiable by any non-admin on the box).
+#    1.5.0-beta11  audit 2026-07-23 fix pass (typed confirm word, shared
+#                  troubleshoot-hint delegation, shared ping-sweep loop).
 # =============================================================================
 
 # Shared troubleshooting-hint engine (loop 79): the shutdown-error mapper below delegates its
@@ -44,7 +70,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'restart'
         name     = 'Restart Scheduler'
-        version  = '1.5.0-beta11'   # audit 2026-07-23 fix pass; Restart.Guards.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.5.0-beta13'   # audit 2026-07-25 (fable re-audit follow-up): /c message sanitiser strips NUL/C0 controls, exceptions parse tolerates '#'/';' comments + '(annotation)' suffixes before failing closed; Restart.Guards.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Lifecycle'
         summary  = 'Mass scheduled restart for Windows fleets - parallel shutdown.exe /r over WinRM with optional user consent, ping gate, abort, and reboot verification.'
         actions  = @(
@@ -161,16 +187,118 @@ function Get-JanetToolManifest {
 # -----------------------------------------------------------------------------
 function ConvertTo-JanetHostList {
     param([string]$Raw)
-    if ([string]::IsNullOrWhiteSpace($Raw)) { return @() }
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    $out  = New-Object System.Collections.ArrayList
-    foreach ($tok in ($Raw -split '[\r\n,;\t ]+')) {
-        $h = $tok.Trim().Trim('\','/').TrimStart('\\')
-        if ([string]::IsNullOrWhiteSpace($h)) { continue }
-        # Accept only a bare host/IPv4 token; drop UNC/URL/junk before New-PSSession.
-        if (($h -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') -and $seen.Add($h)) { [void]$out.Add($h) }
+    # Single implementation of the token rules lives in Split-JanetHostTokens; this
+    # wrapper keeps the historic "accepted tokens only" contract for target lists.
+    $split = Split-JanetHostTokens -Raw $Raw
+    return ,$split.Accepted
+}
+
+# Same parse as above, but it also REPORTS the tokens the host filter threw away.
+# audit 2026-07-24: dropping a junk token in silence is fine for a target list (a
+# bad target simply never gets dialed) but it is a safety failure for the
+# never-restart Exceptions list - the malformed entry vanished and the host it was
+# meant to protect was rebooted. Callers that hold a safety list use this form and
+# fail CLOSED on a non-empty Rejected set.
+function Split-JanetHostTokens {
+    param([string]$Raw)
+    $accepted = New-Object System.Collections.ArrayList
+    $rejected = New-Object System.Collections.ArrayList
+    if (-not [string]::IsNullOrWhiteSpace($Raw)) {
+        $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        # audit 2026-07-25 (fable re-audit follow-up): failing CLOSED on a malformed never-restart
+        # entry is right, but '# never reboot DCs' and 'DC01 (primary)' are ORDINARY annotations in
+        # a pasted host list - and they aborted the entire dispatch wave (and, on a target list,
+        # quietly injected 'never'/'reboot'/'DCs' as hostnames). Normalise those two annotation
+        # forms line-by-line BEFORE the token filter; anything still malformed is still rejected,
+        # so the fail-closed abort keeps its teeth.
+        foreach ($line in ($Raw -split '\r?\n')) {
+            # Whole-line comment: '#' or ';' in the first non-space column drops the whole line.
+            if ($line -match '^\s*[#;]') { continue }
+            # Parenthetical annotation ('DC01 (primary)'): '(' is never legal in a hostname, so a
+            # parenthesised run can only ever be a note. Strip the run, keep the host beside it.
+            $line = $line -replace '\([^()]*\)', ' '
+            foreach ($tok in ($line -split '[\r\n,;\t ]+')) {
+                $h = $tok.Trim().Trim('\','/').TrimStart('\\')
+                if ([string]::IsNullOrWhiteSpace($h)) { continue }
+                # Accept only a bare host/IPv4 token; drop UNC/URL/junk before New-PSSession.
+                if ($h -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') {
+                    if ($seen.Add($h)) { [void]$accepted.Add($h) }
+                } else {
+                    [void]$rejected.Add($tok.Trim())
+                }
+            }
+        }
     }
-    return ,$out.ToArray()
+    return @{ Accepted = @($accepted.ToArray()); Rejected = @($rejected.ToArray()) }
+}
+
+# -----------------------------------------------------------------------------
+# Resolve an operator-supplied reference/restart time-of-day for VERIFICATION.
+# audit 2026-07-24: verify-boottime used a bare [datetime]::TryParse, so a bare
+# 'HH:mm' always landed on TODAY. A wave dispatched 23:50 and verified 00:10 then
+# compared every host against a reference ~24h in the FUTURE and reported the
+# whole fleet "Did NOT restart - confirmed". Verification always runs AFTER the
+# restart, so a bare time-of-day means the NEAREST occurrence: roll back a day
+# once the parse lands more than half a day ahead. The 12h window keeps a small
+# forward tolerance (verifying a few minutes early still means today), and a
+# string that carries a date is used exactly as written.
+# -----------------------------------------------------------------------------
+function Get-RrsReferenceTime {
+    param([string]$Raw, [datetime]$Now = (Get-Date))
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+    $s  = $Raw.Trim()
+    $dt = [datetime]::MinValue
+    if (-not [datetime]::TryParse($s, [ref]$dt)) { return $null }
+    if (($s -match '^\d{1,2}:\d{2}(:\d{2})?(\s*[AaPp]\.?[Mm]\.?)?$') -and ($dt -gt $Now.AddHours(12))) {
+        $dt = $dt.AddDays(-1)
+    }
+    return $dt
+}
+
+# -----------------------------------------------------------------------------
+# Build the shutdown.exe /c token from the operator's countdown message.
+# audit 2026-07-24 (ARGUMENT INJECTION): the old inline form escaped a bare '"'
+# as '\"' but did NOT double the backslashes standing in front of it, so a
+# message containing  \"  closed the /c token early and every word after it
+# became a shutdown.exe ARGUMENT - enough to add /s (shut DOWN instead of
+# restart), add /t 0 (reboot with no warning) or push /f off the command line.
+# Quote per the CommandLineToArgvW rules instead: double every backslash run that
+# precedes a quote, escape that quote, then double a trailing backslash run
+# (which would otherwise escape the closing quote). Returned token INCLUDES its
+# surrounding quotes. Computed once per wave at module scope and handed to the
+# workers already quoted - the consent dialog still gets the RAW message, this is
+# the command-line form only.
+# -----------------------------------------------------------------------------
+function ConvertTo-RrsShutdownMessageArg {
+    param([string]$Message)
+    $m = [string]$Message
+    # CR/LF/TAB break the /c token outright; collapse them before anything else.
+    # audit 2026-07-25 (fable re-audit follow-up): NUL and the rest of the C0 controls slipped
+    # through both this collapse and the Test-RrsShutdownMessageArg re-validation untouched.
+    # Win32 CreateProcess reads the command line as a NUL-TERMINATED wide string, so a U+0000
+    # in the message TRUNCATES the whole line there - 'shutdown /r /t 60 /c "hi<NUL>bye" /f'
+    # loses /f and leaves a dangling-quote /c. It cannot inject an argument (everything past
+    # the NUL is discarded and /r already precedes the message), but reboot-without-force /
+    # a malformed no-op is still not what the operator asked for. Collapse the whole C0 range
+    # here, i.e. BEFORE the 500-char cut below, so the truncate-then-escape ordering that keeps
+    # a cut from splitting a '\\' pair is unchanged.
+    $m = $m -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\r\n\t]+', ' '
+    # shutdown.exe caps /c at 512 chars. Truncate BEFORE escaping so a cut can
+    # never land in the middle of an escape sequence we just built.
+    if ($m.Length -gt 500) { $m = $m.Substring(0, 500) }
+    $m = $m -replace '(\\*)"', '$1$1\"'   # double the backslash run, then escape the quote
+    $m = $m -replace '(\\+)$', '$1$1'     # a trailing run would escape the closing quote
+    return '"' + $m + '"'
+}
+
+# True when a token is a well-formed, fully-escaped quoted command-line argument:
+# wrapped in quotes, every interior quote escaped, no dangling trailing backslash.
+# The two remote shutdown blocks re-check the token they were handed with this same
+# expression (inlined - they run in bare runspaces with no module scope) and
+# neutralise anything that fails, so no path can splice raw text into a command line.
+function Test-RrsShutdownMessageArg {
+    param([string]$Arg)
+    return ([string]$Arg -match '^"(?:[^"\\]|\\[\s\S])*"$')
 }
 
 # Set of identities that resolve to THIS dispatcher host: shortname, FQDN, all
@@ -178,7 +306,7 @@ function ConvertTo-JanetHostList {
 # self-reboot can't kill the HttpListener mid-dispatch (audit#10). Computed once
 # and cached. Returns a case-insensitive HashSet.
 function Get-JanetLocalIdentity {
-    if ($script:JanetLocalIdentity) { return $script:JanetLocalIdentity }
+    if ($script:JanetLocalIdentity) { return ,$script:JanetLocalIdentity }
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($n in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1')) { if ($n) { [void]$set.Add($n) } }
     try { [void]$set.Add([System.Net.Dns]::GetHostName()) } catch {}
@@ -199,7 +327,7 @@ function Get-JanetLocalIdentity {
         }
     } catch {}
     $script:JanetLocalIdentity = $set
-    return $set
+    return ,$set   # comma stops PowerShell unrolling the HashSet (drops the OrdinalIgnoreCase comparer)
 }
 
 # True if a target token names this dispatcher host (short/FQDN/IP/loopback).
@@ -230,7 +358,9 @@ $ErrorActionPreference = 'Stop'
 $token      = '__TOKEN__'
 $dir        = Join-Path $env:ProgramData 'JANET\Consent'
 $cfgPath    = Join-Path $dir ("cfg_$token.json")
-$resultPath = Join-Path $dir ("result_$token.json")
+# audit 2026-07-24: the staging dir (which holds THIS script) is admin-write-only;
+# 'results' is the single subdirectory the interactive user may write to.
+$resultPath = Join-Path (Join-Path $dir 'results') ("result_$token.json")
 
 function Write-ConsentResult([string]$decision) {
     $o = [ordered]@{
@@ -325,8 +455,9 @@ $form.Add_FormClosing({ $timer.Stop() })
 if (-not $script:decision) { $script:decision = 'Timeout' }
 Write-ConsentResult $script:decision
 
-# Best-effort self-clean. The dispatcher also cleans up over WinRM, so a
-# failure here (e.g. a limited user can't delete an admin-created task) is fine.
+# Best-effort self-clean. Since audit 2026-07-24 the staging dir is admin-write-only,
+# so these deletes are EXPECTED to fail for a limited user - the dispatcher's own
+# cleanup over WinRM (which runs with admin rights) is the one that matters.
 try { schtasks.exe /Delete /TN ('JANET\Consent_' + $token) /F 2>$null | Out-Null } catch {}
 try { Remove-Item -LiteralPath $cfgPath -Force -ErrorAction SilentlyContinue } catch {}
 try {
@@ -350,7 +481,11 @@ try {
 # serialize in ~ceil(hosts/threads) prompt-window batches when consent is on.
 # -----------------------------------------------------------------------------
 $script:DispatchWorker = {
-    param($hostname, $restartTicks, $mode, $leadMinutes, $rollingGraceSeconds, $message, $dryRun, $cred, $consentRequired, $agentTemplate, $promptSeconds, $consentGraceSeconds, $pollInterval, $consentFailMode, $cancelJob, $onlyIfPending, $useSsl)
+    # audit 2026-07-24: $messageArg is the ALREADY-QUOTED shutdown.exe /c token
+    # (ConvertTo-RrsShutdownMessageArg, built once at module scope). This runspace has
+    # no module scope, so it cannot build it here; $message stays RAW for the consent
+    # dialog. Positional - keep in sync with $argFactory in dispatch-restart.
+    param($hostname, $restartTicks, $mode, $leadMinutes, $rollingGraceSeconds, $message, $messageArg, $dryRun, $cred, $consentRequired, $agentTemplate, $promptSeconds, $consentGraceSeconds, $pollInterval, $consentFailMode, $cancelJob, $onlyIfPending, $useSsl)
 
     $r = [ordered]@{
         Host         = $hostname
@@ -370,7 +505,7 @@ $script:DispatchWorker = {
 
     # ----- shutdown dispatch helper (shared by direct + post-consent paths) -----
     $doShutdown = {
-        param($targetHost, $sec, $msg, $isDry, $credential, $session, $useSslDial)
+        param($targetHost, $sec, $msgArg, $isDry, $credential, $session, $useSslDial)
         $o = @{ Success = $false; ExitCode = $null; Detail = '' }
         try {
             if ($isDry) {
@@ -385,13 +520,13 @@ $script:DispatchWorker = {
             # COMPUTERNAME - so pass '' to skip the name-compare guard for IPs (audit#9).
             $expectedName = if ($targetHost -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($targetHost -split '\.')[0] }
             $icArgs = @{
-                ArgumentList   = @($sec, $msg, $expectedName)
+                ArgumentList   = @($sec, $msgArg, $expectedName)
                 ErrorAction    = 'Stop'
                 # ponytail: this remote shutdown block is duplicated in Invoke-RrsShutdownDirect on
                 # purpose - this worker runs in a CreateDefault runspace (no module scope), so a
                 # shared $script: scriptblock would be $null here and break the reboot. Keep in sync.
                 ScriptBlock    = {
-                    param($s, $m, $expected)
+                    param($s, $mArg, $expected)
                     $res = @{ ExitCode = $null; Output = ''; Error = '' }
                     # DNS-mismatch guard (HARD ABORT): the box that answered runs this
                     # block, so $env:COMPUTERNAME IS the real machine. If it isn't the
@@ -407,13 +542,15 @@ $script:DispatchWorker = {
                         $psi.RedirectStandardOutput = $true
                         $psi.RedirectStandardError  = $true
                         $psi.CreateNoWindow         = $true
-                        # Strip CR/LF first (a newline in the message can break the /c token),
-                        # then quote-escape. Also double any run of backslashes immediately
-                        # before the appended closing quote (CommandLineToArgvW rule) so a
-                        # message ending in '\' (e.g. a UNC path) can't escape the quote and
-                        # swallow the /f flag into the message text.
-                        $msgArg = '"' + (($m -replace '[\r\n]+',' ' -replace '"','\"') -replace '(\\+)$','$1$1') + '"'
-                        $psi.Arguments = "/r /t $s /c $msgArg /f"
+                        # audit 2026-07-24: $mArg arrives ALREADY quoted+escaped from
+                        # ConvertTo-RrsShutdownMessageArg. The old in-block escaper handled a bare
+                        # '"' but not the backslashes before it, so a message containing \" closed
+                        # the /c token and injected arguments (/s, /t 0, or dropping /f). Re-check
+                        # the token here - same expression as Test-RrsShutdownMessageArg, inlined
+                        # because this runs in a bare remote session - and neutralise anything that
+                        # is not a well-formed single argument rather than splice it in raw.
+                        if ($mArg -notmatch '^"(?:[^"\\]|\\[\s\S])*"$') { $mArg = '"' + ([string]$mArg -replace '[\r\n"\\]',' ') + '"' }
+                        $psi.Arguments = "/r /t $s /c $mArg /f"
                         $p = [System.Diagnostics.Process]::Start($psi)
                         $stdout = $p.StandardOutput.ReadToEnd()
                         $stderr = $p.StandardError.ReadToEnd()
@@ -586,7 +723,20 @@ $script:DispatchWorker = {
                         try {
                             $dir = Join-Path $env:ProgramData 'JANET\Consent'
                             if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-                            try { & icacls.exe $dir /grant '*S-1-5-11:(OI)(CI)M' /T /C /Q *>$null } catch {}
+                            # audit 2026-07-24: this directory holds agent_<tok>.ps1 - the script the
+                            # one-shot task EXECUTES. It used to be granted Modify to Authenticated
+                            # Users (/T), so ANY non-admin on the box could rewrite that script between
+                            # staging and launch (cross-user TOCTOU -> code execution in the prompted
+                            # user's session) or drop a forged result_<tok>.json to fake an 'Accepted'
+                            # verdict. Executable content now stays in the admin-only directory (the
+                            # inherited ProgramData ACL still gives Users read+execute, which is all the
+                            # prompt agent needs) and ONLY the results subdirectory - which never holds
+                            # executable content - is writable. The /remove:g strips the legacy grant
+                            # from hosts already staged by an earlier build.
+                            $resDir = Join-Path $dir 'results'
+                            try { & icacls.exe $dir /remove:g '*S-1-5-11' /T /C /Q *>$null } catch {}
+                            if (-not (Test-Path $resDir)) { New-Item -ItemType Directory -Path $resDir -Force | Out-Null }
+                            try { & icacls.exe $resDir /grant '*S-1-5-11:(OI)(CI)M' /C /Q *>$null } catch {}
                             $user = $null
                             try { $user = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName } catch {}
                             if (-not $user) {
@@ -602,7 +752,7 @@ $script:DispatchWorker = {
                             $res.User = $user
                             $agentPath  = Join-Path $dir ("agent_$tok.ps1")
                             $cfgPath    = Join-Path $dir ("cfg_$tok.json")
-                            $resultPath = Join-Path $dir ("result_$tok.json")
+                            $resultPath = Join-Path $resDir ("result_$tok.json")   # audit 2026-07-24: only the results dir is user-writable
                             $enc = New-Object System.Text.UTF8Encoding($false)
                             [System.IO.File]::WriteAllText($agentPath, $agent, $enc)
                             [System.IO.File]::WriteAllText($cfgPath,   $cfg,   $enc)
@@ -650,15 +800,19 @@ $script:DispatchWorker = {
                                 $o2 = @{ Found = $false; Decision = $null; User = $null }
                                 try {
                                     $dir        = Join-Path $env:ProgramData 'JANET\Consent'
-                                    $resultPath = Join-Path $dir ("result_$tok.json")
+                                    # audit 2026-07-24: results moved to the one user-writable subdir.
+                                    $resultPath = Join-Path (Join-Path $dir 'results') ("result_$tok.json")
                                     if (Test-Path $resultPath) {
                                         $j = Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop | ConvertFrom-Json
                                         $o2.Found    = $true
                                         $o2.Decision = [string]$j.Decision
                                         $o2.User     = [string]$j.User
                                         try { & schtasks.exe /Delete /TN ('JANET\Consent_' + $tok) /F *>$null } catch {}
-                                        foreach ($f in @("agent_$tok.ps1", "cfg_$tok.json", "result_$tok.json")) {
-                                            try { Remove-Item -LiteralPath (Join-Path $dir $f) -Force -ErrorAction SilentlyContinue } catch {}
+                                        # The agent can no longer delete its own script/cfg (it only has
+                                        # read+execute there now), so this dispatcher-side sweep - which
+                                        # runs with admin rights - is the real cleanup.
+                                        foreach ($f in @((Join-Path $dir "agent_$tok.ps1"), (Join-Path $dir "cfg_$tok.json"), $resultPath)) {
+                                            try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch {}
                                         }
                                     }
                                 } catch {}
@@ -755,7 +909,8 @@ $script:DispatchWorker = {
         # ----- dispatch the restart -----
         # Pass the reused consent session (or $null when consent is off / dry run -
         # the direct path then opens its own per-call connection, unchanged).
-        $sd = & $doShutdown $hostname $leadSeconds $message $dryRun $cred $consentSession $useSsl
+        # audit 2026-07-24: the /c token is passed PRE-QUOTED ($messageArg), never the raw text.
+        $sd = & $doShutdown $hostname $leadSeconds $messageArg $dryRun $cred $consentSession $useSsl
         $r.ExitCode = $sd.ExitCode
         $r.Success  = [bool]$sd.Success
         $r.Detail   = [string]$sd.Detail
@@ -947,10 +1102,12 @@ function Invoke-RrsShutdownDirect {
             SessionOption  = $wsOpt
             # Skip the name-compare guard for IP-literal targets (audit#9); an IP has no
             # DNS indirection and its first dot-token can never match a COMPUTERNAME.
-            ArgumentList   = @($LeadSeconds, $Message, $(if ($Hostname -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Hostname -split '\.')[0] }))
+            # audit 2026-07-24: hand the remote block the ALREADY-QUOTED /c token, never
+            # the raw message - see ConvertTo-RrsShutdownMessageArg for the injection.
+            ArgumentList   = @($LeadSeconds, (ConvertTo-RrsShutdownMessageArg -Message $Message), $(if ($Hostname -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Hostname -split '\.')[0] }))
             ErrorAction    = 'Stop'
             ScriptBlock    = {
-                param($sec, $msg, $expected)
+                param($sec, $mArg, $expected)
                 $o = @{ ExitCode = $null; Output = ''; Error = '' }
                 # DNS-mismatch guard (HARD ABORT): keep in sync with $doShutdown.
                 if ($expected -and ($env:COMPUTERNAME.Trim().ToUpper() -ne ([string]$expected).Trim().ToUpper())) {
@@ -964,12 +1121,14 @@ function Invoke-RrsShutdownDirect {
                     $psi.RedirectStandardOutput = $true
                     $psi.RedirectStandardError  = $true
                     $psi.CreateNoWindow         = $true
-                    # Strip CR/LF first (a newline in the message can break the /c token),
-                    # then quote-escape. Also double any run of backslashes immediately before
-                    # the appended closing quote (CommandLineToArgvW rule) so a message ending
-                    # in '\' (e.g. a UNC path) can't escape the quote and swallow the /f flag.
-                    $msgArg = '"' + (($msg -replace '[\r\n]+',' ' -replace '"','\"') -replace '(\\+)$','$1$1') + '"'
-                    $psi.Arguments = "/r /t $sec /c $msgArg /f"
+                    # audit 2026-07-24: $mArg arrives ALREADY quoted+escaped (second copy of
+                    # the $doShutdown guard - keep in sync). The old in-block escaper missed the
+                    # backslashes before a quote, so a message containing \" ended the /c token
+                    # and the rest of it became shutdown.exe arguments. Re-check the token with
+                    # the Test-RrsShutdownMessageArg expression (inlined: bare remote session)
+                    # and neutralise anything that is not a well-formed single argument.
+                    if ($mArg -notmatch '^"(?:[^"\\]|\\[\s\S])*"$') { $mArg = '"' + ([string]$mArg -replace '[\r\n"\\]',' ') + '"' }
+                    $psi.Arguments = "/r /t $sec /c $mArg /f"
                     $p = [System.Diagnostics.Process]::Start($psi)
                     $stdout = $p.StandardOutput.ReadToEnd()
                     $stderr = $p.StandardError.ReadToEnd()
@@ -1389,7 +1548,19 @@ function Invoke-JanetToolAction {
             # Never-restart Exceptions list (1.5.0-beta4). Hosts on it are dropped
             # from this wave up front (case-insensitive), like the desktop tool.
             $excludedCount = 0
-            $exHosts = ConvertTo-JanetHostList ([string]$Params['exceptions'])
+            # audit 2026-07-24 (FAIL CLOSED): entries that fail the host-token filter used
+            # to be dropped in SILENCE - the never-restart entry vanished and the host it
+            # named was rebooted with the rest of the wave. We cannot know which target a
+            # malformed entry meant to protect, so the only safe answer is to refuse the
+            # whole wave and make the operator fix the list (same fail-safe stance the
+            # skipServersRegex gate takes below).
+            $exParsed = Split-JanetHostTokens ([string]$Params['exceptions'])
+            if ($exParsed.Rejected.Count -gt 0) {
+                & $send @{ type='log'; level='err'; text="Exceptions list: $($exParsed.Rejected.Count) never-restart entry/entries are not valid hostnames and could NOT be applied: $($exParsed.Rejected -join ', '). Aborting dispatch (fail-closed: a host that entry was meant to protect could otherwise be restarted). Fix or remove them and re-run - nothing was restarted." }
+                & $send @{ type='status'; text='Dispatch aborted: an unparseable never-restart exception entry. Nothing was restarted.' }
+                return @{ rows = @(); summary = @{ total=$targets.Count; sent=0; failed=0; declined=0; skipped=0; unreachable=0; excluded=0; badExceptions=$exParsed.Rejected.Count; error='unparseable never-restart exception entry' } }
+            }
+            $exHosts = $exParsed.Accepted
             if ($exHosts.Count -gt 0) {
                 # Add both the exception token AND its shortname so a shortname
                 # exception (DC01) protects the FQDN target (DC01.area.af.mil) and an
@@ -1448,6 +1619,10 @@ function Invoke-JanetToolAction {
             $message     = [string]$Params['message']
             if ([string]::IsNullOrWhiteSpace($message)) { $message = 'System is restarting for maintenance. Save your work.' }
             $message     = $message -replace '\{LEAD\}', [string]$leadMinutes
+            # audit 2026-07-24: build the shutdown.exe /c token ONCE, here at module scope
+            # (the pool workers run in bare runspaces and cannot call the escaper). $message
+            # stays raw - the consent dialog shows it verbatim.
+            $messageArg  = ConvertTo-RrsShutdownMessageArg -Message $message
             $burst       = Get-RrsBool $Params['burstMode'] $true
             $rolling     = Get-RrsBool $Params['rollingMode'] $false
             $rollingGrace= Get-RrsInt $Params['rollingGraceSeconds'] 60 10 3600
@@ -1594,7 +1769,9 @@ function Invoke-JanetToolAction {
                 # every mode except rolling converges on RestartAt. UseSsl comes
                 # from the pre-flight ping (false when the gate was skipped/dry-run).
                 $hUseSsl = $false; if ($useSslMap.ContainsKey($h)) { $hUseSsl = $useSslMap[$h] }
-                ,@($h, $restartTicks, $mode, $leadMinutes, $rollingGrace, $message, $dryRun, $Credential, $consent, $agentTemplate, $promptSec, $graceSec, $pollInt, $consentFail, $cancelJob, $onlyIfPending, $hUseSsl)
+                # $message = RAW (consent dialog), $messageArg = pre-quoted shutdown.exe /c
+                # token (audit 2026-07-24). Positional - keep in sync with $script:DispatchWorker.
+                ,@($h, $restartTicks, $mode, $leadMinutes, $rollingGrace, $message, $messageArg, $dryRun, $Credential, $consent, $agentTemplate, $promptSec, $graceSec, $pollInt, $consentFail, $cancelJob, $onlyIfPending, $hUseSsl)
             }
             $rowOf = {
                 param($res)
@@ -1922,8 +2099,19 @@ function Invoke-JanetToolAction {
             $refTicks = [long]0; $refShown = ''
             $refStr = ([string]$Params['referenceTime']).Trim()
             if (-not [string]::IsNullOrWhiteSpace($refStr)) {
-                $refDt = [datetime]::MinValue
-                if ([datetime]::TryParse($refStr, [ref]$refDt)) { $refTicks = $refDt.Ticks; $refShown = $refDt.ToString('yyyy-MM-dd HH:mm:ss') }
+                # audit 2026-07-24: a bare HH:mm used to parse as TODAY, so a wave dispatched
+                # 23:50 and verified 00:10 compared against a reference ~24h in the future and
+                # called the whole fleet "Did NOT restart - confirmed". Get-RrsReferenceTime
+                # resolves a bare time-of-day to the NEAREST occurrence instead.
+                $refDt = Get-RrsReferenceTime -Raw $refStr
+                if ($null -ne $refDt) {
+                    $refTicks = $refDt.Ticks; $refShown = $refDt.ToString('yyyy-MM-dd HH:mm:ss')
+                    # State the resolved DATE loudly when it isn't today - a cross-midnight
+                    # wave is exactly when the operator needs to see which day was assumed.
+                    if ($refDt.Date -ne (Get-Date).Date) {
+                        & $send @{ type='log'; level='warn'; text="Reference time '$refStr' resolved to $refShown (not today) - the nearest occurrence of that time before now." }
+                    }
+                }
                 else { & $send @{ type='log'; level='warn'; text="Could not parse reference time '$refStr' - reporting boot time only (no restarted/not verdict)." } }
             }
             & $send @{ type='status'; text="WinRM boot-time verify: $($targets.Count) host(s)$(if ($refShown) { " vs restart @ $refShown" }) with $threads thread(s)..." }

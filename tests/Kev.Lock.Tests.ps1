@@ -45,5 +45,38 @@ Describe 'Invoke-WithKevLock (audit#8)' {
     }
 }
 
+# audit 2026-07-25 (fable re-audit follow-up): list-kev and xref both report the catalog
+# snapshot's vintage (Updated / AgeDays / Stale); add-kev did not, so the SAME catalog
+# described itself differently depending on which button the operator pressed. Both
+# non-writing add-kev paths are exercised here, so nothing touches the real catalog file.
+Describe 'add-kev reports the catalog age like every other action (audit 2026-07-25)' {
+
+    function Invoke-AddKev([string]$cves) {
+        return & $script:Mod {
+            param($c) Invoke-JanetToolAction -ActionId 'add-kev' -Params @{ cves = $c } -Credential $null -Emit { param($e) }
+        } $cves
+    }
+
+    It 'the empty-input path still carries updated / ageDays / stale' {
+        $res = Invoke-AddKev ''
+        $res.summary.ContainsKey('updated') | Should Be $true
+        $res.summary.ContainsKey('ageDays') | Should Be $true
+        $res.summary.ContainsKey('stale')   | Should Be $true
+    }
+
+    It 'the nothing-to-add path carries them too (and writes nothing)' {
+        $res = Invoke-AddKev 'not-a-cve-id'
+        [int]$res.summary.added   | Should Be 0
+        [int]$res.summary.invalid | Should Be 1
+        $res.summary.ContainsKey('updated') | Should Be $true
+        $res.summary.ContainsKey('ageDays') | Should Be $true
+        $res.summary.ContainsKey('stale')   | Should Be $true
+    }
+
+    It 'kev is at v1.1.1' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.1.1'
+    }
+}
+
 # cleanup (best effort; temp dir)
 try { [System.IO.Directory]::Delete($script:Tmp, $true) } catch {}

@@ -193,7 +193,9 @@ Describe 'secureboot - manifest version floor (loop76 enable-harvest hint in 1.6
         ($src -match 'Import-Module.*JanetWeb\.troubleshoot\.psm1') | Should Be $true
     }
     It 'the enable harvest computes a hint only for a real failure and attaches it to the row' {
-        ($src -match '\$hint\s*=\s*if\s*\(\(-not \$isOk\)\s*-and\s*\(-not \$isSkip\)\s*-and\s*\(-not \$isUnknown\)\s*-and\s*\(-not \$isDryR\)\s*-and\s*\$res\.Error\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
+        # audit 2026-07-24: `-and (-not $isRefused)` joined the guard - a safety refusal is
+        # not a failure, and its Error already names the exact precondition to fix.
+        ($src -match '\$hint\s*=\s*if\s*\(\(-not \$isOk\)\s*-and\s*\(-not \$isSkip\)\s*-and\s*\(-not \$isUnknown\)\s*-and\s*\(-not \$isRefused\)\s*-and\s*\(-not \$isDryR\)\s*-and\s*\$res\.Error\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true
         ($src -match 'Error        = \[string\]\$res\.Error\s*\r?\n\s*Hint         = \[string\]\$hint') | Should Be $true
     }
     It 'the enable err log appends the FIX hint when one exists' {
@@ -210,8 +212,8 @@ Describe 'secureboot 1.6.6 - scan harvest attaches a troubleshooting hint to a C
     $man = & $script:SbeMod { Get-JanetToolManifest }
     $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.secureboot.psm1') -Raw
 
-    It 'manifest version is exactly 1.6.7 (newest bump = audit 2026-07-23 fix pass; exact pin lives here)' {
-        [string]$man.version | Should Be '1.6.7'
+    It 'manifest version is at least 1.6.7 (floor; newest exact pin = audit 2026-07-25 BitLockerRefuse, v1.6.9)' {
+        ([version][string]$man.version -ge [version]'1.6.7') | Should Be $true
     }
     It 'the scan harvest computes a hint only for a host-level CHECK ERROR and attaches it to the row' {
         ($src -match '\$hint\s*=\s*if\s*\(\$verdict\s*-eq\s*''CHECK ERROR''\s*-and\s*\$hostStatus\s*-ne\s*''OK''\s*-and\s*\$detail\)\s*\{\s*Get-JanetTroubleshootHint') | Should Be $true

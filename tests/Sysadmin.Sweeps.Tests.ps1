@@ -13,7 +13,40 @@
 #  Run:  Invoke-Pester -Path .\tests\Sysadmin.Sweeps.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.sysadmin.psm1') -Force -PassThru
+Add-ShimGuard $m
 
 Describe 'Sysadmin pure helpers' {
 
@@ -48,6 +81,7 @@ Describe 'SysadminSweepBlock worker (shimmed - no real WinRM)' {
             param($SweepId, $Days, $InvokeReturn, $Reachable, $AttemptOffline)
             Set-Variable -Name __ir -Scope script -Value $InvokeReturn
             Set-Variable -Name __reach -Scope script -Value $Reachable
+            $__shims = Save-ShimState @('Test-SysadminReachable','New-PSSession','Invoke-Command','Remove-PSSession')
             function script:Test-SysadminReachable { param($ComputerName, $Ports, $TimeoutMs, $UseSsl) if ($UseSsl -is [ref]) { $UseSsl.Value = $false }; return [bool]$script:__reach }
             function script:New-PSSession { param($ComputerName, $SessionOption, $ErrorAction, $Credential, $Authentication) return ([pscustomobject]@{ Id = 1; Name = 'shim' }) }
             function script:Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, $ErrorAction) return (& $script:__ir) }
@@ -55,7 +89,9 @@ Describe 'SysadminSweepBlock worker (shimmed - no real WinRM)' {
             try {
                 & $script:SysadminSweepBlock -Computer 'TESTHOST' -Cred $null -Auth 'Default' -AttemptOffline $AttemptOffline -SweepId $SweepId -Days $Days -ModulePath ''
             } finally {
-                Remove-Item function:script:Test-SysadminReachable, function:script:New-PSSession, function:script:Invoke-Command, function:script:Remove-PSSession -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
                 Remove-Variable -Name __ir, __reach -Scope script -ErrorAction SilentlyContinue
             }
         } $SweepId $Days $InvokeReturn $Reachable $AttemptOffline
@@ -110,6 +146,67 @@ Describe 'SysadminSweepBlock worker (shimmed - no real WinRM)' {
         $r.Online | Should Be $false
         @($r.Rows).Count | Should Be 1
         $r.Rows[0].Error | Should Match 'Offline'
+    }
+}
+
+Describe 'The amber matcher reads the STATE, not the hostname (audit 2026-07-25 (fable re-audit follow-up))' {
+
+    # The old matcher ran -cmatch over the WHOLE report line, hostname included, so a
+    # CLEAN host NAMED 'WS-ERROR-01' was logged amber and an operator triaging by colour
+    # would chase a box with nothing wrong with it.
+    It 'a CLEAN host whose NAME contains a state word is logged info, not warn' {
+        (Get-SysadminReportLevel -Report 'WS-ERROR-01 : no reboot pending')                | Should Be 'info'
+        (Get-SysadminReportLevel -Report 'TIMEOUT-LAB-02 : no certs expiring within 90 day(s)') | Should Be 'info'
+        (Get-SysadminReportLevel -Report 'OFFLINE-BAY-03 : 2 local admin(s) - CORP\alice; BUILTIN\Administrator') | Should Be 'info'
+    }
+
+    It 'a REAL finding still goes amber (no over-correction)' {
+        (Get-SysadminReportLevel -Report 'WS01 : REBOOT PENDING - Windows Update')     | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : OFFLINE - no TCP on 5985/5986/445')   | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : SESSION ERROR - access denied')       | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : PROBE ERROR - rpc failed')            | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : WORKER ERROR - no result')            | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : TIMEOUT (150s) - possible remote read hang') | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : CANCELLED')                           | Should Be 'warn'
+        (Get-SysadminReportLevel -Report "WS01 : DNS MISMATCH - dialed 'WS01', answered 'WS02' - skipped") | Should Be 'warn'
+        (Get-SysadminReportLevel -Report 'WS01 : 3 cert(s) expiring within 90 day(s)') | Should Be 'warn'
+    }
+
+    It 'a local-admin MEMBER name containing a state word does not amber a clean row' {
+        (Get-SysadminReportLevel -Report 'WS01 : 1 local admin(s) - CORP\ERROR-SVC') | Should Be 'info'
+    }
+
+    It 'an empty or unparsable report never throws' {
+        (Get-SysadminReportLevel -Report '')   | Should Be 'info'
+        (Get-SysadminReportLevel -Report $null) | Should Be 'info'
+        (Get-SysadminReportLevel -Report 'REBOOT PENDING with no host prefix') | Should Be 'warn'
+    }
+
+    It 'END TO END: the emitted activity-log level for a clean ERROR-named host is info' {
+        # Same fake-worker idiom as the tally regression below: the REAL
+        # Invoke-JanetToolAction aggregation (and its log-level decision) runs.
+        $fakeBlock = {
+            param($Computer, $Cred, $Auth, $AttemptOffline, $SweepId, $Days, $ModulePath)
+            return @{ Host = $Computer; Online = $true; Error = ''
+                      Rows = @(@{ Host = $Computer; Online = $true; RebootPending = $false; Reasons = ''; Error = '' })
+                      Report = "$Computer : no reboot pending" }
+        }
+        $evts = New-Object System.Collections.ArrayList
+        $emit = { param($e) [void]$evts.Add($e) }
+        $null = & $m {
+            param($fakeBlock, $em)
+            Set-Variable -Name __origBlock -Scope script -Value $script:SysadminSweepBlock
+            $script:SysadminSweepBlock = $fakeBlock
+            try { Invoke-JanetToolAction -ActionId 'rebootpending-sweep' -Params @{ targets = 'WS-ERROR-01' } -Emit $em }
+            finally {
+                $script:SysadminSweepBlock = $script:__origBlock
+                Remove-Variable -Name __origBlock -Scope script -ErrorAction SilentlyContinue
+            }
+        } $fakeBlock $emit
+
+        $hostLines = @($evts | Where-Object { $_.type -eq 'log' -and "$($_.text)" -match 'no reboot pending' })
+        $hostLines.Count | Should Be 1
+        [string]$hostLines[0].level | Should Be 'info'      # <-- was 'warn' before the fix
     }
 }
 

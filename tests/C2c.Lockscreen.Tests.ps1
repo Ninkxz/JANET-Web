@@ -8,7 +8,40 @@
 #  Run:  Invoke-Pester -Path .\tests\C2c.Lockscreen.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $cm = Import-Module (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Force -PassThru
+Add-ShimGuard $cm
 
 # Drive the fix worker's Lockscreen branch LOCALLY.
 #   -Cur      : hashtable of values ALREADY present under the Personalization policy key
@@ -27,6 +60,8 @@ function Invoke-C2cFixLockscreen {
         if ($HasDefLock) { [void]$script:__images.Add($defLock) }
         if ($HasDefDesk) { [void]$script:__images.Add($defDesk) }
 
+        $__shims = Save-ShimState @('New-PSSession','Remove-PSSession','Invoke-Command','Test-Path',
+            'New-Item','Get-ItemProperty','New-ItemProperty','Get-ChildItem')
         function script:New-PSSession { param($ComputerName, $SessionOption, $Authentication, $ErrorAction, $Credential) [pscustomobject]@{ Id = 1; Name = 'shim' } }
         function script:Remove-PSSession { param($Session, $ErrorAction) }
         function script:Invoke-Command {
@@ -65,9 +100,9 @@ function Invoke-C2cFixLockscreen {
                 Writes     = @($script:__writes)
             }
         } finally {
-            Remove-Item function:script:New-PSSession, function:script:Remove-PSSession, function:script:Invoke-Command, `
-                function:script:Test-Path, function:script:New-Item, function:script:Get-ItemProperty, `
-                function:script:New-ItemProperty, function:script:Get-ChildItem -ErrorAction SilentlyContinue
+            # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+            # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+            Restore-ShimState $__shims
         }
     } $Cur $HasPkgLock $HasDefLock $HasDefDesk
 }

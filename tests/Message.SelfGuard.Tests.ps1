@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-#  Message.SelfGuard.Tests.ps1 - Pester 3.4 for the Remote Message 1.3.4
+#  Message.SelfGuard.Tests.ps1 - Pester 3.4 for the Remote Message 1.3.5
 #  dispatcher self-guard (loop-7 audit gap). PURE / offline unit scope - no real
 #  host, no WinRM, no msg.exe. We assert the destructive SEND action can NEVER
 #  WinRM-loopback and pop msg.exe on the JANET box (the host running the
@@ -25,7 +25,7 @@ $mod = Import-Module (Join-Path $script:Root 'modules\JanetWeb.message.psm1') -F
 $Self = $env:COMPUTERNAME
 $Body = @{ title = 'Test'; body = 'hello'; parallel = $false }   # minimal valid send params
 
-Describe 'Message 1.3.4 - Test-JanetMessageHostIsSelf (identity, no over-drop)' {
+Describe 'Message 1.3.5 - Test-JanetMessageHostIsSelf (identity, no over-drop)' {
     It 'flags this dispatcher shortname as self' {
         (& $mod { param($h) Test-JanetMessageHostIsSelf $h } $Self) | Should Be $true
     }
@@ -37,7 +37,7 @@ Describe 'Message 1.3.4 - Test-JanetMessageHostIsSelf (identity, no over-drop)' 
     }
 }
 
-Describe 'Message 1.3.4 - send self-guard (never message the dispatcher)' {
+Describe 'Message 1.3.5 - send self-guard (never message the dispatcher)' {
 
     It 'a self-only send returns total=0 with a Self-guard warn and NO WinRM fan-out' {
         $evts = New-Object System.Collections.ArrayList
@@ -94,7 +94,7 @@ Describe 'Message 1.3.4 - send self-guard (never message the dispatcher)' {
     }
 }
 
-Describe 'Message 1.3.4 - ping stays self-inclusive (guard gated to send only)' {
+Describe 'Message 1.3.5 - ping stays self-inclusive (guard gated to send only)' {
 
     It 'a self-only ping is NOT self-guarded (no warn, host retained)' {
         $evts = New-Object System.Collections.ArrayList

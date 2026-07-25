@@ -24,7 +24,40 @@
 #  Run:  Invoke-Pester -Path .\tests\Winupgrade.InstallUpdates.Tests.ps1
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
+# -----------------------------------------------------------------------------
+# Shim hygiene (audit 2026-07-25). Every shim teardown in this file used to be spelled
+# 'Remove-Item function:script:<name>'. That spelling is INERT: the function provider has no
+# scope qualifier in its paths, so 'function:script:X' names an item that does not exist and
+# the -ErrorAction SilentlyContinue swallowed the failure - the shim SURVIVED into every later
+# Describe/It in the file, where a test could then pass on a leaked stub. The naive correction
+# ('Remove-Item function:X') is worse when the shim shadows a MODULE function: it deletes the
+# real one. So snapshot first, then put back exactly what was there - the captured ScriptBlock
+# for a module function, or nothing at all for a shimmed CMDLET (which had no function entry
+# to begin with, and whose shim the unqualified path does remove).
+function Add-ShimGuard {
+    param($Mod)
+    & $Mod {
+        function script:Save-ShimState {
+            param([string[]]$Names)
+            $h = @{}
+            foreach ($n in $Names) {
+                $i = Get-Item -LiteralPath "function:$n" -ErrorAction SilentlyContinue
+                if ($i) { $h[$n] = $i.ScriptBlock } else { $h[$n] = $null }
+            }
+            return $h
+        }
+        function script:Restore-ShimState {
+            param($State)
+            foreach ($k in @($State.Keys)) {
+                if ($State[$k]) { Set-Item -LiteralPath "function:script:$k" -Value $State[$k] }
+                else { Remove-Item -LiteralPath "function:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+}
+# -----------------------------------------------------------------------------
 $m = Import-Module (Join-Path $script:Root 'modules\JanetWeb.winupgrade.psm1') -Force -PassThru
+Add-ShimGuard $m
 
 $script:ExpectedConfirm = 'Install ALL available Windows Updates on the target(s) via a SYSTEM scheduled task (WSUS + optionally Microsoft Update)? This INSTALLS updates and some will force a REBOOT. The dispatcher host is skipped. Proceed?'
 
@@ -184,6 +217,7 @@ Describe 'install-updates worker end to end (shimmed transport/poll - no real Wi
             Set-Variable -Name __stamp   -Scope script -Value $Stamp
             Set-Variable -Name __nonceOv -Scope script -Value $NonceOverride
             Set-Variable -Name __hostOv  -Scope script -Value $HostOverride
+            $__shims = Save-ShimState @('Invoke-Command')
             function script:Invoke-Command {
                 param($ComputerName,$ScriptBlock,$ArgumentList,$Authentication,$SessionOption,$ErrorAction,$Credential,$Session,$Port,$UseSSL)
                 $t = [string]$ScriptBlock
@@ -218,7 +252,9 @@ Describe 'install-updates worker end to end (shimmed transport/poll - no real Wi
                 $row = & $script:WinUpgradeWorker @argl
                 return @{ Row = $row; Calls = @($script:__calls) }
             } finally {
-                Remove-Item function:script:Invoke-Command -ErrorAction SilentlyContinue
+                # audit 2026-07-25: this teardown was 'Remove-Item function:script:<name>' - an INERT path
+                # (the function provider has no scope qualifier), so the shims leaked. See Add-ShimGuard above.
+                Restore-ShimState $__shims
                 Remove-Variable -Name __json,__calls,__stamp,__nonceOv,__hostOv -Scope script -ErrorAction SilentlyContinue
             }
         } $Computer $ResultJson $DryRun $AllowHttp $AllowWmi $NonceOverride $HostOverride $Stamp

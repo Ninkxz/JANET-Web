@@ -160,14 +160,25 @@
       };
 
       function summarize() {
-        var c = { Current: 0, Outdated: 0, Unknown: 0, Error: 0, Offline: 0 };
+        var c = { Current: 0, Outdated: 0, Unknown: 0, NoBaseline: 0, BadTarget: 0, NoVersion: 0, Error: 0, Offline: 0 };
         grid.rows().forEach(function (r) {
           var s = String(r.Status);
           if (s === 'Current') c.Current++;
           else if (s === 'Outdated') c.Outdated++;
           else if (s === 'Error') c.Error++;
           else if (s === 'Offline') c.Offline++;
-          else c.Unknown++;
+          else {
+            c.Unknown++;
+            // audit 2026-07-24: the Unknown flavours are two different operator actions -
+            // 'no baseline' means add a catalog row, anything else means the host gave
+            // back no usable BIOS version. Neither of them means "up to date".
+            // audit 2026-07-25 (fable re-audit follow-up): a THIRD action - an unscorable
+            // TARGET value (or a target/installed format mismatch) is a defect in the
+            // catalog JSON we own, so it must not be reported as "investigate the host".
+            if (s === 'Unknown (no baseline)') c.NoBaseline++;
+            else if (s === 'Unknown (baseline version format)' || s === 'Unknown (version format)') c.BadTarget++;
+            else c.NoVersion++;
+          }
         });
         return c;
       }
@@ -199,7 +210,7 @@
             setStatus('Done - ' + c.Current + ' current, ' + c.Outdated + ' outdated, ' + c.Unknown + ' unknown, ' + (c.Error + c.Offline) + ' error/offline.', anyBad ? 'st-warn' : 'st-ok');
             ctx.confirm({
               title: 'BIOS Firmware - Scan Complete',
-              body: 'Current: <b>' + c.Current + '</b><br>Outdated: <b>' + c.Outdated + '</b><br>Unknown (no baseline / parse): <b>' + c.Unknown + '</b><br>Error / offline: <b>' + (c.Error + c.Offline) + '</b><br>Total: <b>' + total + '</b><br><br>Measured compliance: <b>' + pct + '%</b> (current / models with a baseline + data)',
+              body: 'Current: <b>' + c.Current + '</b><br>Outdated: <b>' + c.Outdated + '</b><br>Unknown - no baseline for the model (add one to the catalog): <b>' + c.NoBaseline + '</b><br>Unknown - the catalog TARGET version cannot be scored (fix the catalog entry): <b>' + c.BadTarget + '</b><br>Unknown - host returned no usable BIOS version (investigate the host): <b>' + c.NoVersion + '</b><br>Error / offline: <b>' + (c.Error + c.Offline) + '</b><br>Total: <b>' + total + '</b><br><br>Measured compliance: <b>' + pct + '%</b> (current / models with a baseline + data)',
               okText: 'OK', cancelText: null
             });
           }

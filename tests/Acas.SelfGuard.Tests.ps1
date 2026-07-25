@@ -108,3 +108,68 @@ Describe 'ACAS 1.11.1 - Select-AcasNonSelfHosts broadening (unconditional self-d
         $warn.Count | Should BeGreaterThan 0
     }
 }
+
+# =============================================================================
+#  audit 2026-07-24 (P4) - acas was the ONLY one of 13 identity sets WITHOUT the
+#  bound-NIC IPv4 enumeration (block copied verbatim from restart.psm1). The DNS
+#  lookup only returns addresses registered under this box's own name, so a
+#  management / OOB NIC IP (or one whose DNS record is lagging) was NOT in the
+#  identity set - a pasted IP literal for it slipped the self-guard and the
+#  dispatcher could be sent a reboot / KB install / Java removal.
+#
+#  Deterministic without touching DNS: point $env:COMPUTERNAME at a name that
+#  cannot resolve, so BOTH Dns branches throw and are swallowed. The only
+#  remaining source of local IPv4s is the NIC enumeration this fix added.
+# =============================================================================
+Describe 'ACAS self-guard - bound-NIC IPv4 parity (audit 2026-07-24)' {
+
+    $bound = @()
+    foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+        foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+            if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $bound += $ua.Address.IPAddressToString }
+        }
+    }
+    $bound = @($bound | Select-Object -Unique)
+
+    It 'this box has at least one bound unicast IPv4 (else the check below is vacuous)' {
+        @($bound).Count | Should BeGreaterThan 0
+    }
+
+    It 'every bound unicast IPv4 is SELF even when DNS cannot resolve this box' {
+        $realName = $env:COMPUTERNAME
+        $hits = @()
+        try {
+            $env:COMPUTERNAME = 'JANET-NOSUCHHOST-ZQX9'
+            $hits = & $mod {
+                param($ips)
+                $script:AcasLocalIdentity = $null       # drop the cached (DNS-built) set
+                $out = New-Object System.Collections.ArrayList
+                foreach ($ip in $ips) { if (Test-AcasHostIsSelf $ip) { [void]$out.Add($ip) } }
+                ,@($out.ToArray())
+            } $bound
+        } finally {
+            $env:COMPUTERNAME = $realName
+            & $mod { $script:AcasLocalIdentity = $null }   # never leave the bogus set cached
+        }
+        @($hits).Count | Should Be @($bound).Count
+    }
+
+    It 'the identity set itself carries every bound unicast IPv4' {
+        $realName = $env:COMPUTERNAME
+        $missing = @()
+        try {
+            $env:COMPUTERNAME = 'JANET-NOSUCHHOST-ZQX9'
+            $missing = & $mod {
+                param($ips)
+                $script:AcasLocalIdentity = $null
+                $set = Get-AcasLocalIdentity
+                ,@(@($ips) | Where-Object { -not $set.Contains($_) })
+            } $bound
+        } finally {
+            $env:COMPUTERNAME = $realName
+            & $mod { $script:AcasLocalIdentity = $null }
+        }
+        @($missing).Count | Should Be 0
+    }
+}

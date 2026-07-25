@@ -11,10 +11,14 @@ spool/
 uploads/
 # runtime package drop-folder (server seeds Log4j staging on boot; env-specific data)
 Packages/*
-# ...but the DoD trust-cert bundle IS shipped: the C2C Nemesis PKI-roots fixer
-# auto-discovers it here and deploys it, so it must exist on a fresh clone and
-# ride along in every take-to-work cut. Operator refreshes (new .cer) are then
-# version-trackable too.
+# ...but the DoD trust-cert bundle IS version-tracked: the C2C Nemesis PKI-roots
+# fixer and Cert Deploy auto-discover it here, so it must exist on a fresh clone
+# and operator refreshes (new .cer) stay reviewable in history.
+# NOTE (audit 2026-07-24): tracked in git != shipped. Since the 2026-07-17 policy
+# NO certificate rides along in a take-to-work cut - Sync-TakeToWork.ps1 stages
+# these folders EMPTY and fails the cut if a cert lands in the zip. The operator
+# drops the bundle in on the work machine. (The old wording here claimed the
+# opposite and was the only place still promising certs shipped.)
 !Packages/DoD-Certs/
 !Packages/DoD-Certs/**
 # local spool of central-CSV logs when the share is unreachable
@@ -33,5 +37,15 @@ JanetLocal/*
 # ledger + target-groups are RUNTIME state (accumulated per operator), so they are
 # deliberately NOT negated - they stay ignored.
 !JanetLocal/IavmMap.csv
+# ...and the two seeds that were missed (audit 2026-07-24): both are editable
+# BASELINES the tool needs on a fresh clone, same rationale as the ones above -
+# AD Nemesis reads adto-baseline.json (account-management TO rule set) and BIOS
+# Firmware reads BiosFirmwareCatalog.json (per-model firmware baseline). Without
+# these negations JanetLocal/* swallowed them, so a fresh clone got no baseline
+# and operator edits were untrackable.
+!JanetLocal/adto-baseline.json
+!JanetLocal/BiosFirmwareCatalog.json
+# DoDRoots.sst stays ignored on purpose - it is a certificate store (see policy
+# note above), and sla-ledger.json stays ignored as runtime state.
 # machine-specific editor/preview config
 .claude/
