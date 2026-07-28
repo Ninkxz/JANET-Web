@@ -115,8 +115,8 @@ Describe 'client verify probe EXECUTED against a real registry key (loop88 - cat
     }
 }
 
-Describe 'acas 1.11.20 - manifest exact pin (newest bump = audit 2026-07-25 fable re-audit follow-up)' {
-    It 'acas manifest is exactly 1.11.20' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.20'
+Describe 'acas 1.11.21 - manifest exact pin (newest bump = audit 2026-07-25 fable re-audit follow-up)' {
+    It 'acas manifest is exactly 1.11.21' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.21'
     }
 }

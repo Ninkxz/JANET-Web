@@ -286,7 +286,10 @@ function Test-AdToCompliance {
 
     if ($Category -in @('User','Admin','Service')) {
         if (-not $uacReadable) { [void]$hits.Add('uacUnreadable'); [void]$parts.Add('userAccountControl absent/unreadable -> UAC compliance NOT confirmed (fail-closed)') }
-        if (-not $disabled -and -not $isNewObject -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.inactiveDays) { & $fire 'inactiveEnabled' @($b.inactiveDays) }
+        # audit 2026-07-28: $uacReadable -and, matching the Computer/Server staleObject guard below.
+        # An ACL-hidden UAC folds to 0, so $disabled reads $false for an object we never read -
+        # a DISABLED, hidden, idle user was scoring "still ENABLED" and entering the fix plan.
+        if ($uacReadable -and -not $disabled -and -not $isNewObject -and (& $ageDays $Obj.LastLogonTicks) -gt [double]$b.inactiveDays) { & $fire 'inactiveEnabled' @($b.inactiveDays) }
         if ($uacReadable -and (($uac -band $script:AdToUac.DONT_EXPIRE_PASSWORD) -ne 0)) { & $fire 'passwordNeverExpires' $null }
         if ($uacReadable -and (($uac -band $script:AdToUac.PASSWD_NOTREQD) -ne 0))       { & $fire 'passwordNotRequired' $null }
         if ($uacReadable -and (($uac -band $script:AdToUac.ENCRYPTED_TEXT_PWD) -ne 0))   { & $fire 'reversibleEncryption' $null }
@@ -428,7 +431,10 @@ function Get-JanetToolManifest {
     @{
         id       = 'adto'
         name     = 'AD Nemesis'
-        version  = '0.2.8'
+        # audit 2026-07-28: 0.2.8 -> 0.2.9. inactiveEnabled is now gated on $uacReadable, matching
+        # the Computer/Server staleObject guard - an ACL-hidden UAC folds to 0, so a DISABLED,
+        # hidden, idle user was scoring "still ENABLED" and landing in the fix plan.
+        version  = '0.2.9'
         category = 'Remediation'
         summary  = 'Review every AD object against the account-management Technical Order. Splits the fleet into User / Admin / Service / Computer / Server, flags each COMPLIANT / NON-COMPLIANT with the exact reason + fix, bulk-remediates the auto-fixable findings (userAccountControl flips), and offers IAO Validate (express permission, gated server-side) to clear recert findings. Rule set is the editable JanetLocal\adto-baseline.json.'
         actions  = @(

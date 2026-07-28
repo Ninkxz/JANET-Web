@@ -84,7 +84,7 @@ function Invoke-C2cFixLockscreen {
         }
         function script:New-ItemProperty {
             param($LiteralPath, $Path, $Name, $Value, $PropertyType, [switch]$Force, $ErrorAction)
-            [void]$script:__writes.Add([pscustomobject]@{ Name = [string]$Name; Value = [string]$Value; Type = [string]$PropertyType })
+            [void]$script:__writes.Add([pscustomobject]@{ Name = [string]$Name; Value = [string]$Value; Type = [string]$PropertyType; Key = [string]$LiteralPath })
             $null
         }
         function script:Get-ChildItem { param($LiteralPath, $Path, $Filter, $ErrorAction) @() }
@@ -147,6 +147,18 @@ Describe 'C2C v1.9.0 - fix-lockscreen writes the Personalization policy only whe
         $st.Type  | Should Be 'DWord'
         $st.Value | Should Be '1'
     }
+    # audit 2026-07-28: the DesktopImage* trio used to be written to the Policies key, which
+    # defines lock-screen values ONLY - Windows ignored all three while the row booked FIXED.
+    # They are PersonalizationCSP values; pin the key so the two halves cannot drift back.
+    It 'the desktop trio goes to PersonalizationCSP, LockScreenImage to the Policies key' {
+        $r = Invoke-C2cFixLockscreen -Cur @{}
+        foreach ($n in @('DesktopImagePath', 'DesktopImageUrl', 'DesktopImageStatus')) {
+            $w = @($r.Writes | Where-Object { $_.Name -eq $n })[0]
+            $w.Key | Should Be 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP'
+        }
+        $lock = @($r.Writes | Where-Object { $_.Name -eq 'LockScreenImage' })[0]
+        $lock.Key | Should Be 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
+    }
 }
 
 Describe 'C2C v1.9.0 - fix-lockscreen is wired as an opt-in action, NOT a run-all pillar' {
@@ -163,9 +175,9 @@ Describe 'C2C v1.9.0 - fix-lockscreen is wired as an opt-in action, NOT a run-al
     It 'fix-lockscreen maps to the Lockscreen pillar' {
         & $cm { $script:C2cPillarByAction['fix-lockscreen'] } | Should Be 'Lockscreen'
     }
-    It 'reports tool version at least 1.15.1' {
-        # Floor assert (wpt-suite precedent): the newest bump's own test file
-        # (C2c.Enable) carries the exact pin; older files assert a floor.
-        ([version](& $cm { Get-JanetToolManifest }).version -ge [version]'1.15.1') | Should Be $true
+    It 'c2c manifest is exactly 1.18.0' {
+        # The newest bump's own test file carries the EXACT pin (older files assert a floor);
+        # the 1.18.0 bump is the lockscreen CSP-key fix, so the pin moved here.
+        [string](& $cm { Get-JanetToolManifest }).version | Should Be '1.18.0'
     }
 }

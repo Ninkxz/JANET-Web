@@ -104,7 +104,12 @@ function Get-JanetToolManifest {
     @{
         id       = 'c2c'
         name     = 'C2C Nemesis'
-        version  = '1.17.0'
+        # audit 2026-07-28: 1.17.0 -> 1.18.0. fix-lockscreen's DesktopImage* trio now writes to
+        # PersonalizationCSP (the Policies key it used to write defines lock-screen values only, so
+        # Windows ignored all three while the row booked FIXED); and fix-antimalware's MDE OrgId
+        # read/compare now mirrors the scan (root-key fallback + brace/whitespace normalization),
+        # so a scan-PASS host no longer trips the heal ladder and books IN PROGRESS/FAIL.
+        version  = '1.18.0'
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all. (8) READ-ONLY BITLOCKER ESCROW AUDIT - per host, one consolidated WinRM round-trip enumerates the key protectors of every FIXED volume (removable/USB/network/optical never touched) and reconciles each RecoveryPassword protector''s KeyProtectorId GUID against the AD msFVE-RecoveryInformation escrow, flagging ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed (an unreadable protector list or AD search is UNKNOWN, never ESCROWED) and the recovery password is NEVER read or emitted anywhere.'
         actions  = @(
@@ -257,7 +262,7 @@ function Get-JanetToolManifest {
             @{
                 id          = 'fix-lockscreen'
                 label       = 'Fix Lock Screen / Wallpaper Cache'
-                description = 'DESTRUCTIVE (HKLM Personalization policy). Remediates the Windows 11 bug where a device keeps showing the CACHED C2C quarantine lock screen / desktop wallpaper after being unquarantined. Per host, over one WinRM round-trip, sets HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization: LockScreenImage (lock screen) and DesktopImagePath / DesktopImageUrl / DesktopImageStatus (desktop wallpaper) to a DEFAULT image resolved ON the target (the unquarantine package''s C:\ProgramData\Microsoft\User Account Pictures\LockScreen.jpg if present, else the built-in C:\Windows\Web defaults) - so Windows stops using the cached quarantine image. Writes a value ONLY where none is already set (never overwrites an operator/GPO value). Result FIXED (set lock and/or desktop) / NO CHANGE (already set) / SKIP (no default image on target) / FAIL. This is an OPT-IN utility fix, NOT a scored C2C pillar and NOT part of run-all. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
+                description = 'DESTRUCTIVE (HKLM Personalization policy). Remediates the Windows 11 bug where a device keeps showing the CACHED C2C quarantine lock screen / desktop wallpaper after being unquarantined. Per host, over one WinRM round-trip, sets LockScreenImage (lock screen) under HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization and DesktopImagePath / DesktopImageUrl / DesktopImageStatus (desktop wallpaper) under HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP - the ONLY key Windows reads those three from - to a DEFAULT image resolved ON the target (the unquarantine package''s C:\ProgramData\Microsoft\User Account Pictures\LockScreen.jpg if present, else the built-in C:\Windows\Web defaults) - so Windows stops using the cached quarantine image. Writes a value ONLY where none is already set (never overwrites an operator/GPO value). Result FIXED (set lock and/or desktop) / NO CHANGE (already set) / SKIP (no default image on target) / FAIL. This is an OPT-IN utility fix, NOT a scored C2C pillar and NOT part of run-all. Self-guards the dispatcher host, aborts on a DNS wrong-box mismatch, and requires the operator to type FIX to confirm.'
                 kind        = 'stream-table'
                 destructive = $true
                 confirm     = 'Set the default lock screen / wallpaper policy on the target host(s)? Only values that are NOT already set are written (an existing policy is never overwritten). Proceed?'
@@ -2230,14 +2235,25 @@ $script:C2cFixBlock = {
             try {
                 $statusKey = 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status'
                 $policyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Advanced Threat Protection'
-                $orgId = ''
-                try { $pAtp = Get-ItemProperty $statusKey -ErrorAction Stop; if ($pAtp.OrgId) { $orgId = [string]$pAtp.OrgId } } catch {}
-                if ($orgId.Trim().ToUpper() -ne $MdeOrgId.Trim().ToUpper()) {
+                # audit 2026-07-28: read + compare the OrgId the SAME way the scan does (Status key,
+                # then the ATP root fallback, normalized with braces/whitespace stripped). The fixer
+                # used to read only Status and compare raw, so a brace-wrapped or root-key-only OrgId
+                # scanned PASS but tripped the heal ladder here and then booked IN PROGRESS/FAIL on a
+                # correctly-onboarded host.
+                $orgN  = { param($g) (([string]$g) -replace '[{}\s]', '').ToUpperInvariant() }
+                $readOrg = {
+                    $v = ''
+                    try { $pA = Get-ItemProperty $statusKey -ErrorAction Stop; if ($pA.OrgId) { $v = [string]$pA.OrgId } } catch {}
+                    if (-not $v) { try { $rA = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection' -Name 'OrgId' -ErrorAction Stop; if ($rA.OrgId) { $v = [string]$rA.OrgId } } catch {} }
+                    $v
+                }
+                $orgId = & $readOrg
+                if ((& $orgN $orgId) -ne (& $orgN $MdeOrgId)) {
                     # Blob sanity: refuse to ever write a blob whose embedded orgId is not the target.
                     $blobUsable = $false
                     try {
                         $bo = "$MdeBlob" | ConvertFrom-Json; $bb = $bo.body | ConvertFrom-Json
-                        $blobUsable = ("$($bb.orgId)".Trim().ToUpper() -eq $MdeOrgId.Trim().ToUpper())
+                        $blobUsable = ((& $orgN $bb.orgId) -eq (& $orgN $MdeOrgId))
                     } catch { $blobUsable = $false }
                     # Advisory (non-blocking): the embedded blob is signed; if that leaf cert has
                     # expired, Sense will reject the local blob and onboarding heal will not take.
@@ -2291,11 +2307,10 @@ $script:C2cFixBlock = {
                         if ($blobPresent) { Restart-Service -Name Sense -Force -ErrorAction SilentlyContinue }
                     }
                     Start-Sleep -Seconds 15
-                    $orgNow = ''
-                    try { $p2Atp = Get-ItemProperty $statusKey -ErrorAction Stop; if ($p2Atp.OrgId) { $orgNow = [string]$p2Atp.OrgId } } catch {}
+                    $orgNow = & $readOrg
                     $depTxt = if ($depNotes.Count -gt 0) { ' [deps: ' + ($depNotes -join ', ') + ']' } else { '' }
                     $wasTxt = if ($orgId) { "OrgId was '$orgId' (mismatch)" } else { 'OrgId was missing' }
-                    if ($orgNow.Trim().ToUpper() -eq $MdeOrgId.Trim().ToUpper()) {
+                    if ((& $orgN $orgNow) -eq (& $orgN $MdeOrgId)) {
                         & $add 'MdeOnboard' 'onboard' 'FIXED' ("$wasTxt - MDE onboarded, OrgId now matches" + $(if ($usedLocalBlob) { ' (via local blob; the GPO asserts the same value)' } else { " ($gpNote)" }) + $depTxt)
                     } elseif (-not $gwOpen) {
                         & $add 'MdeOnboard' 'onboard' 'FAIL' ("$wasTxt and gateway $gwHost 443 is UNREACHABLE - firewall/proxy fix required; no local action can complete onboarding$depTxt")
@@ -2499,13 +2514,22 @@ $script:C2cFixBlock = {
                 if (& $hasVal 'LockScreenImage')  { [void]$skip.Add("lock already set ($([string]$cur.LockScreenImage))") }
                 elseif (-not $lockImg)            { [void]$skip.Add('no default lock image on target') }
                 else { New-ItemProperty -LiteralPath $polKey -Name 'LockScreenImage' -Value $lockImg -PropertyType String -Force | Out-Null; [void]$set.Add("lock -> $lockImg") }
-                # Desktop wallpaper (Personalization CSP-style DesktopImage* values).
-                if (& $hasVal 'DesktopImagePath') { [void]$skip.Add("desktop already set ($([string]$cur.DesktopImagePath))") }
+                # Desktop wallpaper - the DesktopImage* trio is PersonalizationCSP, honored ONLY under
+                # the CSP key. audit 2026-07-28: these three used to be written to $polKey
+                # (Policies\...\Personalization), which defines lock-screen values only - Windows
+                # ignored all three, the wallpaper never changed, yet the row booked FIXED, and the
+                # skip guard then read the dead value back and booked NOCHANGE forever after.
+                $cspKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP'
+                if (-not (Test-Path -LiteralPath $cspKey)) { New-Item -Path $cspKey -Force | Out-Null }
+                $curCsp = $null; try { $curCsp = Get-ItemProperty -LiteralPath $cspKey -ErrorAction SilentlyContinue } catch {}
+                if ($curCsp -and $curCsp.PSObject.Properties['DesktopImagePath'] -and -not [string]::IsNullOrWhiteSpace([string]$curCsp.DesktopImagePath)) {
+                    [void]$skip.Add("desktop already set ($([string]$curCsp.DesktopImagePath))")
+                }
                 elseif (-not $deskImg)            { [void]$skip.Add('no default desktop image on target') }
                 else {
-                    New-ItemProperty -LiteralPath $polKey -Name 'DesktopImagePath'   -Value $deskImg -PropertyType String -Force | Out-Null
-                    New-ItemProperty -LiteralPath $polKey -Name 'DesktopImageUrl'    -Value $deskImg -PropertyType String -Force | Out-Null
-                    New-ItemProperty -LiteralPath $polKey -Name 'DesktopImageStatus' -Value 1        -PropertyType DWord  -Force | Out-Null
+                    New-ItemProperty -LiteralPath $cspKey -Name 'DesktopImagePath'   -Value $deskImg -PropertyType String -Force | Out-Null
+                    New-ItemProperty -LiteralPath $cspKey -Name 'DesktopImageUrl'    -Value $deskImg -PropertyType String -Force | Out-Null
+                    New-ItemProperty -LiteralPath $cspKey -Name 'DesktopImageStatus' -Value 1        -PropertyType DWord  -Force | Out-Null
                     [void]$set.Add("desktop -> $deskImg")
                 }
                 $skipTxt = if ($skip.Count -gt 0) { " | skipped: $($skip -join '; ')" } else { '' }

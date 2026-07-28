@@ -159,8 +159,16 @@ function New-AcasOfficeC2RVerify {
             if (-not (Test-Path $cfg)) { return @{ Version = 'n/a'; LastUpdated = 'n/a'; Verified = $null; Detail = 'Office C2R not installed' } }
             $p = Get-ItemProperty -Path $cfg -ErrorAction SilentlyContinue
             $ver = if ($p.VersionToReport) { "$($p.VersionToReport)" } elseif ($p.ClientVersionToReport) { "$($p.ClientVersionToReport)" } else { 'unknown' }
-            $key = Get-Item -Path $cfg -ErrorAction SilentlyContinue
-            $mod = if ($key) { $key.LastWriteTime } else { $null }
+            # loop88 twin (audit 2026-07-28): Get-Item on a registry KEY returns a RegistryKey with NO
+            # .LastWriteTime member, so the old $key.LastWriteTime was ALWAYS $null - $mod stayed $null,
+            # Verified stayed $null and this probe was INERT (a fully-current Office could never book OK,
+            # only UNCONFIRMED). C2R carries a REAL timestamp: ClickToRun\Updates!UpdateDetectionLastRunTime.
+            # Unparseable -> $null, i.e. fails back to indeterminate, never to a false-clean.
+            $mod = $null
+            $upd = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Updates' -ErrorAction SilentlyContinue
+            if ($upd -and $upd.UpdateDetectionLastRunTime) {
+                try { $mod = [datetime]::Parse("$($upd.UpdateDetectionLastRunTime)") } catch { $mod = $null }
+            }
             $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
             # loop40 (item35): MIRROR of Get-AcasC2rVerified (ported from wpt loop24) - fresh AND the
             # last scenario SUCCEEDED. C2R bumps this key on failed attempts too, so mtime alone would
@@ -503,8 +511,6 @@ $script:AcasUpdateProfiles = @{
                     if (Test-Path $sub) {
                         $spp = Get-ItemProperty -Path $sub -ErrorAction SilentlyContinue
                         if ($spp -and $spp.JavaHome) { $javaHome = "$($spp.JavaHome)" }
-                        $skey = Get-Item -Path $sub -ErrorAction SilentlyContinue
-                        if ($skey) { $mod = $skey.LastWriteTime }
                     }
                     $ver = $cur
                     if ($javaHome) {
@@ -512,7 +518,13 @@ $script:AcasUpdateProfiles = @{
                         if (-not (Test-Path -LiteralPath $jvm)) { $jvm = Join-Path $javaHome 'bin\client\jvm.dll' }
                         if (Test-Path -LiteralPath $jvm) {
                             try {
-                                $fi = (Get-Item -LiteralPath $jvm -ErrorAction Stop).VersionInfo
+                                # loop88 twin (audit 2026-07-28): the old $mod came from Get-Item on the
+                                # JavaSoft registry KEY, which has NO .LastWriteTime - always $null, so
+                                # Verified was always $null and this probe was inert. jvm.dll is the REAL
+                                # artifact an install replaces; take its mtime.
+                                $jf = Get-Item -LiteralPath $jvm -ErrorAction Stop
+                                $mod = $jf.LastWriteTime
+                                $fi = $jf.VersionInfo
                                 if ($fi.ProductVersion) { $ver = "$($fi.ProductVersion)" }
                                 elseif ($fi.FileVersion) { $ver = "$($fi.FileVersion)" }
                             } catch {}
@@ -1168,7 +1180,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.20'   # audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.11.21'   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -3565,7 +3577,10 @@ function Invoke-JanetToolAction {
                 $gi++
                 $grp = $gr.Group
                 & $send @{ type='status'; text="[$gi/$($groupRuns.Count)] ${mode}: '$($gr.Profile)' for [$($grp.DisplayName)] on $($gr.Jobs.Count) host(s)..." }
-                $fan = Invoke-AcasFanOut -Jobs @($gr.Jobs) -Work $script:AcasUpdateWorker -Threads $threads `
+                # audit 2026-07-28: -PerHostSeconds was missing here - the one patch fan-out that
+                # dropped the operator's per-host watchdog, so a wedged host pinned the whole group
+                # (and every group behind it) to the wall-clock backstop. Siblings all pass it.
+                $fan = Invoke-AcasFanOut -Jobs @($gr.Jobs) -Work $script:AcasUpdateWorker -Threads $threads -PerHostSeconds $perHostTimeout `
                            -RowOf $rowOf -OkOf $okOf -AuditAction $(if ($verifyOnly) { 'TouchHost' } else { 'VulnPatched' }) -AuditDetailOf $detOf -Send $send -CancelCheck $cancelCheck `
                            -RunAction $(if ($verifyOnly) { 'VulnVerify' } else { 'VulnRun' }) -RunScope $grp.DisplayName -RunProfile $gr.Profile -RunMode $(if ($verifyOnly) { 'Verify' } else { 'Update' }) `
                            -RunGroupKey $grp.Key -RunGroupMembers @($grp.MemberNames)
@@ -3724,7 +3739,10 @@ function Invoke-JanetToolAction {
         }
 
         { $_ -eq 'run-all-sequential' -or $_ -eq 'run-all-parallel' } {
-            $jobLines = ConvertTo-AcasJobLines ([string]$Params['jobs'])
+            # audit 2026-07-28: @()-wrap. The ArrayList unwraps on return, so a SINGLE job line
+            # arrived as a bare hashtable and .Count read its KEY count (2) - "2 profile group(s)"
+            # in the status line, the Runs CSV RunScope, and a [1/2] that never reached [2/2].
+            $jobLines = @(ConvertTo-AcasJobLines ([string]$Params['jobs']))
             if ($jobLines.Count -eq 0) {
                 & $send @{ type='log'; level='warn'; text="No valid jobs. Each line must be 'profile | host1,host2,...'." }
                 return @{ rows=@(); summary=@{ total=0; ok=0; failed=0 } }

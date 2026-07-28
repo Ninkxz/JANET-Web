@@ -80,8 +80,9 @@ Describe 'C2C escrow audit - the manifest declares a READ-ONLY action with no co
     $man = & $cm { Get-JanetToolManifest }
     $act = @($man.actions | Where-Object { $_.id -eq 'audit-encryption' })[0]
 
-    It 'the module version was bumped to 1.17.0' {
-        [string]$man.version | Should Be '1.17.0'
+    It 'the module version is at least 1.17.0' {
+        # The exact pin MOVED to C2c.Lockscreen.Tests.ps1 with the 1.18.0 bump; floor here.
+        ([version]$man.version -ge [version]'1.17.0') | Should Be $true
     }
     It 'the audit-encryption action exists' {
         $act | Should Not BeNullOrEmpty

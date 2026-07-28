@@ -97,11 +97,11 @@ function Invoke-FixWith {
     @{ Result = $res; Events = @($evs) }
 }
 
-Describe 'adto 0.2.8 - manifest loads at the bumped version' {
+Describe 'adto 0.2.9 - manifest loads at the bumped version' {
     $mani = & $m { Get-JanetToolManifest }
-    It 'manifest id is adto and version is 0.2.8' {
+    It 'manifest id is adto and version is 0.2.9' {
         [string]$mani.id      | Should Be 'adto'
-        [string]$mani.version | Should Be '0.2.8'
+        [string]$mani.version | Should Be '0.2.9'
     }
     It 'fix + validate-iao are destructive' {
         foreach ($aid in @('fix','validate-iao')) {

@@ -274,7 +274,7 @@
       var lockIntro = el('div'); lockIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
       lockIntro.textContent = 'Clears the stuck quarantine lock screen / wallpaper after unquarantine: writes the Windows DEFAULT image into HKLM Personalization policy on each Target Computer - ONLY where no value is already set. Not a scored pillar; never part of the run-all. Uses the Type-FIX confirm, Max concurrent and offline options in FIX PILLARS above.';
       lockCard.appendChild(lockIntro);
-      var lockArm = ui.checkbox('Arm the cache fix (writes HKLM policy only where unset - never overwrites)', { title: "Opt-in. On each target: LockScreenImage (lock screen) + DesktopImagePath/Url/Status (wallpaper) under HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization, pointed at the target's own default image (LockScreen.jpg -> img100.jpg; wallpaper img0.jpg). A value already set by an operator or GPO is NEVER overwritten." });
+      var lockArm = ui.checkbox('Arm the cache fix (writes HKLM policy only where unset - never overwrites)', { title: "Opt-in. On each target: LockScreenImage (lock screen) under HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization + DesktopImagePath/Url/Status (wallpaper) under HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP, pointed at the target's own default image (LockScreen.jpg -> img100.jpg; wallpaper img0.jpg). A value already set by an operator or GPO is NEVER overwritten." });
       lockArm.style.margin = '0 0 8px';
       lockArm._cb.addEventListener('change', function () { updateTargetButtons(); });
       lockCard.appendChild(lockArm);

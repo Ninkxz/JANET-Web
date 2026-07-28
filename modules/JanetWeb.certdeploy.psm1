@@ -70,7 +70,10 @@ function Get-JanetToolManifest {
         # BLACKLIST NOT ARMED state instead of being counted as MISSING roots; a check store-open
         # failure reads CHECK ERROR instead of silently counting every wanted thumbprint missing;
         # and the check done-line counts an operator Cancelled row.
-        version  = '1.6.0'
+        # audit 2026-07-28: 1.6.0 -> 1.6.1. The fan-out cancel path now emits a progress event
+        # (biosfirmware's 2026-07-24 fix, ported) - it only bumped $done, so the strip froze at its
+        # last pre-cancel count while Cancelled rows streamed and the run looked wedged.
+        version  = '1.6.1'
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA stores over WinRM (adds only-missing by thumbprint, NEVER removes) and, ONLY when the separate pushDisallowed opt-in is ticked, also BLACKLISTS the bundle Untrusted\ certs into the LocalMachine Disallowed store (a fleet-wide DISTRUST, not a trust add); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -876,7 +879,10 @@ function Invoke-CertDeployFanOut {
                         if ($j.PS) {
                             try { [void]$j.PS.BeginStop($null, $null) } catch {}; $j.PS = $null
                             & $EmitResult (& $MakeCancelResult $j.Host)
-                            $done++
+                            # audit 2026-07-28 (biosfirmware's 2026-07-24 fix, ported): emit progress
+                            # here too. Harvest and watchdog both do; cancel only bumped $done, so the
+                            # strip froze at its last pre-cancel count while Cancelled rows streamed.
+                            $done++; & $Send @{ type='progress'; done=$done; total=$Jobs.Count }
                         }
                     }
                     & $Send @{ type='log'; level='warn'; text=$CancelLogText }
