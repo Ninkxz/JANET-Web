@@ -54,9 +54,39 @@ Describe 'winupgrade AutoFix - the inline verdict mirror also treats unknown sfc
     }
 }
 
-Describe 'winupgrade - manifest exact version pin (newest bump = audit 2026-07-25 wrong-box residual pass)' {
-    It 'winupgrade is at v0.5.8' {
+# audit 2026-07-28: AutoFix booked each of its three fixes into $fixes BEFORE attempting the
+# operation, and no failure arm took the marker back. $status is `elseif ($fixes.Count -gt 0)
+# { 'FIXED' }`, and 'FIXED' is not in $noOpStatuses - so a host where DISM exited non-zero, sfc
+# errored AND the $WINDOWS.~BT delete was denied still reported Status=FIXED, Detail="Applied:
+# repair; staging-cleared", and audited VulnPatched/Success/itemCount=1. repair-health in this
+# same module already mapped a non-zero DISM to FAILED; AutoFix was the odd one out.
+Describe 'winupgrade 0.5.9 - AutoFix books a fix only AFTER it actually succeeded' {
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.winupgrade.psm1') -Raw
+
+    It "'repair' is gated behind a success flag, not added up front" {
+        ($src -match '\$repairOk=\$false')                    | Should Be $true
+        ($src -match 'if \(\$repairOk\) \{ \[void\]\$fixes\.Add\(''repair''\) \}') | Should Be $true
+    }
+    It "'staging-cleared' is booked inside the try, after a successful Remove-Item" {
+        # the Add must follow Remove-Item on the same live-run line, not precede the try
+        ($src -match "Remove-Item -LiteralPath \`$btPath -Recurse -Force -ErrorAction Stop; \[void\]\`$fixes\.Add\('staging-cleared'\)") | Should Be $true
+    }
+    It 'the expired-pause clear no longer sets $clearedAny before a SilentlyContinue delete' {
+        # the End value must now be removed with -ErrorAction Stop inside a try, and
+        # $clearedAny must be set only on the success path
+        ($src -match 'Remove-ItemProperty -Path \$wuUx -Name \$pair\.End -ErrorAction Stop') | Should Be $true
+        ($src -match '\$clearedAny=\$true; \[void\]\$report\.Add\("\[FIX\] Cleared EXPIRED pause') | Should Be $true
+    }
+    It 'a run where every fix failed therefore books NO CHANGES, which audits Skipped' {
+        # NO CHANGES is the else arm of the same $status expression and is in $noOpStatuses
+        ($src -match "else \{ 'NO CHANGES' \}")   | Should Be $true
+        ($src -match "'NO CHANGES'")               | Should Be $true
+    }
+}
+
+Describe 'winupgrade - manifest exact version pin (newest bump = audit 2026-07-28 AutoFix honest FIXED)' {
+    It 'winupgrade is at v0.5.9' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '0.5.8'
+        [string]$mani.version | Should Be '0.5.9'
     }
 }

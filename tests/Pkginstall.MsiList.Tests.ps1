@@ -73,6 +73,36 @@ Describe 'pkginstall 2.5.9 - all-1638 MSI host is Skipped, not a false VulnPatch
     }
 }
 
+# audit 2026-07-28: the loop60 fix above covers only the ALL-1638 host. A MIXED bundle
+# (one MSI returns 3010 or 1641, the rest 1638) skips that branch, lands on the plain
+# $failCount -eq 0 arm, and the 1638 disclosure lived ONLY in that arm's else - so the
+# reboot arms reported "All 3 MSI(s) succeeded (reboot required)" with no hint that two
+# were refused, and audited VulnPatched/Success. The note is now hoisted above the
+# if/elseif/else so every arm carries it, and the count says how many actually ran.
+Describe 'pkginstall 2.5.15 - a MIXED 1638 bundle discloses the refusals on every arm' {
+    $mani = & $script:Mod { Get-JanetToolManifest }
+    $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
+
+    It 'manifest version is exactly 2.5.15 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '2.5.15'
+    }
+    It '$installedNote is built BEFORE the reboot-arm branch, not inside its else' {
+        # the note assignment must precede the $sawRebootInit test in source order
+        $noteAt   = $src.IndexOf('$installedNote = if ($installedCount -gt 0)')
+        $branchAt = $src.IndexOf('if     ($sawRebootInit)')
+        ($noteAt -gt 0 -and $branchAt -gt 0 -and $noteAt -lt $branchAt) | Should Be $true
+    }
+    It 'all three success arms append the note' {
+        @([regex]::Matches($src, '\$installedNote"?;?\s*\$res\.ExitCode')).Count | Should Be 3
+    }
+    It 'the note states the install did NOT run and the version is unverified' {
+        ($src -match "install did NOT run, version NOT verified compliant") | Should Be $true
+    }
+    It 'the reason no longer claims "All N" when some MSIs were refused' {
+        ($src -match '\$ranCount = if \(\$installedCount -gt 0\)') | Should Be $true
+    }
+}
+
 # -----------------------------------------------------------------------------
 # loop61 (item68): the PSADT deploy branch pre-seeded $LASTEXITCODE=0, so a Deploy-Application.ps1
 # that returns WITHOUT calling exit/Exit-Script (sets no exit code) left the pre-seeded 0 and was
@@ -204,8 +234,8 @@ Describe 'pkginstall 2.5.14 - the staged payload is not in world-writable C:\Tem
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.pkginstall.psm1') -Raw
 
-    It 'manifest version is exactly 2.5.14 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '2.5.14'
+    It 'manifest version is at least 2.5.14 (floor; newest exact pin = the audit-2026-07-28 mixed-bundle Describe, v2.5.15)' {
+        ([version][string]$mani.version -ge [version]'2.5.14') | Should Be $true
     }
 
     It 'no longer stages under C:\Temp on the target' {

@@ -33,7 +33,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'pkginstall'
         name     = 'Remote Package Installer'
-        version  = '2.5.14'
+        version  = '2.5.15'  # audit 2026-07-28: the 1638 "install did NOT run, version unverified" disclosure was appended only on the no-reboot arm, so a MIXED bundle (one MSI 3010 + two 1638) reported "All 3 MSI(s) succeeded (reboot required)" and audited VulnPatched Success for two products msiexec had refused. Hoisted to every arm; the count now says how many of the bundle actually installed.
         category = 'Patching'
         summary  = 'Deploy PSADT packages or MSI bundles to many workstations in parallel over WinRM, with WinRM-via-DCOM repair and per-host status streaming.'
         actions  = @(
@@ -689,13 +689,18 @@ $script:RpiDeployHostScript = {
                         $res.Reason  = "All $totalCount MSI(s): another version already installed (1638) - install did NOT run; version NOT verified compliant"
                         $res.ExitCode = 1638
                     } elseif ($failCount -eq 0) {
+                        # audit 2026-07-28: the 1638 disclosure below used to live ONLY in the else
+                        # arm, so a MIXED bundle (one MSI returns 3010, two return 1638) took the
+                        # $sawReboot arm and reported "All 3 MSI(s) succeeded" with no hint that two
+                        # never ran - then audited VulnPatched/Success/1 for two still-unverified
+                        # products. Hoisted so every arm carries it, and the count is honest about
+                        # how many of the bundle actually installed.
                         $res.Status = 'Success'
-                        if     ($sawRebootInit) { $res.Reason = "All $totalCount MSI(s) succeeded (reboot initiated)"; $res.ExitCode = 1641 }
-                        elseif ($sawReboot)     { $res.Reason = "All $totalCount MSI(s) succeeded (reboot required)";  $res.ExitCode = 3010 }
-                        else {
-                            $installedNote = if ($installedCount -gt 0) { " ($installedCount already installed, version unverified)" } else { '' }
-                            $res.Reason = "All $totalCount MSI(s) succeeded$installedNote"; $res.ExitCode = 0
-                        }
+                        $installedNote = if ($installedCount -gt 0) { " ($installedCount of $($totalCount) MSI(s): another version already installed (1638) - install did NOT run, version NOT verified compliant)" } else { '' }
+                        $ranCount = if ($installedCount -gt 0) { "$successCount of $totalCount" } else { "All $totalCount" }
+                        if     ($sawRebootInit) { $res.Reason = "$ranCount MSI(s) succeeded (reboot initiated)$installedNote"; $res.ExitCode = 1641 }
+                        elseif ($sawReboot)     { $res.Reason = "$ranCount MSI(s) succeeded (reboot required)$installedNote";  $res.ExitCode = 3010 }
+                        else                    { $res.Reason = "$ranCount MSI(s) succeeded$installedNote";                    $res.ExitCode = 0 }
                     } else {
                         $firstFailReason = ''
                         $ff = $perMsi | Where-Object { $_.Msi -eq $firstFailMsi -and $_.Status -ne 'Success' } | Select-Object -First 1

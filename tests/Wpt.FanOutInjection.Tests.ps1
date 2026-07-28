@@ -258,7 +258,7 @@ Describe 'wpt - every manifest action is reachable from the view (audit 2026-07-
 }
 
 Describe 'wpt - manifest version (newest bump holds the EXACT pin; older tests keep floors)' {
-    It 'wpt manifest is exactly 6.10.2 (audit 2026-07-25 fable re-audit follow-up)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.10.2'
+    It 'wpt manifest is >= 6.10.2 (floor; exact pin moved to the newest bump test)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'6.10.2') | Should Be $true
     }
 }

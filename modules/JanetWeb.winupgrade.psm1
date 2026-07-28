@@ -97,7 +97,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.8'
+        version  = '0.5.9'  # audit 2026-07-28: Auto-Fix booked its three fixes BEFORE attempting them and no failure arm took them back, so a host where DISM errored, sfc errored and the $WINDOWS.~BT delete was denied still reported Status=FIXED / "Applied: repair; staging-cleared" and audited VulnPatched Success. Each fix is now booked only after the operation actually succeeded (repair-health already worked this way).
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -3104,9 +3104,17 @@ $script:WinUpgradeWorker = {
                                 $dt=[datetime]::MinValue
                                 if ([datetime]::TryParse($endVal,[ref]$dt)) {
                                     if ($dt -lt $nowLocal) {
-                                        $clearedAny=$true
-                                        if (-not $dryRun) { Remove-ItemProperty -Path $wuUx -Name $pair.End -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $wuUx -Name $pair.Start -ErrorAction SilentlyContinue; [void]$report.Add("[FIX] Cleared EXPIRED pause $($pair.Start)/$($pair.End) (ended $dt)") }
-                                        else { [void]$report.Add("[FIX] would clear EXPIRED pause $($pair.Start)/$($pair.End) (ended $dt)") }
+                                        # audit 2026-07-28: $clearedAny (and the "[FIX] Cleared" line) fired
+                                        # before a SilentlyContinue delete that could quietly fail, booking
+                                        # pause-cleared -> FIXED on a host whose pause is still set.
+                                        if (-not $dryRun) {
+                                            try {
+                                                Remove-ItemProperty -Path $wuUx -Name $pair.End -ErrorAction Stop
+                                                Remove-ItemProperty -Path $wuUx -Name $pair.Start -ErrorAction SilentlyContinue
+                                                $clearedAny=$true; [void]$report.Add("[FIX] Cleared EXPIRED pause $($pair.Start)/$($pair.End) (ended $dt)")
+                                            } catch { [void]$report.Add("[WARN] could not clear EXPIRED pause $($pair.End): $($_.Exception.Message)") }
+                                        }
+                                        else { $clearedAny=$true; [void]$report.Add("[FIX] would clear EXPIRED pause $($pair.Start)/$($pair.End) (ended $dt)") }
                                     } else { [void]$report.Add("[SKIP] pause $($pair.End) ACTIVE until $dt - respected"); $activeAny=$true }
                                 }
                             }
@@ -3123,12 +3131,18 @@ $script:WinUpgradeWorker = {
                         if (Test-Path -LiteralPath $btErr) { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch {} }
                         $needsRepair=($et -match '0x000003F1' -or $et -match '(?i)configuration registry database is corrupt' -or $et -match 'MigPlatformStartupOffline' -or $et -match '(?i)Offline gather failed' -or $et -match '(?i)FOD inventory' -or $et -match '(?i)Failed to enumerate store capabilities' -or $et -match 'CBS_E_INVALID_PACKAGE' -or $et -match '0x800f0805')
                         if ($needsRepair) {
-                            [void]$fixes.Add('repair')
+                            # audit 2026-07-28: 'repair' used to be booked BEFORE DISM/sfc ran, and
+                            # neither failure arm took it back - so a host where DISM exited non-zero
+                            # AND sfc errored still reported Status=FIXED / "Applied: repair" and
+                            # audited VulnPatched Success. Book it only on a real success, the way
+                            # the repair-health action already does.
+                            $repairOk=$false
                             if (-not $dryRun) {
                                 [void]$report.Add('[FIX] Corruption signature found - running DISM RestoreHealth + sfc (slow)...')
-                                try { $psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true; $pr=[System.Diagnostics.Process]::Start($psi); [void]$pr.StandardOutput.ReadToEnd(); [void]$pr.StandardError.ReadToEnd(); $pr.WaitForExit(); $dc=$pr.ExitCode; if ($dc -eq 0 -or $dc -eq 3010) { [void]$report.Add("[FIX] DISM RestoreHealth done (exit $dc)"); if ($dc -eq 3010) { $rebootNeeded=$true } } else { [void]$report.Add("[WARN] DISM exit $dc") } } catch { [void]$report.Add("[FAIL] DISM error: $($_.Exception.Message)") }
-                                try { $psi2=New-Object System.Diagnostics.ProcessStartInfo; $psi2.FileName='sfc.exe'; $psi2.Arguments='/scannow'; $psi2.UseShellExecute=$false; $psi2.RedirectStandardOutput=$true; $psi2.RedirectStandardError=$true; $psi2.CreateNoWindow=$true; $pr2=[System.Diagnostics.Process]::Start($psi2); $so2=$pr2.StandardOutput.ReadToEnd(); $se2=$pr2.StandardError.ReadToEnd(); $pr2.WaitForExit(); $stx=(($so2+$se2) -replace "`0",''); if ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { [void]$report.Add('[WARN] sfc: corruption not fully repaired (review CBS.log)') } else { [void]$report.Add('[FIX] sfc /scannow done'); if ($stx -match '(?i)successfully repaired') { $rebootNeeded=$true } } } catch { [void]$report.Add("[FAIL] sfc error: $($_.Exception.Message)") }
-                            } else { [void]$report.Add('[FIX] would run DISM RestoreHealth + sfc (corruption signature found)') }
+                                try { $psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName='dism.exe'; $psi.Arguments='/Online /Cleanup-Image /RestoreHealth'; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true; $pr=[System.Diagnostics.Process]::Start($psi); [void]$pr.StandardOutput.ReadToEnd(); [void]$pr.StandardError.ReadToEnd(); $pr.WaitForExit(); $dc=$pr.ExitCode; if ($dc -eq 0 -or $dc -eq 3010) { [void]$report.Add("[FIX] DISM RestoreHealth done (exit $dc)"); $repairOk=$true; if ($dc -eq 3010) { $rebootNeeded=$true } } else { [void]$report.Add("[WARN] DISM exit $dc") } } catch { [void]$report.Add("[FAIL] DISM error: $($_.Exception.Message)") }
+                                try { $psi2=New-Object System.Diagnostics.ProcessStartInfo; $psi2.FileName='sfc.exe'; $psi2.Arguments='/scannow'; $psi2.UseShellExecute=$false; $psi2.RedirectStandardOutput=$true; $psi2.RedirectStandardError=$true; $psi2.CreateNoWindow=$true; $pr2=[System.Diagnostics.Process]::Start($psi2); $so2=$pr2.StandardOutput.ReadToEnd(); $se2=$pr2.StandardError.ReadToEnd(); $pr2.WaitForExit(); $stx=(($so2+$se2) -replace "`0",''); if ($stx -match '(?i)unable to fix' -or $stx -match '(?i)could not fix') { [void]$report.Add('[WARN] sfc: corruption not fully repaired (review CBS.log)') } else { [void]$report.Add('[FIX] sfc /scannow done'); $repairOk=$true; if ($stx -match '(?i)successfully repaired') { $rebootNeeded=$true } } } catch { [void]$report.Add("[FAIL] sfc error: $($_.Exception.Message)") }
+                            } else { [void]$report.Add('[FIX] would run DISM RestoreHealth + sfc (corruption signature found)'); $repairOk=$true }
+                            if ($repairOk) { [void]$fixes.Add('repair') }
                         } else { [void]$report.Add('[SKIP] No registry/CBS corruption signature - repair not needed') }
                     }
 
@@ -3144,9 +3158,11 @@ $script:WinUpgradeWorker = {
                             if ($rollbackMarker) { $sc='Stale' } elseif ($setupProcs.Count -gt 0) { $sc='Active' } elseif ($ageHours -gt 24) { $sc='Stale' } else { $sc='Recent' }
                             $gb=0; try { $gb=[math]::Round((Get-ChildItem -LiteralPath $btPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum/1GB,1) } catch {}
                             if ($sc -eq 'Stale') {
-                                [void]$fixes.Add('staging-cleared')
-                                if (-not $dryRun) { try { Remove-Item -LiteralPath $btPath -Recurse -Force -ErrorAction Stop; [void]$report.Add("[FIX] Cleared stale `$WINDOWS.~BT (~$gb GB reclaimed)") } catch { [void]$report.Add("[WARN] `$WINDOWS.~BT partial removal: $($_.Exception.Message)") } }
-                                else { [void]$report.Add("[FIX] would clear stale `$WINDOWS.~BT (~$gb GB)") }
+                                # audit 2026-07-28: 'staging-cleared' was booked BEFORE the delete, so an
+                                # access-denied Remove-Item (AV handle on the tree) still reported FIXED
+                                # and "~N GB reclaimed" when nothing was reclaimed. Book it inside the try.
+                                if (-not $dryRun) { try { Remove-Item -LiteralPath $btPath -Recurse -Force -ErrorAction Stop; [void]$fixes.Add('staging-cleared'); [void]$report.Add("[FIX] Cleared stale `$WINDOWS.~BT (~$gb GB reclaimed)") } catch { [void]$report.Add("[WARN] `$WINDOWS.~BT partial removal: $($_.Exception.Message)") } }
+                                else { [void]$fixes.Add('staging-cleared'); [void]$report.Add("[FIX] would clear stale `$WINDOWS.~BT (~$gb GB)") }
                             } else { [void]$report.Add("[SKIP] `$WINDOWS.~BT is $sc (not stale) - not clearing") }
                         } else { [void]$report.Add('[SKIP] No `$WINDOWS.~BT staging to clear') }
                     }

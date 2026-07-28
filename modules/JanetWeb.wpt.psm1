@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.10.2'  # audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
+        version  = '6.10.4'  # audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -929,8 +929,19 @@ $script:M365C2RVerify = {
     if (-not (Test-Path $cfg)) { return @{ Version='n/a'; LastUpdated='n/a'; Verified=$null; Detail='Office C2R not installed' } }
     $p = Get-ItemProperty -Path $cfg -ErrorAction SilentlyContinue
     $ver = if ($p.VersionToReport) { "$($p.VersionToReport)" } elseif ($p.ClientVersionToReport) { "$($p.ClientVersionToReport)" } else { 'unknown' }
-    $key = Get-Item -Path $cfg -ErrorAction SilentlyContinue
-    $mod = if ($key) { $key.LastWriteTime } else { $null }
+    # audit 2026-07-28: $mod used to come from Get-Item on the Configuration REGISTRY key,
+    # which returns a RegistryKey with NO .LastWriteTime - so $mod was ALWAYS $null and the
+    # whole $verified chain below short-circuited on its first branch. This Verify was INERT:
+    # Get-WptVerifyOk demands Verified -eq $true, so EVERY reachable host audited Skipped and
+    # rendered LastUpdated=n/a whether Office was current or two years stale. C2R carries a
+    # REAL timestamp in ClickToRun\Updates!UpdateDetectionLastRunTime. Kept byte-identical to
+    # the acas.psm1 twin fixed the same day - these two must not drift again.
+    # Unparseable -> $null, i.e. fails back to indeterminate, never to a false-clean.
+    $mod = $null
+    $upd = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Updates' -ErrorAction SilentlyContinue
+    if ($upd -and $upd.UpdateDetectionLastRunTime) {
+        try { $mod = [datetime]::Parse("$($upd.UpdateDetectionLastRunTime)") } catch { $mod = $null }
+    }
     $modStr = if ($mod) { $mod.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
     # loop24: MIRROR of Get-WptC2rVerified - fresh AND the last scenario SUCCEEDED. C2R bumps
     # this key on failed attempts too, so mtime alone would falsely read Verified. Keep in lockstep.
@@ -1546,8 +1557,6 @@ function Get-WptAppUpdateProfiles {
                         if (Test-Path $sub) {
                             $spp = Get-ItemProperty -Path $sub -ErrorAction SilentlyContinue
                             if ($spp -and $spp.JavaHome) { $javaHome = "$($spp.JavaHome)" }
-                            $skey = Get-Item -Path $sub -ErrorAction SilentlyContinue
-                            if ($skey) { $mod = $skey.LastWriteTime }
                         }
                         $ver = $cur
                         if ($javaHome) {
@@ -1555,7 +1564,16 @@ function Get-WptAppUpdateProfiles {
                             if (-not (Test-Path -LiteralPath $jvm)) { $jvm = Join-Path $javaHome 'bin\client\jvm.dll' }
                             if (Test-Path -LiteralPath $jvm) {
                                 try {
-                                    $fi = (Get-Item -LiteralPath $jvm -ErrorAction Stop).VersionInfo
+                                    # audit 2026-07-28: $mod used to come from Get-Item on the JavaSoft
+                                    # REGISTRY key, which returns a RegistryKey with NO .LastWriteTime -
+                                    # so $mod was ALWAYS $null, $verified ALWAYS $null and the <30 day
+                                    # freshness rule below had never once executed. jvm.dll is a real
+                                    # FILE and already fetched here for its VersionInfo; its mtime is
+                                    # the honest "when did this JRE last change" source. Same fix as
+                                    # acas.psm1 took on 2026-07-28 for the identical probe.
+                                    $jf = Get-Item -LiteralPath $jvm -ErrorAction Stop
+                                    $mod = $jf.LastWriteTime
+                                    $fi = $jf.VersionInfo
                                     if ($fi.ProductVersion) { $ver = "$($fi.ProductVersion)" }
                                     elseif ($fi.FileVersion) { $ver = "$($fi.FileVersion)" }
                                 } catch {}
@@ -2517,8 +2535,18 @@ $script:WptHealthScanBlock = {
             try { $svcWu = Get-Service wuauserv -ErrorAction Stop; $o.WuSvcStartup=[string]$svcWu.StartType } catch {}
             try { $svcTi = Get-Service TrustedInstaller -ErrorAction Stop; $o.TrustedInstallerOK=[bool]$svcTi } catch {}
             $reasons = New-Object System.Collections.ArrayList; $oldestMark = $null
-            try { $cbs = Get-Item 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' -ErrorAction Stop; [void]$reasons.Add('CBS'); if (-not $oldestMark -or $cbs.LastWriteTime -lt $oldestMark) { $oldestMark = $cbs.LastWriteTime } } catch {}
-            try { $wu = Get-Item 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' -ErrorAction Stop; [void]$reasons.Add('WU'); if (-not $oldestMark -or $wu.LastWriteTime -lt $oldestMark) { $oldestMark = $wu.LastWriteTime } } catch {}
+            # audit 2026-07-28: both marks used to be $cbs.LastWriteTime / $wu.LastWriteTime off
+            # Get-Item on REGISTRY keys, which have NO .LastWriteTime - so $oldestMark was assigned
+            # $null twice and stayed $null, PendingDays stayed at its 0 initializer, the AGE column
+            # read a fabricated '<1d' forever, and the ">14 days pending" Degraded rule below could
+            # never fire. There is no registry-key mtime without P/Invoke, so take the real FILE
+            # CBS writes when it stages the pending operation. No mark -> PendingDays stays 0 and
+            # the age renders 'unknown' rather than a made-up '<1d'.
+            try { $null = Get-Item 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' -ErrorAction Stop; [void]$reasons.Add('CBS') } catch {}
+            try { $null = Get-Item 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' -ErrorAction Stop; [void]$reasons.Add('WU') } catch {}
+            foreach ($pf in @('C:\Windows\WinSxS\pending.xml','C:\Windows\WinSxS\reboot.xml')) {
+                try { $pfi = Get-Item -LiteralPath $pf -ErrorAction Stop; if (-not $oldestMark -or $pfi.LastWriteTime -lt $oldestMark) { $oldestMark = $pfi.LastWriteTime } } catch {}
+            }
             try { $pfro = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction Stop; if ($pfro.PendingFileRenameOperations) { [void]$reasons.Add('PFRO') } } catch {}
             try { $ccm = Invoke-WmiMethod -Namespace 'ROOT\ccm\ClientSDK' -Class CCM_ClientUtilities -Name DetermineIfRebootPending -ErrorAction Stop; if ($ccm.IsHardRebootPending -or $ccm.RebootPending) { [void]$reasons.Add('SCCM') } } catch {}
             if ($reasons.Count -gt 0) { $o.RebootPending=$true; if ($oldestMark) { $o.PendingDays=[int]((Get-Date)-$oldestMark).TotalDays } }
@@ -2531,7 +2559,9 @@ $script:WptHealthScanBlock = {
         if (-not $probe.MecmInstalled) { $r.SwCenter='Missing' } elseif ([string]::IsNullOrWhiteSpace($probe.SwCenterExe)) { $r.SwCenter='Broken' } elseif (-not $probe.MecmRunning) { $r.SwCenter='NotRunning' } else { $r.SwCenter='Healthy' }
         $r.WmiState = if ($probe.WmiOK) { 'OK' } else { 'Broken' }
         if ($probe.WuSvcStartup -eq 'Disabled') { $r.WuState='Disabled' } elseif (-not $probe.TrustedInstallerOK) { $r.WuState='Broken' } elseif ($probe.WuSvcStartup) { $r.WuState='OK' }
-        if ($probe.RebootPending) { $r.RebootState='Pending'; $r.RebootAge = if ([int]$probe.PendingDays -gt 0) { "$($probe.PendingDays)d" } else { '<1d' } } else { $r.RebootState='None' }
+        # audit 2026-07-28: '<1d' used to be the fallback for "no mark", which was EVERY pending
+        # host (see the probe). A host pending since January read '<1d'. No mark -> 'unknown'.
+        if ($probe.RebootPending) { $r.RebootState='Pending'; $r.RebootAge = if ([int]$probe.PendingDays -gt 0) { "$($probe.PendingDays)d" } else { 'unknown' } } else { $r.RebootState='None' }
         $r.LastCheckIn = [string]$probe.LastPolicyReq
         if ($r.MecmState -eq 'Missing' -or $r.WmiState -eq 'Broken') { $r.Overall='Broken' }
         elseif ($r.MecmState -eq 'Stopped' -or $r.WuState -eq 'Disabled' -or $r.WuState -eq 'Broken' -or $r.SwCenter -eq 'Broken' -or ([int]$probe.PendingDays -gt 14)) { $r.Overall='Degraded' }
@@ -5631,6 +5661,16 @@ function Invoke-JanetToolAction {
         if ($appNames.Count -eq 0) {
             & $send @{ type='log'; level='warn'; text='At least one app name or {GUID} is required.' }
             return @{ rows=@(); summary=@{ total=0 } }
+        }
+        # Self-guard (audit 2026-07-28): this was the ONLY destructive wpt action that
+        # dialed a host without it. The fleet path 'unsupported-uninstall' drives the
+        # SAME $script:WptSoftwareUninstallBlock and IS guarded; the single-host path
+        # was not. The worker's wrong-box guard cannot cover this - self is dialed by
+        # its own correct name, so the name matches and execution proceeds.
+        $guarded = Remove-WptSelfTargets -Targets @($hostName) -Send $send
+        if ($guarded.Targets.Count -eq 0) {
+            & $send @{ type='log'; level='warn'; text='Nothing to uninstall - the JANET dispatcher host is self-guarded.' }
+            return @{ rows=@(); summary=@{ total=0; selfSkipped=$guarded.SkippedCount } }
         }
         & $send @{ type='status'; text="Uninstalling $($appNames.Count) item(s) on $hostName..." }
         $rows = New-Object System.Collections.ArrayList

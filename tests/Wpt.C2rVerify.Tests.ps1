@@ -84,3 +84,50 @@ Describe 'wpt Chrome/Edge verify scriptblock - gates on the install result, not 
         ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'6.8.17') | Should Be $true
     }
 }
+
+# audit 2026-07-28: the loop88 test above scoped its assertion to ONE function AND to one
+# exact spelling, so three further live instances of the same defect survived it - the M365
+# C2R verify, the Oracle Java verify and Health Scan's reboot-age probe. Get-Item on a
+# REGISTRY key returns a RegistryKey, which has NO .LastWriteTime member: the read yields
+# $null silently and whatever it feeds becomes permanently inert. This Describe is
+# deliberately MODULE-WIDE and spelling-agnostic so a fourth instance cannot slip through.
+Describe 'wpt - no probe takes a timestamp from a REGISTRY key (module-wide, audit 2026-07-28)' {
+    $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+    $lines = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1')
+
+    It 'no Get-Item on an HKLM:/HKCU: path is bound to a variable whose .LastWriteTime is then read' {
+        # Collect every variable assigned from a Get-Item over a registry path, then assert
+        # none of them is later dereferenced for .LastWriteTime anywhere in the file.
+        $regVars = @()
+        foreach ($ln in $lines) {
+            $mm = [regex]::Matches($ln, '\$(\w+)\s*=\s*(?:if \([^)]*\) \{ )?Get-Item\b[^\r\n]*?(HK(?:LM|CU|CR|U|CC)):')
+            foreach ($x in $mm) { $regVars += $x.Groups[1].Value }
+        }
+        $offenders = @()
+        foreach ($v in ($regVars | Select-Object -Unique)) {
+            if ($moduleSrc -match ("\`$$v\.LastWriteTime")) { $offenders += $v }
+        }
+        ($offenders -join ', ') | Should Be ''
+    }
+
+    It 'the M365 C2R verify takes its timestamp from the real UpdateDetectionLastRunTime value' {
+        $sb = [regex]::Match($moduleSrc, '(?s)\$script:M365C2RVerify = \{.*?\r?\n\}').Value
+        ($sb -match 'UpdateDetectionLastRunTime')    | Should Be $true
+        ($sb -match '\$key\.LastWriteTime')          | Should Be $false
+    }
+
+    It 'the Oracle Java verify takes its timestamp from the jvm.dll FILE, not the JavaSoft key' {
+        ($moduleSrc -match '\$skey\.LastWriteTime')  | Should Be $false
+        ($moduleSrc -match '\$jf = Get-Item -LiteralPath \$jvm') | Should Be $true
+        ($moduleSrc -match '\$mod = \$jf\.LastWriteTime')        | Should Be $true
+    }
+
+    It 'Health Scan no longer fabricates a <1d reboot age when it has no datable mark' {
+        ($moduleSrc -match "\{ '<1d' \}") | Should Be $false
+        ($moduleSrc -match 'pending\.xml') | Should Be $true
+    }
+
+    It 'wpt manifest is exactly 6.10.4 (audit 2026-07-28 inert registry-timestamp probes)' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.10.4'
+    }
+}

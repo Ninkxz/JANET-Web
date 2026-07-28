@@ -143,6 +143,31 @@ Describe 'WPT 6.8.3 - the arbitrary-RCE action carries a loud confirm dialog (P3
     }
 }
 
+Describe 'WPT 6.10.3 - single-host software-uninstall self-guards the dispatcher (audit 2026-07-28)' {
+    # The last destructive wpt action dialing a host with no self-guard. Its fleet
+    # sibling unsupported-uninstall drives the SAME $script:WptSoftwareUninstallBlock
+    # and was guarded in 6.8.3; this single-host path was not. The worker's wrong-box
+    # guard cannot substitute - self answers to its own correct name, so no mismatch.
+    It 'the dispatcher shortname is dropped before any WinRM session is built' {
+        $o = Invoke-Wpt 'software-uninstall' @{ host = $script:Me; apps = 'Java 8 Update 202' }
+        [int]$o.Result.summary.total | Should Be 0
+        [int]$o.Result.summary.selfSkipped | Should Be 1
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+    It 'loopback is dropped too' {
+        $o = Invoke-Wpt 'software-uninstall' @{ host = '127.0.0.1'; apps = '{GUID-HERE}' }
+        [int]$o.Result.summary.total | Should Be 0
+        (Has-SelfGuardWarn $o) | Should Be $true
+    }
+    It 'a missing app list still warns plainly, not via the self-guard path' {
+        $o = Invoke-Wpt 'software-uninstall' @{ host = $script:Me; apps = '' }
+        (Has-SelfGuardWarn $o) | Should Be $false
+    }
+    It 'wpt manifest is >= 6.10.3 (floor; exact pin lives in the newest bump test)' {
+        ([version][string](& $m { (Get-JanetToolManifest).version }) -ge [version]'6.10.3') | Should Be $true
+    }
+}
+
 Describe 'WPT 6.8.3 - the read-only sibling is NOT self-guarded (no over-guard)' {
     It 'app-update-verify has no confirm and is not destructive (unchanged)' {
         $mani = & $m { Get-JanetToolManifest }

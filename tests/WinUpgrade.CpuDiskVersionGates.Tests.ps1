@@ -267,9 +267,9 @@ Describe 'no-op remediations are audited Skipped, not VulnPatched Success' {
 }
 
 Describe 'manifest carries the audit version bump' {
-    It 'version is 0.5.8' {
+    It 'version is at least 0.5.8 (floor; exact pin lives in the newest bump test)' {
         # audit 2026-07-25 (fable re-audit follow-up): bumped for the wrong-box residual
         # pass (InstallCab staging + the WMI/DCOM bootstrap/cleanup guards).
-        (& $m { (Get-JanetToolManifest).version }) | Should Be '0.5.8'
+        ([version][string](& $m { (Get-JanetToolManifest).version }) -ge [version]'0.5.8') | Should Be $true
     }
 }

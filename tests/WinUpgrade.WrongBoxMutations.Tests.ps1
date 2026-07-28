@@ -224,7 +224,7 @@ Describe 'the install-updates WMI/DCOM cleanup aborts on a wrong box (audit 2026
 }
 
 Describe 'winupgrade manifest version' {
-    It 'is 0.5.8 (wrong-box residual pass)' {
-        (& $m { (Get-JanetToolManifest).version }) | Should Be '0.5.8'
+    It 'is at least 0.5.8 (wrong-box residual pass; floor, exact pin in the newest bump test)' {
+        ([version][string](& $m { (Get-JanetToolManifest).version }) -ge [version]'0.5.8') | Should Be $true
     }
 }
