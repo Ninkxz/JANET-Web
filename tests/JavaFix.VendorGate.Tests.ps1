@@ -187,6 +187,27 @@ Describe 'javafix audit 2026-07-24 (4) - JavaSoft CurrentVersion repoint sorts a
     }
 }
 
+Describe 'javafix audit 2026-07-28 - phantom OLD finds and no-op removals are not booked as fixes' {
+
+    $src = & $jm { Get-JanetJavaFixSrc }
+
+    It 'the JavaSoft verdict sweep skips the bare FAMILY-POINTER key (1.8 next to 1.8.0_491)' {
+        # A bare '1.8' parses as maj=8/upd=0 and verdicts OLD, so a host whose only Java is
+        # CURRENT reported "found 1 OLD item(s) but removed NOTHING". Verify both halves:
+        # the verdict really is OLD, and the sweep filter really excludes the key.
+        (& $jm { Get-JanetJavaVerdict '1.8' }) | Should Be 'OLD'
+        $src | Should Match ([regex]::Escape("-match '^\d' -and `$_.PSChildName -notmatch '^\d+\.\d+$'"))
+    }
+    It 'the CurrentVersion repair still counts the family key, so a compliant host is not repointed' {
+        # Deliberate asymmetry - $remaining feeds a -notcontains test against CurrentVersion.
+        $src | Should Match ([regex]::Escape('$remaining = @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match ''^\d'' })'))
+    }
+    It 'msiexec 1605 is MANUAL, never an OK* string (OK* buckets as FIXED -> a VulnPatched Success)' {
+        $src | Should Match '1605\s*\{ \$jf\.Result = ''MANUAL:'
+        $src | Should Not Match ([regex]::Escape("1605    { `$jf.Result = 'OK"))
+    }
+}
+
 Describe 'javafix audit 2026-07-24 - the pre-existing security guards are UNTOUCHED' {
 
     $src = & $jm { Get-JanetJavaFixSrc }

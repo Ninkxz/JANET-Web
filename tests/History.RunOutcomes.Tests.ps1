@@ -294,9 +294,9 @@ Describe 'run-outcomes aggregation and reporting' {
         @($run.Events | Where-Object { $_.type -eq 'audit' }).Count | Should Be 0
     }
 
-    It 'declares run-outcomes in the manifest as a non-destructive action at version 1.2.0' {
+    It 'declares run-outcomes in the manifest as a non-destructive action at version 1.2.1' {
         $m = Get-JanetToolManifest
-        ([string]$m.version) | Should Be '1.2.0'
+        ([string]$m.version) | Should Be '1.2.1'
         $a = @($m.actions | Where-Object { $_.id -eq 'run-outcomes' })
         $a.Count | Should Be 1
         $a[0].destructive | Should Be $false

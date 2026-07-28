@@ -182,7 +182,11 @@ function Invoke-JanetJavaRemediation {
                         switch ($prc.ExitCode) {
                             0       { $jf.Result = 'OK - uninstalled' }
                             3010    { $jf.Result = 'OK - uninstalled, reboot pending' }
-                            1605    { $jf.Result = 'OK - orphan key (product was not actually installed)' }
+                            # audit 2026-07-28: 1605 = ERROR_UNKNOWN_PRODUCT. msiexec did NOTHING and no
+                            # later pass revisits the Uninstall key, so the artifact the scanner reads is
+                            # still there and the host re-flags. This used to be an 'OK*' string, which
+                            # bucketed as FIXED and had callers book a VulnPatched SUCCESS for a no-op.
+                            1605    { $jf.Result = 'MANUAL: orphan Uninstall key - MSI does not know this product (1605); nothing removed, delete the stale key manually' }
                             default { $jf.Result = "FAILED: msiexec exit $($prc.ExitCode)" }
                         }
                     } catch { $jf.Result = "FAILED: $($_.Exception.Message)" }
@@ -195,7 +199,12 @@ function Invoke-JanetJavaRemediation {
     foreach ($root in @('HKLM:\SOFTWARE\JavaSoft', 'HKLM:\SOFTWARE\WOW6432Node\JavaSoft')) {
         if (-not (Test-Path $root)) { continue }
         foreach ($product in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
-            foreach ($vk in @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })) {
+            # audit 2026-07-28: skip the FAMILY-POINTER key. Oracle's JRE 8 installer creates
+            # JavaSoft\Java Runtime Environment\1.8 (the CurrentVersion alias) beside the real
+            # 1.8.0_491; a bare '1.8' parses as maj=8/upd=0 and verdicts OLD, so a host whose
+            # only Java is CURRENT reported "found 1 OLD item(s) but removed NOTHING". The
+            # $remaining sweep below deliberately keeps counting it - see its own note.
+            foreach ($vk in @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' -and $_.PSChildName -notmatch '^\d+\.\d+$' })) {
                 $jf = & $jAdd 'Registry' "$($product.PSChildName)" $vk.PSChildName $vk.PSPath
                 if ($jf.Verdict -eq 'OLD') {
                     $jsKey = & $javaKey $vk.PSChildName
@@ -209,6 +218,10 @@ function Invoke-JanetJavaRemediation {
             }
             # Repair CurrentVersion pointing at a removed version; drop empty product keys.
             try {
+                # NOTE (audit 2026-07-28): this filter intentionally does NOT exclude the bare
+                # family-pointer key the verdict sweep above skips. $remaining feeds the
+                # -notcontains test below, and dropping '1.8' here would make CurrentVersion
+                # look dangling on a perfectly compliant host and repoint it needlessly.
                 $remaining = @(Get-ChildItem $product.PSPath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d' })
                 $cvJ = (Get-ItemProperty $product.PSPath -ErrorAction SilentlyContinue).CurrentVersion
                 if ($remaining.Count -eq 0) {

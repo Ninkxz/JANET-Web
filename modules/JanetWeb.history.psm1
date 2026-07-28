@@ -99,7 +99,12 @@ function Get-JanetToolManifest {
     @{
         id       = 'history'
         name     = 'Patch History'
-        version  = '1.2.0'
+        # audit 2026-07-28: 1.2.0 -> 1.2.1. stale-hosts and coverage-reconcile both deduped on
+        # the raw pasted token while verdicting on the short name, so one machine entered
+        # twice (HOST1 + HOST1.area52.mil) rendered twice and double-counted every tally; and
+        # stale-hosts verdicted NEVER TOUCHED for a host whose only rows had an unparseable
+        # Timestamp - asserting the loudest verdict against evidence of a touch.
+        version  = '1.2.1'
         category = 'Reporting'
         summary  = 'Read-only Patch History / Audit Explorer. Makes the audit trail JANET already writes (per-tool monthly detail CSVs, TouchedHosts attribution, the daily per-run outcome cards, and the fleet usage rollup on the central log share - with local-spool fallback when the share is down) queryable in-app: per-host timeline, recent activity across tools, per-operator summary, a staleness board that flags hosts not touched within a threshold, a run-outcomes board over the per-run cards, and a fleet coverage reconciliation that joins the AD computer population against the audit trail. Touches no hosts and writes nothing.'
         actions  = @(
@@ -1089,7 +1094,12 @@ function Invoke-JanetToolAction {
 
     # -------------------------------------------------------------- stale-hosts
     if ($ActionId -eq 'stale-hosts') {
-        $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Select-Object -Unique)
+        # audit 2026-07-28: dedupe on the SHORT NAME, not the raw token. Verdicts key on the
+        # short name, so HOST1 and HOST1.area52.mil (both survive Select-Object -Unique, and
+        # -Unique is case-SENSITIVE in PS 5.1) produced two identical rows and inflated
+        # FRESH/STALE/NEVER/UNKNOWN and total. Group keeps the operator's first spelling.
+        # Same guard c2c already carries as shortUniq ("display == dispatch").
+        $targets = @(([string]$Params['targets']) -split '[\r\n,;\t ]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and ($_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$') } | Group-Object -Property { Get-HistShortName $_ } | ForEach-Object { $_.Group[0] })
         if ($targets.Count -eq 0) {
             & $send @{ type='log'; level='warn'; text='No valid hosts entered.' }
             return @{ rows=@(); summary=@{ total=0; sourceReadable=[bool]$loc.Exists; source=$loc.Reason; onShare=$loc.OnShare } }
@@ -1144,6 +1154,13 @@ function Invoke-JanetToolAction {
                 $tool = [string]$info.Tool; $op = [string]$info.Operator
                 $daysAgo = [int][math]::Floor(($now - $info.TS).TotalDays)
                 if ($info.TS -ge $cutoff) { $verdict = 'FRESH'; $fresh++ } else { $verdict = 'STALE'; $stale++ }
+            } elseif ($latest.ContainsKey($sn)) {
+                # audit 2026-07-28: a row for this host WAS read, but its Timestamp cell did
+                # not parse (torn/glued Add-Content append on the share) so TS is MinValue.
+                # Import-Csv succeeded, so $readFailed is false and this used to fall through
+                # to NEVER TOUCHED - the loudest verdict on the board, asserted against
+                # evidence that the host WAS touched. We only fail to know WHEN.
+                $verdict = 'UNKNOWN (bad timestamp)'; $unknown++
             } elseif ($capped -or $readFailed) {
                 # Capped wins the label when both are true: it is the more specific,
                 # operator-actionable cause (narrow the window) of the two.
@@ -1355,7 +1372,12 @@ function Invoke-JanetToolAction {
         # Pasted hosts the directory has no object for.
         foreach ($t in $pasted) {
             $sn = Get-HistShortName $t
-            if ($adSeen.Contains($sn)) { continue }
+            # audit 2026-07-28: Add, not Contains. This loop only READ $adSeen, so pasting a
+            # host twice under two spellings (HOST1 and HOST1.area52.mil both short-name to
+            # HOST1) emitted two identical rows and double-counted ghost/dead/unknown. Add
+            # returns $false when the name was already emitted - by the AD loop or by an
+            # earlier alias here - so one call covers both cases.
+            if (-not $adSeen.Add($sn)) { continue }
             $touched = $latest.ContainsKey($sn)
             $lastStr = ''; $daysAgo = ''; $tool = ''; $dAgo = 0
             if ($touched) {
