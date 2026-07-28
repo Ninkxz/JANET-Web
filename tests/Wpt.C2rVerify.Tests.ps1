@@ -127,7 +127,38 @@ Describe 'wpt - no probe takes a timestamp from a REGISTRY key (module-wide, aud
         ($moduleSrc -match 'pending\.xml') | Should Be $true
     }
 
-    It 'wpt manifest is exactly 6.10.4 (audit 2026-07-28 inert registry-timestamp probes)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.10.4'
+    It 'wpt manifest is at or past 6.10.4 (floor; exact pin migrated to the newest bump test)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'6.10.4') | Should Be $true
+    }
+}
+
+# audit 2026-07-28 (cross-fork drift slice): same defect as acas, and here it is a
+# SAME-FILE asymmetry - the correct verify-and-clean pattern (remove the orphaned
+# Uninstall key across all three hives, then re-verify) already lives in this module's
+# Remove App path, and the MSXML profile never received it. Reclassified rather than
+# made to delete, per that same tail's rule that the key may only go once the product's
+# FILES are confirmed gone; this profile has no InstallLocation to prove that.
+Describe 'wpt 6.10.5 - MSXML 1605 is an honest error, not a phantom removal' {
+    $moduleSrc = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+
+    It '1605 is no longer bucketed with the successes' {
+        ($moduleSrc -match '\$proc\.ExitCode -in 0,1605,3010') | Should Be $false
+        ($moduleSrc -match '\$proc\.ExitCode -in 0,3010')      | Should Be $true
+    }
+    It '1605 routes to $errors and says nothing was uninstalled' {
+        ($moduleSrc -match "elseif \(\`$proc\.ExitCode -eq 1605\)")   | Should Be $true
+        ($moduleSrc -match 'MSI does not know this product \(1605\)') | Should Be $true
+    }
+    It 'PARTIAL is left alone - this fork drains on -like OK*, so PARTIAL already fails' {
+        # pins the reason the desktop twin needed FAIL and this one does not, so the
+        # desktop change is not "ported back" and made into a no-op regression.
+        ($moduleSrc -match "PARTIAL \(\`$summary")        | Should Be $true
+        ($moduleSrc -match "\`"\`$result\`" -like 'OK\*'") | Should Be $true
+    }
+    It 'the correct clean-the-key pattern still exists on the Remove App path' {
+        ($moduleSrc -match 'remove the orphaned uninstall registry key from all three hives') | Should Be $true
+    }
+    It 'wpt manifest is exactly 6.10.5 (audit 2026-07-28 MSXML 1605)' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.10.5'
     }
 }

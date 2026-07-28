@@ -115,8 +115,40 @@ Describe 'client verify probe EXECUTED against a real registry key (loop88 - cat
     }
 }
 
-Describe 'acas 1.11.21 - manifest exact pin (newest bump = audit 2026-07-25 fable re-audit follow-up)' {
-    It 'acas manifest is exactly 1.11.21' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.21'
+Describe 'acas - manifest version floor (exact pin migrated to the newest bump test)' {
+    It 'acas manifest is at or past 1.11.21' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'1.11.21') | Should Be $true
+    }
+}
+
+# audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile counted msiexec 1605
+# as a removal. ERROR_UNKNOWN_PRODUCT means msiexec wrote NOTHING, and this profile
+# never deletes the Uninstall key it enumerated - so the artifact Tenable 62758 reads
+# survived, the host kept re-flagging, and the run still returned "removed=1 errors=0",
+# which books a green row and a VulnPatched Success for a host nothing touched.
+# Deliberately RECLASSIFIED rather than made to delete the key: this suite's own
+# verify-and-clean rule (JanetWeb.wpt.psm1 $verifyClean, loop51/item45) permits removing
+# an Uninstall key ONLY once the product's FILES are confirmed gone, and this profile
+# carries no InstallLocation to establish that. 1605 also does not prove "not installed".
+Describe 'acas 1.11.22 - MSXML 1605 is an honest error, not a phantom removal' {
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Raw
+
+    It '1605 is no longer bucketed with the successes' {
+        ($src -match '\$proc\.ExitCode -in 0,1605,3010') | Should Be $false
+        ($src -match '\$proc\.ExitCode -in 0,3010')      | Should Be $true
+    }
+    It '1605 routes to $errors and says nothing was uninstalled' {
+        ($src -match "elseif \(\`$proc\.ExitCode -eq 1605\)") | Should Be $true
+        ($src -match 'MSI does not know this product \(1605\)') | Should Be $true
+        ($src -match 'NOTHING was uninstalled')                 | Should Be $true
+    }
+    It 'the profile still does NOT delete the Uninstall key (the files-gone rule is respected)' {
+        # guarding the deliberate choice: if someone later "completes" this fix by
+        # pasting a key delete, they must also supply files-gone evidence first.
+        $blk = [regex]::Match($src, "(?s)MSXML 4\.0.*?return `"OK \(\`$summary").Value
+        ($blk -match 'Remove-Item') | Should Be $false
+    }
+    It 'acas manifest is exactly 1.11.22' {
+        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.22'
     }
 }

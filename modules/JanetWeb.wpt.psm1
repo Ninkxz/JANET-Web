@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.10.4'  # audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
+        version  = '6.10.5'  # audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 with the successes while nothing in that profile deleted the orphan Uninstall key - so the artifact the scanner reads survived and the run still returned removed=1. The correct verify-and-clean pattern exists in THIS FILE (the Remove App tail) and this profile never got it. Reclassified rather than made to delete, per that same tail's rule that the key may only go once the files are confirmed gone. Prior 6.10.4 - audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -1708,8 +1708,34 @@ function Get-WptAppUpdateProfiles {
                     }
                     try {
                         $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/x', $f.GUID, '/qn', '/norestart') -Wait -PassThru -NoNewWindow -EA Stop
-                        if ($proc.ExitCode -in 0,1605,3010) {
+                        ## Exit codes: 0 = success, 3010 = success but reboot suggested.
+                        ## audit 2026-07-28: 1605 (ERROR_UNKNOWN_PRODUCT) used to be bucketed
+                        ## with the successes. msiexec wrote NOTHING, and nothing in THIS
+                        ## profile deletes the Uninstall key - so the artifact Tenable plugin
+                        ## 62758 reads survived and the host kept re-flagging, while the run
+                        ## returned "removed=1 errors=0". Note the correct pattern DOES exist
+                        ## in this very file: the Remove App path's $verifyClean tail removes
+                        ## the orphaned key across all three hives and re-verifies. This
+                        ## profile never got it - the same same-file asymmetry the desktop
+                        ## twin had.
+                        ## RECLASSIFIED rather than made to delete the key, and deliberately
+                        ## so: $verifyClean's own rule (loop51/item45) is that the key may be
+                        ## removed ONLY once the product's FILES are confirmed gone, because
+                        ## deleting it while the product is still installed hides it from
+                        ## every later registry-driven scan - a fleet-level self-blinding
+                        ## false-clean. This profile captures Name/Ver/GUID with no
+                        ## InstallLocation, so that evidence is unavailable here. 1605 also
+                        ## does not prove "not installed" (a per-user install, or a key whose
+                        ## subkey name is not the ProductCode, both return it with a live
+                        ## product present).
+                        ## The PARTIAL return below is already correct for this fork - the
+                        ## drain tests -like 'OK*' for success, so PARTIAL scores as a
+                        ## failure. (The desktop twin needed FAIL because its drain tested
+                        ## -like 'FAIL*' instead; do not port that change back here.)
+                        if ($proc.ExitCode -in 0,3010) {
                             $removed.Add("$($f.Name) [$($f.GUID)] (exit $($proc.ExitCode))") | Out-Null
+                        } elseif ($proc.ExitCode -eq 1605) {
+                            $errors.Add("$($f.Name) [$($f.GUID)]: MSI does not know this product (1605) - NOTHING was uninstalled and the stale Uninstall key remains; the scanner will keep flagging this host until it is removed manually") | Out-Null
                         } else {
                             $errors.Add("$($f.Name) [$($f.GUID)]: msiexec exit $($proc.ExitCode)") | Out-Null
                         }
