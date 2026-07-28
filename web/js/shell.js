@@ -620,6 +620,12 @@
   };
   try { Session.ack = (sessionStorage.getItem('janetweb_ack') === 'yes'); } catch (e) {}
   try { Session.active = (sessionStorage.getItem('janetweb_session') === '1'); } catch (e) {}
+  // audit 2026-07-28: janetweb_adonly was WRITTEN by both read-only gate buttons and
+  // read NOWHERE, so picking "Browse tools (read-only)" and pressing F5 re-showed the
+  // launch gate and flipped the strip from READ-ONLY back to LOCKED - while the admin
+  // path persisted fine via janetweb_session. Restore it here, honour it in the gate
+  // skip below, and clear it in disarmSession so the key has a full lifecycle.
+  try { Session.adOnly = (sessionStorage.getItem('janetweb_adonly') === '1'); } catch (e) {}
   function sessionChanged() { Session._listeners.forEach(function (f) { try { f(Session); } catch (e) {} }); updateStrip(); }
   var SessionApi = {
     get state() { return Session; },
@@ -632,7 +638,7 @@
   // ADMIN strip goes cold instead of showing a stale armed state.
   function disarmSession() {
     Session.ack = false; Session.active = false; Session.credSet = false; Session.user = '';
-    try { sessionStorage.removeItem('janetweb_ack'); sessionStorage.removeItem('janetweb_session'); } catch (e) {}
+    try { sessionStorage.removeItem('janetweb_ack'); sessionStorage.removeItem('janetweb_session'); sessionStorage.removeItem('janetweb_adonly'); } catch (e) {}
     sessionChanged();
   }
   async function refreshCred() {
@@ -1458,8 +1464,10 @@
     };
     Session.onChange(refreshGate);
     refreshCred().then(refreshGate);
-    // if a prior admin session was already established this browser session, skip the gate
-    if (Session.active) { gate.remove(); refreshStatus(); }
+    // if a prior admin session was already established this browser session, skip the gate.
+    // audit 2026-07-28: adOnly now counts too - it is restored from sessionStorage at boot,
+    // so a read-only browse survives F5 the way an admin session already did.
+    if (Session.active || Session.adOnly) { gate.remove(); refreshStatus(); }
   }
 
   /* ========================================================================

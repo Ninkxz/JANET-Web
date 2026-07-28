@@ -520,19 +520,52 @@ function Test-JanetWebHostTarget {
         rollups agree on what a host is.
 
         Deliberately conservative - it only rejects shapes a NetBIOS name / FQDN /
-        IPv4 literal can never have, so a real machine is never dropped:
-        whitespace, a parenthesised label, a drive/UNC/URL path, or a report
-        filename extension. 'HOST\Product' (upr) still counts: it is host-bearing,
-        exactly as the server's TouchedHosts emit treats it. #>
+        IPv4 literal can never have, so a real machine is never dropped.
+
+        audit 2026-07-28: this is now a thin wrapper over Resolve-JanetWebHostKey.
+        It used to hand-maintain its own rules, and the doc here used to claim
+        'HOST\Product' (upr) counted "exactly as the server's TouchedHosts emit
+        treats it" - which was false in BOTH directions. See that function. #>
     param([string]$Target)
-    if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
+    return [bool](Resolve-JanetWebHostKey -Target $Target)
+}
+
+function Resolve-JanetWebHostKey {
+    <#  The ONE answer to "is this audit -Target a machine, and WHICH machine?".
+        Returns the normalized host name, or $null when the target is not a host.
+
+        audit 2026-07-28: two sites answered this question with DIFFERENT logic and
+        so disagreed about the same event.
+          * Server.ps1's TouchedHosts emit split 'HOST\Product' and kept the HOST,
+            but guarded with only the historical 2-literal blacklist - so WPT's
+            OU-import sentinel '(ActiveDirectory)' sailed straight through and wrote
+            a per-host attribution row for a machine that does not exist. That is
+            the same defect the 2026-07-24 pass fixed for remoteadmin's
+            '(run-script)' sentinel, in the site that pass did not touch.
+          * Write-JanetAction's Context.Hosts tally applied the full predicate but
+            then added the target VERBATIM, so 'HOST\Java 8 Update 202' was rejected
+            outright (it contains a space) while 'HOST\Firefox' was stored as its own
+            distinct set member. upr's uninstall path is the sole audit source on
+            that run and emits target="$host\$($cand.Product)" from the RAW registry
+            DisplayName, which normally DOES contain spaces - so a wave that
+            uninstalled 30 products across 10 machines reported HostsTouched = 0,
+            and that number goes to the SHARED fleet rollup <YYYY-MM>_usage.csv.
+
+        Order matters: reject paths/sentinels BEFORE splitting on '\', or a UNC like
+        '\\srv\sh$\x' splits to an empty first token. Then apply the whitespace and
+        report-extension rules to the HOST TOKEN, so 'HOST\Java 8 Update 202'
+        normalizes to 'HOST' instead of being dropped for the product's space. #>
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $null }
     $t = ([string]$Target).Trim()
-    if ($t -eq 'N/A' -or $t -eq '(custom command)') { return $false }   # the historical 2-literal blacklist
-    if ($t -match '\s')          { return $false }   # "Dirty30 (12 hosts)" - no host name contains a space
-    if ($t.StartsWith('('))      { return $false }   # '(start)' / '(end)' / other sentinel labels
-    if ($t.StartsWith('\\') -or $t -match '^[A-Za-z]:[\\/]' -or $t -match '://' -or $t.Contains('/')) { return $false }  # UNC / drive path / URL
-    if ($t -match '\.(csv|xlsx?|html?|pdf|log|txt|json|zip|xml|nessus)$') { return $false }   # bare report filename
-    return $true
+    if ($t -eq 'N/A')       { return $null }
+    if ($t.StartsWith('(')) { return $null }   # '(start)' / '(end)' / '(custom command)' / '(run-script)' / '(ActiveDirectory)'
+    if ($t.StartsWith('\\') -or $t -match '^[A-Za-z]:[\\/]' -or $t -match '://' -or $t.Contains('/')) { return $null }  # UNC / drive path / URL
+    $h = ($t -split '\\')[0]                   # 'HOST\Java 8 Update 202' -> 'HOST'
+    if ([string]::IsNullOrWhiteSpace($h)) { return $null }
+    if ($h -match '\s')     { return $null }   # "Dirty30 (12 hosts)" - no host name contains a space
+    if ($h -match '\.(csv|xlsx?|html?|pdf|log|txt|json|zip|xml|nessus)$') { return $null }   # bare report filename
+    return $h
 }
 
 function Write-JanetAction {
@@ -562,8 +595,12 @@ function Write-JanetAction {
         try {
             # audit 2026-07-24: the aggregate host set gets the SAME non-host filter the
             # per-tool tally uses (report labels / file paths / 'N/A' are not machines).
-            $isHost = Test-JanetWebHostTarget -Target $Target
-            if ($isHost) { [void]$Context.Hosts.Add($Target) }
+            # audit 2026-07-28: add the NORMALIZED host key, not the raw target - upr's
+            # 'HOST\Product' rows otherwise stored one set member per product (or none
+            # at all, when the product name contained a space), so this was never a
+            # machine count. Same helper the server's TouchedHosts emit now uses.
+            $hostKey = Resolve-JanetWebHostKey -Target $Target
+            if ($hostKey) { [void]$Context.Hosts.Add($hostKey) }
             if ($Result -eq 'Failure') { $Context.Failures++ }
             if ($Action -eq 'VulnPatched' -and $Result -ne 'Failure') { $Context.Vulns += [int]$ItemCount }
             # Per-tool tally for the per-tool SessionEnd rollup. Skip non-host targets
@@ -574,7 +611,7 @@ function Write-JanetAction {
                 $pt = @{ Hosts = (New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)); Vulns = 0; Failures = 0; First = (Get-Date); Last = (Get-Date) }
                 $Context.PerTool[$toolName] = $pt
             }
-            if ($isHost) { [void]$pt.Hosts.Add($Target) }
+            if ($hostKey) { [void]$pt.Hosts.Add($hostKey) }
             if ($Result -eq 'Failure') { $pt.Failures++ }
             if ($Action -eq 'VulnPatched' -and $Result -ne 'Failure') { $pt.Vulns += [int]$ItemCount }
             $pt.Last = Get-Date

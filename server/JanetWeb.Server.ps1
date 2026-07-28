@@ -630,10 +630,24 @@ function Start-JanetWebServer {
                                 if (-not (Test-JanetWebHostReachable $Matches[1])) { [void]$archivedCsvs.Add($src); continue }
                             }
                             if (-not (Test-Path -LiteralPath $src)) { continue }
-                            [void]$archivedCsvs.Add($src)
-                            if (-not (Test-Path -LiteralPath $archDir)) { New-Item -ItemType Directory -Path $archDir -Force -ErrorAction Stop | Out-Null }
-                            $dest = Join-Path $archDir ((Get-Date -Format 'yyyy-MM-dd_HHmmss') + '_' + (Split-Path -Leaf $src))
-                            Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
+                            # audit 2026-07-28: the Add used to sit HERE, before the two
+                            # -ErrorAction Stop calls below. A transient copy failure
+                            # (ACL hiccup, share drops after the cached probe, long dest
+                            # path) therefore marked the file archived for the LIFE OF THE
+                            # PROCESS with nothing on disk, and - because the throw escaped
+                            # the loop to the outer empty catch - abandoned the remaining
+                            # CSVs in the same pass too. Silent and permanent: the uploads
+                            # are wiped on the next server start. Now the marker is only
+                            # set after a real copy, and one file's failure no longer
+                            # aborts its siblings. The unreachable-UNC Add above stays
+                            # where it is - that one is a "do not re-probe a dead host"
+                            # marker, not a success marker.
+                            try {
+                                if (-not (Test-Path -LiteralPath $archDir)) { New-Item -ItemType Directory -Path $archDir -Force -ErrorAction Stop | Out-Null }
+                                $dest = Join-Path $archDir ((Get-Date -Format 'yyyy-MM-dd_HHmmss') + '_' + (Split-Path -Leaf $src))
+                                Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
+                                [void]$archivedCsvs.Add($src)
+                            } catch {}
                         }
                     } catch {} finally { [System.Threading.Monitor]::Exit($archivedCsvs) }
                 }
@@ -641,8 +655,21 @@ function Start-JanetWebServer {
                 # loaded logging bridge has the (optional) parameter, so the two
                 # changes can land in either order.
                 # Tools whose audit target IS a machine -> they get a per-host TouchedHosts
-                # CSV. Excludes reports (filenames), dhcp (scope names), adsearch (directory objects).
-                $hostTouchingTool = @('wpt','acas','pkginstall','winupgrade','upr','secureboot','restart','message','remoteadmin') -contains $toolId
+                # CSV. Excluded BY POLICY, not by target shape: reports (filenames),
+                # adsearch/adto (directory objects/DNs), dhcp (its targets ARE server
+                # hostnames, but its read-only "listed N scope(s)" rows would inflate the
+                # freshness trail - the same reason biosfirmware dropped its scan emit on
+                # 2026-07-23), and the read-only cohort (history/sysadmin/patchlib/kev)
+                # which deliberately emits no audit rows at all.
+                # audit 2026-07-28: c2c, certdeploy and winrmbridge had DRIFTED off this
+                # list - each emits a host-targeted audit row on a destructive path
+                # (c2c pillar fixes, certdeploy root-store install, winrmbridge SYSTEM
+                # scheduled task + 5986 listener) but got no attribution row. They were
+                # added to the suite AFTER this list was last hand-edited and nobody
+                # amended it. Adding the three ids deliberately, rather than deriving the
+                # list from the host-key shape test: a derived rule would newly enroll
+                # dhcp, adsearch and reports, whose targets pass the shape test.
+                $hostTouchingTool = @('wpt','acas','pkginstall','winupgrade','upr','secureboot','restart','message','remoteadmin','c2c','certdeploy','winrmbridge') -contains $toolId
                 $emit = {
                     param($e)
                     [void]$job.Events.Add($e)
@@ -664,9 +691,16 @@ function Start-JanetWebServer {
                         # host-touching tool, so a lead can pivot "which machines did op X
                         # touch this month". Skipped for non-host targets / non-host tools.
                         if ($hostTouchingTool) {
-                            $tgt = [string]$e.target
-                            if ($tgt -and $tgt -ne 'N/A' -and $tgt -ne '(custom command)') {
-                                $thHost = ($tgt -split '\\')[0]   # upr emits "host\product" -> keep the host
+                            # audit 2026-07-28: this carried only the historical 2-literal
+                            # blacklist plus an inline split, while its sibling in the
+                            # logging bridge used the full predicate - so WPT's OU-import
+                            # sentinel '(ActiveDirectory)' passed here and wrote a per-host
+                            # attribution row for a machine that does not exist. That is the
+                            # SAME defect the 2026-07-24 pass fixed for remoteadmin's
+                            # '(run-script)', in the one site it did not touch. Both sites
+                            # now share Resolve-JanetWebHostKey and cannot diverge again.
+                            $thHost = Resolve-JanetWebHostKey -Target ([string]$e.target)
+                            if ($thHost) {
                                 try { Write-JanetWebTouchedHost -Context $logCtx -Tool $toolId -Action ([string]$e.action) -TargetHost $thHost -Result ([string]$e.result) -Detail ([string]$e.detail) } catch {}
                             }
                         }
@@ -1224,6 +1258,26 @@ function Start-JanetWebServer {
                     # log share stalled every request), and tail it instead of
                     # full-reading: this runs on the single-threaded accept loop.
                     $tailOk = Test-JanetWebPathReachable $file
+                    # audit 2026-07-28: this was the ONE consumer reading the month CSV by
+                    # EXACT name. When the live file's header does not match the current
+                    # schema AND the rename to .legacy_<stamp> fails (a desktop tool holding
+                    # an append handle on the same shared monthly CSV defeats the two
+                    # no-backoff retries), Invoke-JanetWebHeaderEnsure redirects every row to
+                    # a sister '<base>.r<stamp>.csv'. reports.psm1 and history.psm1 were both
+                    # taught to glob '<month>_detail*.csv' for exactly this reason; the tail
+                    # endpoint was missed, so the viewer showed a stale header and stale rows
+                    # with exists=true - healthy-looking and wrong. Pick the newest
+                    # non-legacy sibling. The reachability gate stays AHEAD of the
+                    # enumeration: this runs on the single-threaded accept loop and must not
+                    # touch a dead share.
+                    if ($tailOk) {
+                        try {
+                            $tailDir = Join-Path (Join-Path $root $toolName) $lc.UserFolder
+                            $cand = @(Get-ChildItem -LiteralPath $tailDir -Filter "$($lc.Month)_detail*.csv" -File -ErrorAction Stop |
+                                      Where-Object { $_.Name -notlike '*.legacy_*' } | Sort-Object LastWriteTime -Descending)
+                            if ($cand.Count) { $file = $cand[0].FullName }
+                        } catch {}
+                    }
                     if ($tailOk -and (Test-Path -LiteralPath $file)) {
                         $exists = $true
                         try {

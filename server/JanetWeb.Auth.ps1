@@ -93,10 +93,21 @@ function Prompt-JanetWebCredential {
         if (-not $cred) {
             return @{ ok = $false; cred = $null; user = ''; message = 'Cancelled - no credential selected.' }
         }
-        # Smartcard / cert-backed creds round-trip fine but a null-password
-        # SecureString means it is unusable for WinRM; detect that the same way
-        # the tools do (GetNetworkCredential throws), without leaving the
-        # decrypted password on the heap.
+        # Smartcard / cert-backed creds round-trip fine but an EMPTY password
+        # SecureString means it is unusable for WinRM.
+        # audit 2026-07-28: the two claims this comment used to make were both
+        # false and worth correcting rather than trusting. (1) It said the tools
+        # detect this because "GetNetworkCredential throws" - verified on PS 5.1
+        # that it does NOT throw on a cert-format credential; the IsNullOrEmpty
+        # test below is what actually decides, and the catch is near-dead.
+        # (2) It said this avoids "leaving the decrypted password on the heap" -
+        # GetNetworkCredential() marshals the secret into an immutable
+        # System.String that cannot be zeroed, so it stays on the managed heap
+        # until GC. Do NOT read this as a no-cleartext path: the tool modules
+        # decrypt the same way on every AD call (adsearch, adto, c2c, history,
+        # wpt), so the process already holds cleartext in normal operation and
+        # this probe adds nothing measurable. Left as-is deliberately - swapping
+        # to a $cred.Password.Length test would be equivalent, not safer.
         $usable = $true
         try {
             $probe = $cred.GetNetworkCredential()

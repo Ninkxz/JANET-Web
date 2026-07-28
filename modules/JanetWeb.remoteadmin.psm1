@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'remoteadmin'
         name     = 'Remote Admin'
-        version  = '1.0.4'   # audit 2026-07-24 fix pass (partial output preserved, recognised audit sentinel, receive cap, '#' comment strip); RemoteAdmin.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.0.5'   # audit 2026-07-28: COMMENT-ONLY change - Test-RemoteAdminComputerName's doc claimed it accepts "ONLY a bare hostname or IPv4 literal", which the regex does not enforce ('.' is in the class, so dotted FQDNs pass). No behaviour change; bumped because the versioning rule keys on the file changing. Prior 1.0.4 - audit 2026-07-24 fix pass (partial output preserved, recognised audit sentinel, receive cap, '#' comment strip); RemoteAdmin.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Operations'
         summary  = 'Two operator hands-on-keyboard capabilities. Open C$: launch \\<computer>\C$ in Explorer on your own session by computer name (strict name validation, audited; needs no admin session). Run Script: fan an operator-authored PowerShell block to one or many hosts over WinRM - arbitrary remote code, so it is destructive and rides the admin-session gate, mirrors the WPT Custom Command SHA256 forensic audit, and self-guards the JANET dispatcher host out of every run.'
         actions  = @(
@@ -96,10 +96,15 @@ function Get-JanetToolManifest {
 
 # --- Pure, unit-testable helpers -------------------------------------------
 
-# Accept ONLY a bare hostname or IPv4 literal: first char alphanumeric, then up to
-# 254 of [alnum . _ -]. Rejects blanks, spaces, quotes, backslashes, UNC (\\srv\c$),
-# forward slashes, and any injection punctuation - so nothing but a machine name can
-# reach Start-Process / a UNC path.
+# Accept a bare hostname, a dotted FQDN, or an IPv4 literal: first char alphanumeric,
+# then up to 254 of [alnum . _ -]. Rejects blanks, spaces, quotes, backslashes, UNC
+# (\\srv\c$), forward slashes, and any injection punctuation - so nothing but a machine
+# name can reach Start-Process / a UNC path.
+# audit 2026-07-28: this used to say "ONLY a bare hostname or IPv4 literal", which the
+# regex does not enforce - '.' is in the character class, so evil.attacker.com passes.
+# That is not a hole (the target is operator-supplied by design and the action only
+# opens Explorer on it), but the comment overstated the constraint, so it now says what
+# the pattern actually does.
 function Test-RemoteAdminComputerName {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }

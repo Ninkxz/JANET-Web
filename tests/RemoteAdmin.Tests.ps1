@@ -58,8 +58,8 @@ Describe 'Manifest' {
         ($ids -contains 'open-cshare') | Should Be $true
         ($ids -contains 'run-script') | Should Be $true
     }
-    It 'manifest version is 1.0.4' {
-        [string]$mani.version | Should Be '1.0.4'
+    It 'manifest version is 1.0.5' {
+        [string]$mani.version | Should Be '1.0.5'
     }
     It 'open-cshare is non-destructive; run-script is destructive' {
         $open = @($mani.actions | Where-Object { $_.id -eq 'open-cshare' })[0]

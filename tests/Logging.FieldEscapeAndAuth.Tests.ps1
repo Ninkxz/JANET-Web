@@ -293,8 +293,15 @@ Describe 'FIX (audit 2026-07-24) - hosts-touched counts machines only' {
         Test-JanetWebHostTarget -Target 'PC-01'                  | Should Be $true
         Test-JanetWebHostTarget -Target 'pc-02.area52.ds.af.mil' | Should Be $true
         Test-JanetWebHostTarget -Target '10.1.2.3'               | Should Be $true
-        Test-JanetWebHostTarget -Target 'PC-03\Java 8'           | Should Be $false   # label (space) - upr sends 'PC-03\Java8'
-        Test-JanetWebHostTarget -Target 'PC-03\Java8'            | Should Be $true    # upr 'host\product' is host-bearing
+        # audit 2026-07-28: these two lines used to pin a FALSE PREMISE - the comment
+        # claimed "upr sends 'PC-03\Java8'". It does not. upr emits
+        # target="$hostName\$($cand.Product)" where Product is the RAW registry
+        # DisplayName, so the real shape is 'PC-03\Java 8 Update 202' - spaces are the
+        # norm. The old predicate rejected that outright, so a UPR uninstall wave
+        # counted ZERO hosts touched. Both shapes are host-bearing and must resolve to
+        # the host.
+        Test-JanetWebHostTarget -Target 'PC-03\Java 8 Update 202' | Should Be $true
+        Test-JanetWebHostTarget -Target 'PC-03\Java8'             | Should Be $true
     }
     It 'non-host shapes are rejected (labels, paths, URLs, sentinels)' {
         Test-JanetWebHostTarget -Target ''                       | Should Be $false
@@ -307,6 +314,51 @@ Describe 'FIX (audit 2026-07-24) - hosts-touched counts machines only' {
         Test-JanetWebHostTarget -Target 'AcasWeekly_2026-07.csv' | Should Be $false
         Test-JanetWebHostTarget -Target '\\dm-tn-01\sh$\x.xlsx'  | Should Be $false
         Test-JanetWebHostTarget -Target 'https://kev/list'       | Should Be $false
+        Test-JanetWebHostTarget -Target '(ActiveDirectory)'      | Should Be $false   # wpt ad-computers sentinel
+        Test-JanetWebHostTarget -Target '(run-script)'           | Should Be $false   # remoteadmin sentinel
+    }
+
+    # audit 2026-07-28: the real defect was that TWO sites answered "is this a host,
+    # and which host" with DIFFERENT logic - the logging tally applied the predicate
+    # then stored the target VERBATIM, while the server's TouchedHosts emit split off
+    # the product but guarded with only a 2-literal blacklist. They now share
+    # Resolve-JanetWebHostKey. These pin the normalization itself, not just a boolean.
+    Context 'Resolve-JanetWebHostKey - one answer for both audit sites' {
+        It 'normalizes upr HOST\Product to the host, spaces in the product and all' {
+            Resolve-JanetWebHostKey -Target 'PC-03\Java 8 Update 202'      | Should Be 'PC-03'
+            Resolve-JanetWebHostKey -Target 'PC-03\Mozilla Firefox (x64)'  | Should Be 'PC-03'
+            Resolve-JanetWebHostKey -Target 'PC-03\Firefox'                | Should Be 'PC-03'
+        }
+        It 'a bare host and an FQDN pass through unchanged' {
+            Resolve-JanetWebHostKey -Target 'PC-01'                  | Should Be 'PC-01'
+            Resolve-JanetWebHostKey -Target 'pc-02.area52.ds.af.mil' | Should Be 'pc-02.area52.ds.af.mil'
+            Resolve-JanetWebHostKey -Target '10.1.2.3'               | Should Be '10.1.2.3'
+        }
+        It 'every sentinel and non-host shape resolves to $null' {
+            foreach ($t in @('', '   ', 'N/A', '(custom command)', '(start)', '(end)',
+                             '(run-script)', '(ActiveDirectory)', 'Dirty30 (12 hosts)',
+                             'C:\out\Dirty30.html', 'AcasWeekly_2026-07.csv',
+                             '\\dm-tn-01\sh$\x.xlsx', 'https://kev/list')) {
+                Resolve-JanetWebHostKey -Target $t | Should BeNullOrEmpty
+            }
+        }
+        It 'a UNC is rejected BEFORE the split (it would otherwise yield an empty token)' {
+            # '\\srv\sh$\x' -split '\\' has an EMPTY first element - rejecting paths
+            # after the split would turn a UNC into a blank "host".
+            Resolve-JanetWebHostKey -Target '\\dm-tn-01\sh$\scan.xlsx' | Should BeNullOrEmpty
+        }
+        It 'a whole UPR wave counts MACHINES, not host-product pairs (the shared rollup number)' {
+            $ctx = New-HostCountContext
+            foreach ($h in @('PC-01','PC-02')) {
+                foreach ($p in @('Java 8 Update 202','Adobe Acrobat Reader DC','Mozilla Firefox (x64 en-US)')) {
+                    Write-JanetAction -Context $ctx -Tool 'upr' -Action 'VulnPatched' -Target "$h\$p" -Result 'Success' -ItemCount 1
+                }
+            }
+            $ctx.Hosts.Count | Should Be 2   # was 0 before the fix (every product name has a space)
+            # per-tool bucket is keyed by the RESOLVED tool folder name, not the id
+            $uprKey = Resolve-JanetWebToolName -ToolId 'upr'
+            $ctx.PerTool[$uprKey].Hosts.Count | Should Be 2
+        }
     }
 
     Remove-Item -LiteralPath $script:__cntRoot -Recurse -Force -ErrorAction SilentlyContinue
