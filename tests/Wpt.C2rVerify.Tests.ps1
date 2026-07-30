@@ -158,7 +158,9 @@ Describe 'wpt 6.10.5 - MSXML 1605 is an honest error, not a phantom removal' {
     It 'the correct clean-the-key pattern still exists on the Remove App path' {
         ($moduleSrc -match 'remove the orphaned uninstall registry key from all three hives') | Should Be $true
     }
-    It 'wpt manifest is exactly 6.10.5 (audit 2026-07-28 MSXML 1605)' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '6.10.5'
+    # Demoted from an exact pin to a floor on 2026-07-30 (wpt 6.10.6, Log4j jar
+    # bump), per the convention that only the NEWEST bump carries the exact pin.
+    It 'wpt manifest is at or past 6.10.5 (audit 2026-07-28 MSXML 1605)' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'6.10.5') | Should Be $true
     }
 }

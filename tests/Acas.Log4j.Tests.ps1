@@ -73,14 +73,14 @@ Describe 'Log4j profile - discovery + safe swap on a temp tree' {
         $script:cur    = Join-Path $script:disco 'GoodApp\lib'
         $script:bkOnly = Join-Path $script:disco 'OldApp\lib\Backup_20200101_000000'
 
-        # source (staged) 2.25.4 jars
-        New-Jar -Dir $script:src -Name 'log4j-api-2.25.4.jar'  -Content 'NEW-API'  | Out-Null
-        New-Jar -Dir $script:src -Name 'log4j-core-2.25.4.jar' -Content 'NEW-CORE' | Out-Null
+        # source (staged) 2.25.5 jars
+        New-Jar -Dir $script:src -Name 'log4j-api-2.25.5.jar'  -Content 'NEW-API'  | Out-Null
+        New-Jar -Dir $script:src -Name 'log4j-core-2.25.5.jar' -Content 'NEW-CORE' | Out-Null
         # stale lib dir (both api + core at 2.17.0)
         New-Jar -Dir $script:stale -Name 'log4j-core-2.17.0.jar' -Content 'OLD-CORE' | Out-Null
         New-Jar -Dir $script:stale -Name 'log4j-api-2.17.0.jar'  -Content 'OLD-API'  | Out-Null
         # already-current lib dir (must be skipped, untouched)
-        New-Jar -Dir $script:cur -Name 'log4j-core-2.25.4.jar' -Content 'ALREADY-CUR' | Out-Null
+        New-Jar -Dir $script:cur -Name 'log4j-core-2.25.5.jar' -Content 'ALREADY-CUR' | Out-Null
         # a pre-existing Backup_* dir with an old jar (must be ignored, never touched)
         New-Jar -Dir $script:bkOnly -Name 'log4j-core-2.10.0.jar' -Content 'ARCHIVED' | Out-Null
 
@@ -97,10 +97,10 @@ Describe 'Log4j profile - discovery + safe swap on a temp tree' {
         $script:result | Should Match 'discovered=1'
         $script:result | Should Match 'pendingReboot=0'
     }
-    It 'places the 2.25.4 jars into the discovered stale dir' {
-        (Test-Path -LiteralPath (Join-Path $script:stale 'log4j-api-2.25.4.jar'))  | Should Be $true
-        (Test-Path -LiteralPath (Join-Path $script:stale 'log4j-core-2.25.4.jar')) | Should Be $true
-        (Get-Content -LiteralPath (Join-Path $script:stale 'log4j-core-2.25.4.jar')) | Should Be 'NEW-CORE'
+    It 'places the 2.25.5 jars into the discovered stale dir' {
+        (Test-Path -LiteralPath (Join-Path $script:stale 'log4j-api-2.25.5.jar'))  | Should Be $true
+        (Test-Path -LiteralPath (Join-Path $script:stale 'log4j-core-2.25.5.jar')) | Should Be $true
+        (Get-Content -LiteralPath (Join-Path $script:stale 'log4j-core-2.25.5.jar')) | Should Be 'NEW-CORE'
     }
     It 'removes the stale jars from the discovered dir top level' {
         (Test-Path -LiteralPath (Join-Path $script:stale 'log4j-core-2.17.0.jar')) | Should Be $false
@@ -120,7 +120,7 @@ Describe 'Log4j profile - discovery + safe swap on a temp tree' {
     It 'leaves the already-current dir untouched (skipped-current, no Backup created)' {
         $curJars = @(Get-ChildItem -LiteralPath $script:cur -File -Filter 'log4j-*.jar')
         $curJars.Count | Should Be 1
-        (Get-Content -LiteralPath (Join-Path $script:cur 'log4j-core-2.25.4.jar')) | Should Be 'ALREADY-CUR'
+        (Get-Content -LiteralPath (Join-Path $script:cur 'log4j-core-2.25.5.jar')) | Should Be 'ALREADY-CUR'
         (@(Get-ChildItem -LiteralPath $script:cur -Directory | Where-Object { $_.Name -like 'Backup_*' })).Count | Should Be 0
         $script:result | Should Match 'current=1'
     }
@@ -135,8 +135,8 @@ Describe 'Log4j profile - locked stale jar is replaced pending reboot' {
         $src   = Join-Path $tmp 'source'
         $disco = Join-Path $tmp 'roots'
         $lib   = Join-Path $disco 'LockApp\lib'
-        New-Jar -Dir $src -Name 'log4j-api-2.25.4.jar'  -Content 'NEW-API'  | Out-Null
-        New-Jar -Dir $src -Name 'log4j-core-2.25.4.jar' -Content 'NEW-CORE' | Out-Null
+        New-Jar -Dir $src -Name 'log4j-api-2.25.5.jar'  -Content 'NEW-API'  | Out-Null
+        New-Jar -Dir $src -Name 'log4j-core-2.25.5.jar' -Content 'NEW-CORE' | Out-Null
         $stalePath = New-Jar -Dir $lib -Name 'log4j-core-2.17.0.jar' -Content 'LOCKED-OLD'
 
         # FileShare.Read: a reader (Copy-Item backup) can still open it, but a delete
@@ -152,8 +152,8 @@ Describe 'Log4j profile - locked stale jar is replaced pending reboot' {
             ($result -like ('*' + $stalePath + '*')) | Should Be $true
 
             # New jars placed...
-            (Test-Path -LiteralPath (Join-Path $lib 'log4j-api-2.25.4.jar'))  | Should Be $true
-            (Test-Path -LiteralPath (Join-Path $lib 'log4j-core-2.25.4.jar')) | Should Be $true
+            (Test-Path -LiteralPath (Join-Path $lib 'log4j-api-2.25.5.jar'))  | Should Be $true
+            (Test-Path -LiteralPath (Join-Path $lib 'log4j-core-2.25.5.jar')) | Should Be $true
             # ...old jar preserved (locked, could not delete) - dir never jar-less...
             (Test-Path -LiteralPath $stalePath) | Should Be $true
             # ...and the backup copy was still made.
@@ -172,8 +172,8 @@ Describe 'Log4j profile - known service path still swaps (service-guarded path p
         $tmp   = New-Log4jTemp
         $src   = Join-Path $tmp 'source'
         $lib   = Join-Path $tmp 'KnownApp\lib'
-        New-Jar -Dir $src -Name 'log4j-api-2.25.4.jar'  -Content 'NEW-API'  | Out-Null
-        New-Jar -Dir $src -Name 'log4j-core-2.25.4.jar' -Content 'NEW-CORE' | Out-Null
+        New-Jar -Dir $src -Name 'log4j-api-2.25.5.jar'  -Content 'NEW-API'  | Out-Null
+        New-Jar -Dir $src -Name 'log4j-core-2.25.5.jar' -Content 'NEW-CORE' | Out-Null
         New-Jar -Dir $lib -Name 'log4j-core-2.17.0.jar' -Content 'OLD-CORE' | Out-Null
         New-Jar -Dir $lib -Name 'log4j-api-2.17.0.jar'  -Content 'OLD-API'  | Out-Null
         try {
@@ -184,7 +184,7 @@ Describe 'Log4j profile - known service path still swaps (service-guarded path p
             $result | Should Match '^OK'
             $result | Should Match 'live=1'
             $result | Should Match 'discovered=0'
-            (Test-Path -LiteralPath (Join-Path $lib 'log4j-core-2.25.4.jar')) | Should Be $true
+            (Test-Path -LiteralPath (Join-Path $lib 'log4j-core-2.25.5.jar')) | Should Be $true
             (Test-Path -LiteralPath (Join-Path $lib 'log4j-core-2.17.0.jar')) | Should Be $false
             $bk = @(Get-ChildItem -LiteralPath $lib -Directory | Where-Object { $_.Name -like 'Backup_*' })
             $bk.Count | Should Be 1

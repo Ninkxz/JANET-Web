@@ -148,7 +148,9 @@ Describe 'acas 1.11.22 - MSXML 1605 is an honest error, not a phantom removal' {
         $blk = [regex]::Match($src, "(?s)MSXML 4\.0.*?return `"OK \(\`$summary").Value
         ($blk -match 'Remove-Item') | Should Be $false
     }
-    It 'acas manifest is exactly 1.11.22' {
-        [string](& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.11.22'
+    # Demoted from an exact pin to a floor on 2026-07-30 (acas 1.11.23, Log4j jar
+    # bump), per the convention that only the NEWEST bump carries the exact pin.
+    It 'acas manifest is at or past 1.11.22' {
+        ([version][string](& $script:Mod { (Get-JanetToolManifest).version }) -ge [version]'1.11.22') | Should Be $true
     }
 }

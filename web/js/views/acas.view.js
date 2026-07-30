@@ -447,24 +447,24 @@
         log4jInput.style.cssText = 'width:150px;font-family:var(--mono);font-size:11.5px;padding:3px 6px;background:var(--bg);border:1px solid var(--edge);color:var(--text);border-radius:3px';
         var l4Wrap = el('div'); l4Wrap.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)';
         l4Wrap.appendChild(el('span', null, 'Log4j source')); l4Wrap.appendChild(log4jInput);
-        // Browse for the Log4j 2.25.4 jars (api + core) on the operator's PC; upload them
+        // Browse for the Log4j 2.25.5 jars (api + core) on the operator's PC; upload them
         // co-located into ONE host folder (X-Janet-Subdir) and point the Log4j source at
         // it, then re-Analyze so the Log4j card un-greys. Web equivalent of the desktop's
         // folder pick: the host reads the uploaded folder (browsers can't return a path).
-        // ponytail: jar names are pinned to 2.25.4 (the remediation + readiness check are);
+        // ponytail: jar names are pinned to 2.25.5 (the remediation + readiness check are);
         // bump all three together if the fleet target moves.
-        var l4Browse = ui.ghostButton('Browse jars', { size: 'sm', title: 'Pick log4j-api-2.25.4.jar + log4j-core-2.25.4.jar from your PC; they upload to the host and the Log4j card becomes runnable.' });
+        var l4Browse = ui.ghostButton('Browse jars', { size: 'sm', title: 'Pick log4j-api-2.25.5.jar + log4j-core-2.25.5.jar from your PC; they upload to the host and the Log4j card becomes runnable.' });
         l4Browse.onclick = function () {
           var fi = el('input'); fi.type = 'file'; fi.accept = '.jar'; fi.multiple = true; fi.style.display = 'none';
           document.body.appendChild(fi);
           fi.addEventListener('change', function () {
             var picked = fi.files ? Array.prototype.slice.call(fi.files) : []; document.body.removeChild(fi);
             if (!picked.length) return;
-            var jars = picked.filter(function (f) { return /^log4j-(api|core)-2\.25\.4\.jar$/i.test(f.name); });
-            var hasApi = jars.some(function (f) { return /^log4j-api-2\.25\.4\.jar$/i.test(f.name); });
-            var hasCore = jars.some(function (f) { return /^log4j-core-2\.25\.4\.jar$/i.test(f.name); });
+            var jars = picked.filter(function (f) { return /^log4j-(api|core)-2\.25\.5\.jar$/i.test(f.name); });
+            var hasApi = jars.some(function (f) { return /^log4j-api-2\.25\.5\.jar$/i.test(f.name); });
+            var hasCore = jars.some(function (f) { return /^log4j-core-2\.25\.5\.jar$/i.test(f.name); });
             if (!hasApi || !hasCore) {
-              ctx.confirm({ title: 'Need both 2.25.4 jars', body: 'Select BOTH log4j-api-2.25.4.jar and log4j-core-2.25.4.jar (the remediation pins 2.25.4). Found: ' + (jars.length ? jars.map(function (f) { return esc(f.name); }).join(', ') : 'none') + '.', okText: 'OK', cancelText: null });
+              ctx.confirm({ title: 'Need both 2.25.5 jars', body: 'Select BOTH log4j-api-2.25.5.jar and log4j-core-2.25.5.jar (the remediation pins 2.25.5). Found: ' + (jars.length ? jars.map(function (f) { return esc(f.name); }).join(', ') : 'none') + '.', okText: 'OK', cancelText: null });
               return;
             }
             log.append({ text: 'Uploading ' + jars.length + ' Log4j jar(s) to the host...', level: 'mode' });
@@ -657,7 +657,7 @@
         // Packages (auto-found) or use "Browse jars" / the Log4j source box, then Analyze.
         if (!c.runnable && c.needsStaging) {
           var sn = el('div'); sn.style.cssText = 'font-size:11px;margin-top:6px;color:var(--amber)';
-          sn.textContent = 'Needs the Log4j 2.25.4 jars staged. Drop log4j-api/core-2.25.4.jar under the host Packages folder (auto-found), or click "Browse jars" / set the Log4j source above, then Analyze.';
+          sn.textContent = 'Needs the Log4j 2.25.5 jars staged. Drop log4j-api/core-2.25.5.jar under the host Packages folder (auto-found), or click "Browse jars" / set the Log4j source above, then Analyze.';
           box.appendChild(sn);
         }
 
