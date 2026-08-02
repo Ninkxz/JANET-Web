@@ -180,8 +180,8 @@ Describe 'upr 1.2.9 - scoped M365 removal + staging hardening (audit 2026-07-24)
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.11 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.11'
+    It 'manifest version is exactly 1.2.12 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.12'
     }
     # audit 2026-07-25 (fable re-audit follow-up): pkginstall creates its staging root
     # WITHOUT -Force so a squatted directory fails the host; upr used
@@ -245,6 +245,14 @@ Describe 'upr 1.2.11 - wrong-box guard fails closed, uninstall exit map (loop 20
     It 'the EXE paths accept 1641 but NOT 1605 (an msiexec code means nothing to a vendor EXE)' {
         $exe = @([regex]::Matches($src, '\$u\.Ran -and \(\$u\.ExitCode -eq 0 -or \$u\.ExitCode -eq 3010 -or \$u\.ExitCode -eq 1641\)'))
         $exe.Count | Should Be 2
+    }
+    # The uninstall phase runs WITHOUT the fan-out watchdog, so the session-level
+    # OperationTimeout is the only thing bounding it - and a flat 5 min was shorter
+    # than a normal M365 removal.
+    It 'the WinRM OperationTimeout is sized to the phase, not flat 5 minutes' {
+        ($src -match '\$opMs = if \(\$DoUninstall\) \{ 1800000 \} else \{ 300000 \}') | Should Be $true
+        ($src -match 'OperationTimeout=\$opMs')                                       | Should Be $true
+        ($src -match 'OperationTimeout=300000')                                       | Should Be $false
     }
     It 'a non-numeric threads value keeps the caller default instead of collapsing to 1' {
         ($src -match 'if \(\[int\]::TryParse\(\[string\]\$Params\[.threads.\], \[ref\]\$parsed\)\) \{ \$threads = \$parsed \}') | Should Be $true

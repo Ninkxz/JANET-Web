@@ -50,7 +50,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.11' # loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
+        version  = '1.2.12' # loop 2026-08-02 (b): WinRM OperationTimeout sized to the phase - 30 min for the unwatchdogged uninstall (a normal M365 removal outran the flat 5 min and booked FAIL mid-removal), 5 min for a scan. Prior 1.2.11 - loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -779,7 +779,19 @@ $UprWorkerBlock = {
         ## -UseSSL only when the host answered ONLY on 5986 (self-signed WinRM HTTPS
         ## is common on AFNET, so skip CA/CN validation -- the transport stays
         ## encrypted; port 5986 is implicit).
-        $soP = @{ OperationTimeout=300000; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
+        ## loop-2026-08-02 (P2): OperationTimeout was a flat 5 min for BOTH phases, but
+        ## the uninstall phase deliberately runs without the fan-out per-host watchdog
+        ## "for uninstall runs that legitimately run long" - so nothing covered it. An
+        ## M365 setup.exe /configure runs 8-15 min inside ONE blocking Invoke-Command,
+        ## so WSMan killed the client at 300s: the row booked FAIL <WSMan timeout>, an
+        ## audit Failure was written, the verify never ran, and the now-broken session
+        ## failed every remaining candidate on that host - all while setup.exe carried
+        ## on removing Office. Size the budget to the phase: 30 min for uninstall (same
+        ## default pkginstall uses for a blocking deploy, :1024), 5 min for a scan,
+        ## which still has its watchdog. A timeout is a CEILING, not a wait - a fast
+        ## uninstall still returns as fast as it ever did.
+        $opMs = if ($DoUninstall) { 1800000 } else { 300000 }
+        $soP = @{ OperationTimeout=$opMs; OpenTimeout=15000; CancelTimeout=5000; IdleTimeout=120000 }
         if ($useSsl) { $soP['SkipCACheck']=$true; $soP['SkipCNCheck']=$true }
         $opt = New-PSSessionOption @soP
         $splat = @{ ComputerName=$ConnectTarget; SessionOption=$opt; ErrorAction='Stop' }
