@@ -81,11 +81,15 @@ Describe 'Log4j replacement jar version agrees everywhere' {
     # This file carries the EXACT pins for the 2026-07-30 bump, per the convention
     # that the newest bump pins exactly and older tests demote to a floor
     # (Acas.ClientVerify 1.11.22 and Wpt.C2rVerify 6.10.5 were demoted for it).
-    It 'acas manifest is exactly 1.11.23 and wpt exactly 6.10.6' {
+    # acas keeps the EXACT pin (1.11.23 is still the log4j bump). wpt's was demoted
+    # to a floor on 2026-08-02 when 6.10.7 landed for an unrelated fix (healer-wu-reset)
+    # - this file guards the jar sweep, not wpt's version, and an exact pin here would
+    # make every future wpt bump fail a log4j test for no reason.
+    It 'acas manifest is exactly 1.11.23 and wpt is at or past 6.10.6' {
         $acas = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Raw), "version\s+=\s+'([0-9.]+)'").Groups[1].Value
         $wpt  = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1')  -Raw), "version\s+=\s+'([0-9.]+)'").Groups[1].Value
         $acas | Should Be '1.11.23'
-        $wpt  | Should Be '6.10.6'
+        ([version]$wpt -ge [version]'6.10.6') | Should Be $true
     }
 
     It 'the acas.view upload gate accepts the version the module copies in' {
