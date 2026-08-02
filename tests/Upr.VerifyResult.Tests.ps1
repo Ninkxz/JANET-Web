@@ -180,8 +180,8 @@ Describe 'upr 1.2.9 - scoped M365 removal + staging hardening (audit 2026-07-24)
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.10 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.10'
+    It 'manifest version is exactly 1.2.11 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.11'
     }
     # audit 2026-07-25 (fable re-audit follow-up): pkginstall creates its staging root
     # WITHOUT -Force so a squatted directory fails the host; upr used
@@ -218,5 +218,35 @@ Describe 'upr 1.2.9 - scoped M365 removal + staging hardening (audit 2026-07-24)
         $fn = [regex]::Match($src, '(?s)function Parse-PdfFinding.*?\n\}').Value
         ($fn -match '(?s)\}\s*finally\s*\{[^}]*Remove-Item -LiteralPath \$tmpTxt') | Should Be $true
         ($fn -match '\$tmpErr')                                                    | Should Be $true
+    }
+}
+
+# loop 2026-08-02: source-wire pins for two fixes that live inside the remote
+# scriptblock, where behavioural coverage would need a live WinRM session.
+Describe 'upr 1.2.11 - wrong-box guard fails closed, uninstall exit map (loop 2026-08-02)' {
+    $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+
+    # The guard compared names only `if ($actualName -and ...)`, so a remote that
+    # deserialized a BLANK ComputerName skipped the check and the permanent uninstall
+    # proceeded on an unverified box - the one case where we know least about it.
+    It 'an empty remote COMPUTERNAME ABORTS the uninstall instead of proceeding' {
+        ($src -match 'the remote returned no COMPUTERNAME - ABORTED, no uninstall performed') | Should Be $true
+        ($src -match "Aborted \(identity unverified\)")                                       | Should Be $true
+        # the fail-open form must be gone
+        ($src -match '\$actualName -and \(\$actualName\.Trim\(\)\.ToUpper\(\)')               | Should Be $false
+    }
+
+    # 1605 = ERROR_UNKNOWN_PRODUCT, which on an UNINSTALL is the desired end state, and
+    # 1641 = removed, reboot initiated. Both were booked FAIL on a host that IS clean.
+    # Safe to accept because the registry re-verify below is the real arbiter.
+    It 'msiexec 1641 and 1605 count as a successful removal' {
+        ($src -match '\$u\.ExitCode -eq 3010 -or \$u\.ExitCode -eq 1641 -or \$u\.ExitCode -eq 1605') | Should Be $true
+    }
+    It 'the EXE paths accept 1641 but NOT 1605 (an msiexec code means nothing to a vendor EXE)' {
+        $exe = @([regex]::Matches($src, '\$u\.Ran -and \(\$u\.ExitCode -eq 0 -or \$u\.ExitCode -eq 3010 -or \$u\.ExitCode -eq 1641\)'))
+        $exe.Count | Should Be 2
+    }
+    It 'a non-numeric threads value keeps the caller default instead of collapsing to 1' {
+        ($src -match 'if \(\[int\]::TryParse\(\[string\]\$Params\[.threads.\], \[ref\]\$parsed\)\) \{ \$threads = \$parsed \}') | Should Be $true
     }
 }

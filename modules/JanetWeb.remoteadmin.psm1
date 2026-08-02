@@ -58,7 +58,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'remoteadmin'
         name     = 'Remote Admin'
-        version  = '1.0.5'   # audit 2026-07-28: COMMENT-ONLY change - Test-RemoteAdminComputerName's doc claimed it accepts "ONLY a bare hostname or IPv4 literal", which the regex does not enforce ('.' is in the class, so dotted FQDNs pass). No behaviour change; bumped because the versioning rule keys on the file changing. Prior 1.0.4 - audit 2026-07-24 fix pass (partial output preserved, recognised audit sentinel, receive cap, '#' comment strip); RemoteAdmin.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.0.6'   # loop 2026-08-02: threads/timeoutSeconds no longer collapse to 0 (and then to the clamp floor) when the posted value is non-numeric - TryParse zeroes its [ref] on failure. Prior 1.0.5 - audit 2026-07-28: COMMENT-ONLY change - Test-RemoteAdminComputerName's doc claimed it accepts "ONLY a bare hostname or IPv4 literal", which the regex does not enforce ('.' is in the class, so dotted FQDNs pass). No behaviour change; bumped because the versioning rule keys on the file changing. Prior 1.0.4 - audit 2026-07-24 fix pass (partial output preserved, recognised audit sentinel, receive cap, '#' comment strip); RemoteAdmin.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Operations'
         summary  = 'Two operator hands-on-keyboard capabilities. Open C$: launch \\<computer>\C$ in Explorer on your own session by computer name (strict name validation, audited; needs no admin session). Run Script: fan an operator-authored PowerShell block to one or many hosts over WinRM - arbitrary remote code, so it is destructive and rides the admin-session gate, mirrors the WPT Custom Command SHA256 forensic audit, and self-guards the JANET dispatcher host out of every run.'
         actions  = @(
@@ -474,11 +474,21 @@ function Invoke-JanetToolAction {
         return @{ rows=@(); summary=@{ total=0; selfSkipped=$guard.SkippedCount } }
     }
 
+    # TryParse ZEROES its [ref] on failure, so parsing straight into the variable made a
+    # non-numeric value collapse to 0 and then get clamped, discarding the documented
+    # default: timeoutSeconds='5m' became 15s and abandoned every host whose block ran
+    # longer, while the remote blocks kept executing. (pkginstall:1008 does this right.)
     $threads = 8
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+        $parsedThreads = 0
+        if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+    }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $timeoutSeconds = 120
-    if ($Params['timeoutSeconds']) { [int]::TryParse([string]$Params['timeoutSeconds'], [ref]$timeoutSeconds) | Out-Null }
+    if ($Params['timeoutSeconds']) {
+        $parsedTimeout = 0
+        if ([int]::TryParse([string]$Params['timeoutSeconds'], [ref]$parsedTimeout)) { $timeoutSeconds = $parsedTimeout }
+    }
     $timeoutSeconds = [Math]::Max(15, [Math]::Min(900, $timeoutSeconds))
     $maxOutput = 4000
 

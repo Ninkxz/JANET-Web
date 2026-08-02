@@ -50,7 +50,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.10' # audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
+        version  = '1.2.11' # loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -303,8 +303,14 @@ function Get-UprSectionBlocks {
 
 function Get-UprThreadCount {
     param([hashtable]$Params, [int]$Default)
+    # TryParse ZEROES its [ref] on failure, so parsing straight into $threads made a
+    # non-numeric value collapse to 0 -> clamped to 1 thread, silently discarding the
+    # caller's default. Only adopt a value that actually parsed. (pkginstall:1008)
     $threads = $Default
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+        $parsed = 0
+        if ([int]::TryParse([string]$Params['threads'], [ref]$parsed)) { $threads = $parsed }
+    }
     return [Math]::Max(1, [Math]::Min(64, $threads))
 }
 
@@ -905,13 +911,24 @@ $UprWorkerBlock = {
                 ## audit 2026-07-23 (finding: DNS-check round-trip): compares against the
                 ## COMPUTERNAME already returned by the enumeration call above - the standalone
                 ## Invoke-Command probe is gone. An IPv4-literal target has no shortname to
-                ## compare -> skip. Empty name -> proceed (don't regress). On a confirmed
-                ## mismatch, remove NOTHING.
+                ## compare -> skip. On a confirmed mismatch, remove NOTHING.
+                ## loop-2026-08-02 (P3, fail-open): an EMPTY name used to PROCEED. That is
+                ## the one case where we know least about the box we are about to
+                ## permanently uninstall from - a partial/odd enumeration result that
+                ## deserialized a blank ComputerName skipped the guard entirely. remoteadmin
+                ## fails CLOSED on an unusable probe result (remoteadmin.psm1:329-334); the
+                ## permanent-removal path must not be the laxer of the two.
                 if ($ConnectTarget -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
                     $targetShort = ($ConnectTarget -split '\.')[0]
-                    $actualName = [string]$remoteName
-                    if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
-                        $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no uninstall performed"
+                    $actualName = ([string]$remoteName).Trim()
+                    if ([string]::IsNullOrWhiteSpace($actualName)) {
+                        $r.Error = "wrong-box guard: dialed '$targetShort' but the remote returned no COMPUTERNAME - ABORTED, no uninstall performed"
+                        foreach ($cand in $candidates) { if ($cand.Decision -eq 'Uninstall') { $cand.Result = 'Aborted (identity unverified)' } }
+                        $r.Candidates = $candidates
+                        return $r
+                    }
+                    if ($actualName.ToUpper() -ne $targetShort.ToUpper()) {
+                        $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$actualName' - ABORTED, no uninstall performed"
                         foreach ($cand in $candidates) { if ($cand.Decision -eq 'Uninstall') { $cand.Result = 'Aborted (DNS mismatch)' } }
                         $r.Candidates = $candidates
                         return $r
@@ -1206,22 +1223,30 @@ $UprWorkerBlock = {
                                     # single ArgumentList string, so a crafted UninstallString GUID (spaces/switches
                                     # before the first '}') could inject extra msiexec switches under the operator cred.
                                     $u = Invoke-SafeUninstall -UnStr $unStr
-                                    if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010)) { return "OK (MSI exit $($u.ExitCode))" }
+                                    ## loop-2026-08-02: 1641 (success, reboot already initiated) and 1605
+                                    ## (ERROR_UNKNOWN_PRODUCT - not installed, i.e. the state an uninstall
+                                    ## is TRYING to reach) were booked FAIL. pkginstall already treats
+                                    ## 0/1641/3010 as success (:764). Booking these OK is safe because the
+                                    ## registry re-verify below is the real arbiter - it fails closed and
+                                    ## will still say "still present" if the removal did not happen.
+                                    if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010 -or $u.ExitCode -eq 1641 -or $u.ExitCode -eq 1605)) { return "OK (MSI exit $($u.ExitCode))" }
                                     else { return "FAIL (MSI $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                 } else {
-                                    ## Exit-code gate (mirrors the MSI handler): treat ONLY 0/3010 as
+                                    ## Exit-code gate (mirrors the MSI handler): treat ONLY 0/1641/3010 as
                                     ## success. A null process (Start-Process failed) or any other exit
                                     ## code is a real failure -- never report OK unconditionally.
+                                    ## 1605 is NOT accepted here: it is an msiexec code, and an arbitrary
+                                    ## vendor EXE returning 1605 means nothing in particular.
                                     if (-not [string]::IsNullOrWhiteSpace($quietStr)) {
                                         $u = Invoke-SafeUninstall -UnStr $quietStr
-                                        if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010)) { return "OK (QuietUninstall exit $($u.ExitCode))" }
+                                        if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010 -or $u.ExitCode -eq 1641)) { return "OK (QuietUninstall exit $($u.ExitCode))" }
                                         else { return "FAIL (QuietUninstall $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                     } elseif (-not [string]::IsNullOrWhiteSpace($unStr)) {
                                         ## Safe decomposition (no cmd /c): the planted UninstallString
                                         ## never reaches a shell. Append conservative silent switches
                                         ## so a bare EXE uninstaller still runs unattended.
                                         $u = Invoke-SafeUninstall -UnStr $unStr -AppendArgs @('/S','/silent','/quiet','/uninstall','/norestart')
-                                        if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010)) { return "OK (EXE exit $($u.ExitCode))" }
+                                        if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010 -or $u.ExitCode -eq 1641)) { return "OK (EXE exit $($u.ExitCode))" }
                                         else { return "FAIL (EXE $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                     } else { return "FAIL: No uninstall string available" }
                                 }
