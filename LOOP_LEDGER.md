@@ -63,22 +63,23 @@ became 0 and was then clamped: `timeoutSeconds='5m'` silently became 15 s and
 abandoned every host whose block ran longer, while the remote blocks kept
 executing. `pkginstall.psm1:1008` already guards this.
 
+**P2 — a normal M365 removal outran the WinRM timeout and booked itself FAIL.** `commit 071b63156`
+`modules\JanetWeb.upr.psm1:782` — the shared worker opened every session with a
+flat `OperationTimeout = 300000` for BOTH phases. The scan can afford that (it
+still has the fan-out watchdog); the uninstall phase cannot — the watchdog is
+deliberately disabled there "for uninstall runs that legitimately run long"
+(`:1335`), so the session cap was the only bound and nobody sized it for the
+work. An M365 `setup.exe /configure` runs 8–15 min inside one blocking
+`Invoke-Command` (`:936`): at 300 s WSMan killed the client, the row booked
+`FAIL <WSMan timeout>`, a `VulnPatched/Failure` audit row was written, the
+verify never ran, and the broken session failed every remaining candidate on
+that host — while setup.exe was still successfully removing Office. Sized to
+the phase: 30 min uninstall (pkginstall's default for the same blocking-deploy
+problem, `:1024`), 5 min scan. upr 1.2.11 → 1.2.12.
+
 ---
 
 ### OPEN — carried to a later session
-
-**P2 — upr session OperationTimeout does not cover a long uninstall.**
-`modules\JanetWeb.upr.psm1:776` — the shared worker builds its WinRM session
-with a hard `OperationTimeout = 300000` (5 min), but the uninstall path
-deliberately disables the fan-out per-host watchdog "for uninstall runs that
-legitimately run long" (`:1335`). The session-level cap was never raised to
-match. An M365 `setup.exe /configure` typically runs 8–15 min inside one
-blocking `Invoke-Command` (`:936`); at 300 s WSMan kills the client, the catch
-books `FAIL: <WSMan timeout>` and an audit Failure, the verify never runs — all
-while setup.exe keeps removing Office on the target. The broken session then
-fails every remaining candidate on that host. pkginstall sizes OperationTimeout
-to the install budget (`:1017-1039`); upr should. *Deferred only for time —
-this is the highest-value open item and should lead the next session.*
 
 **P2 — OPERATOR DECISION — upr's permanent-removal actions have no server-side
 confirm word.** `modules\JanetWeb.upr.psm1:77/:108` (manifest), `:1756`
