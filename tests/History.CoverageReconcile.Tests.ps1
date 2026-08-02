@@ -292,11 +292,16 @@ Describe 'coverage-reconcile FAILS CLOSED (a capped or errored read is never COV
     It 'renders UNKNOWN (read error) when a monthly audit CSV is locked, even for a host it DID find' {
         Set-CovAdShim -Rows $script:LiveFleet
         $root = New-CovAuditTree -Name 'covLocked' -Touches $script:LiveTouch
-        $csv  = Join-Path $root ('WPT\test.operator\' + (Get-Date).ToString('yyyy-MM') + '_detail.csv')
+        # New-CovAuditTree files a touch under ITS OWN month, so the DaysAgo=3 touch
+        # lands in LAST month on the 1st-3rd - hardcoding (Get-Date) here opened a path
+        # that did not exist and threw before any assertion ran (fired 2026-08-02).
+        # Lock whatever file the fixture actually wrote, and look back 2 months so the
+        # reader still opens it: lookbackMonths=1 scans the current month only.
+        $csv = @(Get-ChildItem -LiteralPath (Join-Path $root 'WPT\test.operator') -Filter '*_detail.csv')[0].FullName
         $fs = [System.IO.File]::Open($csv, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
         try {
             Set-CovRootOverride -Path $root -Exists $true
-            $run = Invoke-Coverage -Params @{ thresholdDays = 30; lookbackMonths = 1 }
+            $run = Invoke-Coverage -Params @{ thresholdDays = 30; lookbackMonths = 2 }
             ([string](Get-CovRow $run 'WS-COVERED').Verdict) | Should Be 'UNKNOWN (read error)'
             [int]$run.Result.summary.covered | Should Be 0
             ([int]$run.Result.summary.readErrors -ge 1) | Should Be $true
