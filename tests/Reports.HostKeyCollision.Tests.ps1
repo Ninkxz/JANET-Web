@@ -231,9 +231,20 @@ Describe 'Compare-AcasScans - anti-over-guard: a NON-collided host still REMEDIA
             [pscustomobject]@{ Hostname='appserver.us.af.mil'; PluginID='5'; VulnName='A'; Severity='High'; CVE=''; Category='Other'; Solution='' }
             [pscustomobject]@{ Hostname='HOST1';               PluginID='5'; VulnName='B'; Severity='High'; CVE=''; Category='Other'; Solution='' }
         )
-        # appserver patched (absent); HOST1 re-scanned as its own FQDN with a DIFFERENT plugin.
+        # Both hosts were RE-SCANNED and each cleared plugin 5, evidenced by a different
+        # plugin still present for each.
+        #
+        # loop 2026-08-03 P1: this fixture used to give appserver NO comparison row at all
+        # and call that "appserver patched (absent)" - which is precisely the unsafe
+        # inference the NOT SCANNED bucket now refuses. A host missing from the comparison
+        # was never scanned (the parser keeps Info findings, so a scanned host always
+        # carries rows), so absence is not evidence of a fix. Giving appserver a real
+        # re-scan row keeps this Describe's actual subject intact - that the collision
+        # guard does NOT over-fire and a legitimate closure still REMEDIATES - while
+        # expressing "patched" as evidence instead of silence.
         $script:ComparisonFindings = @(
-            [pscustomobject]@{ Hostname='host1.dom.mil'; PluginID='9'; VulnName='C'; Severity='Low'; CVE=''; Category='Other'; Solution='' }
+            [pscustomobject]@{ Hostname='host1.dom.mil';      PluginID='9'; VulnName='C'; Severity='Low'; CVE=''; Category='Other'; Solution='' }
+            [pscustomobject]@{ Hostname='appserver.us.af.mil'; PluginID='9'; VulnName='D'; Severity='Low'; CVE=''; Category='Other'; Solution='' }
         )
         Invoke-JanetToolAction -ActionId 'acas-run-compare' -Params @{} -Emit $noop
     }

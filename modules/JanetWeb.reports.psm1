@@ -38,7 +38,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.15.2'
+        version  = '2.16.0' # loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -222,7 +222,7 @@ function Get-JanetToolManifest {
                 destructive  = $false
                 columns      = @('Hostname','PluginID','VulnName','Severity','Delta')
                 inputs       = @(
-                    @{ name='deltaFilter';    label='Delta filter';    type='select'; options=@('All','REMEDIATED','STILL OPEN','NEW'); default='All'; required=$false },
+                    @{ name='deltaFilter';    label='Delta filter';    type='select'; options=@('All','REMEDIATED','STILL OPEN','NEW','AMBIGUOUS','NOT SCANNED'); default='All'; required=$false },
                     @{ name='hostFilter';     label='Host filter (substring, blank = all)'; type='text'; required=$false },
                     @{ name='severityFilter'; label='Severity filter'; type='select'; options=@('All','Critical','High','Medium','Low','Info'); default='All'; required=$false }
                 )
@@ -1610,9 +1610,14 @@ function Compare-AcasScans {
     }
     $comparisonKeys   = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     $comparisonLookup = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
+    # loop 2026-08-03 P1: host KEYS actually present in the comparison scan. Mirrors
+    # campaign-verify's $hostsPresent (:5581) - see the REMEDIATED loop below for why.
+    $comparisonHosts  = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     foreach ($f in $script:ComparisonFindings) {
-        $key = "$(Get-ReportsAuditHostKey $f.Hostname)|$($f.PluginID)"
+        $hk  = Get-ReportsAuditHostKey $f.Hostname
+        $key = "$hk|$($f.PluginID)"
         [void]$comparisonKeys.Add($key)
+        [void]$comparisonHosts.Add($hk)
         $comparisonLookup[$key] = $f
         [void]$allHostnames.Add([string]$f.Hostname); [void]$allIps.Add([string]$f.IP)
     }
@@ -1639,11 +1644,29 @@ function Compare-AcasScans {
 
     # REMEDIATED: in baseline but NOT in comparison (patched/fixed) - UNLESS the short host
     # key is a cross-domain collision, in which case the closure is AMBIGUOUS (see above).
+    #
+    # loop 2026-08-03 P1 (FALSE-CLOSE): "absent from the comparison" was being read as
+    # "fixed" even when the HOST ITSELF never appeared in the comparison scan at all.
+    # A box powered off during the after-patch window, or dropped by a scoped export,
+    # had EVERY one of its baseline findings scored REMEDIATED - and unlike the other
+    # consumers this path MUTATES: acas-apply-remediated (:5975-5984) then stamps them
+    # Status='Patched' / PatchedBy='Scan Comparison', so the fleet reads clean on
+    # evidence that was never collected.
+    # campaign-verify already guards exactly this with a NOT-SCANNED bucket (:5621,
+    # "loop21 P1 ... would else FALSE-CLOSE") - the guard simply never got swept to the
+    # sibling that writes. Same rule, same helper, same conservative direction here.
+    # Trade-off inherited from that precedent: a host scanned and now 100% clean also
+    # has no comparison rows, so it lands in NOT SCANNED rather than REMEDIATED. That
+    # is the safe error - it asks for a re-scan instead of closing a finding blind.
+    # NOT SCANNED is its own Delta, so the apply filter (Delta -eq 'REMEDIATED', :5938)
+    # excludes it from the write with no change needed there.
     foreach ($key in $baselineKeys) {
         if (-not $comparisonKeys.Contains($key)) {
             $f = $baselineLookup[$key]
             $hk = Get-ReportsAuditHostKey $f.Hostname
-            $delta = if ($collisions.Contains($hk)) { 'AMBIGUOUS' } else { 'REMEDIATED' }
+            $delta = if (-not $comparisonHosts.Contains($hk)) { 'NOT SCANNED' }
+                     elseif ($collisions.Contains($hk))       { 'AMBIGUOUS' }
+                     else                                     { 'REMEDIATED' }
             [void]$results.Add([PSCustomObject]@{ Hostname=$f.Hostname; IP=$f.IP; PluginID=$f.PluginID; VulnName=$f.VulnName; Severity=$f.Severity; CVE=$f.CVE; Category=$f.Category; Delta=$delta; Solution=$f.Solution })
         }
     }
@@ -5771,13 +5794,14 @@ function Invoke-JanetToolAction {
             $results = Compare-AcasScans
             $script:ComparisonResults = $results
 
-            $remediated = 0; $stillOpen = 0; $newCount = 0; $ambiguous = 0
+            $remediated = 0; $stillOpen = 0; $newCount = 0; $ambiguous = 0; $notScanned = 0
             foreach ($r in $results) {
                 switch ($r.Delta) {
-                    'REMEDIATED' { $remediated++ }
-                    'STILL OPEN' { $stillOpen++ }
-                    'NEW'        { $newCount++ }
-                    'AMBIGUOUS'  { $ambiguous++ }
+                    'REMEDIATED'  { $remediated++ }
+                    'STILL OPEN'  { $stillOpen++ }
+                    'NEW'         { $newCount++ }
+                    'AMBIGUOUS'   { $ambiguous++ }
+                    'NOT SCANNED' { $notScanned++ }
                 }
             }
 
@@ -5804,9 +5828,14 @@ function Invoke-JanetToolAction {
             # loop39 (ledger row 36): AMBIGUOUS = a would-be REMEDIATED key whose short host
             # name is shared by >=2 distinct FQDNs across the two scans - NOT auto-closed.
             $ambNote = if ($ambiguous -gt 0) { " ($ambiguous ambiguous - short name shared by distinct hosts; re-scan by FQDN)" } else { '' }
-            & $send @{ type='audit'; action='TouchHost'; target="Scan compare ($($script:BaselineFindings.Count) baseline vs $($script:ComparisonFindings.Count) comparison)"; result='Success'; itemCount=$results.Count; detail="$remediated remediated, $stillOpen still open, $newCount new, $ambiguous ambiguous" }
-            & $send @{ type='status'; text="Comparison complete: $remediated remediated, $stillOpen still open, $newCount new.$ambNote$filterNote" }
-            return @{ rows=@($rows); summary=@{ total=$rows.Count; remediated=$remediated; stillOpen=$stillOpen; newFindings=$newCount; ambiguous=$ambiguous; deltaTotal=$results.Count } }
+            # loop 2026-08-03 P1: NOT SCANNED must be LOUD. These findings were previously
+            # counted as remediated and could be stamped Patched, so an operator who does
+            # not notice them believes a fleet is closed that was never re-scanned.
+            $nsNote = if ($notScanned -gt 0) { " ($notScanned NOT SCANNED - the host never appeared in the comparison scan; nothing about it is confirmed, re-scan those hosts)" } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Scan compare ($($script:BaselineFindings.Count) baseline vs $($script:ComparisonFindings.Count) comparison)"; result='Success'; itemCount=$results.Count; detail="$remediated remediated, $stillOpen still open, $newCount new, $ambiguous ambiguous, $notScanned not scanned" }
+            if ($notScanned -gt 0) { & $send @{ type='log'; level='warn'; text="$notScanned baseline finding(s) are on hosts ABSENT from the comparison scan - reported NOT SCANNED, never remediated. Re-scan those hosts before closing them." } }
+            & $send @{ type='status'; text="Comparison complete: $remediated remediated, $stillOpen still open, $newCount new.$ambNote$nsNote$filterNote" }
+            return @{ rows=@($rows); summary=@{ total=$rows.Count; remediated=$remediated; stillOpen=$stillOpen; newFindings=$newCount; ambiguous=$ambiguous; notScanned=$notScanned; deltaTotal=$results.Count } }
         }
 
         # -------------------------------------------------------------------

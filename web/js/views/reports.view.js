@@ -1545,7 +1545,10 @@
         panel.appendChild(loadRow);
 
         var filterRow = btnRow();
-        var deltaSel = ui.select({ options: ['All', 'REMEDIATED', 'STILL OPEN', 'NEW'], value: 'All', title: 'Filter the diff rows shown.' });
+        // AMBIGUOUS (loop39) and NOT SCANNED (loop 2026-08-03) are the two buckets that
+        // block an auto-close, so they are exactly the rows an operator needs to isolate -
+        // but neither was filterable. Both are now options here and in the manifest.
+        var deltaSel = ui.select({ options: ['All', 'REMEDIATED', 'STILL OPEN', 'NEW', 'AMBIGUOUS', 'NOT SCANNED'], value: 'All', title: 'Filter the diff rows shown. NOT SCANNED = the host never appeared in the comparison scan, so nothing about it can be confirmed.' });
         var hostFilter = ui.input({ placeholder: 'host filter (substring)', title: 'Substring match on hostname; blank = all.' }); hostFilter.style.width = '180px';
         var sevFilter = ui.select({ options: ['All', 'Critical', 'High', 'Medium', 'Low', 'Info'], value: 'All' });
         var compareBtn = ui.button('Compare Scans', { variant: 'go', size: 'sm', title: 'Diff the baseline against the comparison.' });
