@@ -50,7 +50,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.12' # loop 2026-08-02 (b): WinRM OperationTimeout sized to the phase - 30 min for the unwatchdogged uninstall (a normal M365 removal outran the flat 5 min and booked FAIL mid-removal), 5 min for a scan. Prior 1.2.11 - loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
+        version  = '1.2.13' # loop 2026-08-03: server-side typed confirm word (UNINSTALL, -cne) on LIVE report-uninstall/manual-uninstall - the view drove an arming dialog but never posted the word, so the suite's only permanent-removal actions had no server-side barrier. Prior 1.2.12 - loop 2026-08-02 (b): WinRM OperationTimeout sized to the phase - 30 min for the unwatchdogged uninstall (a normal M365 removal outran the flat 5 min and booked FAIL mid-removal), 5 min for a scan. Prior 1.2.11 - loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -312,6 +312,36 @@ function Get-UprThreadCount {
         if ([int]::TryParse([string]$Params['threads'], [ref]$parsed)) { $threads = $parsed }
     }
     return [Math]::Max(1, [Math]::Min(64, $threads))
+}
+
+# Server-side typed confirm word for a LIVE (non-dry-run) uninstall.
+#
+# loop 2026-08-03 (P2, operator-approved): the view has ALWAYS made the operator
+# type UNINSTALL into an arming dialog (upr.view.js confirmWord), but it never
+# POSTED the word and nothing here read it - the barrier was decoration. A stale
+# tab, a non-UI client, or a replayed POST inside an already-armed admin session
+# could permanently remove software fleet-wide with no typed barrier at all.
+# report-uninstall and manual-uninstall are the suite's only permanent-removal
+# actions and were the last destructive pair without one (remoteadmin RUN :446,
+# pkginstall DEPLOY :881).
+#
+# Only a LIVE run is gated: a dry run removes nothing, so demanding the word
+# there would train operators to type it out of habit - which is how a typed
+# barrier stops being one.
+#
+# -cne, not -ne: the operator-facing text says "exactly", and a case-insensitive
+# compare accepts 'uninstall'. Fail closed and mean what the message says.
+# ONE helper called from BOTH dispatcher paths on purpose - two copies of a
+# guard is how the report path and the manual path drift apart.
+function Test-UprLiveUninstallArmed {
+    param([bool]$DoUninstall, [bool]$DryRun, [hashtable]$Params, [scriptblock]$Log)
+    if (-not $DoUninstall) { return $true }
+    if ($DryRun)           { return $true }
+    if ([string]$Params['confirm'] -cne 'UNINSTALL') {
+        if ($Log) { & $Log 'Refused: type UNINSTALL (exactly, uppercase) to arm a LIVE uninstall. Nothing was removed.' 'err' }
+        return $false
+    }
+    return $true
 }
 
 # Host-class. Workstations on this network use the MSEKL (laptop) or MSEKW
@@ -1849,6 +1879,9 @@ function Invoke-JanetToolAction {
             $dv = $Params['dryrun']
             if ($dv -is [bool]) { $dryRun = $dv } else { $dryRun = -not (("$dv").Trim() -match '^(?i:false|0|no|off)$') }
         }
+        if (-not (Test-UprLiveUninstallArmed -DoUninstall $doUninstall -DryRun $dryRun -Params $Params -Log $log)) {
+            return @{ rows=@(); summary=@{ total=0; rejected=$true } }
+        }
         $threads = Get-UprThreadCount $Params 16
 
         # Operator selection (uninstall only): same selecthosts/selectkeys contract
@@ -2062,6 +2095,9 @@ function Invoke-JanetToolAction {
     if ($Params.ContainsKey('dryrun')) {
         $dv = $Params['dryrun']
         if ($dv -is [bool]) { $dryRun = $dv } else { $dryRun = -not (("$dv").Trim() -match '^(?i:false|0|no|off)$') }
+    }
+    if (-not (Test-UprLiveUninstallArmed -DoUninstall $doUninstall -DryRun $dryRun -Params $Params -Log $log)) {
+        return @{ rows=@(); summary=@{ total=0; rejected=$true } }
     }
     $threads = Get-UprThreadCount $Params 16
 

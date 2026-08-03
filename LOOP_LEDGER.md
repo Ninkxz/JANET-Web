@@ -77,21 +77,30 @@ that host — while setup.exe was still successfully removing Office. Sized to
 the phase: 30 min uninstall (pkginstall's default for the same blocking-deploy
 problem, `:1024`), 5 min scan. upr 1.2.11 → 1.2.12.
 
+**P2 — upr's permanent-removal actions had no server-side confirm word.**
+*(was OPERATOR DECISION; operator approved 2026-08-03)*
+`report-uninstall` and `manual-uninstall` are the suite's only permanent-removal
+actions, and the barrier in front of them was a browser dialog. The view *did*
+make the operator type `UNINSTALL` (`upr.view.js` `confirmWord`), but it never
+POSTED the word and the module never read `$Params['confirm']` — so a stale tab,
+a non-UI client, or a replayed POST inside an already-armed admin session
+uninstalled fleet-wide with no typed barrier at all. remoteadmin has enforced a
+typed `RUN` server-side since `:446`, pkginstall a typed `DEPLOY` at `:881`.
+Fixed: `Test-UprLiveUninstallArmed` — one helper called from BOTH dispatcher
+paths (two copies is how the report and manual paths drift), `-cne` so
+`uninstall` is refused, and LIVE-only so a dry run is not gated (gating a dry run
+trains the operator to type the word by reflex, which is how a typed barrier
+stops being one). The view now posts the word it already collected.
+Proven through the real dispatcher, not just the helper: a live `manual-uninstall`
+with no `confirm` returns `rejected=$true`, zero rows, and an error log; the same
+call with the word proceeds past the gate. upr 1.2.12 → 1.2.13.
+*Note: `Upr.LiveSelectionRefuse.Tests.ps1` needed `confirm='UNINSTALL'` added to
+two fixtures — arming now precedes the selection gate, so an unarmed fixture
+stopped one gate early and never reached the one it was testing.*
+
 ---
 
 ### OPEN — carried to a later session
-
-**P2 — OPERATOR DECISION — upr's permanent-removal actions have no server-side
-confirm word.** `modules\JanetWeb.upr.psm1:77/:108` (manifest), `:1756`
-(dispatcher) — `report-uninstall` and `manual-uninstall` are the suite's only
-permanent-removal actions, and the manifest's `confirm=` string is *client-side
-dialog text only*. remoteadmin enforces a typed `RUN` server-side
-(`remoteadmin.psm1:446`) and pkginstall a typed `DEPLOY` (`pkginstall.psm1:881`,
-whose comment claims every destructive tool has one). A stale tab, non-UI
-client, or replayed POST inside an armed admin session uninstalls fleet-wide
-with no typed barrier. Compensating controls exist (dry-run defaults true, live
-requires explicit selection). **Adding the gate changes the API contract — the
-view must send it — so it waits for the operator.**
 
 **P3 — pre-verification state changes happen before the wrong-box guard.**
 `modules\JanetWeb.pkginstall.psm1:308-372, :376-552` — the DCOM WinRM bootstrap

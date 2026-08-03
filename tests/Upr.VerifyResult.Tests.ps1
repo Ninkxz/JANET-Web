@@ -180,8 +180,8 @@ Describe 'upr 1.2.9 - scoped M365 removal + staging hardening (audit 2026-07-24)
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.12 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.12'
+    It 'manifest version is exactly 1.2.13 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.13'
     }
     # audit 2026-07-25 (fable re-audit follow-up): pkginstall creates its staging root
     # WITHOUT -Force so a squatted directory fails the host; upr used
@@ -256,5 +256,72 @@ Describe 'upr 1.2.11 - wrong-box guard fails closed, uninstall exit map (loop 20
     }
     It 'a non-numeric threads value keeps the caller default instead of collapsing to 1' {
         ($src -match 'if \(\[int\]::TryParse\(\[string\]\$Params\[.threads.\], \[ref\]\$parsed\)\) \{ \$threads = \$parsed \}') | Should Be $true
+    }
+}
+
+# =============================================================================
+#  loop 2026-08-03 - server-side typed confirm word on the LIVE uninstall.
+#
+#  The view has always driven an arming dialog with confirmWord 'UNINSTALL', but
+#  never posted the word and the module never read it, so the only barrier in
+#  front of the suite's two permanent-removal actions was a browser dialog any
+#  non-UI client skipped entirely. These are BEHAVIOURAL (the helper is pure and
+#  directly callable), not regex pins - the point is what it DOES, not how it
+#  reads.
+# =============================================================================
+function Test-Armed([bool]$DoUninstall, [bool]$DryRun, $Confirm) {
+    $p = @{}
+    if ($null -ne $Confirm) { $p['confirm'] = $Confirm }
+    (& $script:Mod {
+        param($du, $dr, $pp)
+        Test-UprLiveUninstallArmed -DoUninstall $du -DryRun $dr -Params $pp -Log $null
+    } $DoUninstall $DryRun $p)
+}
+
+Describe 'upr - a LIVE uninstall refuses to arm without the typed word' {
+
+    It 'LIVE + the exact word arms' {
+        Test-Armed $true $false 'UNINSTALL' | Should Be $true
+    }
+    It 'LIVE + no confirm param at all is REFUSED (the replayed-POST case)' {
+        Test-Armed $true $false $null | Should Be $false
+    }
+    It 'LIVE + an empty word is REFUSED' {
+        Test-Armed $true $false '' | Should Be $false
+    }
+    # -cne, matching RUN/DEPLOY. The operator text says "exactly", so a
+    # case-insensitive compare would be the message lying about the gate.
+    It 'LIVE + lowercase "uninstall" is REFUSED (case-SENSITIVE, like RUN and DEPLOY)' {
+        Test-Armed $true $false 'uninstall' | Should Be $false
+    }
+    It 'LIVE + a near-miss word is REFUSED' {
+        Test-Armed $true $false 'UNINSTALL ' | Should Be $false
+        Test-Armed $true $false 'REMOVE'     | Should Be $false
+    }
+
+    # A dry run removes nothing. Gating it would train the operator to type the
+    # word by reflex, which is how a typed barrier stops being a barrier.
+    It 'a DRY RUN arms with no word (it removes nothing)' {
+        Test-Armed $true $true $null | Should Be $true
+    }
+    It 'a non-uninstall action (scan) is never gated' {
+        Test-Armed $false $false $null | Should Be $true
+    }
+
+    # The guard is one helper called from both dispatcher paths; two copies is how
+    # the report path and the manual path drift apart.
+    It 'BOTH dispatcher paths call the one shared helper (no second copy to drift)' {
+        $src = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
+        (@([regex]::Matches($src, 'if \(-not \(Test-UprLiveUninstallArmed -DoUninstall \$doUninstall -DryRun \$dryRun')).Count) | Should Be 2
+        # ...and it is defined exactly once
+        (@([regex]::Matches($src, 'function Test-UprLiveUninstallArmed')).Count) | Should Be 1
+    }
+
+    It 'the view POSTS the word it made the operator type, on the LIVE path only' {
+        $view = Get-Content (Join-Path $script:Root 'web\js\views\upr.view.js') -Raw
+        # both ctx.run uninstall call sites
+        (@([regex]::Matches($view, "confirm: dry \? '' : 'UNINSTALL'")).Count) | Should Be 2
+        # and the arming dialog that produces it is still there
+        (@([regex]::Matches($view, "confirmWord: 'UNINSTALL'")).Count)         | Should Be 2
     }
 }

@@ -611,7 +611,10 @@
         // Tanium gate still runs server-side; unchecked rows are never removed.
         // audit 2026-07-24: see tallyUninstallRow - Abandoned rows need their own bucket.
         var counts = { ok: 0, warn: 0, fail: 0, skipped: 0, unreach: 0, error: 0, abandoned: 0 };
-        scanRun = ctx.run('report-uninstall', reportParams({ hostclass: hostClass(), threads: threadCount(), dryrun: dry, selecthosts: selHosts, selectkeys: selKeys }), { keyOf: keyByRk });
+        // The arming dialog above already made the operator type UNINSTALL, but the word
+        // was never POSTED, so the server had no typed barrier at all (loop 2026-08-03).
+        // Send it on the LIVE path only - a dry run removes nothing and is not gated.
+        scanRun = ctx.run('report-uninstall', reportParams({ hostclass: hostClass(), threads: threadCount(), dryrun: dry, selecthosts: selHosts, selectkeys: selKeys, confirm: dry ? '' : 'UNINSTALL' }), { keyOf: keyByRk });
         bindUninstall(scanRun, counts, dry);
       }
 
@@ -989,7 +992,9 @@
         log.banner('TARGETED UNINSTALL (DryRun=' + dry + ')');
         // audit 2026-07-24: shares tallyUninstallRow, so it needs the Abandoned bucket too.
         var counts = { ok: 0, warn: 0, fail: 0, skipped: 0, unreach: 0, error: 0, abandoned: 0 };
-        manRun = ctx.run('manual-uninstall', manParams({ threads: threadCount(), dryrun: dry, selecthosts: selHosts, selectkeys: selKeys }), { keyOf: keyByRk });
+        // Same as the report path: the typed word from ctx.arm must reach the server,
+        // or the gate is client-side decoration. LIVE only (loop 2026-08-03).
+        manRun = ctx.run('manual-uninstall', manParams({ threads: threadCount(), dryrun: dry, selecthosts: selHosts, selectkeys: selKeys, confirm: dry ? '' : 'UNINSTALL' }), { keyOf: keyByRk });
         bindManualUninstall(manRun, counts, dry);
       }
 

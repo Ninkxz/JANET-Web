@@ -33,7 +33,12 @@ function Has-RefuseLog($o) {
 }
 
 Describe 'manual-uninstall REFUSES a live wave with no operator selection' {
-    $o = Invoke-Upr 'manual-uninstall' @{ hosts = 'WS-REMOTE-777'; software = 'SomeApp'; dryrun = $false }
+    # confirm='UNINSTALL' since loop 2026-08-03: a LIVE uninstall is now ARMED first
+    # (Test-UprLiveUninstallArmed), so an unarmed fixture stops one gate earlier and
+    # never reaches the selection gate this Describe exists to test. Passing the word
+    # keeps the subject under test the SELECTION refusal - and incidentally proves the
+    # two gates are independent and correctly ordered (arming, then selection).
+    $o = Invoke-Upr 'manual-uninstall' @{ hosts = 'WS-REMOTE-777'; software = 'SomeApp'; dryrun = $false; confirm = 'UNINSTALL' }
     It 'returns total=0 (no fan-out)' {
         [int]$o.Result.summary.total | Should Be 0
     }
@@ -68,7 +73,8 @@ Describe 'report-uninstall REFUSES a live wave with no operator selection' {
         '99001,Microsoft Silverlight Unsupported Application,10.20.30.40,WS-REMOTE-777,,High'
     ) -join "`r`n" | Set-Content -LiteralPath $csv -Encoding UTF8
 
-    $o = Invoke-Upr 'report-uninstall' @{ report = $csv; dryrun = $false; hostclass = 'all' }
+    # confirm='UNINSTALL' for the same reason as the manual Describe above.
+    $o = Invoke-Upr 'report-uninstall' @{ report = $csv; dryrun = $false; hostclass = 'all'; confirm = 'UNINSTALL' }
 
     It 'parsed at least one finding (reached the refuse gate, not the empty-report exit)' {
         # A refusal on the summary proves findings.Count>0 AND the live gate fired;
