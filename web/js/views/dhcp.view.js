@@ -159,7 +159,25 @@
       function secHdr(t) { var h = el('div', 'j-section-h', t); h.style.marginBottom = '6px'; return h; }
       function hint(t) { var d = el('div', 'muted', t); d.style.cssText = 'font-size:11px;margin-bottom:6px'; return d; }
       function optChanged() { var v = parseInt(optSelect.value, 10); optIdInput.disabled = (v !== 0); if (v !== 0) optIdInput.value = v; }
-      function currentOptionId() { var v = parseInt(optSelect.value, 10); return v === 0 ? Math.max(1, Math.min(254, parseInt(optIdInput.value, 10) || 6)) : v; }
+      // loop 2026-08-03: this used to end in '|| 6', so a BLANK or typo'd custom option ID
+      // became 6 (006 DNS Servers) client-side. loop69 added a server-side guard that
+      // refuses exactly that on a destructive write - "the operator meant a specific option
+      // (60/66/...), typo'd, and defaulting would live-replace the scope's DNS servers"
+      // (dhcp.psm1:1271) - but the view had already turned the bad input into a perfectly
+      // valid 6, so the server never saw it and the guard could not fire. Return NaN and let
+      // the callers refuse; nothing downstream may invent an option ID.
+      function currentOptionId() {
+        var v = parseInt(optSelect.value, 10);
+        if (v !== 0) return v;
+        var raw = parseInt(optIdInput.value, 10);
+        if (isNaN(raw) || raw < 1 || raw > 254) return NaN;
+        return raw;
+      }
+      function optionIdOk() { return !isNaN(currentOptionId()); }
+      function optionIdLabel() { return optionIdOk() ? String(currentOptionId()) : '(none - enter an ID 1-254)'; }
+      function refuseBadOptionId() {
+        ctx.confirm({ title: 'No option ID', body: 'Enter a numeric custom option ID between 1 and 254. JANET will not guess one - a blank ID used to become 006 DNS Servers, which would replace the DNS servers on every selected scope.', okText: 'OK', cancelText: null });
+      }
       function setEditorEnabled(on) { loadBtn.disabled = !on; }
       // audit 2026-07-25 (fable re-audit follow-up): the loaded before-state belongs to ONE
       // option ID. Typing a new custom ID used to leave it in place, so APPLY could send the
@@ -173,7 +191,7 @@
         renderIpList();   // calls updateApplyState() - APPLY drops out with the load
         if (currentScopeId) {
           var ph = el('div'); ph.style.cssText = 'padding:6px 8px;color:var(--warn)';
-          ph.textContent = '(option ID changed - click Load Values for option ' + currentOptionId() + ')';
+          ph.textContent = '(option ID changed - click Load Values for option ' + optionIdLabel() + ')';
           ipList.appendChild(ph);
         }
       }
@@ -184,7 +202,7 @@
       }
       function updateBulk() {
         var n = Object.keys(checked).filter(function (k) { return checked[k]; }).length;
-        bulkOptEcho.textContent = 'Option: ' + currentOptionId() + '  |  ' + n + ' checked';
+        bulkOptEcho.textContent = 'Option: ' + optionIdLabel() + '  |  ' + n + ' checked';
         var en = connected && n > 0 && !writeActive;
         appendBtn.disabled = prependBtn.disabled = removeBulkBtn.disabled = !en;
       }
@@ -241,7 +259,7 @@
         // new scope's label, then show a transient loading placeholder until the
         // load row arrives (replaced by renderIpList / the failed-load placeholder).
         originalValues = []; workingValues = []; selIdx = -1; loadedOptionId = null; renderIpList();
-        var ph = el('div'); ph.style.cssText = 'padding:6px 8px;color:var(--muted)'; ph.textContent = 'Loading option ' + currentOptionId() + ' on ' + currentScopeId + '...';
+        var ph = el('div'); ph.style.cssText = 'padding:6px 8px;color:var(--muted)'; ph.textContent = 'Loading option ' + optionIdLabel() + ' on ' + currentScopeId + '...';
         ipList.appendChild(ph);
         doLoad(true);
       }
@@ -357,6 +375,7 @@
           applyBtn.disabled = true; revertBtn.disabled = true;
           return;
         }
+        if (!optionIdOk()) { refuseBadOptionId(); return; }
         var opt = currentOptionId();
         var loadErr = false;   // a failed read must NOT masquerade as an empty/unset option
         // Nothing is loaded until THIS read lands: an in-flight (or failed) load must never
@@ -407,7 +426,8 @@
         // audit 2026-07-25 (fable re-audit follow-up): belt-and-braces behind the disabled
         // button - expectedOld below is only meaningful for the option it was READ from, so a
         // commit whose ID no longer matches the loaded one is refused here, not sent.
-        if (!optionLoaded()) { ctx.confirm({ title: 'Option not loaded', body: 'The option ID changed since the values were loaded. Click Load Values for option ' + currentOptionId() + ' first - APPLY sends the loaded before-state as its concurrency guard.', okText: 'OK', cancelText: null }); return; }
+        if (!optionLoaded()) { ctx.confirm({ title: 'Option not loaded', body: 'The option ID changed since the values were loaded. Click Load Values for option ' + optionIdLabel() + ' first - APPLY sends the loaded before-state as its concurrency guard.', okText: 'OK', cancelText: null }); return; }
+        if (!optionIdOk()) { refuseBadOptionId(); return; }
         var opt = currentOptionId(), removeOpt = removeOptCb._cb.checked, dry = dryCbSingle._cb.checked;
         // audit 2026-07-24 (finding 1): this was ctx.confirm, which silently IGNORES
         // confirmWord - and the run below sent no `confirm` param at all, so the engine's
@@ -466,6 +486,7 @@
         if (!ips.length || bad.length) { ctx.confirm({ title: 'Check IPs', body: ips.length ? ('Not valid IPv4: ' + bad.map(esc).join(', ')) : 'Enter at least one IP.', okText: 'OK', cancelText: null }); return; }
         var srv = activeServer(false);
         if (!srv) return;   // audit 2026-07-24: never bulk-write to a server other than the connected one
+        if (!optionIdOk()) { refuseBadOptionId(); return; }
         var dry = dryCbBulk._cb.checked, opt = currentOptionId();
         var label = { append: 'APPEND to bottom of', prepend: 'PREPEND to top of', remove: 'REMOVE from' }[mode];
         // audit 2026-07-24 (finding 1): ctx.confirm ignores confirmWord and no `confirm`

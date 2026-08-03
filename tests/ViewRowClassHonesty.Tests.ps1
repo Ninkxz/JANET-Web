@@ -62,6 +62,22 @@ Describe 'dhcp - a REFUSED scope is not tallied as a change' {
         ($src -match "else if \(st !== 'Changed' && st !== 'WouldChange'\)") | Should Be $true
         ($src -match "REFUSED/UNKNOWN")                                      | Should Be $true
     }
+    # loop 2026-08-03: currentOptionId() ended in '|| 6', so a BLANK or typo'd custom
+    # option ID became 6 (006 DNS Servers) CLIENT-SIDE. loop69 had added a server-side
+    # guard refusing exactly that on a destructive write - "defaulting would live-replace
+    # the scope's DNS servers" (dhcp.psm1:1271) - but the view handed the server a
+    # perfectly valid 6, so that guard could never fire. Fifth instance of a guard added
+    # on one side while the thing that defeats it was left on the other.
+    It 'the view never invents an option ID (no silent default to 6)' {
+        ($src -match "parseInt\(optIdInput\.value, 10\) \|\| 6") | Should Be $false
+        ($src -match 'function optionIdOk\(\)')                  | Should Be $true
+        # all three senders (load, apply, bulk) refuse rather than guess
+        (@([regex]::Matches($src, 'if \(!optionIdOk\(\)\) \{ refuseBadOptionId\(\); return; \}')).Count) | Should Be 3
+    }
+    It 'the server-side guard it was defeating is still there' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+        ($mod -match 'refusing a destructive write rather than defaulting to option 6') | Should Be $true
+    }
     It 'the module side it mirrors is still fail-closed (both halves must agree)' {
         $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
         ($mod -match "elseif \(\`$status -eq 'NoChange'\) \{ \`$nochange\+\+ \}") | Should Be $true
