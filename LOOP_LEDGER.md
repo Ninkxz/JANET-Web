@@ -100,7 +100,119 @@ stopped one gate early and never reached the one it was testing.*
 
 ---
 
+## Session 2026-08-03 (continuation)
+
+### FIXED
+
+**P1 — scan-compare scored an UNSCANNED host as REMEDIATED, and that write stamps
+`Patched`.** `modules\JanetWeb.reports.psm1:1642`
+`Compare-AcasScans` defined REMEDIATED as "this baseline key is not in the
+comparison", with the only demotion being a cross-domain short-name collision.
+Nothing checked whether the **host itself** appeared in the comparison scan.
+A box powered off during the after-patch window — or dropped by a scoped export —
+had **every** baseline finding scored REMEDIATED, and unlike the other consumers
+this path MUTATES: `acas-apply-remediated` (`:5975-5984`) then stamps
+`Status='Patched'` / `PatchedBy='Scan Comparison'`. The fleet reads clean on
+evidence never collected.
+**Textbook sweep failure:** `campaign-verify:5621` already guards exactly this
+with a NOT-SCANNED bucket, its comment reading *"loop21 P1 … would else
+FALSE-CLOSE"*. The guard was written once and never swept to the sibling that
+writes. Same rule, same helper, same conservative direction now. NOT SCANNED is
+its own Delta, so the apply filter (`Delta -eq 'REMEDIATED'`) excludes it with no
+change needed there; it is counted, surfaced in a warn log, and filterable
+(AMBIGUOUS was never filterable either — added while there). reports 2.15.2 →
+2.16.0. New behavioural test `Reports.CompareNotScanned.Tests.ps1`.
+*Inherited trade-off, same as the precedent: a host scanned and now 100% clean
+also has no comparison rows, so it lands in NOT SCANNED. That is the safe error —
+it asks for a re-scan instead of closing a finding blind.*
+
+**P3 — a cancelled or unverified host was painted with the success colour.**
+`web\js\views\pkginstall.view.js:58`, `web\js\views\remoteadmin.view.js:16,200`
+pkginstall mapped `Skipped` to `row-ok` (green) though the module emits it for a
+never-dispatched host and for an MSI cancelled in flight whose outcome its own
+comment calls *"genuinely UNKNOWN"*. remoteadmin had no `skipped` case at all, so
+the wrong-box abort — the row that most needs to stand out — was the blandest in
+the grid. New class-scoped `ViewRowClassHonesty.Tests.ps1` sweeps every view for
+the shape. secureboot is a **declared exception** (its `Skipped` = already-enabled
+/ already-pending, the desired state) and is pinned so nobody "completes" the
+sweep by breaking it.
+
+**P3 — a lost exit code booked a removed product as FAIL.**
+`modules\JanetWeb.upr.psm1:1057`
+`Start-Process -Wait -PassThru` can return `ExitCode=$null` inside a remote
+PSSession (handle reaped early); `$null -eq 0` is false, so a genuinely removed
+product came back `FAIL (MSI exit )` and skipped the registry verify — the only
+step that proves removal. Now retried once, then reported UNKNOWN and routed
+**into** the fail-closed verify, which arbitrates (still present ⇒ FAIL,
+unreadable ⇒ FAIL), so it cannot manufacture a clean. upr 1.2.13 → 1.2.14.
+*Deliberately NOT converted to pkginstall's `ProcessStartInfo` pattern: .NET
+Framework's `ProcessStartInfo` has no `ArgumentList`, so it needs a hand-quoted
+argument STRING — and these args come from a registry UninstallString a low-priv
+user can plant. Discrete tokens are the whole LPE defence here; a quoting bug
+would undo it.*
+
+### Checked and clean (do not re-investigate)
+
+- 37 test files lack a UTF-8 BOM, but every one is pure ASCII, so the missing BOM
+  cannot mis-decode under PS 5.1. All shipping code in `modules\` and `server\`
+  has its BOM.
+- `reports` correctness audit: SLA day-math and DUE-SOON/OVERDUE boundaries,
+  ledger carry/prune, divide-by-zero guards on every percentage, POA&M column
+  alignment (26/26), IAVM multi-bulletin split, ping tri-state, burndown
+  ordering, `[Int64]` on lastlogontimestamp, TryParse throughout (no
+  culture-bare `::Parse`).
+- `reports` wiring audit: all 41 manifest actions have dispatcher branches, all
+  41 are invoked by the view, every grid column binds to a property the module
+  emits. No unreachable branches, no blank-column bindings.
+
+---
+
 ### OPEN — carried to a later session
+
+**P2 — `Read-ReportsAuditTouchIndex` swallows every read failure.**
+`modules\JanetWeb.reports.psm1:1793-1826` — `catch { $data = @() }` on
+Import-Csv plus `-EA SilentlyContinue` and bare `catch {}` on all three directory
+walks, so `scan-closure-proof` renders confident causation numbers over audit
+files it never read. One denied operator folder yields zero touches for those
+hosts: a host JANET *did* patch is reported "closed by something else", and a
+still-open finding on a touched host drops off the next-day worklist. This is the
+same "denied path renders as no activity" defect v2.15.2 fixed in squadron-rollup
+with an error bag (`:6964-6972`) — this sibling reader was left on the old
+pattern. *Another instance of the sweep failure; worth doing next.*
+
+**P2 — import dedupe keys on the RAW hostname while every consumer normalizes.**
+`modules\JanetWeb.reports.psm1:4582-4587` — the import dedupe uses
+`Hostname|PluginID` raw, but ledger/compare/apply/CORA all fold the host through
+`Get-ReportsAuditHostKey`. One physical box carried as both `WEB01` and
+`web01.dom` keeps two live rows per plugin, inflating open counts, SLA aging and
+burndown totals while `UniqueHosts` (normalized) stays right — so VPH is skewed
+in both directions at once.
+
+**P3 — `Categorize-Finding` matches unanchored substrings.**
+`modules\JanetWeb.reports.psm1:694,696` — `word` matches "password", `edge`
+matches "knowledge", bare `access` matches "restrict access…". A blank-admin-
+password finding buckets as `Office` and the Remediation Router then offers to
+fix it with an Office update. Feeds Router, Planner, Third-Party Catalog,
+campaigns and the command brief identically.
+
+**P2 — "All weeks" weekly CSV export is unreachable from the UI.**
+`reports.view.js:1731`, `psm1:4745-4791` — the view never sends `OutputPath` (no
+field exists), so the AllWeeks branch ships each CSV only inside `rows[].Csv`
+while the ArtifactBar reads only `summary.csv`. Operator ticks "All weeks",
+clicks Export, gets zero files and a log line telling them to supply an
+OutputPath the UI cannot supply.
+
+**P3 — streamed rows nobody renders.** `campaign-verify` streams up to 800
+per-finding verdict rows (STILL-OPEN / MANUAL-ATTESTED / NOT-SCANNED /
+AMBIGUOUS) and `export-poam` streams 500 preview rows, both to subscriptions with
+no `row` handler and no grid — the actionable part of a verify is computed,
+shipped, and dropped. Also: `sla-aging` builds `summary.perHost` that nothing
+reads, and three actions declare a `colorblind` param the view never sends.
+
+**P3 — IAVM add wipes operator input on a rejected CVE.** `psm1:4635-4642` /
+`view:625-629` — invalid CVE returns `invalid=1` with no `saveError`; the view
+checks only `saveError`, so it clears the typed CVE/IAVA/title and banners
+"0 mapping(s)" as if it worked.
 
 **P3 — pre-verification state changes happen before the wrong-box guard.**
 `modules\JanetWeb.pkginstall.psm1:308-372, :376-552` — the DCOM WinRM bootstrap
