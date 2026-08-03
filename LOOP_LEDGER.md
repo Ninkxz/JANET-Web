@@ -167,18 +167,121 @@ would undo it.*
 
 ---
 
+## Session 2026-08-03 (2-hour block, 15:45→)
+
+### FIXED
+
+**P1 — an armed restart wave rebooted the fleet ~24 HOURS LATE.**
+`server\JanetWeb.Server.ps1` (arm route) + `ConvertTo-JanetWebArmFireAt`
+A bare `HH:mm` restart time is ambiguous — it means *the next 02:00* — and it was
+resolved **twice, at two different moments**: once at arm time to compute
+`FireAt`, then again by the engine at **fire** time (`restart.psm1:1608`), where
+today's 02:00 has just become seconds-in-the-past, so the engine rolled it to
+**tomorrow**. Burst then computed `/t = (tomorrow 02:00 − now) ≈ 86400` and issued
+`shutdown /r /t 86400` to every host; rows read *"Dispatched / OK (rc=0)"* and the
+fleet actually rebooted the **next night**, unattended, a day after the consent
+prompts ran. Time-gated was worse — every pool worker held in-runspace ~24 h.
+The view pre-fills that field in bare `HH:mm` (`restart.view.js:277`), so this was
+the **default** path for delayed start, not an exotic input.
+Fixed by resolving the ambiguous form **once**, at arm time, storing the absolute
+datetime; a `restartTime` that already carries a date is unambiguous and is left
+exactly as supplied (an API caller may legitimately arm at X to reboot at Y). The
+resolver also now accepts `HH:mm:ss`, because the engine's roll regex is
+unanchored and matched that form too while the resolver did not.
+*Both audit agents found this independently; verified end-to-end in source before
+acting.* restart 1.5.0-beta13 → beta14. New `Restart.ArmedTimeResolution.Tests.ps1`
+(12 assertions, including two that prove the roll WOULD have fired).
+
+**P2 — a refused restart wave rendered as a completed one.**
+`modules\JanetWeb.restart.psm1:1613`, `web\js\views\restart.view.js:873`
+An unparseable/blank restart time refuses the whole wave, but returned a summary
+indistinguishable from a completed run — the banner read *"Dispatch complete:
+0 sent, 0 declined, 0 failed, 0 skipped-server."* An operator who typed RESTART
+and armed a wave was told it completed when nothing was dispatched. Reachable by
+design: the view's RunBar guard explicitly allows a blank time in rolling mode
+(`view:443`) because rolling genuinely does not use it (`psm1:889`), but the engine
+parses it unconditionally before the mode branch. Now returns `rejected=$true`
+with a reason, and the banner says REFUSED.
+*Deliberately did NOT "let rolling through without a time" — that would make a
+wave which currently reboots NOTHING start rebooting a fleet. See OPEN below.*
+
+**P2 — `Read-ReportsAuditTouchIndex` swallowed every read failure.**
+`modules\JanetWeb.reports.psm1:1799` — `catch { $data = @() }` on Import-Csv plus
+`-EA SilentlyContinue` inside bare `catch {}` on all three directory walks, so
+`scan-closure-proof` rendered confident causation over audit files it never read.
+One denied operator folder yields zero touches: a host JANET *did* patch reads
+"closed by something else", and a still-open finding on a touched host drops off
+the next-day worklist. Same "denied path renders as no activity" defect v2.15.2
+fixed in squadron-rollup with an error bag (`:6993`) — the sibling reader was left
+on the old pattern. **Third instance of the sweep failure this week.** Now carries
+`Errors`/`ErrorPaths`, an unreachable root counts as a failure (not an empty
+trail), and the caller raises an error event plus `readFailed` in the summary and
+appends INCOMPLETE to the headline. reports 2.16.0 → 2.16.1. New behavioural
+`Reports.ClosureProofReadFailure.Tests.ps1` (locks a real CSV).
+
+### Verified clean in the `restart` audit (do not re-report)
+
+Self-guard on dispatch and test-single-host (shortname/FQDN/DNS IPs/every bound
+NIC IPv4/loopback); wrong-box guard runs ON the remote in all three shutdown
+blocks and the abort worker and fails **closed**; dispatch confirm word is
+server-side `-cne 'RESTART'` and demanded again at arm time; `Get-RrsInt` already
+avoids the TryParse-zeroed-ref trap the siblings had; host tokens charset-
+whitelisted and the `/c` message CommandLineToArgvW-quoted; single arm slot nulled
+before fire (no double-fire), arm dies with session-end/cred-clear/restart/stale
+clock; cancel truly stops undispatched hosts; all four `destructive=$false`
+actions are genuinely read-only.
+
+---
+
 ### OPEN — carried to a later session
 
-**P2 — `Read-ReportsAuditTouchIndex` swallows every read failure.**
-`modules\JanetWeb.reports.psm1:1793-1826` — `catch { $data = @() }` on
-Import-Csv plus `-EA SilentlyContinue` and bare `catch {}` on all three directory
-walks, so `scan-closure-proof` renders confident causation numbers over audit
-files it never read. One denied operator folder yields zero touches for those
-hosts: a host JANET *did* patch is reported "closed by something else", and a
-still-open finding on a touched host drops off the next-day worklist. This is the
-same "denied path renders as no activity" defect v2.15.2 fixed in squadron-rollup
-with an error bag (`:6964-6972`) — this sibling reader was left on the old
-pattern. *Another instance of the sweep failure; worth doing next.*
+**P2 — OPERATOR DECISION — `consentFailMode='skip'` is ignored for No-User hosts.**
+`modules\JanetWeb.restart.psm1:858` — `elseif ($launchStatus -eq 'No-User') {
+$r.ConsentState = 'No-User'; $proceed = $true }` with no `consentFailMode` check,
+unlike the Launch-Failed / No-Response / Agent-Failed branches which all honour it.
+The manifest labels the option "If consent prompt fails to run" and the view's
+option is literally "Skip the host", so an operator who picks skip to reboot only
+machines whose user approved gets a logged-out lab of 50 boxes rebooted anyway.
+**Fixing it changes which machines reboot — that is the operator's call, not mine.**
+Recommendation: honour `skip` here for consistency with its three siblings.
+
+**P2 — OPERATOR DECISION — rolling mode disagrees with the engine about the restart time.**
+The view permits a blank time in rolling mode; the engine refuses the wave. The
+refusal is now honest (above), but the contract disagreement stands. Letting
+rolling through would turn a wave that currently reboots nothing into a live fleet
+reboot, so it waits. Alternative, conservative fix: make the view require a time in
+rolling mode too, so the refused state is unreachable.
+
+**P3 — `test-single-host` live reboot has no server-side confirm word.**
+`modules\JanetWeb.restart.psm1:1866-1917` — the typed RESTART gate exists only in
+the browser (`restart.view.js:604`). Same class as the upr uninstall gap closed on
+operator approval this session; adding it changes the API contract (the view must
+send the word), so it waits for the same call.
+
+**P3 — consent stage runs before the wrong-box check.**
+`restart.psm1:621-644, 689-780` — the pending-reboot probe, the file drop under
+`ProgramData\JANET\Consent`, `schtasks /Create /Run` and the interactive popup all
+execute on the dialled box before any identity check; only the final shutdown block
+verifies COMPUTERNAME. Stale DNS means a user on an untargeted machine gets a
+full-screen "Scheduled System Restart" prompt and task artifacts. The reboot itself
+still fails closed. (Same shape as the open pkginstall finding below.)
+
+**P3 — cancelled hosts counted twice, differently.** `restart.psm1:1347` tallies
+each Cancelled row as `failCount` (feeding `summary.failed`) while
+`restart.view.js:38` buckets Cancelled as *skipped* — cancel a 100-host wave with
+40 unstarted and the banner says "40 failed" while the FAILED card excludes them.
+
+**P3 — verify-reboots final rows contradict the streamed rows on cancel.**
+`restart.psm1:2069-2080` rebuilds final rows from the PRE-cancel state, so a
+re-attach or export shows no trace of the cancellation.
+
+**P3 — hidden param.** `restart.psm1:1807` reads `fanoutDeadlineSeconds`
+("operator-overridable") but it is in neither the manifest nor the view.
+
+**P3 — dead view code.** `restart.view.js:20-41` claims seven in-flight engine
+statuses the engine never emits, so the PENDING/CONSENT/IN-FLIGHT stat cards can
+never be nonzero — during a live consent wave the bar shows nothing, because rows
+only arrive when a worker finishes.
 
 **P2 — import dedupe keys on the RAW hostname while every consumer normalizes.**
 `modules\JanetWeb.reports.psm1:4582-4587` — the import dedupe uses
