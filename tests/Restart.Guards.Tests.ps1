@@ -74,8 +74,8 @@ Describe 'restart shutdown-error hint delegates detail text to the shared engine
         ($src -match "return 'WinRM auth: 0x80090351 SEC_E_NO_AUTHENTICATING_AUTHORITY") | Should Be $false
         ($src -match "return 'Target not in the WinRM TrustedHosts")                     | Should Be $false
     }
-    It 'restart manifest bumped to 1.5.0-beta13 (audit 2026-07-25 fable re-audit follow-up)' {
-        (& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.5.0-beta13'
+    It 'restart manifest bumped to 1.5.0-beta14 (loop 2026-08-03 P1: armed-wave time resolved once, at arm time)' {
+        (& $script:Mod { (Get-JanetToolManifest).version }) | Should Be '1.5.0-beta14'
     }
 }
 

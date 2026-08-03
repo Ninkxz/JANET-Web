@@ -70,7 +70,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'restart'
         name     = 'Restart Scheduler'
-        version  = '1.5.0-beta13'   # audit 2026-07-25 (fable re-audit follow-up): /c message sanitiser strips NUL/C0 controls, exceptions parse tolerates '#'/';' comments + '(annotation)' suffixes before failing closed; Restart.Guards.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.5.0-beta14' # loop 2026-08-03 P1: an armed wave whose restart time was a bare HH:mm was re-resolved AT FIRE TIME and rolled +1 day, so the fleet rebooted ~24h late while the grid read "Dispatched OK" (resolved once at arm time now, server-side); plus a refused wave (unparseable/blank time) no longer renders as "Dispatch complete". Prior 1.5.0-beta13   # audit 2026-07-25 (fable re-audit follow-up): /c message sanitiser strips NUL/C0 controls, exceptions parse tolerates '#'/';' comments + '(annotation)' suffixes before failing closed; Restart.Guards.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Lifecycle'
         summary  = 'Mass scheduled restart for Windows fleets - parallel shutdown.exe /r over WinRM with optional user consent, ping gate, abort, and reboot verification.'
         actions  = @(
@@ -1611,8 +1611,22 @@ function Invoke-JanetToolAction {
                 }
             }
             if ($null -eq $restartTime) {
-                & $send @{ type='log'; level='warn'; text="Could not parse restartTime '$restartRaw'." }
-                return @{ rows=@(); summary=@{ total=$targets.Count } }
+                # loop 2026-08-03: this REFUSES the whole wave, but it used to say so with a
+                # single warn line and return a summary indistinguishable from a completed
+                # run - so the view's final banner read "Dispatch complete: 0 sent, 0 declined,
+                # 0 failed, 0 skipped-server." An operator who typed RESTART and armed a wave
+                # was told it completed when nothing had been dispatched and no host would
+                # reboot. Reachable by design: the view's RunBar guard explicitly allows a
+                # BLANK restart time in rolling mode (restart.view.js:443) because rolling
+                # genuinely does not use it (:889), but the engine parses it unconditionally
+                # here, before the mode branch. Say REFUSED, loudly, and carry rejected=$true
+                # so the banner cannot claim completion.
+                # NOTE: deliberately NOT "let rolling through without a time" - that would make
+                # a wave that currently reboots NOTHING start rebooting a fleet. Which machines
+                # reboot is the operator's call; see LOOP_LEDGER.md.
+                $why = if ([string]::IsNullOrWhiteSpace($restartRaw)) { 'no restart time was supplied' } else { "could not parse restartTime '$restartRaw'" }
+                & $send @{ type='error'; text="Dispatch REFUSED - $why. NOTHING was dispatched; no host will reboot. Rolling mode ignores the restart time but the engine still requires a parseable one - supply any valid HH:mm and re-run." }
+                return @{ rows=@(); summary=@{ total=$targets.Count; sent=0; rejected=$true; rejectReason=$why } }
             }
 
             $leadMinutes = Get-RrsInt $Params['leadMinutes'] 15 0 1440

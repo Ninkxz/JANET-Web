@@ -870,6 +870,13 @@
           final: function (res) {
             recomputeStats();
             var sm = (res && res.summary) || {};
+            // loop 2026-08-03: a REFUSED wave (engine returned rejected) must never render as
+            // "Dispatch complete" - nothing was dispatched and no host will reboot.
+            if (sm.rejected) {
+              refs.dispatchLog.banner('Dispatch REFUSED - ' + (sm.rejectReason || 'the engine rejected the wave') + '. Nothing was dispatched.');
+              refreshDispatchButtons();
+              return;
+            }
             refs.dispatchLog.banner('Dispatch complete: ' + (sm.sent || 0) + ' sent, ' + (sm.declined || 0) + ' declined, ' + (sm.failed || 0) + ' failed, ' + (sm.skipped || 0) + ' skipped-server' + ((sm.dryRun || 0) ? ', ' + sm.dryRun + ' dry-run' : '') + ((sm.noPending || 0) ? ', ' + sm.noPending + ' no-pending' : '') + '.');
             refreshDispatchButtons();
             // auto-open the Reboot Verification Monitor on a real run that dispatched at least one host

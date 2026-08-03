@@ -185,10 +185,15 @@ function ConvertTo-JanetWebArmFireAt {
     param([string]$Raw, [datetime]$Now = (Get-Date))
     $s = ([string]$Raw).Trim()
     if ([string]::IsNullOrWhiteSpace($s)) { return $null }
-    if ($s -match '^(\d{1,2}):(\d{2})$') {
+    # loop 2026-08-03: seconds are accepted too. The engine's day-roll regex
+    # (restart.psm1:1608) is unanchored - '^\s*\d{1,2}:\d{2}' matches 'HH:mm:ss' as
+    # well - so an API caller arming with seconds hit the same 24h roll this resolver
+    # exists to pre-empt. One resolver, one rule, both bare forms.
+    if ($s -match '^(\d{1,2}):(\d{2})(?::(\d{2}))?$') {
         $hh = [int]$Matches[1]; $mm = [int]$Matches[2]
-        if ($hh -gt 23 -or $mm -gt 59) { return $null }
-        $d = Get-Date -Year $Now.Year -Month $Now.Month -Day $Now.Day -Hour $hh -Minute $mm -Second 0 -Millisecond 0
+        $ss = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
+        if ($hh -gt 23 -or $mm -gt 59 -or $ss -gt 59) { return $null }
+        $d = Get-Date -Year $Now.Year -Month $Now.Month -Day $Now.Day -Hour $hh -Minute $mm -Second $ss -Millisecond 0
         if ($d -le $Now) { $d = $d.AddDays(1) }
         return $d
     }
@@ -1545,6 +1550,29 @@ function Start-JanetWebServer {
                     if ([string]::IsNullOrWhiteSpace($fireRaw)) { $fireRaw = [string]$armParams['restartTime'] }
                     $chk = Test-JanetWebArmRequest -Params $armParams -FireAtRaw $fireRaw -Now (Get-Date) -MaxHours $armMaxHours
                     if (-not $chk.ok) { & $writeJson $resp @{ error = [string]$chk.error } 400; continue }
+                    # loop 2026-08-03 P1 (fleet rebooted 24h late): a BARE 'HH:mm' restartTime
+                    # is AMBIGUOUS - it means "the next 02:00" - and it was being resolved
+                    # TWICE, at two different moments. Once here, to compute FireAt. Then
+                    # AGAIN by the engine at FIRE time (restart.psm1:1608), where today's
+                    # 02:00 has just become seconds-in-the-PAST, so the engine rolled it to
+                    # TOMORROW. Burst then computed /t = (tomorrow 02:00 - now) ~= 86400 and
+                    # issued 'shutdown /r /t 86400' to every host; the rows read
+                    # "Dispatched / OK (rc=0)" and the fleet actually rebooted the NEXT night,
+                    # unattended, long after the operator had gone. Time-gated was worse - each
+                    # pool worker held in-runspace for ~24h. The view pre-fills this field in
+                    # bare HH:mm form, so it was the DEFAULT path, not an edge case.
+                    # Resolve the ambiguous form ONCE, here at arm time, to the absolute moment
+                    # the operator meant. Same resolver, so 'the next 02:00' is unchanged.
+                    # A restartTime that already carries a DATE is unambiguous - the engine's
+                    # roll cannot fire on it - so it is left exactly as supplied, preserving an
+                    # API caller's right to arm at X and reboot at Y.
+                    if ($armParams.ContainsKey('restartTime')) {
+                        $rtRaw = ([string]$armParams['restartTime']).Trim()
+                        if ($rtRaw -match '^\d{1,2}:\d{2}(:\d{2})?$') {
+                            $rtAbs = ConvertTo-JanetWebArmFireAt -Raw $rtRaw -Now (Get-Date)
+                            if ($rtAbs) { $armParams['restartTime'] = ([datetime]$rtAbs).ToString('yyyy-MM-ddTHH:mm:ss') }
+                        }
+                    }
                     $newArm = New-JanetWebArmedRestart -Params $armParams -FireAt ([datetime]$chk.fireAt) `
                                 -SessionId ([string]$state.LogCtx.SessionId) -Operator ([string]$state.LogCtx.Operator) `
                                 -DryRun ([bool]$chk.dryRun) -Mode ([string]$armBody.mode)
