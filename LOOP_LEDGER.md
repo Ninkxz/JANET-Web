@@ -1,5 +1,24 @@
 # JANET Web — maintenance loop ledger
 
+> ## ⚠ CROSS-FORK: the P1 false-close is UNFIXED in the other two forks
+> *Verified read-only 2026-08-03. Fixed in JANET Web (`bc4184814`); NOT fixed in:*
+>
+> - **SECRET / SIPR** — `X:\shh-JANET\modules\JanetSec.reports.psm1`. Same
+>   `Compare-AcasScans` (REMEDIATED = baseline-only, no host-presence check), and it
+>   writes `$finding.PatchedBy = 'Scan Comparison'` at `:4794`. **Worse than Web was:**
+>   it never received the AMBIGUOUS cross-domain collision guard either (zero
+>   occurrences of `AMBIGUOUS`), so it lacks loop39/40 as well. Tree clean at `1211272`.
+> - **Desktop** — `X:\J.A.N.E.T\Tools\ReportsTool_2.14.12.ps1`. Its own header
+>   documents the defect as the design: *"as REMEDIATED (baseline key absent from
+>   comparison)"*. Zero host-presence guard, zero AMBIGUOUS guard, writes
+>   `PatchedBy='Scan Comparison'`.
+>
+> A host powered off during the after-patch scan has every finding recorded as
+> patched, on evidence never collected. **This is the top item for the next block.**
+> Desktop needs the versioned-file + archive + `JANET_Config.json` repoint dance;
+> SECRET needs its own suite run. Neither is a five-minute port — do it deliberately.
+
+
 Running list of findings from unattended audit/fix sessions. Severity: P1 (acts
 wrongly / unsafe / suite-blocking), P2 (wrong result in a reachable case), P3
 (cosmetic, dead code, hygiene).
