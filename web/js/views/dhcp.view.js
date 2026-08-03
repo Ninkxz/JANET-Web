@@ -516,6 +516,26 @@
             else if (st === 'Cancelled') { er++; log.append({ text: '  [' + sid + '] cancelled by operator.', level: 'warn' }); }
             else if (/nochange/i.test(st) || st === 'NoChange') { nc++; log.append({ text: '  [' + sid + '] no change (already in desired state).', level: 'dim' }); }
             else if (/removed/i.test(st)) { ch++; log.append({ text: '  [' + sid + '] option removed (list now empty).', level: 'ok' }); }
+            // loop 2026-08-03: this catch-all used to be OPEN - anything unrecognised was
+            // counted as a CHANGE and logged green. The engine's own 'ReadError' refusal
+            // (it declined to write because it could not read the current value) matched no
+            // branch above, so a scope JANET explicitly REFUSED to touch rendered as
+            // "0 -> 0 value(s)" at level ok, and the tally said "0 error(s)".
+            // loop65 fixed exactly this ON THE MODULE SIDE (dhcp.psm1:1062-1068, "Anything
+            // that is not a change or a genuine no-change is an error") and the view was
+            // never swept, so the two sides have been contradicting each other since: the
+            // module audits a Failure while the operator's log shows green.
+            // Fail CLOSED here too - only the four success statuses the engine actually
+            // emits count as a change.
+            // Only 'Changed' and 'WouldChange' can still reach here: Error/Stale/Cancelled/
+            // NoChange are handled above, and /removed/i already absorbs both Removed and
+            // WouldRemove. The engine emits no other success status (dhcp.psm1 assigns
+            // '', Cancelled, Changed, Error, NoChange, ReadError, Removed, Stale, plus
+            // WouldChange/WouldRemove) - so an empty or unrecognised status is a refusal.
+            else if (st !== 'Changed' && st !== 'WouldChange') {
+              er++;
+              log.append({ text: '  [' + sid + '] REFUSED/UNKNOWN (' + (st || 'no status') + '): ' + (r.Error || 'nothing was written to this scope.'), level: 'err' });
+            }
             else {
               ch++;
               var detail;

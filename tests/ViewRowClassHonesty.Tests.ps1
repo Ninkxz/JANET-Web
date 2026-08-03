@@ -48,6 +48,27 @@ Describe 'remoteadmin - the wrong-box abort is visible' {
     }
 }
 
+Describe 'dhcp - a REFUSED scope is not tallied as a change' {
+    $src = Get-ViewSource 'dhcp.view.js'
+
+    # loop 2026-08-03: the bulk row handler's catch-all was OPEN - anything unrecognised
+    # was counted as a change and logged green. The engine's own 'ReadError' refusal (it
+    # declined to write because it could not read the current value) matched no branch, so
+    # a scope JANET explicitly REFUSED to touch rendered "0 -> 0 value(s)" at level ok and
+    # the tally said "0 error(s)". loop65 had already fixed exactly this ON THE MODULE SIDE
+    # (dhcp.psm1:1062-1068) and the view was never swept - the two sides contradicted each
+    # other, module auditing a Failure while the operator saw green.
+    It 'the catch-all fails CLOSED - only the engine success statuses count as a change' {
+        ($src -match "else if \(st !== 'Changed' && st !== 'WouldChange'\)") | Should Be $true
+        ($src -match "REFUSED/UNKNOWN")                                      | Should Be $true
+    }
+    It 'the module side it mirrors is still fail-closed (both halves must agree)' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.dhcp.psm1') -Raw
+        ($mod -match "elseif \(\`$status -eq 'NoChange'\) \{ \`$nochange\+\+ \}") | Should Be $true
+        ($mod -match "else \{ \`$errs\+\+ \}")                                    | Should Be $true
+    }
+}
+
 Describe 'no view paints an unknown-outcome status as success' {
 
     # The sweep. Any view that maps a status whose NAME says the work did not
