@@ -38,7 +38,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.16.0' # loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
+        version  = '2.16.1' # loop 2026-08-03 (c) P2: Read-ReportsAuditTouchIndex no longer swallows read failures - an unreadable audit path is reported, so scan-closure-proof cannot render confident causation ("closed by something else") over files it never read. Prior 2.16.0 - loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -1807,18 +1807,39 @@ function Read-ReportsAuditTouchIndex {
     )
     $index = @{}
     $files = 0; $rows = 0; $capped = $false
-    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root -ErrorAction SilentlyContinue)) {
-        return @{ Index = $index; Files = 0; Rows = 0; Capped = $false }
+    # loop 2026-08-03: every walk and the Import-Csv below used to fail SILENTLY -
+    # `-ErrorAction SilentlyContinue` inside a bare `catch {}`, and `catch { $data = @() }`.
+    # A denied operator folder or a locked TouchedHosts CSV therefore contributed ZERO
+    # touches and said nothing, so scan-closure-proof rendered CONFIDENT causation over
+    # files it never read: a host JANET really did patch reads "closed by something else",
+    # and a still-open finding on a touched host silently drops off the next-day worklist.
+    # Same error-bag contract squadron-rollup adopted at :6993 (audit 2026-07-25) and
+    # history.psm1 before it. Keys are Errors/Messages, NOT 'Count' - a hashtable's real
+    # .Count property would shadow that key.
+    $readBag = @{ Errors = 0; Messages = (New-Object System.Collections.ArrayList) }
+    $addReadErr = {
+        param([string]$Path, $Err)
+        $readBag.Errors++
+        if ($readBag.Messages.Count -lt 25) {
+            $m = if ($Err) { [string]$Err.Exception.Message } else { 'not readable' }
+            [void]$readBag.Messages.Add(("{0} ({1})" -f $Path, $m))
+        }
     }
-    if (-not $WantHosts -or $WantHosts.Count -eq 0) { return @{ Index = $index; Files = 0; Rows = 0; Capped = $false } }
+    $emptyRes = { @{ Index = $index; Files = 0; Rows = 0; Capped = $false; Errors = [int]$readBag.Errors; ErrorPaths = @($readBag.Messages) } }
+    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root -ErrorAction SilentlyContinue)) {
+        # An unreachable ROOT is itself a read failure, not an empty audit trail.
+        if (-not [string]::IsNullOrWhiteSpace($Root)) { & $addReadErr $Root $null }
+        return (& $emptyRes)
+    }
+    if (-not $WantHosts -or $WantHosts.Count -eq 0) { return (& $emptyRes) }
 
     $toolDirs = @()
-    try { $toolDirs = @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '_Rollup' }) } catch {}
+    try { $toolDirs = @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction Stop | Where-Object { $_.Name -ne '_Rollup' }) } catch { & $addReadErr $Root $_ }
     foreach ($td in $toolDirs) {
         if ($capped) { break }
         $toolName = $td.Name
         $opDirs = @()
-        try { $opDirs = @(Get-ChildItem -LiteralPath $td.FullName -Directory -ErrorAction SilentlyContinue) } catch {}
+        try { $opDirs = @(Get-ChildItem -LiteralPath $td.FullName -Directory -ErrorAction Stop) } catch { & $addReadErr $td.FullName $_ }
         foreach ($od in $opDirs) {
             if ($capped) { break }
             foreach ($m in $Months) {
@@ -1833,12 +1854,12 @@ function Read-ReportsAuditTouchIndex {
                 foreach ($set in $sets) {
                     if ($capped) { break }
                     $csvFiles = @()
-                    try { $csvFiles = @(Get-ChildItem -LiteralPath $od.FullName -Filter $set.Filter -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.legacy_*' }) } catch {}
+                    try { $csvFiles = @(Get-ChildItem -LiteralPath $od.FullName -Filter $set.Filter -File -ErrorAction Stop | Where-Object { $_.Name -notlike '*.legacy_*' }) } catch { & $addReadErr $od.FullName $_ }
                     foreach ($cf in $csvFiles) {
                         if ($capped) { break }
                         $files++
                         $data = @()
-                        try { $data = @(Import-Csv -LiteralPath $cf.FullName -ErrorAction Stop) } catch { $data = @() }
+                        try { $data = @(Import-Csv -LiteralPath $cf.FullName -ErrorAction Stop) } catch { $data = @(); & $addReadErr $cf.FullName $_ }
                         foreach ($r in $data) {
                             if ($rows -ge $Cap) { $capped = $true; break }
                             $target = [string]$r.($set.Prop)
@@ -1864,7 +1885,7 @@ function Read-ReportsAuditTouchIndex {
             }
         }
     }
-    return @{ Index = $index; Files = $files; Rows = $rows; Capped = $capped }
+    return @{ Index = $index; Files = $files; Rows = $rows; Capped = $capped; Errors = [int]$readBag.Errors; ErrorPaths = @($readBag.Messages) }
 }
 
 # ---- Remediation plan helpers --------------------------------------------
@@ -5901,6 +5922,15 @@ function Invoke-JanetToolAction {
             $idxRes = Read-ReportsAuditTouchIndex -Root $loc.Root -Months $months -WantHosts $want -Start $startD -End $endD
             $index = $idxRes.Index
             if ($idxRes.Capped) { & $send @{ type='log'; level='warn'; text="Audit read cap hit ($($idxRes.Rows) rows) - some touches were not read; causation counts may undercount. Narrow the date window." } }
+            # loop 2026-08-03: an unreadable audit path is NOT proof of no activity. Without
+            # this, a denied operator folder turned "JANET patched this host" into "closed by
+            # something else" with no hint anything was missed.
+            $proofReadErrors = [int]$idxRes.Errors
+            $proofReadFailed = ($proofReadErrors -gt 0)
+            if ($proofReadFailed) {
+                $firstErr = if (@($idxRes.ErrorPaths).Count -gt 0) { @($idxRes.ErrorPaths)[0] } else { 'unknown path' }
+                & $send @{ type='error'; text="Closure proof INCOMPLETE - $proofReadErrors audit path(s) could not be read (first: $firstErr). A host shown as 'closed by something else' may simply have touches JANET could not read - this is NOT proof JANET did not patch it until the share reads clean." }
+            }
 
             $closedTouched=0; $closedUntouched=0; $openTouched=0; $openUntouched=0
             $worklist = New-Object System.Collections.ArrayList
@@ -5941,8 +5971,11 @@ function Invoke-JanetToolAction {
             }
 
             $waveNote = "$closedTouched closed on hosts JANET touched (wave worked), $closedUntouched closed on untouched hosts (closed by something else), $openTouched still-open on touched hosts (patch did not take - next-day worklist)."
-            & $send @{ type='audit'; action='TouchHost'; target="Wave closure proof ($($subject.Count) subject row(s))"; result='Success'; itemCount=$closedTouched; detail=$waveNote }
-            & $send @{ type='status'; text="Closure proof: $waveNote" }
+            # The incompleteness rides on the headline itself, not just an earlier log line
+            # the operator may have scrolled past.
+            $proofNote = if ($proofReadFailed) { " INCOMPLETE - $proofReadErrors audit path(s) unreadable; 'untouched' here means 'no touch we could READ'." } else { '' }
+            & $send @{ type='audit'; action='TouchHost'; target="Wave closure proof ($($subject.Count) subject row(s))"; result='Success'; itemCount=$closedTouched; detail="$waveNote$proofNote" }
+            & $send @{ type='status'; text="Closure proof: $waveNote$proofNote" }
 
             return @{ rows=@($rows); summary=@{
                 total=$rows.Count; subjects=$subject.Count
@@ -5952,6 +5985,7 @@ function Invoke-JanetToolAction {
                 onShare=$loc.OnShare; source=$loc.Reason
                 windowStart=$startD.ToString('yyyy-MM-dd'); windowEnd=$endD.ToString('yyyy-MM-dd')
                 auditRows=$idxRes.Rows; auditFiles=$idxRes.Files; capped=$idxRes.Capped
+                readErrors=$proofReadErrors; readFailed=$proofReadFailed; readErrorPaths=@($idxRes.ErrorPaths)
                 worklist=@($worklist); worklistCount=$worklist.Count
             } }
         }

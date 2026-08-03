@@ -82,9 +82,9 @@ Describe 'Build-RemediationPlan host-key fold - one physical host as short+FQDN 
     }
 }
 
-Describe 'reports - manifest exact version pin (newest bump = loop 2026-08-03 P1: scan-compare NOT SCANNED bucket)' {
-    It 'reports is at v2.16.0' {
+Describe 'reports - manifest exact version pin (newest bump = loop 2026-08-03 (c) P2: closure-proof read-failure bag)' {
+    It 'reports is at v2.16.1' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '2.16.0'
+        [string]$mani.version | Should Be '2.16.1'
     }
 }
