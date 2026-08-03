@@ -17,7 +17,10 @@
     var s = String(v == null ? '' : v);
     var low = s.toLowerCase();
     if (low === 'success' || low.indexOf('opened') === 0) return { text: s, cls: 'st-ok' };
-    if (low === 'offline' || low === 'timeout' || low === 'rejected' || low === 'session error') return { text: s, cls: 'st-warn' };
+    // loop 2026-08-03: 'skipped' was in neither list, so the wrong-box DNS-mismatch
+    // abort (psm1:324) - the row that most needs to stand out, because the operator's
+    // arbitrary block did NOT run - rendered as the blandest row in the grid.
+    if (low === 'offline' || low === 'timeout' || low === 'rejected' || low === 'session error' || low === 'skipped') return { text: s, cls: 'st-warn' };
     if (low === 'failed') return { text: s, cls: 'st-bad' };
     return { text: s, cls: '' };
   }
@@ -197,7 +200,7 @@
             { key: 'Output', label: 'OUTPUT', render: function (r) { return wrapCell(r.Output); } },
             { key: 'Error', label: 'ERROR', width: 200, render: function (r) { return errCell(r.Error); } }
           ],
-          rowClass: function (r) { var s = String(r.Status || '').toLowerCase(); if (s === 'failed') return 'row-bad'; if (s === 'offline' || s === 'timeout' || s === 'session error') return 'row-warn'; return ''; }
+          rowClass: function (r) { var s = String(r.Status || '').toLowerCase(); if (s === 'failed') return 'row-bad'; if (s === 'offline' || s === 'timeout' || s === 'session error' || s === 'skipped') return 'row-warn'; return ''; }
         });
         var gh = el('div'); gh.style.cssText = 'flex:1;min-height:0;display:flex'; gh.appendChild(grid.el);
         results.appendChild(gh); right.appendChild(results);

@@ -53,7 +53,12 @@
   function rowClassFor(v) {
     switch (String(v)) {
       case 'Success': return 'row-ok';
-      case 'Skipped': return 'row-ok';
+      // loop 2026-08-03: Skipped was painted row-ok (GREEN, the success colour). The
+      // module emits Skipped for a host that was never dispatched and for an MSI
+      // cancelled in flight, whose outcome its own comment calls "genuinely UNKNOWN"
+      // (psm1:1296-1303, :1314). Neither is a success, and green is exactly the wrong
+      // thing to tell an operator scanning a cancelled wave. Warn, not ok.
+      case 'Skipped': return 'row-warn';
       case 'Failed': return 'row-bad';
       case 'Rejected': return 'row-bad';
       case 'Deferred': return 'row-warn';
