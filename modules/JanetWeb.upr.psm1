@@ -50,7 +50,7 @@ function Get-JanetToolManifest {
         id       = 'upr'
         name     = 'Unsupported Product Remediator'
         category = 'Remediation'
-        version  = '1.2.13' # loop 2026-08-03: server-side typed confirm word (UNINSTALL, -cne) on LIVE report-uninstall/manual-uninstall - the view drove an arming dialog but never posted the word, so the suite's only permanent-removal actions had no server-side barrier. Prior 1.2.12 - loop 2026-08-02 (b): WinRM OperationTimeout sized to the phase - 30 min for the unwatchdogged uninstall (a normal M365 removal outran the flat 5 min and booked FAIL mid-removal), 5 min for a scan. Prior 1.2.11 - loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
+        version  = '1.2.14' # loop 2026-08-03 (b): a lost ExitCode ($null from Start-Process -Wait -PassThru inside a remote PSSession) no longer books a removed product as FAIL - the exit is reported UNKNOWN and the fail-closed registry verify arbitrates. Prior 1.2.13 - loop 2026-08-03: server-side typed confirm word (UNINSTALL, -cne) on LIVE report-uninstall/manual-uninstall - the view drove an arming dialog but never posted the word, so the suite's only permanent-removal actions had no server-side barrier. Prior 1.2.12 - loop 2026-08-02 (b): WinRM OperationTimeout sized to the phase - 30 min for the unwatchdogged uninstall (a normal M365 removal outran the flat 5 min and booked FAIL mid-removal), 5 min for a scan. Prior 1.2.11 - loop 2026-08-02: uninstall wrong-box guard fails CLOSED when the remote returns no COMPUTERNAME (was: proceed); msiexec 1641/1605 and EXE 1641 no longer booked FAIL on a host that IS remediated; Get-UprThreadCount no longer collapses a non-numeric threads value to 1. Prior 1.2.10 - audit 2026-07-25 (fable re-audit follow-up): the M365 staging directory is created EXCLUSIVELY (no -Force), matching pkginstall - a squatted directory fails the path instead of being silently reused, and only a directory we created is cleaned up. audit 2026-07-24: M365 removal scoped to the SELECTED C2R product (no fleet-wide Remove All), relaxed parser tags section-approximate host attribution, Adobe key read literally, staged Office config gets an admin-only DACL + pre-exec hash check, pdftotext temp files always cleaned up
         summary  = 'Two ways to remediate, both host-by-host over WinRM: (1) consume a Tenable / ACAS Unsupported & SEoL report (PDF or CSV) and bulk-uninstall the proven-EOL findings; (2) Targeted Removal -- paste a machine list + a software list, scan, and uninstall the checked matches. Handlers: M365 SaRA, Adobe Acrobat w/ RunAsPPL guard, generic MSI/EXE. Security agents (Tanium, Trellix, Defender, CrowdStrike, ...) are always skipped.'
         actions  = @(
             @{
@@ -1058,7 +1058,29 @@ $UprWorkerBlock = {
                                 if ($argList.Count -gt 0) { $sp['ArgumentList'] = $argList }
                                 $proc = Start-Process @sp
                                 if ($null -eq $proc) { return [pscustomobject]@{ Ran = $false; ExitCode = $null; Detail = 'process did not start' } }
-                                return [pscustomobject]@{ Ran = $true; ExitCode = $proc.ExitCode; Detail = $null }
+                                # loop 2026-08-03: Start-Process -Wait -PassThru can hand back
+                                # ExitCode=$null INSIDE a remote PSSession (the handle is reaped
+                                # early). $null -eq 0 is false, so a genuinely removed product came
+                                # back "FAIL (MSI exit )" with an empty exit tag and the registry
+                                # verify - the only thing that actually proves removal - never ran.
+                                # Retry the read once, then report the exit as UNKNOWN rather than
+                                # guessing; the caller routes unknown to the fail-closed verify.
+                                # NOTE: deliberately still Start-Process, NOT pkginstall's
+                                # ProcessStartInfo. .NET Framework's ProcessStartInfo has no
+                                # ArgumentList, so that pattern needs a single hand-quoted argument
+                                # STRING - and these args come from a registry UninstallString that a
+                                # low-priv user can plant. Discrete tokens are the whole LPE defence
+                                # here (Get-SafeUninstallPlan); a quoting bug would undo it.
+                                $exit = $null
+                                try { $exit = $proc.ExitCode } catch { $exit = $null }
+                                if ($null -eq $exit) {
+                                    try { $proc.WaitForExit(); $exit = $proc.ExitCode } catch { $exit = $null }
+                                }
+                                try { $proc.Dispose() } catch {}
+                                if ($null -eq $exit) {
+                                    return [pscustomobject]@{ Ran = $true; ExitCode = $null; Detail = 'exit code unavailable (handle reaped)' }
+                                }
+                                return [pscustomobject]@{ Ran = $true; ExitCode = $exit; Detail = $null }
                             }
                             try {
                                 ## === Microsoft 365 handler (SaRA-style package script + setup.exe /configure) ===
@@ -1272,6 +1294,11 @@ $UprWorkerBlock = {
                                     ## registry re-verify below is the real arbiter - it fails closed and
                                     ## will still say "still present" if the removal did not happen.
                                     if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010 -or $u.ExitCode -eq 1641 -or $u.ExitCode -eq 1605)) { return "OK (MSI exit $($u.ExitCode))" }
+                                    ## Unknown exit -> hand the verdict to the registry verify, which
+                                    ## is fail-closed: still present => FAIL, unreadable => FAIL. It
+                                    ## cannot manufacture a false clean, and it is a better arbiter
+                                    ## than a lost exit code.
+                                    elseif ($u.Ran -and $null -eq $u.ExitCode) { return "OK (MSI exit unknown - registry verify decides)" }
                                     else { return "FAIL (MSI $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                 } else {
                                     ## Exit-code gate (mirrors the MSI handler): treat ONLY 0/1641/3010 as
@@ -1282,6 +1309,7 @@ $UprWorkerBlock = {
                                     if (-not [string]::IsNullOrWhiteSpace($quietStr)) {
                                         $u = Invoke-SafeUninstall -UnStr $quietStr
                                         if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010 -or $u.ExitCode -eq 1641)) { return "OK (QuietUninstall exit $($u.ExitCode))" }
+                                        elseif ($u.Ran -and $null -eq $u.ExitCode) { return "OK (QuietUninstall exit unknown - registry verify decides)" }
                                         else { return "FAIL (QuietUninstall $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                     } elseif (-not [string]::IsNullOrWhiteSpace($unStr)) {
                                         ## Safe decomposition (no cmd /c): the planted UninstallString
@@ -1289,6 +1317,7 @@ $UprWorkerBlock = {
                                         ## so a bare EXE uninstaller still runs unattended.
                                         $u = Invoke-SafeUninstall -UnStr $unStr -AppendArgs @('/S','/silent','/quiet','/uninstall','/norestart')
                                         if ($u.Ran -and ($u.ExitCode -eq 0 -or $u.ExitCode -eq 3010 -or $u.ExitCode -eq 1641)) { return "OK (EXE exit $($u.ExitCode))" }
+                                        elseif ($u.Ran -and $null -eq $u.ExitCode) { return "OK (EXE exit unknown - registry verify decides)" }
                                         else { return "FAIL (EXE $(if ($u.Ran) { "exit $($u.ExitCode)" } else { $u.Detail }))" }
                                     } else { return "FAIL: No uninstall string available" }
                                 }

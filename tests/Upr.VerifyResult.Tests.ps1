@@ -180,8 +180,8 @@ Describe 'upr 1.2.9 - scoped M365 removal + staging hardening (audit 2026-07-24)
     $mani = & $script:Mod { Get-JanetToolManifest }
     $src  = Get-Content (Join-Path $script:Root 'modules\JanetWeb.upr.psm1') -Raw
 
-    It 'manifest version is exactly 1.2.13 (newest bump holds the exact pin)' {
-        [string]$mani.version | Should Be '1.2.13'
+    It 'manifest version is exactly 1.2.14 (newest bump holds the exact pin)' {
+        [string]$mani.version | Should Be '1.2.14'
     }
     # audit 2026-07-25 (fable re-audit follow-up): pkginstall creates its staging root
     # WITHOUT -Force so a squatted directory fails the host; upr used
@@ -253,6 +253,23 @@ Describe 'upr 1.2.11 - wrong-box guard fails closed, uninstall exit map (loop 20
         ($src -match '\$opMs = if \(\$DoUninstall\) \{ 1800000 \} else \{ 300000 \}') | Should Be $true
         ($src -match 'OperationTimeout=\$opMs')                                       | Should Be $true
         ($src -match 'OperationTimeout=300000')                                       | Should Be $false
+    }
+    # A lost exit code is not evidence of failure. Start-Process -Wait -PassThru can
+    # return ExitCode=$null inside a remote PSSession, and $null -eq 0 is false, so a
+    # genuinely removed product booked "FAIL (MSI exit )" and skipped the verify -
+    # the only step that actually proves removal. Unknown now routes INTO the verify,
+    # which is fail-closed (still present => FAIL, unreadable => FAIL), so this cannot
+    # manufacture a clean.
+    It 'an unknown exit code routes to the registry verify instead of a blanket FAIL' {
+        ($src -match 'exit code unavailable \(handle reaped\)') | Should Be $true
+        (@([regex]::Matches($src, '\$u\.Ran -and \$null -eq \$u\.ExitCode')).Count) | Should Be 3
+    }
+    It 'the unknown-exit strings still trigger the verify gate (^OK) and are not read as 3010' {
+        foreach ($kind in @('MSI','QuietUninstall','EXE')) {
+            $s = "OK ($kind exit unknown - registry verify decides)"
+            ($s -match '^\s*OK\b') | Should Be $true    # the verify gate at :1309
+            ($s -match '3010')     | Should Be $false   # must not be read as reboot-required
+        }
     }
     It 'a non-numeric threads value keeps the caller default instead of collapsing to 1' {
         ($src -match 'if \(\[int\]::TryParse\(\[string\]\$Params\[.threads.\], \[ref\]\$parsed\)\) \{ \$threads = \$parsed \}') | Should Be $true
