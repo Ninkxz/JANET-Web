@@ -175,9 +175,11 @@ Describe 'C2C v1.9.0 - fix-lockscreen is wired as an opt-in action, NOT a run-al
     It 'fix-lockscreen maps to the Lockscreen pillar' {
         & $cm { $script:C2cPillarByAction['fix-lockscreen'] } | Should Be 'Lockscreen'
     }
-    It 'c2c manifest is exactly 1.18.0' {
-        # The newest bump's own test file carries the EXACT pin (older files assert a floor);
-        # the 1.18.0 bump is the lockscreen CSP-key fix, so the pin moved here.
-        [string](& $cm { Get-JanetToolManifest }).version | Should Be '1.18.0'
+    It 'c2c is at or past 1.18.0 (the lockscreen CSP-key fix)' {
+        # Demoted to a FLOOR on 2026-08-04: the newest bump's own test file carries the EXACT
+        # pin, and 1.18.1 is the AntiMalware empty-AMRunningMode fail-close, so the exact pin
+        # moved to C2c.MultiVolAntiMalware.Tests.ps1. This file guards the lockscreen fix, not
+        # c2c's version number - an exact pin here would fail on every future unrelated bump.
+        ([version][string](& $cm { Get-JanetToolManifest }).version -ge [version]'1.18.0') | Should Be $true
     }
 }

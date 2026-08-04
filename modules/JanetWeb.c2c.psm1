@@ -109,7 +109,7 @@ function Get-JanetToolManifest {
         # Windows ignored all three while the row booked FIXED); and fix-antimalware's MDE OrgId
         # read/compare now mirrors the scan (root-key fallback + brace/whitespace normalization),
         # so a scan-PASS host no longer trips the heal ladder and books IN PROGRESS/FAIL.
-        version  = '1.18.0'
+        version  = '1.18.1' # loop 2026-08-04: an EMPTY AMRunningMode (engine Disabled/Not Running) no longer books NOCHANGE 'already protected' - empty is neither Active nor Passive so no fail gate fired and an unprotected host certified compliant-green; plus 4 TryParse-zeroing threads sites
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all. (8) READ-ONLY BITLOCKER ESCROW AUDIT - per host, one consolidated WinRM round-trip enumerates the key protectors of every FIXED volume (removable/USB/network/optical never touched) and reconciles each RecoveryPassword protector''s KeyProtectorId GUID against the AD msFVE-RecoveryInformation escrow, flagging ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed (an unreadable protector list or AD search is UNKNOWN, never ESCROWED) and the recovery password is NEVER read or emitted anywhere.'
         actions  = @(
@@ -2202,10 +2202,22 @@ $script:C2cFixBlock = {
                     # tool's output is reported up a chain of command, so the fixer must never book it
                     # NOCHANGE/already-protected. Mirrors the scan's null-age-is-stale gate.
                     $sigUnknownNow = ($null -eq $ageNow)
-                    if ($failDet -or $rtpStillOff -or $sigUnknownNow) {
+                    # loop 2026-08-04: an EMPTY AMRunningMode is neither Active nor Passive, so
+                    # NEITHER of the gates above fires for it - and with a readable signature age
+                    # the host fell straight through to NOCHANGE "already protected". Empty mode
+                    # means the Defender engine is Disabled / Not Running: the least protected
+                    # state there is, reported compliant-green. The line right above already
+                    # renders it honestly as 'null (Disabled/Not Running)' in $stateTxt, so the
+                    # tool described the state correctly and then booked the opposite verdict.
+                    # Same fail-closed rule the signature gate uses two lines up, and the same
+                    # reason: this output is reported up a chain of command, so "we could not
+                    # confirm protection" must never be written as "already protected".
+                    $modeUnknownNow = [string]::IsNullOrWhiteSpace([string]$modeNow)
+                    if ($failDet -or $rtpStillOff -or $sigUnknownNow -or $modeUnknownNow) {
                         $why = $failDet.TrimEnd('; ')
                         if ($rtpStillOff) { if ($why) { $why += '; ' }; $why += 'Active but RTP still off after heal' }
                         if ($sigUnknownNow) { if ($why) { $why += '; ' }; $why += 'signature age UNREADABLE - protection NOT confirmed (fail-closed, matches the scan)' }
+                        if ($modeUnknownNow) { if ($why) { $why += '; ' }; $why += 'AMRunningMode EMPTY (engine Disabled / Not Running) - protection NOT confirmed (fail-closed)' }
                         & $add 'AntiMalware' 'heal' 'FAIL' ($why + '; ' + $stateTxt + $noteTxt)
                     }
                     elseif ($changed.Count -gt 0) { & $add 'AntiMalware' 'heal' 'FIXED' (($changed -join '; ') + '; ' + $stateTxt + $noteTxt) }
@@ -3388,7 +3400,14 @@ function Invoke-C2cFixAction {
     }
 
     $threads = 8
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(16, $threads))
     $perHostTimeout = 300
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
@@ -3667,7 +3686,14 @@ function Invoke-C2cVersionCheckAction {
     $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
     $winrmHeal      = Get-C2cBool $Params['winrmHeal'] $false
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 200
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
@@ -4243,7 +4269,14 @@ function Invoke-C2cEncryptionAuditAction {
     }
     $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 200
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
@@ -4410,7 +4443,14 @@ function Invoke-JanetToolAction {
     # audit 2026-07-23: was an inline re-implementation of Get-C2cBool (:1323) - one coercer.
     $attemptOffline = Get-C2cBool $Params['attemptOffline'] $false
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 200  # a read-only 11-check probe that runs this long = a wedged remote read
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
