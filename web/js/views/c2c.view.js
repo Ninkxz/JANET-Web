@@ -709,9 +709,13 @@
               lockInputs(false);
               var c = verTally();
               countLine.textContent = c.total + ' / ' + c.total;
-              var bad = c.outdated + c.offline;
-              log.append({ text: '[' + ts() + '] FINISHED version check "' + match + '"' + (tgt ? ' vs ' + tgt : '') + '. UP TO DATE=' + c.upToDate + '  OUTDATED=' + c.outdated + '  NEWER=' + c.newer + '  INSTALLED=' + c.installed + '  NOT INSTALLED=' + c.notInstalled + '  OFFLINE=' + c.offline, level: bad ? 'warn' : 'ok' });
-              runbar.setStatus('Version check done - ' + (tgt ? ('UpToDate ' + c.upToDate + ' / Outdated ' + c.outdated + ' / Newer ' + c.newer) : ('Installed ' + c.installed + ' / Not ' + c.notInstalled)) + ' / Offline ' + c.offline, bad ? 'st-bad' : 'st-ok');
+              // loop 2026-08-04: `other` (Cancelled / DNS MISMATCH / anything unnamed) now
+              // counts toward bad, so an all-cancelled or all-errored run can no longer
+              // close green, and it is shown rather than silently missing from the line.
+              var bad = c.outdated + c.offline + c.other;
+              var otherTxt = c.other ? ('  OTHER=' + c.other) : '';
+              log.append({ text: '[' + ts() + '] FINISHED version check "' + match + '"' + (tgt ? ' vs ' + tgt : '') + '. UP TO DATE=' + c.upToDate + '  OUTDATED=' + c.outdated + '  NEWER=' + c.newer + '  INSTALLED=' + c.installed + '  NOT INSTALLED=' + c.notInstalled + '  OFFLINE=' + c.offline + otherTxt, level: bad ? 'warn' : 'ok' });
+              runbar.setStatus('Version check done - ' + (tgt ? ('UpToDate ' + c.upToDate + ' / Outdated ' + c.outdated + ' / Newer ' + c.newer) : ('Installed ' + c.installed + ' / Not ' + c.notInstalled)) + ' / Offline ' + c.offline + (c.other ? (' / Other ' + c.other) : ''), bad ? 'st-bad' : 'st-ok');
             }
           }
         });
@@ -776,8 +780,13 @@
         return t;
       }
 
+      // loop 2026-08-04: this had NO bucket for Cancelled, DNS MISMATCH, or any status it
+      // does not name, so those rows were counted in `total` and nowhere else - the
+      // counters did not reconcile and an all-cancelled or all-errored version check
+      // closed green. The scan, fix and escrow tallies in this same view all carry an
+      // `other` catch-all; this one was missed. Unknown is now counted and surfaced.
       function verTally() {
-        var t = { upToDate: 0, outdated: 0, newer: 0, installed: 0, notInstalled: 0, offline: 0, total: 0 };
+        var t = { upToDate: 0, outdated: 0, newer: 0, installed: 0, notInstalled: 0, offline: 0, other: 0, total: 0 };
         grid.rows().forEach(function (r) {
           var s = String(r.Status);
           if (s === 'UP TO DATE') t.upToDate++;
@@ -786,6 +795,7 @@
           else if (s === 'INSTALLED') t.installed++;
           else if (s === 'NOT INSTALLED') t.notInstalled++;
           else if (s === 'OFFLINE') t.offline++;
+          else t.other++;
         });
         t.total = grid.rows().length;
         return t;

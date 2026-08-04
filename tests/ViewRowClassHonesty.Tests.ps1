@@ -85,6 +85,40 @@ Describe 'dhcp - a REFUSED scope is not tallied as a change' {
     }
 }
 
+Describe 'tallies fail closed - an unknown status is never counted as compliant' {
+
+    # loop 2026-08-04, the same family one level up from row colour: a COUNTER whose final
+    # branch is open silently books unrecognised or errored outcomes as good news, and the
+    # summary line is what gets reported up a chain of command. Four sites, all found by
+    # sweeping for the dhcp defect's shape rather than waiting for them to be reported.
+    It 'c2c per-pillar tally has an explicit other bucket (it counted unknown as nochange)' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
+        ($mod -match "elseif \(@\('NOCHANGE','NO CHANGE'\) -contains \`$pr\)") | Should Be $true
+        ($mod -match "else                                                           \{ \`$perPillar\[\`$pn\]\.other\+\+ \}") | Should Be $true
+    }
+    It 'c2c per-pillar tally no longer drops a whole host inside a bare catch' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
+        ($mod -match "\} catch \{ \`$perPillarErrors\+\+ \}")                | Should Be $true
+        ($mod -match 'per-pillar counts are INCOMPLETE')                     | Should Be $true
+    }
+    It 'c2c fix done-line downgrades from ok when anything went wrong' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.c2c.psm1') -Raw
+        ($mod -match "\`$doneLvl = if \(\`$doneBad -gt 0\) \{ 'warn' \} else \{ 'ok' \}") | Should Be $true
+        ($mod -match "level=\`$doneLvl")                                                  | Should Be $true
+    }
+    It 'c2c version-check tally counts unknown statuses and lets them fail the run' {
+        $src = Get-ViewSource 'c2c.view.js'
+        ($src -match 'else t\.other\+\+;')                              | Should Be $true
+        ($src -match 'var bad = c\.outdated \+ c\.offline \+ c\.other;') | Should Be $true
+    }
+    It 'certdeploy scan summary accounts for CHECK ERROR / Cancelled instead of losing them' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.certdeploy.psm1') -Raw
+        ($mod -match "\`$errored     = @\(\`$rows \| Where-Object \{ \[string\]\`$_\.Status -eq 'CHECK ERROR' \}\)\.Count") | Should Be $true
+        ($mod -match "\`$unaccounted = \[Math\]::Max\(0,")                                                                  | Should Be $true
+        ($mod -match "\`$lvl = if \(\(\`$errored \+ \`$cancelled \+ \`$unaccounted\) -gt 0\) \{ 'warn' \} else \{ 'ok' \}")  | Should Be $true
+    }
+}
+
 Describe 'no view paints an unknown-outcome status as success' {
 
     # The sweep. Any view that maps a status whose NAME says the work did not

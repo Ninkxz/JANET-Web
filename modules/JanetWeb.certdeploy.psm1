@@ -73,7 +73,7 @@ function Get-JanetToolManifest {
         # audit 2026-07-28: 1.6.0 -> 1.6.1. The fan-out cancel path now emits a progress event
         # (biosfirmware's 2026-07-24 fix, ported) - it only bumped $done, so the strip froze at its
         # last pre-cancel count while Cancelled rows streamed and the run looked wedged.
-        version  = '1.6.2' # loop 2026-08-04: 3 TryParse-zeroing threads sites - a non-numeric threads value silently collapsed to a single-threaded run
+        version  = '1.6.3' # loop 2026-08-04: 3 TryParse-zeroing threads sites - a non-numeric threads value silently collapsed to a single-threaded run
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA stores over WinRM (adds only-missing by thumbprint, NEVER removes) and, ONLY when the separate pushDisallowed opt-in is ticked, also BLACKLISTS the bundle Untrusted\ certs into the LocalMachine Disallowed store (a fleet-wide DISTRUST, not a trust add); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -1780,9 +1780,18 @@ function Invoke-CertDeployScanAction {
     $gpoManaged  = @($rows | Where-Object { @('GPO','InstallRoot+GPO') -contains [string]$_.Reconciler }).Count
     $none        = @($rows | Where-Object { [string]$_.Reconciler -eq 'None detected' }).Count
     $offline     = @($rows | Where-Object { [string]$_.Reconciler -eq 'OFFLINE' }).Count
-    & $send @{ type='log'; level='ok'; text="Scan Cert Management done - InstallRoot: $installRoot, GPO: $gpoManaged, None detected: $none, OFFLINE: $offline (of $($targets.Count) host(s))." }
-    & $send @{ type='status'; text="Done. $installRoot InstallRoot, $gpoManaged GPO, $none none, $offline offline of $($targets.Count)." }
-    return @{ rows=@($rows); summary=@{ total=$targets.Count; installRoot=$installRoot; gpoManaged=$gpoManaged; none=$none; offline=$offline } }
+    # loop 2026-08-04: CHECK ERROR and Cancelled rows matched NONE of the four buckets, so
+    # those hosts vanished from a line that still said "of N host(s)" - 10 hosts all
+    # CHECK ERROR printed "InstallRoot: 0, GPO: 0, None: 0, OFFLINE: 0 (of 10)" at level ok.
+    # The `check` action got exactly this fix on 2026-07-25; the scan was never swept.
+    $errored     = @($rows | Where-Object { [string]$_.Status -eq 'CHECK ERROR' }).Count
+    $cancelled   = @($rows | Where-Object { [string]$_.Status -eq 'Cancelled' }).Count
+    $unaccounted = [Math]::Max(0, $targets.Count - ($installRoot + $gpoManaged + $none + $offline + $errored + $cancelled))
+    $errTxt = "$(if ($errored -gt 0) { ", CHECK ERROR: $errored" } else { '' })$(if ($cancelled -gt 0) { ", Cancelled: $cancelled" } else { '' })$(if ($unaccounted -gt 0) { ", unaccounted: $unaccounted" } else { '' })"
+    $lvl = if (($errored + $cancelled + $unaccounted) -gt 0) { 'warn' } else { 'ok' }
+    & $send @{ type='log'; level=$lvl; text="Scan Cert Management done - InstallRoot: $installRoot, GPO: $gpoManaged, None detected: $none, OFFLINE: $offline$errTxt (of $($targets.Count) host(s))." }
+    & $send @{ type='status'; text="Done. $installRoot InstallRoot, $gpoManaged GPO, $none none, $offline offline$errTxt of $($targets.Count)." }
+    return @{ rows=@($rows); summary=@{ total=$targets.Count; installRoot=$installRoot; gpoManaged=$gpoManaged; none=$none; offline=$offline; checkErrors=$errored; cancelled=$cancelled; unaccounted=$unaccounted } }
 }
 
 function Invoke-JanetToolAction {

@@ -109,7 +109,7 @@ function Get-JanetToolManifest {
         # Windows ignored all three while the row booked FIXED); and fix-antimalware's MDE OrgId
         # read/compare now mirrors the scan (root-key fallback + brace/whitespace normalization),
         # so a scan-PASS host no longer trips the heal ladder and books IN PROGRESS/FAIL.
-        version  = '1.18.1' # loop 2026-08-04: an EMPTY AMRunningMode (engine Disabled/Not Running) no longer books NOCHANGE 'already protected' - empty is neither Active nor Passive so no fail gate fired and an unprotected host certified compliant-green; plus 4 TryParse-zeroing threads sites
+        version  = '1.18.2' # loop 2026-08-04: an EMPTY AMRunningMode (engine Disabled/Not Running) no longer books NOCHANGE 'already protected' - empty is neither Active nor Passive so no fail gate fired and an unprotected host certified compliant-green; plus 4 TryParse-zeroing threads sites
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all. (8) READ-ONLY BITLOCKER ESCROW AUDIT - per host, one consolidated WinRM round-trip enumerates the key protectors of every FIXED volume (removable/USB/network/optical never touched) and reconciles each RecoveryPassword protector''s KeyProtectorId GUID against the AD msFVE-RecoveryInformation escrow, flagging ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed (an unreadable protector list or AD search is UNKNOWN, never ESCROWED) and the recovery password is NEVER read or emitted anywhere.'
         actions  = @(
@@ -3437,6 +3437,10 @@ function Invoke-C2cFixAction {
 
     # Per-pillar tallies keyed by pillar name; per-status host counts from the rows.
     $perPillar = @{}
+    # loop 2026-08-04: the per-pillar tally sat inside a bare `catch {}`, so an exception
+    # dropped a whole host's pillar counts and the summary line still printed as though
+    # every host had been counted. Count the drops and say so.
+    $perPillarErrors = 0
     $emitResult = {
         param($res)
         # loop77 (informative failures): classify up front so the hint can ride with the row. On a failure
@@ -3450,19 +3454,29 @@ function Invoke-C2cFixAction {
         # per-pillar fixed/nochange/unverified/fail tally (raw tokens from the worker).
         # audit 2026-07-23: NOT VERIFIED / SKIP / IN PROGRESS used to lump into nochange,
         # overstating "already compliant" in the per-pillar summary line - explicit bucket.
+        # loop 2026-08-04: the final `else` was OPEN - any token this chain does not name
+        # counted as `nochange`, i.e. "already compliant". The HOST-level rollup got an
+        # `Other` catch-all for exactly this reason ($cOther below); the per-pillar tally
+        # was never swept, so a future or typo'd result token silently inflates the
+        # compliant column of a summary that is reported up a chain of command. Unknown is
+        # now its own bucket, and the surrounding `catch {}` no longer drops a whole host's
+        # pillar counts without saying so.
         try {
             foreach ($p in @($res.Pillars)) {
                 $pn = [string]$p.Name; if (-not $pn) { continue }
                 $pr = [string]$p.Result
-                if (-not $perPillar.ContainsKey($pn)) { $perPillar[$pn] = @{ fixed=0; nochange=0; unverified=0; fail=0 } }
+                if (-not $perPillar.ContainsKey($pn)) { $perPillar[$pn] = @{ fixed=0; nochange=0; unverified=0; fail=0; other=0 } }
+                # Older rows in this run may predate the 'other' key; add it in place.
+                if (-not $perPillar[$pn].ContainsKey('other')) { $perPillar[$pn]['other'] = 0 }
                 # audit 2026-07-25: REJECTED (non-CA anchor refused, so ABSENT) tallies as a fail -
                 # the pillar did not achieve its goal on that host.
                 if     (@('FAIL','REJECTED') -contains $pr)                    { $perPillar[$pn].fail++ }
                 elseif (@('FIXED','STARTED','KICKED') -contains $pr)           { $perPillar[$pn].fixed++ }
                 elseif (@('NOT VERIFIED','SKIP','IN PROGRESS') -contains $pr)  { $perPillar[$pn].unverified++ }
-                else                                                           { $perPillar[$pn].nochange++ }
+                elseif (@('NOCHANGE','NO CHANGE') -contains $pr)               { $perPillar[$pn].nochange++ }
+                else                                                           { $perPillar[$pn].other++ }
             }
-        } catch {}
+        } catch { $perPillarErrors++ }
         # JANET audit: a fix is a security-state change.
         # loop47 (F7): a PARTIAL host has >= 1 pillar FAIL, so it is not a clean success - Get-C2cHostAuditResult
         # audits it 'Failure', not the old 'Success'. Only a fully-FIXED host counts as a patched item.
@@ -3554,8 +3568,14 @@ function Invoke-C2cFixAction {
     $cInProg  = @($rows | Where-Object { $_.Status -eq 'IN PROGRESS' }).Count
     $cOther   = $rows.Count - $cFixed - $cNoChange - $cPartial - $cFailed - $cOffline - $cSkipped - $cNotVer - $cInProg
 
-    $ppTxt = (@($perPillar.Keys | Sort-Object | ForEach-Object { "{0} fixed {1}/nochange {2}/unverified-skip {3}/fail {4}" -f $_, $perPillar[$_].fixed, $perPillar[$_].nochange, $perPillar[$_].unverified, $perPillar[$_].fail }) -join ' | ')
-    & $send @{ type='log'; level='ok'; text="$verb done - FIXED: $cFixed, NO CHANGE: $cNoChange, IN PROGRESS: $cInProg, PARTIAL: $cPartial, NOT VERIFIED: $cNotVer, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped$(if ($cOther -gt 0) { ", Other: $cOther" } else { '' }).$(if ($ppTxt) { "  Per-pillar: $ppTxt" } else { '' })" }
+    $ppTxt = (@($perPillar.Keys | Sort-Object | ForEach-Object { "{0} fixed {1}/nochange {2}/unverified-skip {3}/fail {4}{5}" -f $_, $perPillar[$_].fixed, $perPillar[$_].nochange, $perPillar[$_].unverified, $perPillar[$_].fail, $(if ([int]$perPillar[$_].other -gt 0) { "/other $($perPillar[$_].other)" } else { '' }) }) -join ' | ')
+    $ppErrTxt = if ($perPillarErrors -gt 0) { "  ($perPillarErrors host(s) could not be tallied - per-pillar counts are INCOMPLETE)" } else { '' }
+    # loop 2026-08-04: this done-line was emitted at level='ok' UNCONDITIONALLY, so a run
+    # where every host FAILED still closed with a green "done" line. The escrow audit
+    # already gets this right (:4345). Anything that is not a clean outcome downgrades it.
+    $doneBad = ($cFailed + $cOffline + $cOther + $perPillarErrors)
+    $doneLvl = if ($doneBad -gt 0) { 'warn' } else { 'ok' }
+    & $send @{ type='log'; level=$doneLvl; text="$verb done - FIXED: $cFixed, NO CHANGE: $cNoChange, IN PROGRESS: $cInProg, PARTIAL: $cPartial, NOT VERIFIED: $cNotVer, FAILED: $cFailed, OFFLINE: $cOffline, SKIPPED: $cSkipped$(if ($cOther -gt 0) { ", Other: $cOther" } else { '' }).$(if ($ppTxt) { "  Per-pillar: $ppTxt" } else { '' })$ppErrTxt" }
     & $send @{ type='status'; text="Done. $cFixed fixed, $cPartial partial, $cNotVer not-verified, $cInProg in-progress, $cNoChange no-change, $cFailed failed of $($rows.Count) row(s)." }
     return @{ rows=@($rows); summary=@{ total=$rows.Count; fixed=$cFixed; noChange=$cNoChange; inProgress=$cInProg; partial=$cPartial; notVerified=$cNotVer; failed=$cFailed; offline=$cOffline; skipped=$cSkipped; other=$cOther; selfSkipped=$selfSkipped.Count; perPillar=$perPillar } }
 }
