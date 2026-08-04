@@ -1072,6 +1072,23 @@ $script:AcasUpdateProfiles = @{
             return "OK ($summary$note)"
         }
         Verify = {
+            # loop 2026-08-04: this probed ONLY the two known service paths, while the Script
+            # above discovers vulnerable jars ANYWHERE under the search roots (default
+            # C:\Program Files + C:\Program Files (x86)) - and then reported the all-clean
+            # case as "All jars at 2.25.5 (recursive scan)". "Recursive" was true only WITHIN
+            # those two folders, so a host carrying a vulnerable jar under any other path
+            # (C:\Program Files\SomeApp\lib) verified CLEAN, booked a green OK row and counted
+            # as PATCHED - on a KEV-class finding, which is the worst place in this suite to
+            # be optimistic. Verify-only ("Test Selected") reported the same false clean
+            # without any fix having run.
+            #
+            # Scan the same roots the fix scans. The Script's roots are injected as
+            # $searchRoots and are not reachable from this separate Verify scriptblock, so the
+            # documented DEFAULT is mirrored here - if an operator narrows the fix's roots,
+            # this verify is broader, which is the safe direction. The two service paths stay
+            # listed because they are the profile's named subjects; both already sit under
+            # these roots, so they are covered either way.
+            $roots = @('C:\Program Files', 'C:\Program Files (x86)')
             $targets = @(
                 'C:\Program Files\HID Global\Credential Management Client\lib'
                 'C:\Program Files\Adobe\Adobe Experience Manager Forms Designer\Java\libs'
@@ -1079,11 +1096,18 @@ $script:AcasUpdateProfiles = @{
             $found    = New-Object System.Collections.Generic.List[string]
             $vulns    = New-Object System.Collections.Generic.List[string]
             $newest   = $null
+            $seen     = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $scanErr  = ''
 
-            foreach ($p in $targets) {
+            # An UNREADABLE root is not an absence of jars. Record it so a permissions
+            # failure cannot render as "no log4j jars" (the swallowed-read family).
+            foreach ($p in @($roots + $targets)) {
                 if (-not (Test-Path -LiteralPath $p)) { continue }
+                try { $null = Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Select-Object -First 1 }
+                catch { if (-not $scanErr) { $scanErr = "$p : $($_.Exception.Message)" } }
                 $jars = @(Get-ChildItem -LiteralPath $p -Filter 'log4j-*.jar' -Recurse -File -Force -ErrorAction SilentlyContinue)
                 foreach ($j in $jars) {
+                    if (-not $seen.Add($j.FullName)) { continue }   # roots overlap the service paths
                     $found.Add("$($j.Name)") | Out-Null
                     if ($j.Name -notmatch '^log4j-(api|core)-2\.25\.5\.jar$') {
                         $vulns.Add("$($j.FullName)") | Out-Null
@@ -1093,13 +1117,25 @@ $script:AcasUpdateProfiles = @{
             }
 
             if ($found.Count -eq 0) {
-                return @{ Version='none'; LastUpdated='n/a'; Verified=$true; Detail='No log4j jars in target paths' }
+                # A root we could not read is not a host without log4j. Fail closed.
+                if ($scanErr) {
+                    return @{ Version='unknown'; LastUpdated='n/a'; Verified=$null; Detail="Search root UNREADABLE - log4j presence NOT determined: $scanErr" }
+                }
+                return @{ Version='none'; LastUpdated='n/a'; Verified=$true; Detail="No log4j jars anywhere under $($roots -join ' or ')" }
             }
 
             $verStr  = ($found | Sort-Object -Unique) -join ', '
             $modStr  = if ($newest) { $newest.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' }
-            $verified = ($vulns.Count -eq 0)
-            $detail  = if ($vulns.Count -gt 0) { "STILL-VULNERABLE ($($vulns.Count)): " + (($vulns | Sort-Object -Unique) -join '; ') } else { 'All jars at 2.25.5 (recursive scan)' }
+            # A partial scan cannot certify "all jars are current" - if a root was
+            # unreadable, the clean verdict is downgraded to indeterminate.
+            $verified = if ($vulns.Count -gt 0) { $false } elseif ($scanErr) { $null } else { $true }
+            $detail = if ($vulns.Count -gt 0) {
+                "STILL-VULNERABLE ($($vulns.Count)): " + (($vulns | Sort-Object -Unique) -join '; ')
+            } elseif ($scanErr) {
+                "All jars found are 2.25.5, but a search root was UNREADABLE so the scan is INCOMPLETE: $scanErr"
+            } else {
+                "All jars at 2.25.5 (recursive scan of $($roots -join ' + '))"
+            }
             return @{ Version=$verStr; LastUpdated=$modStr; Verified=$verified; Detail=$detail }
         }
     }
@@ -1226,7 +1262,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.25'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.11.26'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
