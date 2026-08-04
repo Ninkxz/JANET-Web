@@ -378,6 +378,105 @@ certdeploy check+deploy AND c2c fix-pki. No PS7 syntax anywhere.
 
 ---
 
+## Audit haul 2026-08-04 (b) — wpt + acas (the two most-used tools)
+
+### FIXED — the registry-mtime family, again, in BOTH modules at once
+
+`acas.psm1:735` and `wpt.psm1:1667` carried a **byte-identical** Unquoted Service
+Path verify doing `Get-ChildItem` on a REGISTRY path, sorting by `LastWriteTime`,
+then calling `.ToString('yyyy-MM-dd HH:mm')` on the result. `RegistryKey` has no
+`.LastWriteTime`, so that is a method call on `$null` — it **throws**.
+
+Three things made it quiet:
+- it only fired where the backup root had CHILDREN, i.e. **only on hosts the fix
+  had already remediated**, so it read as intermittent;
+- in acas the throw is swallowed into a verdict — `JANET_PROBE_ERR` →
+  *"UNCONFIRMED: verify probe errored"* + a **Failure** audit, so the profile could
+  never book a success after fixing anything;
+- the right value was already on disk. The Script writes a `FixedTimestamp`
+  **value** into each backup key. The verify ignored it and reached for a key mtime
+  that does not exist, three lines up.
+
+This family has now been "fixed" five separate times. `loop88` killed three sibling
+probes here (M365 C2R, Oracle Java, health-scan) and missed this one — in two
+modules. Every previous fix was site-scoped. New `Platform.NoRegistryMtime.Tests.ps1`
+sweeps **every** module for the shape and asserts zero, with a self-check proving
+the sweep can fail and one documented exception (wpt's health-scan probe, which
+correctly reads `pending.xml`/`reboot.xml` FILE mtimes — that IS the loop88 fix).
+acas 1.11.23 → 1.11.24, wpt 6.10.7 → 6.10.8.
+
+### OPEN — from this haul
+
+**P2 — acas kb-install crashes the whole wave on cancel.** `acas.psm1:2737` —
+`[int](Get-AcasMarker $res 'MECM')` on a marker-less result yields `''`, and
+`[int]''` **throws**. Reachable via operator Cancel, a batch-deadline abandon, or a
+worker error string (`:2832`). The throw lands inside the fan-out harvest loop, so
+the action dies and every remaining row and audit for the wave is lost.
+
+**P2 — wpt bulk-patch books `VulnPatched/Success` for hosts it did nothing to.**
+`wpt.psm1:5923-5938` (+ `wpt.view.js:110` mirrors it as "Patched") — every
+reachable no-error host audits itemCount=1, including 0 updates + 0 apps
+triggered. `6.10.1` fixed exactly this in kb-install with `AuditResultOf` →
+'Skipped'; bulk-patch never got it.
+
+**P2 — acas Log4j verify checks two directories and calls it a recursive scan.**
+`acas.psm1:1052-1082` — the remediation Script discovers vulnerable jars anywhere
+under Program Files (x86), but the Verify probes ONLY the HID Global and Adobe
+paths and its all-clean Detail literally says *"(recursive scan)"*. A host flagged
+for log4j under any other path verifies clean and books PATCHED.
+
+**P2 — acas MS Store and Java-Software-Center are freshness-only verifies.**
+`acas.psm1:628-656` and `:497-540` — both fire an async trigger that returns
+immediately, then "verify" by directory/file mtime with no result signal, so a
+package dir written 10 days ago (or a jvm.dll from three weeks back) reads
+`Verified=$true` → *"confirmed current"* → green OK + **VulnPatched Success** on a
+host nothing was installed to. This is the freshness-only family the Chrome/Edge
+fix closed by pairing freshness with `LastInstallerResult`; these two were not
+swept.
+
+**P3 — wpt reboot-schedule TryParse zeroing arms `shutdown /r /t 0`.**
+`wpt.psm1:5960` — non-numeric `seconds` zeroes and the `-lt 0` clamp keeps it, so a
+direct POST with `seconds='15m'` reboots the fleet **immediately** instead of the
+900 s default. Unreachable through the view (numeric input + client clamp), but it
+is the reboot path. Same zeroing at `:541` (threads → 1) and `:6616`
+(remote-message timeout → never dismiss).
+
+**P3 — wpt telemetry reads a field the action never emits.** `wpt.view.js:121` —
+`classify('app-update-apply')` reads `r.Success`, but that action's RowOf emits
+Host/Status/Detail only, so 50 successful applies show as 50 "Failed" rows in
+Reports and the Updates stat never moves.
+
+**P3 — more swallowed reads in wpt.** MSXML uninstall verify returns
+`Verified=$true` "No MSXML 4.0 products" when the hives are unreadable (`:1749`);
+the software scan feeding unsupported-scan renders an unreadable registry as
+"0 unsupported/SEoL product(s) found" + TouchHost Success (`:4531`, `:6168`); the
+Log4j root walk scans an unreadable tree as clean (`:5140`).
+
+**P3 — six wpt confirm words are browser-only.** `wpt.view.js` CLEAN/DELETE/LOCK/
+REBOOT/ENABLE/JAVA are enforced via `ctx.arm` with no server-side `-cne`; only
+Custom Command's RUN is re-checked (`:6824`). The 2026-07-24 decision deliberately
+gated only the arbitrary-RCE path — flagged because live `cleanup-disk` deletes
+user profiles fleet-wide, which is the same harm class. **Operator call**, same
+shape as the upr gate you approved.
+
+**P3 — acas preflight-services has no self-guard.** `acas.psm1:3874` — the one
+state-changing wave that can force RemoteRegistry to Running+Automatic on the
+dispatcher itself if it appears in the imported CSV.
+
+### Verified clean in this haul (do not re-report)
+
+wpt: all five pure helpers are byte-equivalent to their inline remote mirrors (no
+authority-vs-mirror drift); self-guard coverage is comprehensive across 13
+destructive actions; all 46 manifest actions wired; the fan-out ok/failed/skipped
+tally is honest including the all-failed banner. acas: the Chrome/Edge always-OK
+pair is genuinely fixed (triggers pre-check blockers and prove before/after
+versions; verifies read `LastCheckSuccess` + `LastInstallerResult`); KEV read
+records missing/unreadable explicitly; self-guards present at all five update
+dispatch sites including bound-NIC IPs; all 11 manifest actions wired. No PS7
+syntax in either module.
+
+---
+
 ### OPEN — carried to a later session
 
 **P2 — OPERATOR DECISION — `consentFailMode='skip'` is ignored for No-User hosts.**
