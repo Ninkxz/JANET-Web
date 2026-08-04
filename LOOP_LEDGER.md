@@ -269,6 +269,103 @@ actions are genuinely read-only.
 
 ---
 
+## Audit haul 2026-08-04 — winupgrade, c2c, certdeploy
+
+### ⚑ OPERATOR DECISION — DoD certs are tracked in the git repo
+
+`Packages\DoD-Certs\` holds **182 cert files on disk, 93 tracked in git**, and the repo
+is pushed to Gitea. Verified directly, not taken on trust.
+
+**What is fine:** no private-key container (`.pfx/.p12/.pvk/.key/.jks/.keystore`) is
+tracked in ANY of the three forks — checked all three. These are public DoD trust
+anchors, the kind DISA publishes. And `Sync-TakeToWork.ps1` is intact and thorough:
+16 withheld extensions, private-key detection, and a final leak scan of the staged
+tree, so the take-to-work rule ("zips ship empty skeletons") IS enforced.
+
+**What is your call:** the standing note says *"operator populates Packages at work"*,
+which reads as though the dev-side folder should be empty too. Deleting 93 tracked
+files is destructive, hard to reverse, and would break `certdeploy` on the dev box —
+so it is not mine to take. Flagging, not acting.
+
+### OPEN — from this haul
+
+**P2 — c2c fix-antimalware books "already protected" for a DEAD Defender.**
+`modules\JanetWeb.c2c.psm1:2173,2193,2212` — an EMPTY `AMRunningMode` (engine Disabled
+/ Not Running) is neither Active nor Passive, so no fail gate fires and the host books
+a clean NOCHANGE *"already protected"*. A WinDefend start failure is only a swallowed
+note (`:2100`). An unprotected host reports compliant-green. **Highest-value item here.**
+
+**P2 — c2c version-check reports an unreadable product as NOT INSTALLED.**
+`c2c.psm1:440-450, 3595-3597, 3625-3626` — ACL-denied Uninstall hive → `Installed=$false`
+via `-EA SilentlyContinue`/`catch {}`, and the dot-source-failure fallback hardcodes the
+same. Family 3 again: an errored read rendering as a confident answer.
+
+**P2 — winupgrade upgrade-drive can reboot a host that staged nothing.**
+`winupgrade.psm1:2465-2494` — "CONFIRMED staged" accepts ANY pending-reboot signal (CBS
+RebootPending, WU RebootRequired, or any `PendingFileRenameOperations`), not evidence a
+feature update is staged. A PFRO left by an AV update satisfies it, so with
+`rebootWhenStaged` ticked the box reboots, comes back on the old build, and the row reads
+REBOOTING/green. The manifest (`:221`) and the plan comment (`:489`) both state the
+invariant *"an un-staged host is NEVER rebooted"* — the code does not enforce it.
+*Tightening this only ever reboots FEWER hosts, so it is a guard fix, not a behaviour
+change — but it is on the reboot path, so do it deliberately with tests.*
+
+**P2 — winupgrade error-report renders an unreadable setuperr.log as "No upgrade errors
+detected".** `winupgrade.psm1:3240 → :3295`. `CheckUpgrade` handles the identical case
+honestly (READERR → FAILED, `:1652/:1674`); error-report does not. Same for Diagnose
+(`:2128`) and Auto-Fix's repair skip (`:3131`), both P3.
+
+**P3 — TRYPARSE ZEROING, 7 more sites.** `c2c.psm1:3391,3670,4246,4413`,
+`certdeploy.psm1:1163,1488,1708` — `threads="abc"` silently becomes 1 thread on a
+200-host run. Third module family hit this week; the correct guarded idiom already
+exists at `c2c.psm1:3105`.
+
+**P3 — c2c "KICKED" (async MECM trigger, nothing verified installed) rolls up FIXED and
+audits `VulnPatched/Success`.** `c2c.psm1:2630,2638,3451` — 50 hosts kicked = 50
+"patched" audit rows with zero confirmed installs.
+
+**P3 — c2c rollup precedence: FIXED beats IN PROGRESS.** `c2c.psm1:2636-2642` — one
+healed pillar plus one still-encrypting pillar books terminal-clean FIXED. The
+all-IN-PROGRESS case was fixed 07-25; the mixed case was not.
+
+**P3 — more open catch-alls counting unknown as success** (the dhcp defect's relatives):
+`c2c.psm1:3441` per-pillar tally counts an unrecognised token as `nochange`;
+`c2c.view.js:779-792` `verTally` has no bucket for Cancelled/DNS MISMATCH so an
+all-cancelled version check closes green; `c2c.psm1:3539` emits the done-line at
+`level='ok'` even when 100% FAILED; `certdeploy.psm1:1758` scan summary has no
+CHECK ERROR/Cancelled buckets so those hosts vanish from "of N host(s)".
+
+**P3 — certdeploy scan-cert-management gives the WRONG ADVICE on an unreadable host.**
+`certdeploy.psm1:1626-1671` — unreadable uninstall hive / Policies key / Root store all
+render as "None detected", i.e. *"a manual push WILL persist"* — exactly backwards on a
+GPO-managed box whose reconciler will strip the certs.
+
+**P3 — c2c lockscreen's "never overwrites a GPO value" rests on swallowed reads.**
+`c2c.psm1:2500-2516` — a failed `Get-ItemProperty` makes `$hasVal` false and the existing
+value is overwritten with `-Force`.
+
+**P3 — winupgrade misc:** ForceDiscovery logs "WU services stopped" unconditionally and
+counts loop iterations rather than regsvr32 exits (`:2750,2778,2808`); the manifest
+declares a `version` select on `diagnose` the view never sends (`:113` vs view
+`:951-996`), so a 25H2 diagnose is unreachable; error-report from the Operations tab
+passes `keyOf: keyByHost` while the engine streams multiple rows per host, so pop-out
+shows only the last issue (`view:998` vs the correct `errKeyOf` at `:1727`);
+`summarize()` counts only some success tokens so a fully-green repair run logs "OK=0"
+(`view:812-822`).
+
+### Verified clean in this haul (do not re-report)
+
+winupgrade: Pin/Unpin read back all three policy values AND the MoSetup bypass and fail
+closed on mismatch; no registry `.LastWriteTime`; every mutating op drops self
+pre-fan-out; no `Start-Process -Wait -PassThru`; no arm/fire resolved-twice split; all 15
+manifest actions wired. c2c/certdeploy: both confirm words re-checked server-side with
+`-cne` as the FIRST gate; self-guard on every destructive fan-out plus a remote-side
+wrong-box hard abort; escrow-first BitLocker genuinely fail-closed with rollback; every
+fixer verifies by post-action re-read; cert bundle fails closed when empty on
+certdeploy check+deploy AND c2c fix-pki. No PS7 syntax anywhere.
+
+---
+
 ### OPEN — carried to a later session
 
 **P2 — OPERATOR DECISION — `consentFailMode='skip'` is ignored for No-User hosts.**
