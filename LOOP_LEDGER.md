@@ -300,15 +300,27 @@ note (`:2100`). An unprotected host reports compliant-green. **Highest-value ite
 via `-EA SilentlyContinue`/`catch {}`, and the dot-source-failure fallback hardcodes the
 same. Family 3 again: an errored read rendering as a confident answer.
 
-**P2 — winupgrade upgrade-drive can reboot a host that staged nothing.**
-`winupgrade.psm1:2465-2494` — "CONFIRMED staged" accepts ANY pending-reboot signal (CBS
-RebootPending, WU RebootRequired, or any `PendingFileRenameOperations`), not evidence a
-feature update is staged. A PFRO left by an AV update satisfies it, so with
-`rebootWhenStaged` ticked the box reboots, comes back on the old build, and the row reads
-REBOOTING/green. The manifest (`:221`) and the plan comment (`:489`) both state the
-invariant *"an un-staged host is NEVER rebooted"* — the code does not enforce it.
-*Tightening this only ever reboots FEWER hosts, so it is a guard fix, not a behaviour
-change — but it is on the reboot path, so do it deliberately with tests.*
+**P2 — OPERATOR DECISION — winupgrade upgrade-drive can reboot a host that staged nothing.**
+`winupgrade.psm1:2465-2494`, consumed by the reboot gate at `:2502`
+("CONFIRMED staged" accepts ANY pending-reboot signal — CBS RebootPending, WU
+RebootRequired, or any `PendingFileRenameOperations` — not evidence a *feature update*
+is staged. A PFRO left by an AV update satisfies it, so with `rebootWhenStaged` ticked
+the box reboots, returns on the old build, and the row reads REBOOTING/green. The
+manifest `:221` and the plan comment `:489` both assert *"an un-staged host is NEVER
+rebooted"*; the code does not enforce it. `loop36` fixed exactly this invariant for the
+stale `~BT` tree and carefully classified it — then left the three generic signals that
+short-circuit ABOVE that classification. Another partial sweep.)
+
+**Why I did not just tighten it.** The obvious fix — require `~BT` Active/Recent — would
+break the **enablement-package** path: a 23H2→24H2 enablement package is a small update
+that sets `RebootRequired` and creates **no** `$WINDOWS.~BT` tree, so those hosts would
+never reboot and the tool would silently stop doing its job on the most common 24H2
+route. Which signal legitimately proves "staged" depends on the upgrade path in use
+here, and that is a domain call.
+**Recommendation:** keep the gate as-is but make the EVIDENCE visible — report *which*
+signal proved staging ("~BT Active" vs "pending-reboot signal only, no ~BT tree") so an
+operator can see a PFRO-only host before arming a reboot. That is honest reporting with
+no functional regression, and is safe for me to do on your word.
 
 **P2 — winupgrade error-report renders an unreadable setuperr.log as "No upgrade errors
 detected".** `winupgrade.psm1:3240 → :3295`. `CheckUpgrade` handles the identical case
