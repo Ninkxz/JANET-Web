@@ -1,22 +1,23 @@
 # JANET Web — maintenance loop ledger
 
-> ## ⚠ CROSS-FORK: the P1 false-close is UNFIXED in the other two forks
-> *Verified read-only 2026-08-03. Fixed in JANET Web (`bc4184814`); NOT fixed in:*
+> ## ✅ CROSS-FORK: the P1 false-close is now fixed in ALL THREE forks
+> *Found by a cross-fork grep 2026-08-03 after the Web fix; closed 2026-08-04.*
 >
-> - **SECRET / SIPR** — `X:\shh-JANET\modules\JanetSec.reports.psm1`. Same
->   `Compare-AcasScans` (REMEDIATED = baseline-only, no host-presence check), and it
->   writes `$finding.PatchedBy = 'Scan Comparison'` at `:4794`. **Worse than Web was:**
->   it never received the AMBIGUOUS cross-domain collision guard either (zero
->   occurrences of `AMBIGUOUS`), so it lacks loop39/40 as well. Tree clean at `1211272`.
-> - **Desktop** — `X:\J.A.N.E.T\Tools\ReportsTool_2.14.12.ps1`. Its own header
->   documents the defect as the design: *"as REMEDIATED (baseline key absent from
->   comparison)"*. Zero host-presence guard, zero AMBIGUOUS guard, writes
->   `PatchedBy='Scan Comparison'`.
+> | fork | commit | tests |
+> |---|---|---|
+> | **JANET Web** | `bc4184814` | full suite 2694 → green |
+> | **SECRET / SIPR** | `5d81b24` | fork suite 22/22 (was 12) |
+> | **Desktop** | `b8d5a13` (`ReportsTool_2.14.13`) | 152/152 (was 143) |
 >
-> A host powered off during the after-patch scan has every finding recorded as
-> patched, on evidence never collected. **This is the top item for the next block.**
-> Desktop needs the versioned-file + archive + `JANET_Config.json` repoint dance;
-> SECRET needs its own suite run. Neither is a five-minute port — do it deliberately.
+> Each carries a behavioural test, not a source pin. The desktop one slices the
+> inline compare block out by brace-matching and executes it against seeded globals,
+> and carries a **negative control** that runs the same scenario against archived
+> `2.14.12` and asserts it still shows the false close — which is what proves the
+> slice executes shipped code and that the assertions can fail.
+>
+> **Still open on SECRET only:** it never received the AMBIGUOUS cross-domain
+> collision guard (loop39/40) that Web and desktop have. Same family, different
+> defect — a short name shared by two distinct FQDNs can still false-close there.
 
 
 Running list of findings from unattended audit/fix sessions. Severity: P1 (acts
