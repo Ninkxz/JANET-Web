@@ -62,7 +62,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'secureboot'
         name     = 'Secure Boot Enabler'
-        version  = '1.7.0'   # audit 2026-07-25 capability audit #3 (scan/enable BitLocker+TPM+Escrow pre-flight parity via the shared Get-SbeBitLockerPosture); Secureboot.BitLockerRefuse.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.7.1'   # audit 2026-07-25 capability audit #3 (scan/enable BitLocker+TPM+Escrow pre-flight parity via the shared Get-SbeBitLockerPosture); Secureboot.BitLockerRefuse.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Hardening'
         summary  = 'Two-stage Secure Boot hardening: (1) a READ-ONLY fleet-wide SCAN that fans out one WinRM probe per host (no 50-host cap) and returns a per-host verdict - ENABLED, READY TO ENABLE (off + UEFI + GPT + suspendable-or-unprotected BitLocker + Dell/HP/Lenovo), RISK - NO ESCROWED KEY, OFF - UNSUPPORTED OEM, BLOCKED - LEGACY/MBR, or BLOCKED - BITLOCKER UNSUSPENDABLE - so the operator can hand the READY hosts straight to (2) the ENABLE action, which remotely enables UEFI Secure Boot on Dell, HP and Lenovo via a WinRM-armed SYSTEM scheduled task with a UEFI+GPT brick-safety precheck and dry-run preflight (waves of up to 50).'
         actions  = @(
@@ -1437,7 +1437,7 @@ function Invoke-SbeScanAction {
     # admin-session gate - mirrors the c2c scan conventions.
     $attemptOffline = Get-SbeBool $Params['attemptOffline'] $false
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) { $tpv = 0; if ([int]::TryParse([string]$Params['threads'], [ref]$tpv)) { $threads = $tpv } }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 120
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
@@ -1736,7 +1736,7 @@ function Invoke-JanetToolAction {
 
     # Concurrency. Original cap is 1-10 parallel jobs.
     $threads = 5
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) { $tpv = 0; if ([int]::TryParse([string]$Params['threads'], [ref]$tpv)) { $threads = $tpv } }
     $threads = [Math]::Max(1, [Math]::Min(10, $threads))
 
     # audit 2026-07-23: per-host wall-clock watchdog budget for the harvest loop below,

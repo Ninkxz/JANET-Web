@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 #  BiosFirmware.Tests.ps1 - Pester 3.4 tests for JanetWeb.biosfirmware.psm1
 #  (audit 2026-07-24). Two things are pinned here:
 #
@@ -205,7 +205,7 @@ Describe 'Manifest' {
 
     It 'declares the bumped version and stays read-only' {
         $man = & $script:Mod { Get-JanetToolManifest }
-        $man.version | Should Be '1.1.1'
+        $man.version | Should Be '1.1.2'
         foreach ($a in $man.actions) { $a.destructive | Should Be $false }
     }
 }

@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 #  Secureboot.BitLockerRefuse.Tests.ps1 - Pester 3.4 for the audit 2026-07-24
 #  secureboot fix pass and its 2026-07-25 fable re-audit follow-up (v1.6.9).
 #
@@ -205,7 +205,7 @@ Describe 'secureboot 1.6.9 - manifest pin + the confirm input it always read (au
     $en  = @($man.actions | Where-Object { $_.id -eq 'enable-secure-boot' })[0]
 
     It 'manifest version is exactly 1.7.0 (newest bump = audit 2026-07-25 capability audit #3, scan/enable BitLocker pre-flight parity; exact pin lives here)' {
-        [string]$man.version | Should Be '1.7.0'
+        [string]$man.version | Should Be '1.7.1'
     }
     It 'enable-secure-boot DECLARES the confirm input the module enforces server-side' {
         # The gate at Invoke-JanetToolAction reads $Params['confirm'] - undeclared, it was

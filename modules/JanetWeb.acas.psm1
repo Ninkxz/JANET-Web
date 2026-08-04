@@ -1226,7 +1226,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.24'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.11.25'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -3299,14 +3299,14 @@ function Invoke-JanetToolAction {
     $cancelCheck = { if ($cancelJob) { try { [bool]$cancelJob['Cancel'] } catch { $false } } else { $false } }
 
     $threads = 20
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) { $tpv = 0; if ([int]::TryParse([string]$Params['threads'], [ref]$tpv)) { $threads = $tpv } }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
 
     # Per-host timeout (seconds): the patch/update fan-outs pass this so a single
     # hung host is abandoned on its own clock instead of pinning the wave. 0 = off,
     # so reboot/verify/preflight (which legitimately wait minutes) keep no limit.
     $perHostTimeout = 0
-    if ($Params['perHostTimeout']) { [int]::TryParse([string]$Params['perHostTimeout'], [ref]$perHostTimeout) | Out-Null }
+    if ($Params['perHostTimeout']) { $tpv = 0; if ([int]::TryParse([string]$Params['perHostTimeout'], [ref]$tpv)) { $perHostTimeout = $tpv } }
     if ($perHostTimeout -lt 0) { $perHostTimeout = 0 }
 
     $verifyOnly = $false
@@ -3958,7 +3958,7 @@ function Invoke-JanetToolAction {
         }
 
         'kb-install' {
-            $threads = 12; if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+            $threads = 12; if ($Params['threads']) { $tpv = 0; if ([int]::TryParse([string]$Params['threads'], [ref]$tpv)) { $threads = $tpv } }
             $threads = [Math]::Max(1, [Math]::Min(32, $threads))
             $noReboot = $true; if ($Params.ContainsKey('noreboot') -and $null -ne $Params['noreboot']) { $noReboot = [bool]$Params['noreboot'] }
             $msuPath = ([string]$Params['msu']).Trim().Trim('"')

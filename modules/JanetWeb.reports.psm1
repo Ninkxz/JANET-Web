@@ -38,7 +38,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.16.2' # loop 2026-08-04 P2: the ACAS import dedupe keyed on the RAW hostname while every consumer folds it, so one box carried as WEB01 and web01.dom kept two rows per plugin and inflated open counts/SLA/burndown while UniqueHosts stayed right. Folded - but ONLY where the short key is unambiguous, because folding a cross-domain collision would DELETE a real host's finding. Prior 2.16.1 - loop 2026-08-03 (c) P2: Read-ReportsAuditTouchIndex no longer swallows read failures - an unreadable audit path is reported, so scan-closure-proof cannot render confident causation ("closed by something else") over files it never read. Prior 2.16.0 - loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
+        version  = '2.16.3' # loop 2026-08-04 P2: the ACAS import dedupe keyed on the RAW hostname while every consumer folds it, so one box carried as WEB01 and web01.dom kept two rows per plugin and inflated open counts/SLA/burndown while UniqueHosts stayed right. Folded - but ONLY where the short key is unambiguous, because folding a cross-domain collision would DELETE a real host's finding. Prior 2.16.1 - loop 2026-08-03 (c) P2: Read-ReportsAuditTouchIndex no longer swallows read failures - an unreadable audit path is reported, so scan-closure-proof cannot render confident causation ("closed by something else") over files it never read. Prior 2.16.0 - loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -4405,8 +4405,8 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='No hosts to probe (paste hosts or run a Dirty 30 lookup first).' }
                 return @{ rows=@(); summary=@{ total=0 } }
             }
-            $timeoutSec = 8; if ($Params['TimeoutSec']) { [int]::TryParse([string]$Params['TimeoutSec'], [ref]$timeoutSec) | Out-Null }
-            $threads = 16; if ($Params['MaxConcurrent']) { [int]::TryParse([string]$Params['MaxConcurrent'], [ref]$threads) | Out-Null }
+            $timeoutSec = 8; if ($Params['TimeoutSec']) { $tpv = 0; if ([int]::TryParse([string]$Params['TimeoutSec'], [ref]$tpv)) { $timeoutSec = $tpv } }
+            $threads = 16; if ($Params['MaxConcurrent']) { $tpv = 0; if ([int]::TryParse([string]$Params['MaxConcurrent'], [ref]$tpv)) { $threads = $tpv } }
             $threads = [Math]::Max(1, [Math]::Min(64, $threads))
 
             & $send @{ type='status'; text="Probing LastLoggedOnUser on $($targets.Count) host(s) with $threads thread(s)..." }

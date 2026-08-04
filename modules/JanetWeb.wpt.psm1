@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.10.8'  # audit 2026-08-02: healer-wu-reset could not fix the state that flags it. health-scan sets WuState='Disabled' from WuSvcStartup, driving Overall='Degraded' - but Start-Service THROWS on a Disabled service, so on exactly those hosts the healer renamed SoftwareDistribution and catroot2 (its destructive half) and then could not restart wuauserv. It failed loudly, so never a false green - but the repair was structurally unreachable for its own headline symptom. StartType is now restored to Automatic first, reusing the ChangeStartMode pattern already in Repair-WptWinRm. Prior 6.10.6 - 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5, kept in sync with JanetWeb.acas.psm1 1.11.23 (this file carries an independent copy of the same literals). Includes Get-WptLog4jVulnState, an EXACT equality classifier - a host left on 2.25.4 now reports Vulnerable rather than Patched. Prior 6.10.5 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 with the successes while nothing in that profile deleted the orphan Uninstall key - so the artifact the scanner reads survived and the run still returned removed=1. The correct verify-and-clean pattern exists in THIS FILE (the Remove App tail) and this profile never got it. Reclassified rather than made to delete, per that same tail's rule that the key may only go once the files are confirmed gone. Prior 6.10.4 - audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
+        version  = '6.10.9'  # audit 2026-08-02: healer-wu-reset could not fix the state that flags it. health-scan sets WuState='Disabled' from WuSvcStartup, driving Overall='Degraded' - but Start-Service THROWS on a Disabled service, so on exactly those hosts the healer renamed SoftwareDistribution and catroot2 (its destructive half) and then could not restart wuauserv. It failed loudly, so never a false green - but the repair was structurally unreachable for its own headline symptom. StartType is now restored to Automatic first, reusing the ChangeStartMode pattern already in Repair-WptWinRm. Prior 6.10.6 - 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5, kept in sync with JanetWeb.acas.psm1 1.11.23 (this file carries an independent copy of the same literals). Includes Get-WptLog4jVulnState, an EXACT equality classifier - a host left on 2.25.4 now reports Vulnerable rather than Patched. Prior 6.10.5 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 with the successes while nothing in that profile deleted the orphan Uninstall key - so the artifact the scanner reads survived and the run still returned removed=1. The correct verify-and-clean pattern exists in THIS FILE (the Remove App tail) and this profile never got it. Reclassified rather than made to delete, per that same tail's rule that the key may only go once the files are confirmed gone. Prior 6.10.4 - audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -538,7 +538,12 @@ function ConvertTo-JanetHostList {
 function Get-WptThreadCount {
     param([hashtable]$Params, [int]$Default)
     $threads = $Default
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    # loop 2026-08-04: TryParse zeroes its [ref] on failure, so a non-numeric threads value
+    # collapsed to 0 and then clamped to 1 - a silent single-threaded fleet wave.
+    if ($Params['threads']) {
+        $parsedThreads = 0
+        if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+    }
     return [Math]::Max(1, [Math]::Min(64, $threads))
 }
 
@@ -5972,7 +5977,20 @@ function Invoke-JanetToolAction {
         }
         'reboot-schedule' {
             $threads = Get-WptThreadCount $Params 16
-            $seconds = 900; if ($Params['seconds']) { [int]::TryParse([string]$Params['seconds'], [ref]$seconds) | Out-Null }
+            # loop 2026-08-04: TryParse ZEROES its [ref] on failure and the value was adopted
+            # unconditionally, so a NON-NUMERIC seconds became 0 - and the `-lt 0` clamp does
+            # not catch 0 - arming `shutdown /r /t 0`: an immediate forced reboot instead of
+            # the 900s default, with no countdown for anyone logged on. Unreachable through
+            # the view (numeric input, client-side clamp), but this is the reboot path and a
+            # direct POST with seconds='15m' hits it.
+            # An EXPLICIT 0 is still honoured - "reboot now" is a legitimate operator choice.
+            # What is refused is a parse failure silently BECOMING "reboot now".
+            $seconds = 900
+            if ($Params['seconds']) {
+                $parsedSeconds = 0
+                if ([int]::TryParse([string]$Params['seconds'], [ref]$parsedSeconds)) { $seconds = $parsedSeconds }
+                else { & $send @{ type='log'; level='warn'; text="Ignoring non-numeric delay '$([string]$Params['seconds'])' - using the $seconds second default rather than rebooting immediately." } }
+            }
             if ($seconds -lt 0) { $seconds = 0 }
             $msg = [string]$Params['message']
             # Self-guard: drop the JANET dispatcher host from the wave before arming a
@@ -6572,11 +6590,11 @@ function Invoke-JanetToolAction {
             $kbFilter = ''
             if ($Params.ContainsKey('kbFilter') -and $Params['kbFilter']) { $kbFilter = ([string]$Params['kbFilter']).Trim() }
             $maxPolls = 6
-            if ($Params.ContainsKey('maxPolls') -and -not [string]::IsNullOrWhiteSpace([string]$Params['maxPolls'])) { [int]::TryParse([string]$Params['maxPolls'], [ref]$maxPolls) | Out-Null }
+            if ($Params.ContainsKey('maxPolls') -and -not [string]::IsNullOrWhiteSpace([string]$Params['maxPolls'])) { $pv = 0; if ([int]::TryParse([string]$Params['maxPolls'], [ref]$pv)) { $maxPolls = $pv } }
             if ($maxPolls -lt 1) { $maxPolls = 1 }
             if ($maxPolls -gt 60) { $maxPolls = 60 }   # ceiling: guard a typo from sleeping for hours
             $interval = 30
-            if ($Params.ContainsKey('intervalSeconds') -and -not [string]::IsNullOrWhiteSpace([string]$Params['intervalSeconds'])) { [int]::TryParse([string]$Params['intervalSeconds'], [ref]$interval) | Out-Null }
+            if ($Params.ContainsKey('intervalSeconds') -and -not [string]::IsNullOrWhiteSpace([string]$Params['intervalSeconds'])) { $iv = 0; if ([int]::TryParse([string]$Params['intervalSeconds'], [ref]$iv)) { $interval = $iv } }
             if ($interval -lt 1) { $interval = 1 }
             if ($interval -gt 600) { $interval = 600 }   # ceiling: max 10 min between polls
             & $send @{ type='status'; text="Starting 'verify-patch' on $($targets.Count) host(s) with $threads thread(s) (up to $maxPolls poll(s) every ${interval}s)..." }
@@ -6628,7 +6646,13 @@ function Invoke-JanetToolAction {
                 & $send @{ type='log'; level='warn'; text='Title and message are both required.' }
                 return @{ rows=@(); summary=@{ total=$targets.Count } }
             }
-            $timeout = 300; if ($Params['timeout']) { [int]::TryParse([string]$Params['timeout'], [ref]$timeout) | Out-Null }
+            # loop 2026-08-04: zeroing here meant a non-numeric timeout became 0 = the warning
+            # popup never dismisses itself on the user's desktop.
+            $timeout = 300
+            if ($Params['timeout']) {
+                $parsedTimeout = 0
+                if ([int]::TryParse([string]$Params['timeout'], [ref]$parsedTimeout)) { $timeout = $parsedTimeout }
+            }
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptMessageBlock -AuditAction 'TouchHost' `
                 -ArgFactory { param($h) ,@($h, $Credential, $auth, $title, $body, $timeout) } `

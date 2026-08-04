@@ -42,7 +42,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'biosfirmware'
         name     = 'BIOS Firmware'
-        version  = '1.1.1'   # audit 2026-07-25 (fable re-audit follow-up): catalog-side vs host-side unscorable version split out, Ordinal series compare, cancel-progress now tested; tests\BiosFirmware.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.1.2'   # audit 2026-07-25 (fable re-audit follow-up): catalog-side vs host-side unscorable version split out, Ordinal series compare, cancel-progress now tested; tests\BiosFirmware.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Hardening'
         summary  = 'Read-only fleet BIOS firmware compliance: scan Win32_BIOS over WinRM, compare each model to a per-model target-version baseline (editable JanetLocal catalog), and flag Current / Outdated / Unknown.'
         actions  = @(
@@ -287,7 +287,7 @@ function Invoke-JanetToolAction {
         return @{ rows=@(); summary=@{ total=0 } }
     }
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) { $tpv = 0; if ([int]::TryParse([string]$Params['threads'], [ref]$tpv)) { $threads = $tpv } }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 180  # a read-only BIOS scan that runs this long = a wedged WMI/CIM call
 
