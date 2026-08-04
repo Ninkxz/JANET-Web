@@ -68,7 +68,7 @@ Describe 'CertDeploy (1a) manifest - the Disallowed blacklist push is an explici
     # shortfall as its own BLACKLIST NOT ARMED state, store-open failure reads CHECK ERROR,
     # the check done-line counts Cancelled).
     It 'manifest version is exactly 1.6.0 (newest bump holds the exact pin)' {
-        [string]$man.version | Should Be '1.6.1'
+        [string]$man.version | Should Be '1.6.2'
     }
     It 'exposes pushDisallowed as a bool input defaulting to OFF (guarded like prunePki/fixRdp)' {
         $pd = @($dep.inputs | Where-Object { $_.name -eq 'pushDisallowed' })[0]

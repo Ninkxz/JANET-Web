@@ -73,7 +73,7 @@ function Get-JanetToolManifest {
         # audit 2026-07-28: 1.6.0 -> 1.6.1. The fan-out cancel path now emits a progress event
         # (biosfirmware's 2026-07-24 fix, ported) - it only bumped $done, so the strip froze at its
         # last pre-cancel count while Cancelled rows streamed and the run looked wedged.
-        version  = '1.6.1'
+        version  = '1.6.2' # loop 2026-08-04: 3 TryParse-zeroing threads sites - a non-numeric threads value silently collapsed to a single-threaded run
         category = 'Hardening'
         summary  = 'Proactively deploy the DoD/LTMA trust-root bundle (defaults to the shipped Packages\DoD-Certs) to ANY host list to get AHEAD of PKI Trust Roots non-compliance - even a host that is not failing yet but carries the PKI tag. Read-only CHECK reports which hosts are missing which roots (the accurate needs-certs signal, unlike the C2C audit tag); DEPLOY additively installs the roots into the LocalMachine Root/CA stores over WinRM (adds only-missing by thumbprint, NEVER removes) and, ONLY when the separate pushDisallowed opt-in is ticked, also BLACKLISTS the bundle Untrusted\ certs into the LocalMachine Disallowed store (a fleet-wide DISTRUST, not a trust add); Import C2C export loads every PKI-tagged host into the target list. Independent of C2C failure status.'
         actions  = @(
@@ -1160,7 +1160,14 @@ function Invoke-CertDeployCheckAction {
 
     $attemptOffline = Get-CertDeployBool $Params['attemptOffline'] $false
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 150
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
@@ -1485,7 +1492,14 @@ function Invoke-CertDeployDeployAction {
     }
 
     $threads = 8
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(16, $threads))
     $perHostTimeout = 200
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
@@ -1705,7 +1719,14 @@ function Invoke-CertDeployScanAction {
 
     $attemptOffline = Get-CertDeployBool $Params['attemptOffline'] $false
     $threads = 16
-    if ($Params['threads']) { [int]::TryParse([string]$Params['threads'], [ref]$threads) | Out-Null }
+    if ($Params['threads']) {
+                # loop 2026-08-04: TryParse ZEROES its [ref] on failure, so parsing straight into
+                # $threads made a non-numeric value collapse to 0 and then clamp to 1 - a silent
+                # single-threaded run on a 200-host fan-out, with no message. Only adopt a value
+                # that actually parsed. (The correct idiom already existed at c2c.psm1:3105.)
+                $parsedThreads = 0
+                if ([int]::TryParse([string]$Params['threads'], [ref]$parsedThreads)) { $threads = $parsedThreads }
+            }
     $threads = [Math]::Max(1, [Math]::Min(32, $threads))
     $perHostTimeout = 150
     $auth = if ($Credential) { 'Negotiate' } else { 'Default' }
