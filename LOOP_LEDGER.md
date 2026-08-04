@@ -15,9 +15,25 @@
 > `2.14.12` and asserts it still shows the false close — which is what proves the
 > slice executes shipped code and that the assertions can fail.
 >
-> **Still open on SECRET only:** it never received the AMBIGUOUS cross-domain
-> collision guard (loop39/40) that Web and desktop have. Same family, different
-> defect — a short name shared by two distinct FQDNs can still false-close there.
+> **The collision guard is now at parity too.** Closing the P1 in SECRET surfaced
+> that SECRET had never received the AMBIGUOUS cross-domain guard (Web's loop39/40)
+> — and fixing SECRET surfaced that **desktop hadn't either**, despite folding both
+> compare keys since 2.14.12, which is exactly what creates the collision. Two more
+> instances of the same sweep failure, each found by checking the siblings after a
+> fix rather than assuming.
+>
+> | fork | collision guard |
+> |---|---|
+> | JANET Web | had it (loop39/40) |
+> | SECRET | `c7b5fcb` — reports 2.14.8, suite 26/26 |
+> | Desktop | `c36b749` — `ReportsTool_2.14.14`, suite 156/156 |
+>
+> The helper is kept **structurally identical** in all three (only the name is
+> localised) so the next cross-fork check is a diff, not a re-reading. Signal (b),
+> two distinct scan IPs under one short name, is inert in SECRET and desktop —
+> neither `New-AcasFinding` carries an IP field — and is kept so threading it later
+> is a one-line change. Residual in all three, per Web's own loop40 note: a truly
+> IP-less short-name-only export stays undisambiguable; re-scan by FQDN.
 
 
 Running list of findings from unattended audit/fix sessions. Severity: P1 (acts
