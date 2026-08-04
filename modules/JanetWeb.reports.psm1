@@ -38,7 +38,7 @@ function Get-JanetToolManifest {
         id       = 'reports'
         name     = 'Reports'
         category = 'Reporting'
-        version  = '2.16.1' # loop 2026-08-03 (c) P2: Read-ReportsAuditTouchIndex no longer swallows read failures - an unreadable audit path is reported, so scan-closure-proof cannot render confident causation ("closed by something else") over files it never read. Prior 2.16.0 - loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
+        version  = '2.16.2' # loop 2026-08-04 P2: the ACAS import dedupe keyed on the RAW hostname while every consumer folds it, so one box carried as WEB01 and web01.dom kept two rows per plugin and inflated open counts/SLA/burndown while UniqueHosts stayed right. Folded - but ONLY where the short key is unambiguous, because folding a cross-domain collision would DELETE a real host's finding. Prior 2.16.1 - loop 2026-08-03 (c) P2: Read-ReportsAuditTouchIndex no longer swallows read failures - an unreadable audit path is reported, so scan-closure-proof cannot render confident causation ("closed by something else") over files it never read. Prior 2.16.0 - loop 2026-08-03 P1: scan-compare no longer scores a host ABSENT from the comparison scan as REMEDIATED (it could then be stamped Patched by acas-apply-remediated on evidence never collected) - new NOT SCANNED bucket, mirroring campaign-verify's loop21 guard. Prior 2.15.2
         summary  = 'ACAS vulnerability import with CISA KEV auto-flag (known-exploited CVEs highlighted at parse), scan-to-scan comparison (REMEDIATED / STILL OPEN / NEW + apply), findings triage (Patched / NOT OUR PATCH / Undo), per-host dashboard summary, Dirty 30 AD triage, weekly enclave metrics, CORA commander briefs, remediation planning with push tracking, and parallel target IP resolve. Self-contained HTML/CSV output.'
         # parse/build actions cache findings in $script: state that later render/export
         # actions read - so this tool MUST run in one persistent runspace (the server
@@ -4623,12 +4623,47 @@ function Invoke-JanetToolAction {
             # De-dup on Hostname|PluginID exactly like the desktop import (orig
             # btnImportAcas:6131-6150): a plugin on multiple open ports of one host -
             # or a re-import of the same file - must NOT inflate the open-vuln total.
+            #
+            # loop 2026-08-04: the key used the RAW hostname while every consumer folds the
+            # host through Get-ReportsAuditHostKey (ledger :1314, compare :1606, apply
+            # :5953, CORA host counts :2425). So ONE physical box carried as both WEB01 and
+            # web01.dom - routine on AFNET CSVs, where the per-row DNS->NetBIOS fallback
+            # yields short names on rows with a blank DNS Name, and guaranteed when
+            # Append=true mixes a weekly FQDN export with a daily short-name one - kept TWO
+            # live rows per plugin. Open counts, SLA aging and burndown totals inflate while
+            # UniqueHosts (normalized) stays right, so vulns-per-host is skewed in both
+            # directions at once.
+            #
+            # The obvious fix - just fold the key - is WRONG, and dangerously so: two
+            # DISTINCT machines in a cross-domain collision (web01.us + web01.eu) also fold
+            # to WEB01, and folding the dedupe key would silently DROP one real host's
+            # finding. In the compare, uncertainty must not CLOSE a finding; here,
+            # uncertainty must not DELETE one. Losing a vulnerability is strictly worse than
+            # double-counting it.
+            #
+            # So: fold only where the short key is unambiguous. Where the working set proves
+            # >=2 distinct machines under that name, fall back to the raw hostname and keep
+            # both rows. Same Get-ReportsHostKeyCollisions the compare uses, computed over
+            # the COMBINED existing+incoming population so an Append that introduces the
+            # collision suppresses folding for that key too.
+            $dedupeNames = New-Object System.Collections.ArrayList
+            $dedupeIps   = New-Object System.Collections.ArrayList
+            foreach ($e in $script:AcasFindings) { [void]$dedupeNames.Add([string]$e.Hostname); [void]$dedupeIps.Add([string]$e.IP) }
+            foreach ($f in $findings)            { [void]$dedupeNames.Add([string]$f.Hostname); [void]$dedupeIps.Add([string]$f.IP) }
+            $dedupeCollisions = Get-ReportsHostKeyCollisions -Hostnames @($dedupeNames.ToArray()) -IPs @($dedupeIps.ToArray())
+
             $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($e in $script:AcasFindings) { [void]$seenKeys.Add("$($e.Hostname)|$($e.PluginID)") }
+            foreach ($e in $script:AcasFindings) {
+                $hk = Get-ReportsAuditHostKey $e.Hostname
+                $k  = if ($hk -and -not $dedupeCollisions.Contains($hk)) { "$hk|$($e.PluginID)" } else { "$($e.Hostname)|$($e.PluginID)" }
+                [void]$seenKeys.Add($k)
+            }
             $added = New-Object System.Collections.ArrayList
             $dupes = 0
             foreach ($f in $findings) {
-                if ($seenKeys.Add("$($f.Hostname)|$($f.PluginID)")) { [void]$script:AcasFindings.Add($f); [void]$added.Add($f) }
+                $hk = Get-ReportsAuditHostKey $f.Hostname
+                $k  = if ($hk -and -not $dedupeCollisions.Contains($hk)) { "$hk|$($f.PluginID)" } else { "$($f.Hostname)|$($f.PluginID)" }
+                if ($seenKeys.Add($k)) { [void]$script:AcasFindings.Add($f); [void]$added.Add($f) }
                 else { $dupes++ }
             }
 
