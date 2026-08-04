@@ -119,6 +119,33 @@ Describe 'tallies fail closed - an unknown status is never counted as compliant'
     }
 }
 
+Describe 'telemetry classifies on a field the action actually emits' {
+
+    # loop 2026-08-04: wpt's app-update-apply telemetry read r.Success, which that action
+    # never emits - its RowOf returns Host/Status/Detail only. asBool(undefined) is false,
+    # so every apply row booked "Failed" in Reports/Usage and the Updates stat never moved,
+    # while the grid showed Status=OK. A contract mismatch, not a colour bug: the view and
+    # the audit were describing the same row differently.
+    It 'app-update-apply classifies on Status, not on a non-existent Success field' {
+        $src = Get-ViewSource 'wpt.view.js'
+        ($src -match "case 'app-update-apply': if \(asBool\(r\.Success\)\)") | Should Be $false
+        ($src -match 'var aus = String\(r\.Status \|\| ..\);')               | Should Be $true
+    }
+    It 'and it uses the module OWN vocabulary (OK success; Pending/Skipped neither)' {
+        $src = Get-ViewSource 'wpt.view.js'
+        ($src -match "if \(/\^OK\$/i\.test\(aus\)\) \{ add\.updates = 1")     | Should Be $true
+        ($src -match "else if \(/\^\(pending\|skipped\)\$/i\.test\(aus\)\)")  | Should Be $true
+        # the module side those mirror - if either changes, they must change together
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+        ($mod -match "-OkOf \{ param\(\`$r\) \(\`$r\.Status -eq 'OK'\) \}")   | Should Be $true
+        ($mod -match "\`"\`$\(\`$r\.Status\)\`" -eq 'Pending' -or \`"\`$\(\`$r\.Status\)\`" -eq 'Skipped'") | Should Be $true
+    }
+    It 'the RowOf really does emit Status and not Success' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+        ($mod -match "-RowOf \{ param\(\`$r\) @\{ Host=\`$r\.Host; Status=\[string\]\`$r\.Status; Detail=\[string\]\`$r\.Detail \} \}") | Should Be $true
+    }
+}
+
 Describe 'no view paints an unknown-outcome status as success' {
 
     # The sweep. Any view that maps a status whose NAME says the work did not

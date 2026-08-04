@@ -118,7 +118,22 @@
               if (ok3) { if (m === 'install') add.installed = 1; else if (m === 'uninstall') add.uninstalled = 1; else if (m === 'reinstall') add.reinstalled = 1; else if (m === 'repair') add.repaired = 1; }
               result = r.Result || ''; detail = ((r.App || '') + ' ' + (r.Method || '')).trim(); break;
             }
-            case 'app-update-apply': if (asBool(r.Success)) add.updates = 1; result = asBool(r.Success) ? 'Updated' : 'Failed'; break;
+            // loop 2026-08-04: this read r.Success, a field this action NEVER emits - its
+            // RowOf (wpt.psm1:6917) returns Host/Status/Detail only. asBool(undefined) is
+            // false, so EVERY apply row booked "Failed" in Reports/Usage telemetry and the
+            // Updates stat never moved: an operator applying a profile to 50 hosts, all
+            // Status=OK on screen, saw 50 "Failed" rows in the history.
+            // Classified on Status now, using the module's OWN vocabulary from the same
+            // dispatch block: -OkOf is ($r.Status -eq 'OK'), and -AuditResultOf treats
+            // 'Pending'/'Skipped' as neither success nor failure. Telemetry must not
+            // disagree with the audit written from the same row.
+            case 'app-update-apply': {
+              var aus = String(r.Status || '');
+              if (/^OK$/i.test(aus)) { add.updates = 1; result = 'Updated'; }
+              else if (/^(pending|skipped)$/i.test(aus)) { result = aus; }
+              else { result = aus || 'Failed'; }
+              break;
+            }
             case 'healer-restart-ccm': case 'healer-ccm-repair': case 'healer-wmi-repair': case 'healer-wu-reset': case 'healer-gpupdate': case 'healer-trigger-checkin': case 'healer-rdp-rebind':
               if (asBool(r.Success)) add.repaired = 1; result = asBool(r.Success) ? 'Repaired' : 'Failed'; break;
             case 'reboot': if (asBool(r.Success)) add.reboots = 1; result = asBool(r.Success) ? 'Reboot sent' : 'Failed'; break;
