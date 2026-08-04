@@ -441,10 +441,22 @@ direct POST with `seconds='15m'` reboots the fleet **immediately** instead of th
 is the reboot path. Same zeroing at `:541` (threads → 1) and `:6616`
 (remote-message timeout → never dismiss).
 
-**P3 — wpt telemetry reads a field the action never emits.** `wpt.view.js:121` —
-`classify('app-update-apply')` reads `r.Success`, but that action's RowOf emits
-Host/Status/Detail only, so 50 successful applies show as 50 "Failed" rows in
-Reports and the Updates stat never moves.
+**~~P3 — wpt telemetry reads a field the action never emits.~~ FIXED** —
+`wpt.view.js` now classifies on `Status` using the module's OWN vocabulary from the
+same dispatch block (`-OkOf` = `Status -eq 'OK'`; `-AuditResultOf` treats
+Pending/Skipped as neither), so the view and the audit written from the same row can
+no longer disagree. Guarded in `ViewRowClassHonesty.Tests.ps1`, including
+assertions on the module side they mirror.
+
+### REFUTED — checked and NOT a defect (do not re-file)
+
+**acas kb-install does NOT crash the wave on Cancel.** An audit claimed
+`$script:AcasKbInstallRowOf`'s `[int](Get-AcasMarker $res 'MECM')` throws on a
+marker-less result because `Get-AcasMarker` returns `''`. Tested directly on
+PS 5.1.26100: `[int]''` returns **0**, it does not throw — verified for a bare
+string, a function return, and inside a hashtable literal (the real shape).
+Marker-less rows book `MECM=0/MSU=0/Skipped=0`, which are the correct defaults.
+No change made.
 
 **P3 — more swallowed reads in wpt.** MSXML uninstall verify returns
 `Verified=$true` "No MSXML 4.0 products" when the hives are unreadable (`:1749`);
