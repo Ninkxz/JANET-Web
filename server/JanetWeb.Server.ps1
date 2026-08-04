@@ -443,6 +443,41 @@ function Start-JanetWebServer {
     # ones are half a megabyte of source apiece - so this is where "why is it slow" is
     # answerable. Kept to Write-Host on the launch console, exactly like E.P.I.C: no route,
     # no state, nothing a browser can reach.
+    # --- manifest cache ------------------------------------------------------
+    # Import-Module is the ENTIRE cost of this pass. Measured on the dev box: 10.2s of a
+    # 13.1s startup, while the manifest call itself is 1-32ms and Remove-Module ~0. We parse
+    # 3.2 MB of PowerShell on every launch purely to read 21 small manifests, then throw the
+    # modules away again.
+    #
+    # Every manifest in this suite is a STATIC literal - all 21 were checked for
+    # environment-dependent calls and the only hit was a Get-Item inside a comment - so a
+    # manifest can only change when its .psm1 changes. Cache it, keyed on the file's write
+    # time and length, and a warm start does 21 stats instead of 21 parses.
+    #
+    # WHY NOT A CONTENT HASH: measured 2778ms to SHA256 the 3.2 MB over this SMB share -
+    # a quarter of the saving spent on the check. Stat costs 44ms.
+    #
+    # RESIDUAL: a file replaced by a DIFFERENT build of identical length AND identical write
+    # time (a timestamp-preserving restore) would serve a stale entry. Delete
+    # JanetLocal\manifest-cache.json to force a full reload.
+    #
+    # BLAST RADIUS, which is why that residual is tolerable: this catalog feeds the tool
+    # list, the manifest endpoint and action-id validation ONLY. Every ACTION imports the
+    # module fresh in its own runspace (~:766), so a stale entry could misreport a version
+    # or miss a brand-new action id - it can never change what actually runs.
+    #
+    # Fails safe in every direction: unreadable, corrupt or absent cache -> full reload.
+    $manifestCacheFile = Join-Path (Join-Path $Root 'JanetLocal') 'manifest-cache.json'
+    $mfCache = @{}
+    try {
+        if (Test-Path -LiteralPath $manifestCacheFile) {
+            $rawCache = Get-Content -LiteralPath $manifestCacheFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($p in $rawCache.PSObject.Properties) { $mfCache[$p.Name] = $p.Value }
+        }
+    } catch { $mfCache = @{} }
+    $mfCacheDirty = $false
+    $cacheHits = 0
+
     $loadRows = New-Object System.Collections.ArrayList
     $catalogSw = [System.Diagnostics.Stopwatch]::StartNew()
     foreach ($t in $registry.tools) {
@@ -452,7 +487,23 @@ function Start-JanetWebServer {
             continue
         }
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $kb = [math]::Round((Get-Item -LiteralPath $mp).Length / 1KB)
+        $fi = Get-Item -LiteralPath $mp
+        $kb = [math]::Round($fi.Length / 1KB)
+        $stamp = "{0}:{1}" -f $fi.LastWriteTimeUtc.Ticks, $fi.Length
+
+        # Cache hit: use the stored manifest and skip the parse entirely.
+        $hit = $mfCache[[string]$t.id]
+        if ($hit -and ([string]$hit.stamp -eq $stamp) -and $hit.manifest) {
+            $manifests[$t.id] = $hit.manifest
+            $modulePaths[$t.id] = $mp
+            $sw.Stop()
+            $cacheHits++
+            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = [int]$sw.ElapsedMilliseconds; Kb = $kb; Ok = $true; Cached = $true })
+            Write-Host ("  cached   {0,-14} v{1,-10} {2,6} ms {3,6} KB  {4}" -f `
+                $t.id, [string]$hit.manifest.version, [int]$sw.ElapsedMilliseconds, $kb, [string]$hit.manifest.name) -ForegroundColor DarkGreen
+            continue
+        }
+
         try {
             Import-Module $mp -Force -ErrorAction Stop
             $manifests[$t.id] = Get-JanetToolManifest
@@ -460,16 +511,32 @@ function Start-JanetWebServer {
             Remove-Module ("JanetWeb.{0}" -f $t.id) -Force -ErrorAction SilentlyContinue
             $sw.Stop()
             $ms = [int]$sw.ElapsedMilliseconds
-            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = $ms; Kb = $kb; Ok = $true })
+            $mfCache[[string]$t.id] = @{ stamp = $stamp; manifest = $manifests[$t.id] }
+            $mfCacheDirty = $true
+            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = $ms; Kb = $kb; Ok = $true; Cached = $false })
             # Slow modules earn a colour so the eye lands on them without reading numbers.
             $c = if ($ms -ge 1000) { 'Yellow' } elseif ($ms -ge 400) { 'DarkYellow' } else { 'DarkGray' }
             Write-Host ("  module   {0,-14} v{1,-10} {2,6} ms {3,6} KB  {4}" -f `
                 $t.id, [string]$manifests[$t.id].version, $ms, $kb, [string]$manifests[$t.id].name) -ForegroundColor $c
         } catch {
             $sw.Stop()
-            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = [int]$sw.ElapsedMilliseconds; Kb = $kb; Ok = $false })
+            # A failure is never cached - the next launch must try again.
+            [void]$mfCache.Remove([string]$t.id)
+            $mfCacheDirty = $true
+            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = [int]$sw.ElapsedMilliseconds; Kb = $kb; Ok = $false; Cached = $false })
             Write-Host ("  MODULE FAILED   {0,-14} {1,6} ms  {2}" -f $t.id, [int]$sw.ElapsedMilliseconds, $_.Exception.Message) -ForegroundColor Red
             Write-Warning "JANET Web: module '$($t.id)' failed to load: $($_.Exception.Message)"
+        }
+    }
+    # Write the cache AFTER the loop, once, and never let a write failure break startup -
+    # the worst case is that the next launch is a cold one.
+    if ($mfCacheDirty) {
+        try {
+            $cacheDir = Split-Path -Parent $manifestCacheFile
+            if (-not (Test-Path -LiteralPath $cacheDir)) { [void](New-Item -ItemType Directory -Path $cacheDir -Force) }
+            ($mfCache | ConvertTo-Json -Depth 12 -Compress) | Set-Content -LiteralPath $manifestCacheFile -Encoding UTF8
+        } catch {
+            Write-Host ("  cache    could not be written ({0}) - next start will be a cold one" -f $_.Exception.Message) -ForegroundColor DarkYellow
         }
     }
     $catalogSw.Stop()
@@ -478,8 +545,10 @@ function Start-JanetWebServer {
     if ($okRows.Count -gt 0) {
         $slow = @($okRows | Sort-Object Ms -Descending | Select-Object -First 3)
         $slowTxt = (@($slow | ForEach-Object { "{0} {1}ms" -f $_.Id, $_.Ms }) -join ', ')
-        Write-Host ("  catalog  {0} module(s) in {1} ms   slowest: {2}" -f `
-            $okRows.Count, [int]$catalogSw.ElapsedMilliseconds, $slowTxt) -ForegroundColor Cyan
+        $parsedN = @($okRows | Where-Object { -not $_.Cached }).Count
+        $cacheTxt = if ($cacheHits -gt 0) { "  ($cacheHits cached, $parsedN parsed)" } else { '  (all parsed - cold start)' }
+        Write-Host ("  catalog  {0} module(s) in {1} ms{2}   slowest: {3}" -f `
+            $okRows.Count, [int]$catalogSw.ElapsedMilliseconds, $cacheTxt, $slowTxt) -ForegroundColor Cyan
     }
     if ($badRows.Count -gt 0) {
         Write-Host ("  catalog  {0} module(s) FAILED to load: {1}" -f `

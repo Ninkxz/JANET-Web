@@ -35,9 +35,12 @@ Describe 'startup prints per-module load detail' {
     It 'the failure path still raises the original warning (nothing was swallowed for prettiness)' {
         ($script:Src -match "Write-Warning ""JANET Web: module '\`$\(\`$t\.id\)' failed to load") | Should Be $true
     }
+    # Positional index moved from {2} to {3} when the manifest cache added a
+    # "(N cached, M parsed)" segment ahead of it. Asserted on the label rather than the
+    # index now, so a future insertion does not fail a test that is not about ordering.
     It 'the catalog line names the slowest modules, not just a total' {
-        ($script:Src -match 'slowest: \{2\}')                       | Should Be $true
-        ($script:Src -match 'Sort-Object Ms -Descending')           | Should Be $true
+        ($script:Src -match 'slowest: \{\d\}')            | Should Be $true
+        ($script:Src -match 'Sort-Object Ms -Descending') | Should Be $true
     }
     It 'failures are summarised separately so they cannot hide in the total' {
         ($script:Src -match "module\(s\) FAILED to load") | Should Be $true
