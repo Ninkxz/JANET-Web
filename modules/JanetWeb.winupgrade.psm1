@@ -97,7 +97,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'winupgrade'
         name     = 'Windows Upgrade'
-        version  = '0.5.9'  # audit 2026-07-28: Auto-Fix booked its three fixes BEFORE attempting them and no failure arm took them back, so a host where DISM errored, sfc errored and the $WINDOWS.~BT delete was denied still reported Status=FIXED / "Applied: repair; staging-cleared" and audited VulnPatched Success. Each fix is now booked only after the operation actually succeeded (repair-health already worked this way).
+        version  = '0.5.10' # loop 2026-08-04: three swallowed setuperr.log reads no longer render as a clean host - error-report emits a READ ERROR row instead of the confident 'No upgrade errors detected', diagnose says its forensic analysis was SKIPPED, and auto-fix warns that corruption was NOT ruled out rather than printing 'repair not needed'. The pure authority Get-WinUpgradeErrorRowSet gained the same rule so it cannot drift from the inline worker. Prior 0.5.9  # audit 2026-07-28: Auto-Fix booked its three fixes BEFORE attempting them and no failure arm took them back, so a host where DISM errored, sfc errored and the $WINDOWS.~BT delete was denied still reported Status=FIXED / "Applied: repair; staging-cleared" and audited VulnPatched Success. Each fix is now booked only after the operation actually succeeded (repair-health already worked this way).
         category = 'Remediation'
         summary  = 'Pin/unpin the Windows feature-update target version and push feature-update CAB/MSU packages (DISM) across many workstations in parallel. Two common jobs: the 24H2 UPGRADE (Pin to Windows 11 24H2, then let Windows Update / MECM install it) and the 25H2 UPDATE (Install the 25H2 enablement-package CAB; Unpin first if the fleet is pinned). Also diagnoses a failed in-place upgrade: Check Upgrade Errors reads setuperr.log and flags the out-of-memory build failure (0x8007000E), and Set Page File applies the fix (fixed 16 GB page file).'
         actions  = @(
@@ -786,7 +786,13 @@ function Get-WinUpgradeErrorRowSet {
         [double]$StagingGB = 0,
         [bool]$PolicyMissing = $false,
         [bool]$PolicyHalfWritten = $false,
-        [string]$SetupDiagProfile = ''
+        [string]$SetupDiagProfile = '',
+        # loop 2026-08-04: the reason setuperr.log could not be read, '' when it read fine.
+        # This helper is the TESTED authority for the row set and the remote worker mirrors
+        # it inline; the swallowed-read fix landed in the worker, so the parameter exists
+        # here to keep the two from drifting - which is exactly how this repo's recurring
+        # defect family is born. An unreadable log is NOT an absence of errors.
+        [string]$SetupErrReadError = ''
     )
     $trim = { param($s) $x = [string]$s; if ($x.Length -gt 200) { $x = $x.Substring(0,200) }; $x }
     if ($Build -ge $MinBuild) {
@@ -829,6 +835,11 @@ function Get-WinUpgradeErrorRowSet {
     }
     if ($SetupDiagProfile) {
         [void]$rows.Add([ordered]@{ Category='SETUPDIAG'; Severity='WARN'; Evidence=(& $trim "SetupDiag matched profile: $SetupDiagProfile"); Fix='Action the SetupDiag remediation for this profile, then re-trigger.' })
+    }
+    # Added BEFORE the NONE fallback on purpose: "no upgrade errors detected" must never be
+    # the sole verdict on a host whose setup log we could not open.
+    if ($SetupErrReadError) {
+        [void]$rows.Add([ordered]@{ Category='READ ERROR'; Severity='WARN'; Evidence=(& $trim "Could not read setuperr.log - upgrade errors NOT analysed: $SetupErrReadError"); Fix='Re-run with rights to C:\$WINDOWS.~BT\Sources\Panther, or retry once the in-flight upgrade releases the file.' })
     }
     if ($rows.Count -eq 0) {
         return ,@([ordered]@{ Category='NONE'; Severity='INFO'; Evidence='No upgrade errors detected'; Fix='' })
@@ -2121,11 +2132,15 @@ $script:WinUpgradeWorker = {
                         if (Test-Path -LiteralPath $btErr) {
                             $ei = Get-Item -LiteralPath $btErr -Force -ErrorAction SilentlyContinue
                             $curErrTime = if ($ei) { $ei.LastWriteTime } else { $null }
-                            $sr = $null
+                            $sr = $null; $curErrReadErr = ''
                             try {
                                 $fs = [System.IO.File]::Open($btErr, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
                                 try { $sr = New-Object System.IO.StreamReader($fs); $curErrText = $sr.ReadToEnd() } finally { if ($sr) { $sr.Dispose() }; $fs.Dispose() }
-                            } catch { try { $curErrText = Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $curErrText = '' } }
+                            # loop 2026-08-04: a swallowed read here made the whole SETUP FAILURE
+                            # ANALYSIS section render EMPTY and the verdict compute as though the log
+                            # were clean - with no indication the forensics had been skipped. Say so.
+                            } catch { try { $curErrText = Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $curErrText = ''; $curErrReadErr = $_.Exception.Message } }
+                            if ($curErrReadErr) { $lines += "[WARN] Current setuperr.log COULD NOT BE READ - setup failure analysis SKIPPED (not 'clean'): $curErrReadErr" }
                             $lines += "[INFO] Current setuperr.log : ~BT\Sources\Panther (modified $curErrTime)"
                         } else {
                             $lines += "[INFO] No ~BT\Sources\Panther\setuperr.log (no current in-place attempt to analyse)"
@@ -3127,8 +3142,17 @@ $script:WinUpgradeWorker = {
                     if ($fixRepair) {
                         # audit 2026-07-23: -LiteralPath on the $WINDOWS.~BT path - parity with
                         # every other ~BT read in this block.
-                        $btErr="$env:SystemDrive\`$WINDOWS.~BT\Sources\Panther\setuperr.log"; $et=''
-                        if (Test-Path -LiteralPath $btErr) { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch {} }
+                        # loop 2026-08-04: a swallowed read made a corrupt host print the confident
+                        # "[SKIP] No registry/CBS corruption signature - repair not needed" and skip
+                        # its DISM/SFC repair. An unreadable log is not a clean log - say so, and do
+                        # not present the skip as a finding.
+                        $btErr="$env:SystemDrive\`$WINDOWS.~BT\Sources\Panther\setuperr.log"; $et=''; $etReadErr=''
+                        if (Test-Path -LiteralPath $btErr) { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $etReadErr=$_.Exception.Message } }
+                        # $report, NOT $fixes: this is a WARNING that the check could not be made,
+                        # not a fix that was applied. Adding it to $fixes would book Status=FIXED and
+                        # audit VulnPatched/Success for a repair that never ran - the very family of
+                        # defect this change exists to close.
+                        if ($etReadErr) { [void]$report.Add("[WARN] setuperr.log UNREADABLE - registry/CBS corruption NOT ruled out, repair NOT evaluated: $etReadErr") }
                         $needsRepair=($et -match '0x000003F1' -or $et -match '(?i)configuration registry database is corrupt' -or $et -match 'MigPlatformStartupOffline' -or $et -match '(?i)Offline gather failed' -or $et -match '(?i)FOD inventory' -or $et -match '(?i)Failed to enumerate store capabilities' -or $et -match 'CBS_E_INVALID_PACKAGE' -or $et -match '0x800f0805')
                         if ($needsRepair) {
                             # audit 2026-07-28: 'repair' used to be booked BEFORE DISM/sfc ran, and
@@ -3233,11 +3257,18 @@ $script:WinUpgradeWorker = {
                     $freeGB=[math]::Round($disk.FreeSpace/1GB,1)
                     if ($freeGB -lt $minDisk) { [void]$rows.Add([pscustomobject]@{ Category='DISK'; Severity='BLOCK'; Evidence=(& $trim "$freeGB GB free on $sysDrive (need $minDisk+ GB)"); Fix="Free disk to 25+ GB (clearing `$WINDOWS.~BT reclaims staging), then re-trigger." }) }
                     # read current setuperr.log (shared open; may be held during an in-flight upgrade)
-                    $btErr='C:\$WINDOWS.~BT\Sources\Panther\setuperr.log'; $et=''
+                    # loop 2026-08-04: the read failure used to vanish into `catch { $et='' }`, so an
+                    # ACL-denied or locked setuperr.log produced no DRIVER/signature rows and - with
+                    # nothing else firing - the confident single "No upgrade errors detected" NONE row
+                    # below. On a host that failed with 0x8007000E that reads as CLEAN and the operator
+                    # never runs Set Page File. CheckUpgrade handles the identical case honestly
+                    # (READERR -> FAILED, :1652/:1674); this action did not. Capture the reason and
+                    # surface it as its own row, which also stops the NONE row from being reachable.
+                    $btErr='C:\$WINDOWS.~BT\Sources\Panther\setuperr.log'; $et=''; $etErr=''
                     if (Test-Path -LiteralPath $btErr) {
                         $sr=$null
                         try { $fs=[System.IO.File]::Open($btErr,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite); try { $sr=New-Object System.IO.StreamReader($fs); $et=$sr.ReadToEnd() } finally { if ($sr){$sr.Dispose()}; $fs.Dispose() } }
-                        catch { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $et='' } }
+                        catch { try { $et=Get-Content -LiteralPath $btErr -Raw -ErrorAction Stop } catch { $et=''; $etErr=$_.Exception.Message } }
                     }
                     # DRIVER injection failures
                     $failedInfs=@()
@@ -3292,6 +3323,10 @@ $script:WinUpgradeWorker = {
                     # SETUPDIAG
                     $sdr="$env:SystemRoot\Logs\SetupDiag\SetupDiagResults.xml"
                     if (Test-Path -LiteralPath $sdr) { try { [xml]$sdx=Get-Content -LiteralPath $sdr -Raw -ErrorAction Stop; $node=$sdx.SelectSingleNode('//*[local-name()="SetupDiag"]'); if (-not $node) { $node=$sdx.DocumentElement }; $rule=''; foreach ($rn in @('ProfileName','Rule','MatchingProfile')) { try { if ($node.$rn) { $rule=[string]$node.$rn; break } } catch {} }; if ($rule) { [void]$rows.Add([pscustomobject]@{ Category='SETUPDIAG'; Severity='WARN'; Evidence=(& $trim "SetupDiag matched profile: $rule"); Fix='Action the SetupDiag remediation for this profile, then re-trigger.' }) } } catch {} }
+                    # An UNREADABLE setup log is not an absence of errors. Emitted before the NONE
+                    # row on purpose, so "No upgrade errors detected" can never be the sole verdict
+                    # on a host whose log we could not open.
+                    if ($etErr) { [void]$rows.Add([pscustomobject]@{ Category='READ ERROR'; Severity='WARN'; Evidence=(& $trim "Could not read setuperr.log - upgrade errors NOT analysed: $etErr"); Fix='Re-run with rights to C:\$WINDOWS.~BT\Sources\Panther, or retry once the in-flight upgrade releases the file.' }) }
                     if ($rows.Count -eq 0) { [void]$rows.Add([pscustomobject]@{ Category='NONE'; Severity='INFO'; Evidence='No upgrade errors detected'; Fix='' }) }
                     return ,@($rows)
                 }

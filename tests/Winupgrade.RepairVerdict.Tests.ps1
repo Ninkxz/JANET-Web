@@ -85,8 +85,8 @@ Describe 'winupgrade 0.5.9 - AutoFix books a fix only AFTER it actually succeede
 }
 
 Describe 'winupgrade - manifest exact version pin (newest bump = audit 2026-07-28 AutoFix honest FIXED)' {
-    It 'winupgrade is at v0.5.9' {
+    It 'winupgrade is at or past v0.5.9 (floor; exact pin moved to WinUpgrade.SetupLogReadErrors.Tests.ps1 on 2026-08-04)' {
         $mani = & $script:Mod { Get-JanetToolManifest }
-        [string]$mani.version | Should Be '0.5.9'
+        ([version][string]$mani.version -ge [version]'0.5.9') | Should Be $true
     }
 }
