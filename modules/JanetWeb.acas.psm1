@@ -730,10 +730,32 @@ $script:AcasUpdateProfiles = @{
                 $remaining.Add($svc.PSChildName) | Out-Null
             }
 
+            # loop 2026-08-04 (P1): this did Get-ChildItem on a REGISTRY path, sorted by
+            # LastWriteTime, then called .ToString('yyyy-MM-dd HH:mm') on it. RegistryKey has
+            # NO .LastWriteTime member, so $newest.LastWriteTime was $null and the .ToString
+            # THREW "You cannot call a method on a null-valued expression".
+            #
+            # It only fired where the backup root had CHILDREN - i.e. ONLY on hosts this
+            # profile had already fixed. The throw propagates into the combined block, stamps
+            # JANET_PROBE_ERR, and a genuinely successful fix comes back "UNCONFIRMED: verify
+            # probe errored" with a Failure audit. The profile could never book a success
+            # after fixing anything, while untouched hosts verified fine - so it read as
+            # intermittent rather than as a bug.
+            #
+            # The right value was already on disk: the Script above writes a FixedTimestamp
+            # VALUE into each backup key. Read that instead of a key mtime that does not
+            # exist. loop88 swept the C2R / Java / Chrome siblings and missed this one - in
+            # this module AND in the identical profile in JanetWeb.wpt.psm1.
             $lastFix = 'n/a'
             if (Test-Path $backupRoot) {
-                $newest = Get-ChildItem -LiteralPath $backupRoot -EA SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                if ($newest) { $lastFix = $newest.LastWriteTime.ToString('yyyy-MM-dd HH:mm') }
+                $stamps = New-Object System.Collections.ArrayList
+                foreach ($bk in @(Get-ChildItem -LiteralPath $backupRoot -EA SilentlyContinue)) {
+                    try {
+                        $fv = (Get-ItemProperty -LiteralPath $bk.PSPath -Name 'FixedTimestamp' -EA Stop).FixedTimestamp
+                        if ($fv) { [void]$stamps.Add([string]$fv) }
+                    } catch {}
+                }
+                if ($stamps.Count -gt 0) { $lastFix = (@($stamps) | Sort-Object -Descending | Select-Object -First 1) }
             }
 
             return @{
@@ -1204,7 +1226,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.23'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.11.24'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(

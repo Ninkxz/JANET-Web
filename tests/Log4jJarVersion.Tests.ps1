@@ -85,10 +85,12 @@ Describe 'Log4j replacement jar version agrees everywhere' {
     # to a floor on 2026-08-02 when 6.10.7 landed for an unrelated fix (healer-wu-reset)
     # - this file guards the jar sweep, not wpt's version, and an exact pin here would
     # make every future wpt bump fail a log4j test for no reason.
-    It 'acas manifest is exactly 1.11.23 and wpt is at or past 6.10.6' {
+    It 'acas is at or past 1.11.23 and wpt at or past 6.10.6 (both floors)' {
         $acas = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Raw), "version\s+=\s+'([0-9.]+)'").Groups[1].Value
         $wpt  = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1')  -Raw), "version\s+=\s+'([0-9.]+)'").Groups[1].Value
-        $acas | Should Be '1.11.23'
+        # acas exact pin demoted to a floor 2026-08-04: 1.11.24 is the registry-mtime fix,
+        # not a log4j change. This file guards the JAR SWEEP, not acas's version number.
+        ([version]$acas -ge [version]'1.11.23') | Should Be $true
         ([version]$wpt -ge [version]'6.10.6') | Should Be $true
     }
 
