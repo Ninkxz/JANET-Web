@@ -314,6 +314,9 @@ function Start-JanetWebServer {
     # EVERY request 403s and the server looks up-but-dead. Throw loudly at start instead.
     # (loop12 server audit P3 - not a bypass, the gate already fails closed; this is clarity.)
     if ([string]::IsNullOrEmpty($Token)) { throw 'Start-JanetWebServer: -Token must be a non-empty per-launch secret.' }
+    # Whole-startup clock, reported next to the per-module detail at "Listening". Started
+    # AFTER the token guard so a misconfigured launch does not report a meaningless number.
+    $startupSw = [System.Diagnostics.Stopwatch]::StartNew()
     $serverDir    = Join-Path $Root 'server'
     $webDir       = (Resolve-Path (Join-Path $Root 'web')).Path
     $modulesDir   = Join-Path $Root 'modules'
@@ -434,15 +437,53 @@ function Start-JanetWebServer {
     #     isolation, because every tool module exports the same two function names) -
     $registry = Get-Content -LiteralPath $registryFile -Raw -Encoding UTF8 | ConvertFrom-Json
     $manifests = @{}; $modulePaths = @{}
+    # Per-module load detail + timing (mirrors E.P.I.C's startup engine list, which prints
+    # one line per module but no cost). This catalog pass IS the bulk of startup: every tool
+    # module is imported far enough to read its manifest, then unloaded again, and the big
+    # ones are half a megabyte of source apiece - so this is where "why is it slow" is
+    # answerable. Kept to Write-Host on the launch console, exactly like E.P.I.C: no route,
+    # no state, nothing a browser can reach.
+    $loadRows = New-Object System.Collections.ArrayList
+    $catalogSw = [System.Diagnostics.Stopwatch]::StartNew()
     foreach ($t in $registry.tools) {
         $mp = Join-Path $modulesDir ("JanetWeb.{0}.psm1" -f $t.id)
-        if (-not (Test-Path -LiteralPath $mp)) { continue }
+        if (-not (Test-Path -LiteralPath $mp)) {
+            Write-Host ("  MODULE MISSING  {0,-14} {1}" -f $t.id, $mp) -ForegroundColor DarkYellow
+            continue
+        }
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $kb = [math]::Round((Get-Item -LiteralPath $mp).Length / 1KB)
         try {
             Import-Module $mp -Force -ErrorAction Stop
             $manifests[$t.id] = Get-JanetToolManifest
             $modulePaths[$t.id] = $mp
             Remove-Module ("JanetWeb.{0}" -f $t.id) -Force -ErrorAction SilentlyContinue
-        } catch { Write-Warning "JANET Web: module '$($t.id)' failed to load: $($_.Exception.Message)" }
+            $sw.Stop()
+            $ms = [int]$sw.ElapsedMilliseconds
+            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = $ms; Kb = $kb; Ok = $true })
+            # Slow modules earn a colour so the eye lands on them without reading numbers.
+            $c = if ($ms -ge 1000) { 'Yellow' } elseif ($ms -ge 400) { 'DarkYellow' } else { 'DarkGray' }
+            Write-Host ("  module   {0,-14} v{1,-10} {2,6} ms {3,6} KB  {4}" -f `
+                $t.id, [string]$manifests[$t.id].version, $ms, $kb, [string]$manifests[$t.id].name) -ForegroundColor $c
+        } catch {
+            $sw.Stop()
+            [void]$loadRows.Add([pscustomobject]@{ Id = [string]$t.id; Ms = [int]$sw.ElapsedMilliseconds; Kb = $kb; Ok = $false })
+            Write-Host ("  MODULE FAILED   {0,-14} {1,6} ms  {2}" -f $t.id, [int]$sw.ElapsedMilliseconds, $_.Exception.Message) -ForegroundColor Red
+            Write-Warning "JANET Web: module '$($t.id)' failed to load: $($_.Exception.Message)"
+        }
+    }
+    $catalogSw.Stop()
+    $okRows = @($loadRows | Where-Object { $_.Ok })
+    $badRows = @($loadRows | Where-Object { -not $_.Ok })
+    if ($okRows.Count -gt 0) {
+        $slow = @($okRows | Sort-Object Ms -Descending | Select-Object -First 3)
+        $slowTxt = (@($slow | ForEach-Object { "{0} {1}ms" -f $_.Id, $_.Ms }) -join ', ')
+        Write-Host ("  catalog  {0} module(s) in {1} ms   slowest: {2}" -f `
+            $okRows.Count, [int]$catalogSw.ElapsedMilliseconds, $slowTxt) -ForegroundColor Cyan
+    }
+    if ($badRows.Count -gt 0) {
+        Write-Host ("  catalog  {0} module(s) FAILED to load: {1}" -f `
+            $badRows.Count, (@($badRows | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Red
     }
 
     $state = @{
@@ -935,6 +976,13 @@ function Start-JanetWebServer {
         Write-Host "    - Or try a different port:  ""Launch JANET Web.cmd"" -Port 8090" -ForegroundColor Yellow
         return
     }
+    $startupSw.Stop()
+    # The catalog figure is the slice of startup spent importing tool modules; the rest is
+    # config/log/auth setup and the listener bind. Printing both makes it obvious which one
+    # to go after when startup feels slow.
+    $otherMs = [Math]::Max(0, [int]$startupSw.ElapsedMilliseconds - [int]$catalogSw.ElapsedMilliseconds)
+    Write-Host ("  startup  {0} ms total  ({1} ms module catalog + {2} ms server setup)" -f `
+        [int]$startupSw.ElapsedMilliseconds, [int]$catalogSw.ElapsedMilliseconds, $otherMs) -ForegroundColor Cyan
     Write-Host "  Listening. Ctrl+C to stop." -ForegroundColor DarkGray
 
 
