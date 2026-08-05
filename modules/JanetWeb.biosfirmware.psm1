@@ -231,7 +231,14 @@ $script:BiosFirmwareScanBlock = {
         $actualName  = ([string]$info.Name).Trim()
         $targetShort = ($Computer -split '\.')[0]
         $isIPv4      = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
-        if (-not $isIPv4 -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+        # Fail closed on an UNREADABLE name, not just a mismatched one. `$actualName -and`
+        # meant a box that did not report its name skipped the compare and its BIOS facts
+        # were published anyway - the same false report this guard exists to stop.
+        if (-not $isIPv4 -and -not $actualName) {
+            $r.Error = "Identity NOT confirmed: '$targetShort' did not report its name - skipped (facts unknown, not current)"
+            return $r
+        }
+        if (-not $isIPv4 -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
             $r.Error = "DNS mismatch: dialed '$targetShort' but remote is '$actualName' - skipped"
             return $r
         }

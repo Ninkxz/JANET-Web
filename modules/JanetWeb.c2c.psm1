@@ -1318,7 +1318,16 @@ $script:C2cProbeBlock = {
     # mode invites typing the IP of a DNS-broken box; without this every IP scan false-skips.
     $actualName  = ([string]$probe.RemoteName).Trim()
     $targetShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-    if ($targetShort -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+    # Fail closed on an UNREADABLE name, not just a mismatched one. `$actualName -and`
+    # meant a box that did not report its COMPUTERNAME skipped the compare entirely and
+    # its reads were published anyway - and the only reason this is a skip at all is
+    # that the reads would describe the WRONG machine. An unconfirmed identity has
+    # exactly that problem. IP literals stay exempt via the empty $targetShort above.
+    if ($targetShort -and -not $actualName) {
+        $r.Status = 'IDENTITY UNKNOWN'; $r.Detail = "dialed '$targetShort' but it did not report its COMPUTERNAME - skipped (posture unknown, not clean)"
+        return $r
+    }
+    if ($targetShort -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
         $r.Status = 'DNS MISMATCH'; $r.Detail = "dialed '$targetShort' but remote is '$actualName' - skipped (would report the wrong machine)"
         return $r
     }
@@ -3648,7 +3657,12 @@ $script:C2cVersionBlock = {
     # (audit 2026-07-23: the version block was the only worker without this guard.)
     $actualName  = ([string]$read.RemoteName).Trim()
     $targetShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-    if ($targetShort -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+    # Fail closed on an unreadable name too - see the note at the compliance-read guard.
+    if ($targetShort -and -not $actualName) {
+        $r.Status = 'IDENTITY UNKNOWN'; $r.Detail = "dialed '$targetShort' but it did not report its COMPUTERNAME - skipped (versions unknown, not current)"
+        return $r
+    }
+    if ($targetShort -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
         $r.Status = 'DNS MISMATCH'; $r.Detail = "dialed '$targetShort' but remote is '$actualName' - skipped (would report the wrong machine's versions)"
         return $r
     }
@@ -4251,7 +4265,15 @@ $script:C2cEscrowAuditBlock = {
     # state is worse than reporting none. IP literals have no name to compare.
     $actualName  = ([string]$facts.RemoteName).Trim()
     $targetShort = if ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$') { '' } else { ($Computer -split '\.')[0] }
-    if ($targetShort -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+    # Fail closed on an unreadable name too - see the note at the compliance-read guard.
+    # Reporting the WRONG machine's escrow state is worse than reporting none, and an
+    # unconfirmed identity cannot be distinguished from the wrong machine.
+    if ($targetShort -and -not $actualName) {
+        $r.Status = 'ESCROW UNKNOWN'
+        $r.Detail = "dialed '$targetShort' but it did not report its COMPUTERNAME - soft-skipped, nothing reported"
+        return $r
+    }
+    if ($targetShort -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
         $r.Status = 'ESCROW UNKNOWN'
         $r.Detail = "DNS MISMATCH: dialed '$targetShort' but remote is '$actualName' - soft-skipped, nothing reported"
         return $r

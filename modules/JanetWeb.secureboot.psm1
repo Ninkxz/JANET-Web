@@ -1393,7 +1393,14 @@ $script:SbeScanWorker = {
     $actualName  = ([string]$p.RemoteName).Trim()
     $targetShort = ($Computer -split '\.')[0]
     $isIpLiteral = ($Computer -match '^\d{1,3}(\.\d{1,3}){3}$')
-    if (-not $isIpLiteral -and $actualName -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
+    # Fail closed on an UNREADABLE name, not just a mismatched one. `$actualName -and`
+    # meant a box that did not report its COMPUTERNAME skipped the compare and its
+    # Secure Boot state was published anyway - the same false report this guard stops.
+    if (-not $isIpLiteral -and -not $actualName) {
+        $r.HostStatus = 'IDENTITY UNKNOWN'; $r.Detail = "dialed '$targetShort' but it did not report its COMPUTERNAME - skipped (state unknown, not compliant)"
+        return $r
+    }
+    if (-not $isIpLiteral -and ($actualName.ToUpper() -ne $targetShort.ToUpper())) {
         $r.HostStatus = 'DNS MISMATCH'; $r.Detail = "dialed '$targetShort' but remote is '$actualName' - skipped (would report the wrong machine)"
         return $r
     }
