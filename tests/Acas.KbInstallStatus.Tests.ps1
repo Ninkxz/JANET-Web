@@ -225,6 +225,17 @@ Describe 'ambient reboot: shutdown.exe /c is a QUOTED single argument (audit 202
         $blk.Contains('if ($warn.Length -gt 500)') | Should Be $true
     }
     It 'the wrong-box (DNS mismatch) hard-aborts are still on BOTH reboot paths' {
-        ([regex]::Matches($blk, 'ABORTED, no reboot sent').Count) | Should Be 2
+        # Counts the MISMATCH abort specifically. This asserted
+        # 'ABORTED, no reboot sent' == 2, but that phrase is now emitted by the
+        # unreadable-name abort added beside these guards as well, so it no longer
+        # isolates the mismatch case. The invariant is unchanged and still exact.
+        ([regex]::Matches($blk, 'DNS mismatch: dialed').Count) | Should Be 2
+    }
+    It 'an UNREADABLE name hard-aborts on BOTH reboot paths too' {
+        # Fail closed: a box that cannot be asked its name used to skip the compare
+        # and be sent a restart unverified. The in-session path returns the marker
+        # with a placeholder, the direct path returns the FAIL string - one each.
+        ([regex]::Matches($blk, 'Identity NOT confirmed').Count) | Should Be 1
+        ([regex]::Matches($blk, 'name unavailable').Count)       | Should Be 1
     }
 }

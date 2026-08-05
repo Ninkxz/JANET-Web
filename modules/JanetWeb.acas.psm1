@@ -2265,7 +2265,12 @@ $script:AcasUpdateWorker = {
             # Runs FIRST so a mismatched box never executes the pre-probe or the update.
             if ($guardShort) {
                 $selfName = ([string]$env:COMPUTERNAME).Trim()
-                if ($selfName -and ($selfName.ToUpper() -ne ([string]$guardShort).ToUpper())) {
+                # Fail closed on an UNREADABLE name, not only a mismatched one. `$selfName -and`
+                # let a box that could not state its own name skip the compare and remediate.
+                if (-not $selfName) {
+                    return @{ Abort = "Identity NOT confirmed: dialed '$guardShort' but the box did not state its COMPUTERNAME - ABORTED, no remediation run" }
+                }
+                if ($selfName.ToUpper() -ne ([string]$guardShort).ToUpper()) {
                     return @{ Abort = "DNS mismatch: dialed '$guardShort' but remote is '$selfName' - ABORTED, no remediation run" }
                 }
             }
@@ -2403,7 +2408,13 @@ $script:AcasRebootWorker = {
                 param($w, $expectShort)
                 if ($expectShort) {
                     $selfName = ([string]$env:COMPUTERNAME).Trim()
-                    if ($selfName -and ($selfName.ToUpper() -ne ([string]$expectShort).ToUpper())) {
+                    # Fail closed on an unreadable name too. The caller renders whatever
+                    # follows the marker as "remote is '<x>'", so a placeholder keeps the
+                    # abort path unchanged while still refusing to send the restart.
+                    if (-not $selfName) {
+                        return "JANET_DNS_MISMATCH:(name unavailable)"
+                    }
+                    if ($selfName.ToUpper() -ne ([string]$expectShort).ToUpper()) {
                         return "JANET_DNS_MISMATCH:$selfName"
                     }
                 }
@@ -2432,7 +2443,12 @@ $script:AcasRebootWorker = {
     if ($Target -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
         $targetShort = ($Target -split '\.')[0]
         $actualName = try { Invoke-Command -ComputerName $Target -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-        if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+        # Fail closed on an UNREADABLE name, not only a mismatched one: a host that could
+        # not be asked its name used to skip the compare and be sent a restart unverified.
+        if (-not ([string]$actualName).Trim()) {
+            return "FAIL: Identity NOT confirmed: '$targetShort' did not return its COMPUTERNAME - ABORTED, no reboot sent <<EXIT=>>"
+        }
+        if ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper()) {
             return "FAIL: DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no reboot sent <<EXIT=>>"
         }
     }
@@ -2626,7 +2642,11 @@ $script:AcasPreflightWorker = {
             param($expectShort)
             if ($expectShort) {
                 $selfName = ([string]$env:COMPUTERNAME).Trim()
-                if ($selfName -and ($selfName.ToUpper() -ne ([string]$expectShort).ToUpper())) {
+                # Fail closed on an unreadable name too - see the sibling guards.
+                if (-not $selfName) {
+                    return "FAIL: Identity NOT confirmed: dialed '$expectShort' but the box did not state its COMPUTERNAME - ABORTED, no service changes <<CHANGES=>>"
+                }
+                if ($selfName.ToUpper() -ne ([string]$expectShort).ToUpper()) {
                     return "FAIL: DNS mismatch: dialed '$expectShort' but remote is '$selfName' - ABORTED, no service changes <<CHANGES=>>"
                 }
             }
@@ -3101,7 +3121,12 @@ $script:AcasKbInstallBlock = {
         if ($Computer -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
             $targetShort = ($Computer -split '\.')[0]
             $actualName = try { Invoke-Command -Session $sess -EA Stop -ScriptBlock { $env:COMPUTERNAME } } catch { '' }
-            if ($actualName -and ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper())) {
+            # Fail closed on an UNREADABLE name, not only a mismatched one: a host that
+            # could not be asked its name used to skip the compare and have KBs installed.
+            if (-not ([string]$actualName).Trim()) {
+                return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> Identity NOT confirmed: '$targetShort' did not return its COMPUTERNAME - ABORTED, no KBs installed"
+            }
+            if ($actualName.Trim().ToUpper() -ne $targetShort.ToUpper()) {
                 return "FAIL <<MECM=0>> <<MSU=0>> <<SKIP=0>> <<KBS=$kbList>> DNS mismatch: dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no KBs installed"
             }
         }
