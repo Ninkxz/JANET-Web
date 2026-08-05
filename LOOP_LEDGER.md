@@ -489,6 +489,102 @@ syntax in either module.
 
 ---
 
+## Audit haul 2026-08-05 — adsearch, history, patchlib
+
+### FIXED — "we could not read it" reported as "it is not there"
+
+Three sites in `adsearch` turned an ERRORED directory read into a confident
+**negative claim**, which is worse than an empty result because an operator acts
+on it. All the same family as the winupgrade/closure-proof/c2c swallowed reads,
+but pointed the other way.
+
+- **BulkComputer** (`:866-930`) — the batch query's catch falls back to a per-name
+  query whose own `catch {}` swallowed. If BOTH threw, `$foundMachines` was empty
+  and **every** name was emitted `Status='Not Found'` — telling the operator that
+  50 real machines are not in AD, on a read that never succeeded, with those rows
+  excluded from `auditCount` as though the absence were proven. Now reports
+  `Lookup Failed` carrying the reason; a genuine miss still reports `Not Found`.
+- **BaseUsers base-OU** (`:945`) — a swallowed `FindAll` produced *"No OU matching
+  '<base>' was found in the domain. Try: LAKENHEATH, RAMSTEIN…"*, so an LDAP
+  timeout read as "that base does not exist". Now says the search FAILED and gives
+  the reason.
+- **BaseUsers child-OU** (`:993`) — the OU was added to `$searchedOUs` **before**
+  its user query ran, and that query's `catch {}` swallowed. The summary then
+  claimed *"… across N searched OU(s)"* counting OUs whose read had failed. Worst
+  case: the Administrative OU denies the query, every privileged account is
+  silently missing from the export, and that OU is reported as covered. The marker
+  moved to after a successful read; failures are recorded separately and surfaced
+  as an INCOMPLETE row.
+
+**Nearly introduced the family while fixing it:** `bulkStatusCls` returns `''` for
+an unrecognised status, so the new `Lookup Failed` would have rendered unstyled
+**and** fallen through every branch of the summary tally — vanishing from "of N"
+exactly like the dhcp and certdeploy defects fixed days earlier. The view now
+matches it before `not found`, colours it, and counts it in its own bucket with an
+explicit "NOT confirmed absent" line. adsearch 3.4.1 → 3.4.2.
+
+### OPEN — from this haul
+
+**P2 — patchlib inventories an unreadable root as EMPTY.**
+`modules\JanetWeb.patchlib.psm1:356` — `Get-PatchlibInventory` lists an `Ok` root
+with `-EA SilentlyContinue` plus `catch { $entries = @() }` and no error signal, so
+a root that passed `Test-Path` but fails enumeration (list-denied ACL, share
+dropping between the gate and the walk) inventories as empty — and crossref then
+verdicts every item red MISSING. This is one level *below* the root-resolution
+guard that v1.1.0's UNKNOWN verdict was built to close.
+
+**P3 — patchlib, the same defect pointed the other way.** `:151-152` — an ABSENT
+local `.\Packages` is recorded `Ok=$false` (an unreadable root), which flips every
+honest MISSING verdict to UNKNOWN. A folder that does not exist *does* prove
+absence. The module's own 07-25 comment (`:197-200`) names exactly this
+"fabricated unreadable root" hazard for the dedupe case, and the Local leg still
+does it.
+
+**P3 — patchlib inventory closes green on zero reachable roots.**
+`web\js\views\patchlib.view.js:189` — the `final` handler paints `st-ok`
+("Done - 0 item(s), 0 KB id(s) on hand.") unconditionally, including the
+`summary.roots=0` return. A dead share plus a missing local folder reads as a
+clean, empty library; the only signal is a warn line in the log dock.
+
+**P3 — patchlib KB harvest silently partial.** `:301-311` — the per-folder
+classify/KB walk uses `-EA SilentlyContinue` (denied subtrees vanish while
+`$walked` stays true) and the 200-installer harvest cap is surfaced nowhere, so a
+genuinely staged KB can be reported MISSING with all roots shown as "scanned".
+
+**P3 — history coverage-reconcile did not get the bad-timestamp guard.**
+`modules\JanetWeb.history.psm1:1326,1348` — stale-hosts got an "UNKNOWN (bad
+timestamp)" verdict in 1.2.1; coverage-reconcile did not. A host whose only audit
+rows carry an unparseable Timestamp (a torn share append) enters `$latest` with
+`TS=MinValue` and, if AD-alive, verdicts `STALE (live)` with DaysAgo ≈ 739,000.
+The two boards now disagree on identical evidence. *Straight sweep of an existing
+fix to its sibling.*
+
+**P3 — history silently drops malformed host tokens.** `:1102,:1299` — stale-hosts
+and coverage-reconcile discard pasted tokens failing the hostname regex with no row
+and no warning ("of N" is the post-filter count), so a host pasted with a stray
+character just vanishes. `host-timeline` warns loudly for the same input (`:869`).
+
+**P3 — adsearch cancel promises partial output it cannot deliver.** `:2108-2140` —
+the engine returns all rows in ONE terminal `return $results`, so BeginStop always
+leaves `$output` empty: every cancel shows "Cancelled. 0 partial result(s)" and the
+partial-row projection loop is dead code. Honest, but the advertised affordance
+never works.
+
+### Verified clean in this haul (do not re-report)
+
+adsearch books only TouchHost and its Success requires real projected rows, with
+bulk Not Found placeholders already excluded from `auditCount` (`:2303`);
+history/patchlib emit no audit rows by design. TryParse zeroing is clean in all
+three (adsearch regex-gates before parsing, history re-defaults
+`ConvertTo-HistInt`'s 0 at every param site, patchlib returns `''`). Zero registry
+access, so no mtime family. Five declared authority/mirror twins compared and
+byte-identical (`Test-AdSearchDnInLocalDomain`, `New-AdUserLdapFilter`,
+`Merge-AdRangedMemberValues`, `Escape-LdapFilterValue`, history's
+`Test-HistDnInLocalDomain`). CSV formula-injection is handled centrally by
+`shell.js toCsv`. No PS7 syntax.
+
+---
+
 ### OPEN — carried to a later session
 
 **P2 — OPERATOR DECISION — `consentFailMode='skip'` is ignored for No-User hosts.**
