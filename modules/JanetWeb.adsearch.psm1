@@ -45,7 +45,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'adsearch'
         name     = 'AD Search'
-        version  = '3.4.1'
+        version  = '3.4.2'
         category = 'Reporting'
         summary  = 'Search Active Directory for users, computers, groups, org boxes, email, managers, bulk computers, base users, and last-PC logon (DC Security-log scan). RSAT-free ADSI; read-only.'
         actions  = @(
@@ -786,6 +786,9 @@ $script:AdSearchEngine = {
             $staleThreshold = $now.AddDays(-90)
 
             $foundMachines = @{}
+            # loop 2026-08-05: name -> why its lookup FAILED, so a read error is never
+            # reported as "this machine is not in AD". See the row loop at the end.
+            $lookupErrors = @{}
 
             function Parse-OUFromDN {
                 param([string]$DN)
@@ -897,32 +900,52 @@ $script:AdSearchEngine = {
                                     $results += $props
                                 }
                             }
-                        } catch {} finally { Close-AdDisposable $fallbackResults }   # audit 2026-07-24 (P3)
+                        # loop 2026-08-05: a swallowed fallback made an ERRORED lookup
+                        # indistinguishable from a machine that genuinely is not in AD.
+                        # Record the failure so the row below can tell the operator which
+                        # of the two happened.
+                        } catch { $lookupErrors[$name] = $_.Exception.Message } finally { Close-AdDisposable $fallbackResults }   # audit 2026-07-24 (P3)
                     }
                 } finally { Close-AdDisposable $adResults }   # audit 2026-07-24 (P3)
             }
 
+            # loop 2026-08-05: this asserted "Not Found" - i.e. THIS MACHINE IS NOT IN AD -
+            # for every name missing from $foundMachines, including when the batch query AND
+            # its per-name fallback had both thrown. An LDAP drop mid-run therefore told the
+            # operator that 50 real machines do not exist, on a read that never succeeded,
+            # and those rows were excluded from auditCount as if the absence were proven.
+            # "We could not look it up" is not "it is not there". A name whose lookup ERRORED
+            # is now reported as such, with the reason, and is visually distinct from a
+            # genuine miss.
             foreach ($name in $machineList) {
                 if (-not $foundMachines.ContainsKey($name)) {
+                    $failMsg = [string]$lookupErrors[$name]
                     $results += @{
                         name            = $name
-                        _squadron       = "NOT FOUND"
+                        _squadron       = $(if ($failMsg) { "LOOKUP FAILED" } else { "NOT FOUND" })
                         _parentOU       = "N/A"
                         _ouChain        = "N/A"
-                        _fullOU         = "N/A"
+                        _fullOU         = $(if ($failMsg) { $failMsg } else { "N/A" })
                         _lastLogon      = "N/A"
                         _isStale        = $false
-                        _status         = "Not Found"
+                        _status         = $(if ($failMsg) { "Lookup Failed" } else { "Not Found" })
                         operatingsystem = "N/A"
                     }
                 }
             }
+            # NOTE: no log event here on purpose - this switch runs inside the search-engine
+            # scriptblock, which RETURNS rows and has no $send in scope. The signal rides on
+            # the row itself (_status 'Lookup Failed' + the reason in the OU column), which is
+            # what the operator reads, and the caller tallies it below.
         }
         "BaseUsers" {
             $baseName = $SearchParams.BaseName
             $allFound = [System.Collections.ArrayList]::new()
             $seenDNs = @{}
             $searchedOUs = [System.Collections.ArrayList]::new()
+            # loop 2026-08-05: OUs whose user search ERRORED. Kept separate from
+            # $searchedOUs so "N searched OU(s)" counts only OUs actually read.
+            $ouReadFailures = [System.Collections.ArrayList]::new()
             # audit 2026-07-23: DN -> the searched OU whose subtree query found the
             # user, recorded at dedup time so _sourceOU needs no per-user rescan of
             # every searched OU below. (The dead credentialed RootDSE bind that sat
@@ -937,12 +960,17 @@ $script:AdSearchEngine = {
             $ouSearcher.Filter = "(&(objectCategory=organizationalUnit)(name=$(Escape-LdapFilterValue $baseName)*))"
             $baseOUs = @()
             $baseOUResults = $null
+            # loop 2026-08-05: a swallowed failure here produced the confident message
+            # "No OU matching '<base>' was found in the domain. Try: LAKENHEATH, RAMSTEIN..."
+            # when the OU search had ERRORED - an LDAP timeout past the client deadline told
+            # the operator the base does not exist. Record the failure and say which it was.
+            $baseOULookupError = ''
             try {
                 $baseOUResults = $ouSearcher.FindAll()
                 foreach ($ou in $baseOUResults) {
                     $baseOUs += "$($ou.Properties['distinguishedname'][0])"
                 }
-            } catch {} finally {
+            } catch { $baseOULookupError = $_.Exception.Message } finally {
                 Close-AdDisposable $baseOUResults    # audit 2026-07-24 (P3)
                 Close-AdDisposable $ouSearcher
             }
@@ -968,7 +996,13 @@ $script:AdSearchEngine = {
                     foreach ($childOU in $childOUs) {
                         $childOUDN = "$($childOU.Properties['distinguishedname'][0])"
                         $childOUName = "$($childOU.Properties['name'][0])"
-                        [void]$searchedOUs.Add($childOUDN)
+                        # loop 2026-08-05: this recorded the OU as SEARCHED here, BEFORE its
+                        # user query ran, and the query's catch below swallowed a failure. So
+                        # the summary claimed "... across N searched OU(s)" counting OUs whose
+                        # read never succeeded. Worst case is the Administrative OU denying the
+                        # query: every privileged account silently missing from the export
+                        # while that OU is reported as covered. Moved to AFTER a successful
+                        # read; a failure is recorded separately and surfaced.
 
                         $userSearcher = $null; $userRoot = $null; $userResults = $null
                         try {
@@ -987,6 +1021,8 @@ $script:AdSearchEngine = {
                                 $userSearcher.Filter = "(&(objectCategory=person)(objectClass=user)(|(samaccountname=*.adw)(samaccountname=*.adf)(samaccountname=*.adm)(samaccountname=*.ada)(samaccountname=*.adn)(samaccountname=*.SA)))"
                             }
                             $userResults = $userSearcher.FindAll()
+                            # The read SUCCEEDED - only now does this OU count as searched.
+                            [void]$searchedOUs.Add($childOUDN)
                             foreach ($user in $userResults) {
                                 $dn = "$($user.Properties['distinguishedname'][0])"
                                 if (-not $seenDNs.ContainsKey($dn)) {
@@ -1009,16 +1045,41 @@ $script:AdSearchEngine = {
                             Close-AdDisposable $userRoot
                         }
                     }
-                } catch {} finally {
+                } catch { [void]$ouReadFailures.Add("$baseOUDN : $($_.Exception.Message)") } finally {
                     Close-AdDisposable $childOUs
                     Close-AdDisposable $childSearcher
                     Close-AdDisposable $childRoot
                 }
             }
 
+            # An OU whose read FAILED is not an OU with no users. Say so before any
+            # conclusion is drawn from an empty or short result set.
+            if ($ouReadFailures.Count -gt 0) {
+                $results += @{
+                    name        = "READ FAILED"
+                    _squadron   = "READ FAILED"
+                    _parentOU   = "$($ouReadFailures.Count) OU search(es) errored - results are INCOMPLETE"
+                    _ouChain    = ($ouReadFailures -join ' | ')
+                    _fullOU     = "Accounts under these OUs are NOT accounted for. Re-run before treating this export as a full picture."
+                    _lastLogon  = "N/A"
+                    _isStale    = $false
+                    _status     = "Read Failed"
+                }
+            }
+
             if ($searchedOUs.Count -eq 0) {
                 $msg = "No 'Users', 'Administrative', or 'AFB' OU found under '$baseName'.`n`n"
-                if ($baseOUs.Count -gt 0) {
+                # loop 2026-08-05: a failed base-OU search used to fall into the "no OU
+                # matching" branch below, telling the operator the base does not exist.
+                if ($baseOULookupError) {
+                    $msg = "The OU search for '$baseName' FAILED - this is NOT a statement that the base does not exist.`n`n"
+                    $msg += "Reason: $baseOULookupError`n`n"
+                    $msg += "Re-run once AD is reachable. If it persists, check the client timeout and your rights to read the OU tree."
+                } elseif ($ouReadFailures.Count -gt 0) {
+                    $msg = "Every child-OU user search under '$baseName' FAILED - no accounts could be read.`n`n"
+                    $msg += ($ouReadFailures -join "`n")
+                    $msg += "`n`nThis is NOT a statement that those OUs are empty."
+                } elseif ($baseOUs.Count -gt 0) {
                     $msg += "Found base OU(s):`n"
                     foreach ($b in $baseOUs) { $msg += "  $b`n" }
                     $msg += "`nBut none contained a child OU with 'Users', 'Administrative', or 'AFB' in the name.`n"

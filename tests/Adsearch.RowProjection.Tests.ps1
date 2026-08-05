@@ -150,9 +150,14 @@ Describe 'Ranged member re-read failure keeps the fetched page (audit 2026-07-25
     }
 }
 
-Describe 'adsearch 3.4.1 - manifest exact pin (newest bump = audit 2026-07-25 fable re-audit follow-up)' {
-    It 'adsearch manifest is exactly 3.4.1' {
-        [string](Get-JanetToolManifest).version | Should Be '3.4.1'
+Describe 'adsearch - manifest floor (3.4.1 = audit 2026-07-25 fable re-audit follow-up)' {
+    # Demoted from an exact pin to a FLOOR on 2026-08-05: 3.4.2 is the read-failure
+    # honesty fix, so the exact pin moved to that change's own test file
+    # (Adsearch.ReadFailureHonesty.Tests.ps1), per the convention that the newest bump
+    # carries the exact pin and older files assert a floor. This file guards the row
+    # projection, not adsearch's version number.
+    It 'adsearch is at or past 3.4.1' {
+        ([version][string](Get-JanetToolManifest).version -ge [version]'3.4.1') | Should Be $true
     }
 }
 

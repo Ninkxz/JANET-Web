@@ -42,12 +42,22 @@
   //      ConvertTo-AdGridRow projection / manifest columns.
   function txt(v) { return v == null ? '' : String(v); }
 
+  // loop 2026-08-05: 'Lookup Failed' / 'Read Failed' are new statuses for a machine or OU
+  // whose AD read ERRORED - previously those were reported as 'Not Found', i.e. as a
+  // positive claim that the object does not exist in AD. Matched BEFORE 'not found' so a
+  // failure never colours as a clean miss, and mapped to st-bad so it is counted by the
+  // summary rather than falling through to '' and silently vanishing from the tally.
   function bulkStatusCls(v) {
     var s = String(v || '').toLowerCase();
+    if (s.indexOf('lookup failed') >= 0 || s.indexOf('read failed') >= 0) return 'st-bad';
     if (s.indexOf('active') >= 0) return 'st-ok';
     if (s.indexOf('stale') >= 0) return 'st-warn';
     if (s.indexOf('not found') >= 0 || s.indexOf('error') >= 0) return 'st-bad';
     return '';
+  }
+  function isLookupFailure(v) {
+    var s = String(v || '').toLowerCase();
+    return s.indexOf('lookup failed') >= 0 || s.indexOf('read failed') >= 0;
   }
   function privCls(v) { return /priv/i.test(String(v || '')) ? 'st-warn' : 'cell-dim'; }
 
@@ -522,9 +532,17 @@
       function renderSummary(modeId, rows) {
         info.append({ text: rows.length + ' result(s).', level: 'ok' });
         if (modeId === 'search-bulk-computer') {
-          var a = 0, st = 0, nf = 0;
-          rows.forEach(function (r) { var c = bulkStatusCls(r.Status); if (c === 'st-ok') a++; else if (c === 'st-warn') st++; else if (c === 'st-bad') nf++; });
-          info.append({ text: 'Active: ' + a + '   Stale (90+d): ' + st + '   Not Found / Error: ' + nf, level: 'mode' });
+          // loop 2026-08-05: a lookup FAILURE is counted separately from a genuine miss.
+          // Lumping them under "Not Found / Error" would hide the distinction the engine
+          // now makes, which is the whole point: absence proven vs absence unknown.
+          var a = 0, st = 0, nf = 0, lf = 0;
+          rows.forEach(function (r) {
+            if (isLookupFailure(r.Status)) { lf++; return; }
+            var c = bulkStatusCls(r.Status);
+            if (c === 'st-ok') a++; else if (c === 'st-warn') st++; else if (c === 'st-bad') nf++;
+          });
+          info.append({ text: 'Active: ' + a + '   Stale (90+d): ' + st + '   Not Found: ' + nf, level: 'mode' });
+          if (lf) { info.append({ text: 'LOOKUP FAILED: ' + lf + ' - the AD read errored, so these are NOT confirmed absent. Re-run before acting on them.', level: 'err' }); }
           var byOrg = {};
           rows.forEach(function (r) { var o = String(r.Organization || '(unknown)'); byOrg[o] = (byOrg[o] || 0) + 1; });
           Object.keys(byOrg).sort().forEach(function (o) { info.append({ text: '  ' + String(byOrg[o]).padStart(3, '0') + '  ' + o, level: 'dim' }); });
