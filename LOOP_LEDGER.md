@@ -1,5 +1,44 @@
 # JANET Web — maintenance loop ledger
 
+> # ✅ STABLE CHECKPOINT — 2026-08-05
+>
+> Work paused here deliberately to mark a stable baseline before moving to other
+> products. Everything below the checkpoint is history; everything in **OPEN** is
+> the backlog for whoever picks this up next.
+>
+> | fork | branch | tag | suite |
+> |---|---|---|---|
+> | JANET Web | `master` | `stable-2026-08-05` | 171 files / 2794 tests / 0 failed |
+> | SECRET | `master` | `stable-2026-08-05` | 26 / 26 |
+> | Desktop | `feat/winrm-5986-c2c-dualmode` + `main` | `stable-2026-08-05` | 156 / 156 |
+>
+> All three are pushed to Gitea and synced. The Web figure was verified against a
+> **pristine `git worktree` of the committed HEAD**, not the working tree — see the
+> note below.
+>
+> ### ⚠ One file is dirty and is NOT mine
+> `modules/JanetWeb.c2c.psm1` carries uncommitted work from a **concurrent session**
+> (fail-open wrong-box guards → `IDENTITY UNKNOWN`, three sites: the compliance
+> probe, the version block, the escrow audit). It was modified mid-session on
+> 2026-08-05 and deliberately left untouched — not committed, not reverted, not
+> stashed. It is good work and overlaps findings this ledger had left OPEN as
+> family-5 fail-open guards.
+>
+> **Because of it, the stable tag was verified in a separate worktree at the
+> committed HEAD.** The earlier in-tree run that reported 2794/0 included those
+> uncommitted changes, so it was not clean evidence for a stable marker.
+>
+> **That work still needs committing by whoever wrote it.** The tag does not
+> include it.
+>
+> ### Where to resume
+> Highest-value OPEN items, in order: patchlib's unreadable-root-reads-as-empty
+> (P2, and its mirror image where an absent folder reads as unreadable), history's
+> missing bad-timestamp guard in coverage-reconcile (a straight sweep of a fix its
+> sibling board already has), and the four **OPERATOR DECISION** items which are
+> not mine to take.
+
+
 > ## ✅ CROSS-FORK: the P1 false-close is now fixed in ALL THREE forks
 > *Found by a cross-fork grep 2026-08-03 after the Web fix; closed 2026-08-04.*
 >
