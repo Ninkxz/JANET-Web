@@ -105,9 +105,22 @@
             case 'kb-scan': result = 'KB ' + (r.HotFixID || ''); detail = r.Description || ''; break;
             case 'software-scan': result = 'App'; detail = r.Name || ''; break;
             case 'unsupported-scan': result = r.Status || 'Scanned'; detail = r.DisplayName || r.Name || ''; break;
+            // loop 2026-08-05: this labelled ANY reachable host 'Patched', including one with
+            // 0 updates and 0 apps triggered - a host the action did nothing to. The stat
+            // counters were already honest (add.updates/add.installed are gated on if (u) /
+            // if (a)); it was the per-row verdict that lied, and the row is what an operator
+            // reads back in Reports. Matches the module, which now audits that host 'Skipped'
+            // rather than VulnPatched/Success.
             case 'bulk-patch': {
               var u = parseInt(r.UpdatesTriggered, 10) || 0, a = parseInt(r.AppsTriggered, 10) || 0;
-              if (r.Error) { result = 'Error'; } else { if (u) add.updates = u; if (a) add.installed = a; result = asBool(r.Reachable) ? 'Patched' : 'Unreachable'; detail = 'upd ' + u + ', app ' + a; }
+              if (r.Error) { result = 'Error'; }
+              else if (!asBool(r.Reachable)) { result = 'Unreachable'; detail = 'upd ' + u + ', app ' + a; }
+              else {
+                if (u) add.updates = u;
+                if (a) add.installed = a;
+                result = (u + a) > 0 ? 'Patched' : 'No change';
+                detail = 'upd ' + u + ', app ' + a;
+              }
               break;
             }
             case 'kb-install': { var kr = String(r.Result || (asBool(r.Success) ? 'Installed' : 'Failed')); if (/^installed$/i.test(kr)) add.installed = 1; result = kr; break; }

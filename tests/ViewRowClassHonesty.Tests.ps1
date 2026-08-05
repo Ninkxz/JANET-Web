@@ -140,6 +140,25 @@ Describe 'telemetry classifies on a field the action actually emits' {
         ($mod -match "-OkOf \{ param\(\`$r\) \(\`$r\.Status -eq 'OK'\) \}")   | Should Be $true
         ($mod -match "\`"\`$\(\`$r\.Status\)\`" -eq 'Pending' -or \`"\`$\(\`$r\.Status\)\`" -eq 'Skipped'") | Should Be $true
     }
+    # loop 2026-08-05, same family one action over: bulk-patch booked a
+    # VulnPatched/Success audit (itemCount=1) and a 'Patched' row for a host with 0
+    # updates and 0 apps triggered - a host it did nothing to. On a wave where most
+    # machines are already current that is a fleet-wide phantom patch in the ledger
+    # that gets reported upward. The module already printed "0 updates, 0 apps -
+    # nothing to trigger" in the activity log for that same host.
+    It 'bulk-patch requires evidence of work before booking a patch' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+        ($mod -match '\(\(\(\[int\]\$r\.UpdatesTriggered\) \+ \(\[int\]\$r\.AppsTriggered\)\) -gt 0\)') | Should Be $true
+    }
+    It 'and a clean no-op audits Skipped, never Failure (a healthy host is not a failure)' {
+        $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
+        ($mod -match "elseif \(\[bool\]\`$r\.Reachable -and \[string\]::IsNullOrEmpty\(\[string\]\`$r\.Error\)\) \{ 'Skipped' \}") | Should Be $true
+    }
+    It 'the view agrees with the audit rather than calling every reachable host Patched' {
+        $src = Get-ViewSource 'wpt.view.js'
+        ($src -match "result = \(u \+ a\) > 0 \? 'Patched' : 'No change';") | Should Be $true
+        ($src -match "result = asBool\(r\.Reachable\) \? 'Patched' : 'Unreachable'") | Should Be $false
+    }
     It 'the RowOf really does emit Status and not Success' {
         $mod = Get-Content (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1') -Raw
         ($mod -match "-RowOf \{ param\(\`$r\) @\{ Host=\`$r\.Host; Status=\[string\]\`$r\.Status; Detail=\[string\]\`$r\.Detail \} \}") | Should Be $true

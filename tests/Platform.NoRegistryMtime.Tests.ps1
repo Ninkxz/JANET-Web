@@ -93,7 +93,7 @@ Describe 'no module reads a timestamp off a registry key' {
     }
 }
 
-Describe 'manifest EXACT pins for this bump (acas 1.11.26, wpt 6.10.9)' {
+Describe 'manifest EXACT pins for this bump (acas 1.11.26, wpt 6.10.10)' {
     # Both modules carried the same defect and both were bumped in one pass, so the exact
     # pins live here together. Log4jJarVersion.Tests.ps1's acas pin was demoted to a floor:
     # it guards the JAR SWEEP, not acas's version, and an exact pin there would fail on
@@ -102,9 +102,9 @@ Describe 'manifest EXACT pins for this bump (acas 1.11.26, wpt 6.10.9)' {
         $m = Import-Module (Join-Path $script:ModulesDir 'JanetWeb.acas.psm1') -Force -PassThru
         [string](& $m { (Get-JanetToolManifest).version }) | Should Be '1.11.26'
     }
-    It 'wpt is exactly 6.10.9' {
+    It 'wpt is exactly 6.10.10' {
         $m = Import-Module (Join-Path $script:ModulesDir 'JanetWeb.wpt.psm1') -Force -PassThru
-        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.10.9'
+        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.10.10'
     }
 }
 
