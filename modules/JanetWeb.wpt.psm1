@@ -2198,8 +2198,14 @@ $script:WptScanBlock = {
                     $o.RebootPending = ($cbs -or $wuau -or $sccm); $o.LastBoot = $os.LastBootUpTime.ToString('g'); $o.LoggedOnUser = $usr; $o.RebootOK = $true
                 } catch {}
                 try {
-                    $upd = @(Get-CimInstance -Query "SELECT * FROM CCM_SoftwareUpdate" -Namespace root/CCM/ClientSDK -EA Stop |
-                        Where-Object { $_.InstallState -ne 'Installed' -and $_.ApplicabilityState -ne 'NotApplicable' } |
+                    # Same WQL the installers select on (:2296, and the KB-install worker),
+                    # so the names REPORTED here are the updates that would actually be
+                    # installed. This filtered on InstallState/ApplicabilityState while
+                    # every install path selects ComplianceState = '0' - two different
+                    # populations, so the scan could list updates the patch would not touch
+                    # and omit ones it would. Aligned toward the INSTALLER on purpose:
+                    # changing the install predicate would change what a live wave installs.
+                    $upd = @(Get-CimInstance -Query "SELECT * FROM CCM_SoftwareUpdate WHERE ComplianceState = '0'" -Namespace root/CCM/ClientSDK -EA Stop |
                         Select-Object -ExpandProperty Name)
                     $o.UpdateNames = @($upd); $o.UpdatesOK = $true
                 } catch {}
