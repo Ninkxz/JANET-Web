@@ -93,18 +93,19 @@ Describe 'no module reads a timestamp off a registry key' {
     }
 }
 
-Describe 'manifest EXACT pins for this bump (acas 1.11.26, wpt 6.10.10)' {
-    # Both modules carried the same defect and both were bumped in one pass, so the exact
-    # pins live here together. Log4jJarVersion.Tests.ps1's acas pin was demoted to a floor:
-    # it guards the JAR SWEEP, not acas's version, and an exact pin there would fail on
-    # every future unrelated acas bump.
-    It 'acas is exactly 1.11.26' {
+Describe 'manifest floors for this bump (acas 1.11.26, wpt 6.10.10)' {
+    # Both modules carried the same defect and both were bumped in one pass, so the pins
+    # live here together. DEMOTED from exact pins to floors on 2026-08-11, when the Log4j
+    # floor bump landed (acas 1.11.27 / wpt 6.10.11) - this file guards the registry-mtime
+    # fix, not the modules' version numbers, and the exact pins moved to the newest bump's
+    # test (Log4jJarVersion.Tests.ps1) per the standing convention.
+    It 'acas is at or past 1.11.26' {
         $m = Import-Module (Join-Path $script:ModulesDir 'JanetWeb.acas.psm1') -Force -PassThru
-        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '1.11.26'
+        ([version][string](& $m { (Get-JanetToolManifest).version }) -ge [version]'1.11.26') | Should Be $true
     }
-    It 'wpt is exactly 6.10.10' {
+    It 'wpt is at or past 6.10.10' {
         $m = Import-Module (Join-Path $script:ModulesDir 'JanetWeb.wpt.psm1') -Force -PassThru
-        [string](& $m { (Get-JanetToolManifest).version }) | Should Be '6.10.10'
+        ([version][string](& $m { (Get-JanetToolManifest).version }) -ge [version]'6.10.10') | Should Be $true
     }
 }
 

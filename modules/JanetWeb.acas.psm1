@@ -860,12 +860,12 @@ $script:AcasUpdateProfiles = @{
         }
     }
     'Apache Log4j - Replace Vulnerable Jars' = @{
-        # NeedsStaging: the JANET Web host stages the controller-side 2.25.5 jars
+        # NeedsStaging: the JANET Web host stages the controller-side patched jars
         # into each target session (Copy-Item -ToSession) and rewrites $sourceShare
         # to that local temp before running - so this auto-runs when the jars are
         # present where the host can read them (default: the desktop staging share,
         # or an operator-set source path).
-        Desc   = 'Replace log4j-api/core jars with 2.25.5. Covers the known service paths (HID Global + Adobe AEM: stop-service -> swap -> start-service) PLUS a recursive discovery of vulnerable log4j jars anywhere under the search roots (default C:\Program Files + C:\Program Files (x86)); each discovered lib dir gets the same safe copy-before-delete swap, and a jar held by a running process is flagged replaced-pending-reboot rather than failing. Auto-runs when the 2.25.5 jars are staged where the JANET Web host can read them (host copies them into each session).'
+        Desc   = 'Replace log4j-api/core jars with 2.26.1 or later. Covers the known service paths (HID Global + Adobe AEM: stop-service -> swap -> start-service) PLUS a recursive discovery of vulnerable log4j jars anywhere under the search roots (default C:\Program Files + C:\Program Files (x86)); each discovered lib dir gets the same safe copy-before-delete swap, and a jar held by a running process is flagged replaced-pending-reboot rather than failing. The version is a FLOOR, not an exact pin: whatever api/core pair is staged wins as long as it is at or above 2.26.1, and a host already carrying a newer jar is left alone. Auto-runs when qualifying jars are staged where the JANET Web host can read them (host copies them into each session).'
         NeedsStaging = $true
         Script = {
             # ---- configurable inputs (defaults used in production; tests inject overrides
@@ -882,13 +882,43 @@ $script:AcasUpdateProfiles = @{
                     @{ Path='C:\Program Files\Adobe\Adobe Experience Manager Forms Designer\Java\libs'; Service='AdobeExperienceManagerFormsDesigner' }
                 )
             }
-            $newApi  = 'log4j-api-2.25.5.jar'
-            $newCore = 'log4j-core-2.25.5.jar'
+            # ponytail: FLOOR, not an exact pin. Any log4j-api/core jar at or above
+            # $l4jFloor counts as patched, so the next Apache release is a one-line
+            # floor bump instead of the ~100-site filename sweep that got half-swept
+            # on the 2.25.4 -> 2.25.5 bump. Hardcoded per block by necessity - these
+            # blocks serialize to remote runspaces, where a module-scope constant
+            # arrives $null. Log4jJarVersion.Tests.ps1 asserts every site's floor agrees.
+            $l4jFloor = '2.26.1'
 
-            $srcApi  = Join-Path $sourceShare $newApi
-            $srcCore = Join-Path $sourceShare $newCore
-            if (-not (Test-Path -LiteralPath $srcApi))  { return "FAIL: source jar missing: $srcApi" }
-            if (-not (Test-Path -LiteralPath $srcCore)) { return "FAIL: source jar missing: $srcCore" }
+            # Jar name -> [version], api/core only. $null for anything else, so an
+            # unparseable or non-api/core jar is never mistaken for patched (fail closed).
+            function Get-L4jVer { param([string]$n)
+                if ($n -notmatch '^log4j-(?:api|core)-(\d+(?:\.\d+){1,3})\.jar$') { return $null }
+                try { return [version]$Matches[1] } catch { return $null }
+            }
+            function Test-L4jCurrent { param([string]$n, [string]$floor)
+                $v = Get-L4jVer $n
+                return ($null -ne $v -and $v -ge [version]$floor)
+            }
+            # Newest qualifying jar of one kind at the staging source. The staged
+            # filename is discovered, not assumed - that is what makes the floor work.
+            function Get-L4jStaged { param([string]$dir, [string]$kind, [string]$floor)
+                $best = $null
+                foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter "log4j-$kind-*.jar" -File -ErrorAction SilentlyContinue)) {
+                    if (-not (Test-L4jCurrent $f.Name $floor)) { continue }
+                    if ($null -eq $best -or (Get-L4jVer $f.Name) -gt (Get-L4jVer $best.Name)) { $best = $f }
+                }
+                return $best
+            }
+
+            $apiFile  = Get-L4jStaged $sourceShare 'api'  $l4jFloor
+            $coreFile = Get-L4jStaged $sourceShare 'core' $l4jFloor
+            if (-not $apiFile)  { return "FAIL: source jar missing: no log4j-api-*.jar at or above $l4jFloor under $sourceShare" }
+            if (-not $coreFile) { return "FAIL: source jar missing: no log4j-core-*.jar at or above $l4jFloor under $sourceShare" }
+            $newApi  = $apiFile.Name
+            $newCore = $coreFile.Name
+            $srcApi  = $apiFile.FullName
+            $srcCore = $coreFile.FullName
 
             $liveReplaced       = 0   # known service-path lib dirs swapped
             $discoveredReplaced = 0   # discovered lib dirs fully swapped (old jars removed)
@@ -917,8 +947,10 @@ $script:AcasUpdateProfiles = @{
                 })
                 if ($relevant.Count -eq 0) { $skippedRoots++; continue }
 
-                $current = @($relevant | Where-Object { $_.Name -eq $newApi -or $_.Name -eq $newCore })
-                $stale   = @($relevant | Where-Object { $_.Name -ne $newApi -and $_.Name -ne $newCore })
+                # At/above the floor = current (so a host already on a NEWER jar than the
+                # staged one is left alone, never downgraded). Below it, or unparseable = stale.
+                $current = @($relevant | Where-Object { Test-L4jCurrent $_.Name $l4jFloor })
+                $stale   = @($relevant | Where-Object { -not (Test-L4jCurrent $_.Name $l4jFloor) })
                 $skippedCurrent += $current.Count
 
                 $archiveStale = @($stale | Where-Object { $_.FullName -like '*\Backup_*\*' })
@@ -987,7 +1019,7 @@ $script:AcasUpdateProfiles = @{
 
             # =====================================================================
             #  PASS 2: discovery - vulnerable log4j-(api|core) jars ANYWHERE under
-            #  the search roots that are NOT already 2.25.5, NOT under a Backup_*
+            #  the search roots that are NOT already at/above the floor, NOT under a Backup_*
             #  dir, and NOT already covered by a known target path. Group by lib dir.
             #  No service is guessed: same safe copy-before-delete swap, but a stale
             #  jar held open by a running process is flagged replaced-pending-reboot
@@ -1009,7 +1041,7 @@ $script:AcasUpdateProfiles = @{
                         if ($dir -eq $kd -or $dir.StartsWith($kd + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $covered = $true; break }
                     }
                     if ($covered) { continue }
-                    if ($j.Name -eq $newApi -or $j.Name -eq $newCore) { $skippedCurrent++; continue }  # already 2.25.5
+                    if (Test-L4jCurrent $j.Name $l4jFloor) { $skippedCurrent++; continue }   # already at/above the floor
                     $discoStale.Add($j) | Out-Null
                 }
             }
@@ -1075,7 +1107,7 @@ $script:AcasUpdateProfiles = @{
             # loop 2026-08-04: this probed ONLY the two known service paths, while the Script
             # above discovers vulnerable jars ANYWHERE under the search roots (default
             # C:\Program Files + C:\Program Files (x86)) - and then reported the all-clean
-            # case as "All jars at 2.25.5 (recursive scan)". "Recursive" was true only WITHIN
+            # case as "All jars at <version> (recursive scan)". "Recursive" was true only WITHIN
             # those two folders, so a host carrying a vulnerable jar under any other path
             # (C:\Program Files\SomeApp\lib) verified CLEAN, booked a green OK row and counted
             # as PATCHED - on a KEV-class finding, which is the worst place in this suite to
@@ -1088,6 +1120,19 @@ $script:AcasUpdateProfiles = @{
             # this verify is broader, which is the safe direction. The two service paths stay
             # listed because they are the profile's named subjects; both already sit under
             # these roots, so they are covered either way.
+            # Same FLOOR the Script above enforces - carried again because Verify is a
+            # separate scriptblock serialized to the remote runspace on its own.
+            # Log4jJarVersion.Tests.ps1 asserts the two never drift apart.
+            $l4jFloor = '2.26.1'
+            function Get-L4jVer { param([string]$n)
+                if ($n -notmatch '^log4j-(?:api|core)-(\d+(?:\.\d+){1,3})\.jar$') { return $null }
+                try { return [version]$Matches[1] } catch { return $null }
+            }
+            function Test-L4jCurrent { param([string]$n, [string]$floor)
+                $v = Get-L4jVer $n
+                return ($null -ne $v -and $v -ge [version]$floor)
+            }
+
             $roots = @('C:\Program Files', 'C:\Program Files (x86)')
             $targets = @(
                 'C:\Program Files\HID Global\Credential Management Client\lib'
@@ -1109,7 +1154,7 @@ $script:AcasUpdateProfiles = @{
                 foreach ($j in $jars) {
                     if (-not $seen.Add($j.FullName)) { continue }   # roots overlap the service paths
                     $found.Add("$($j.Name)") | Out-Null
-                    if ($j.Name -notmatch '^log4j-(api|core)-2\.25\.5\.jar$') {
+                    if (-not (Test-L4jCurrent $j.Name $l4jFloor)) {
                         $vulns.Add("$($j.FullName)") | Out-Null
                     }
                     if ($null -eq $newest -or $j.LastWriteTime -gt $newest) { $newest = $j.LastWriteTime }
@@ -1132,9 +1177,9 @@ $script:AcasUpdateProfiles = @{
             $detail = if ($vulns.Count -gt 0) {
                 "STILL-VULNERABLE ($($vulns.Count)): " + (($vulns | Sort-Object -Unique) -join '; ')
             } elseif ($scanErr) {
-                "All jars found are 2.25.5, but a search root was UNREADABLE so the scan is INCOMPLETE: $scanErr"
+                "All jars found are at or above $l4jFloor, but a search root was UNREADABLE so the scan is INCOMPLETE: $scanErr"
             } else {
-                "All jars at 2.25.5 (recursive scan of $($roots -join ' + '))"
+                "All jars at or above $l4jFloor (recursive scan of $($roots -join ' + '))"
             }
             return @{ Version=$verStr; LastUpdated=$modStr; Verified=$verified; Detail=$detail }
         }
@@ -1262,7 +1307,7 @@ function Get-JanetToolManifest {
     @{
         id       = 'acas'
         name     = 'ACAS Nemesis'
-        version  = '1.11.26'  # 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
+        version  = '1.11.27'  # 2026-08-11: Log4j jar pin 2.25.5 -> FLOOR 2.26.1. An operator pushing the Log4j fix from the ACAS portal was told it needed the 2.25 jars while the staging share had already moved to 2.26.1. The profile matched the replacement filename EXACTLY, so a NEWER jar was rejected three times over: at the acas.view upload gate, at the staged-source readiness probe (card stayed greyed), and - had it got that far - by Verify, which would have reported every successfully patched host STILL-VULNERABLE. Now version-compared against a floor: the staged filename is DISCOVERED rather than assumed, any api/core pair at or above 2.26.1 is accepted, and a host already carrying a newer jar is skipped rather than downgraded. The floor is still repeated per block (remote runspaces get no module scope) but it is one token per site instead of a filename, and Log4jJarVersion.Tests.ps1 asserts every site agrees. Prior 1.11.26 - 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5 (operator-reported ACAS finding on Adobe Experience Manager Forms Designer). Swept every literal in this file: the replacement filenames, the staged-source readiness probe + Packages auto-find, the PASS-2 already-current skip, the Verify regex behind STILL-VULNERABLE, and the operator-facing text. Hardcoded by necessity - these blocks serialize to remote runspaces, so a module constant would arrive $null. Requires the 2.25.5 jars staged in Packages\Log4j\NewFiles; fails closed without them. Prior 1.11.22 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 (ERROR_UNKNOWN_PRODUCT) with the successes, so a host whose orphan Uninstall key msiexec could not touch still booked "removed=1 errors=0" - a green row and a VulnPatched Success for a host nothing was written to, while Tenable 62758 kept flagging it. Reclassified to an honest error rather than made to delete the key: this suite's own verify-and-clean rule only permits removing an Uninstall key once the product's FILES are confirmed gone, and this profile has no InstallLocation to prove that. Prior 1.11.21 -   # audit 2026-07-28: the Office C2R and Java Verify probes read $mod from Get-Item on a registry KEY (no .LastWriteTime), so Verified was ALWAYS $null and both probes were inert - now off ClickToRun\Updates!UpdateDetectionLastRunTime / jvm.dll mtime; patch-selected's fan-out passes -PerHostSeconds like its siblings; run-all @()-wraps ConvertTo-AcasJobLines so a single job line stops reporting "2 profile group(s)". Prior 1.11.20 = audit 2026-07-25 (fable re-audit follow-up): quoted the ambient reboot's shutdown.exe /c argument (unquoted-array twin of the fixed wusa/shutdown quoting bugs), + a test pinning the kb-install arm to the shared $script:AcasKbInstallRowOf. Prior 1.11.19 = audit 2026-07-24 fix pass (KEV catalog-unavailable state, honest kb-install row, quoted wusa path, bound-NIC self-guard, in-card dispatch); Acas.ClientVerify.Tests.ps1 pins it EXACTLY - bump both together
         category = 'Patching'
         summary  = 'Import ACAS/Nessus CSV findings, combine same-product vulnerabilities, push App Update remediations, and schedule/verify reboots + pre-flight services across many hosts over WinRM.'
         actions  = @(
@@ -1627,20 +1672,41 @@ function Test-AcasProfileAutoRunnable {
 
 # -----------------------------------------------------------------------------
 #  Resolve the controller-side Log4j staged-jar source. Default is the JANET Web
-#  host's own Packages\Log4j\NewFiles (operators grab the 2.25.5 jars from the
+#  host's own Packages\Log4j\NewFiles (operators grab the patched jars from the
 #  desktop staging share and drop them there); an operator override (UNC or local
-#  folder) wins. "Ready" means both the api and core 2.25.5 jars are present where
-#  the JANET Web host can read them - the host then Copy-Item -ToSession's them
-#  into each target session (no double-hop).
+#  folder) wins. "Ready" means an api AND a core jar at or above $AcasLog4jFloor
+#  are present where the JANET Web host can read them - the host then
+#  Copy-Item -ToSession's them into each target session (no double-hop).
+#
+#  ponytail: FLOOR, not an exact filename. This runs host-side so it CAN read the
+#  module constant, but the remediation blocks serialize to remote runspaces and
+#  carry their own copy of the same literal; Log4jJarVersion.Tests.ps1 asserts all
+#  of them agree. Bumping to a new Apache release = change these floors, nothing else.
 # -----------------------------------------------------------------------------
+$script:AcasLog4jFloor = '2.26.1'
+
 function Resolve-AcasLog4jSource {
     param([string]$Override = '')
     $local = Join-Path (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'Packages') 'Log4j') 'NewFiles'
     $share = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles'
+    $floor = [version]$script:AcasLog4jFloor
 
-    # True only when BOTH patched jars are present at $p. For a UNC path the server
-    # is TCP-gated first (445, AFNET-safe, never ICMP) so an unreachable share fails
-    # fast instead of blocking the whole dispatch on the SMB timeout.
+    # Jar name -> [version], api/core only; $null (never "current") for anything else.
+    $verOf = {
+        param($n)
+        if ($n -notmatch '^log4j-(?:api|core)-(\d+(?:\.\d+){1,3})\.jar$') { return $null }
+        try { return [version]$Matches[1] } catch { return $null }
+    }
+    # Names of the qualifying jars of one kind in $p (empty when none).
+    $kindHits = {
+        param($p, $kind)
+        @(Get-ChildItem -LiteralPath $p -Filter "log4j-$kind-*.jar" -File -ErrorAction SilentlyContinue |
+            Where-Object { $v = & $verOf $_.Name; $v -and $v -ge $floor })
+    }
+
+    # True only when BOTH an api and a core jar at/above the floor are present at $p.
+    # For a UNC path the server is TCP-gated first (445, AFNET-safe, never ICMP) so an
+    # unreachable share fails fast instead of blocking the whole dispatch on the SMB timeout.
     $hasJars = {
         param($p)
         if ([string]::IsNullOrWhiteSpace($p)) { return $false }
@@ -1652,14 +1718,14 @@ function Resolve-AcasLog4jSource {
                 try { $tc = New-Object System.Net.Sockets.TcpClient; $iar = $tc.BeginConnect($srv, 445, $null, $null); if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $tcpOk = $true } } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
                 if (-not $tcpOk) { return $false }
             }
-            return ((Test-Path -LiteralPath (Join-Path $p 'log4j-api-2.25.5.jar')) -and (Test-Path -LiteralPath (Join-Path $p 'log4j-core-2.25.5.jar')))
+            return (((& $kindHits $p 'api').Count -gt 0) -and ((& $kindHits $p 'core').Count -gt 0))
         } catch { return $false }
     }
 
     # Override wins; else the local staging folder; else AUTO-FIND by recursively
-    # hunting the host's Packages tree for any folder holding BOTH 2.25.5 jars (the
-    # operator may have dropped the package anywhere under it); else the work share;
-    # else report the local default path.
+    # hunting the host's Packages tree for any folder holding BOTH qualifying jars
+    # (the operator may have dropped the package anywhere under it); else the work
+    # share; else report the local default path.
     if (-not [string]::IsNullOrWhiteSpace($Override)) { $path = $Override.Trim().Trim('"') }
     elseif (& $hasJars $local) { $path = $local }
     else {
@@ -1667,8 +1733,10 @@ function Resolve-AcasLog4jSource {
         $autoDir = $null
         if (Test-Path -LiteralPath $pkgRoot) {
             try {
-                foreach ($hit in @(Get-ChildItem -LiteralPath $pkgRoot -Filter 'log4j-api-2.25.5.jar' -Recurse -File -ErrorAction SilentlyContinue)) {
-                    if (Test-Path -LiteralPath (Join-Path $hit.DirectoryName 'log4j-core-2.25.5.jar')) { $autoDir = $hit.DirectoryName; break }
+                foreach ($hit in @(Get-ChildItem -LiteralPath $pkgRoot -Filter 'log4j-api-*.jar' -Recurse -File -ErrorAction SilentlyContinue)) {
+                    $v = & $verOf $hit.Name
+                    if (-not $v -or $v -lt $floor) { continue }
+                    if ((& $kindHits $hit.DirectoryName 'core').Count -gt 0) { $autoDir = $hit.DirectoryName; break }
                 }
             } catch {}
         }
@@ -1678,7 +1746,7 @@ function Resolve-AcasLog4jSource {
     }
 
     $ready = [bool](& $hasJars $path)
-    return @{ Path=$path; Ready=$ready; Api=(Join-Path $path 'log4j-api-2.25.5.jar'); Core=(Join-Path $path 'log4j-core-2.25.5.jar') }
+    return @{ Path=$path; Ready=$ready; Floor=$script:AcasLog4jFloor }
 }
 
 # -----------------------------------------------------------------------------
@@ -2117,7 +2185,10 @@ $script:AcasUpdateWorker = {
     # NeedsStaging (Log4j) full-run requires a resolved controller-side jar source;
     # the host copies the jars into the session below (no remote double-hop).
     if ($needsStaging -and -not $VerifyOnlyIn -and [string]::IsNullOrWhiteSpace([string]$StageSource)) {
-        return "FAIL: Log4j staging source not available (drop log4j-api/core-2.25.5.jar where the JANET Web host can read them, or set a staging path)."
+        # Floor literal, not $script:AcasLog4jFloor - this worker runs in a bare pool
+        # runspace with no module scope (see the header comment), so the constant would
+        # interpolate to empty. Log4jJarVersion.Tests.ps1 pins it to the module's floor.
+        return "FAIL: Log4j staging source not available (drop log4j-api/core jars at or above 2.26.1 where the JANET Web host can read them, or set a staging path)."
     }
 
     # Inline TCP reachability probe: WinRM HTTP 5985, then WinRM HTTPS 5986, then SMB 445

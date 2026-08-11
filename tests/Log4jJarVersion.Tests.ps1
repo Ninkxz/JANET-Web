@@ -1,36 +1,34 @@
-﻿# =============================================================================
-#  Log4jJarVersion.Tests.ps1 - the Log4j replacement-jar version agrees across
-#  every live file that hardcodes it.
+# =============================================================================
+#  Log4jJarVersion.Tests.ps1 - the Log4j patched-version FLOOR agrees across
+#  every live file that carries it, and nothing pins a jar FILENAME any more.
 #
-#  WHY THIS EXISTS, AND WHY Acas.Log4j.Tests.ps1 IS NOT ENOUGH: bumping the
-#  patched jar is a RECURRING chore, and the version is hardcoded in five files
-#  here - it cannot be a shared constant, because the remediation blocks are
-#  serialized to remote runspaces over WinRM and a module-scope variable would
-#  arrive $null on the far side.
+#  WHY THIS EXISTS: bumping the patched jar is a RECURRING chore, and the value
+#  is repeated in five files - it cannot be a single shared constant, because the
+#  remediation blocks are serialized to remote runspaces over WinRM (and the
+#  update worker runs in a bare pool runspace), where a module-scope variable
+#  arrives $null.
 #
 #  On the 2.25.4 -> 2.25.5 bump (2026-07-30) a literal find-and-replace swept 105
 #  sites and MISSED 12, because those write the version REGEX-ESCAPED
 #  (^log4j-(api|core)-2\.25\.4\.jar$) and the escaped form does not contain the
-#  plain literal. The verification grep was blind in exactly the same way, so it
-#  reported clean. The missed sites were the worst possible ones:
-#    - the Verify regex in acas and wpt - the profile would copy the NEW jars in
-#      and then report every successfully patched host STILL-VULNERABLE;
-#    - the upload gate in acas.view.js - the UI would refuse the new jars, so the
-#      operator could not stage the fix at all.
-#  Acas.Log4j.Tests.ps1 pins the version as a literal, so it was swept alongside
-#  the module and stayed green throughout. A test scoped to the sites you already
-#  fixed cannot catch the sites you missed.
+#  plain literal. The verification grep was blind in exactly the same way.
 #
-#  So this asserts AGREEMENT rather than a value - it stays true across every
-#  future bump and fails the moment one site is left behind. Dots are unescaped
-#  before matching so the escaped form is covered by the same sweep.
+#  2026-08-11 - the SAME defect surfaced from the other direction: the staging
+#  share moved to 2.26.1 and every exact-match site REJECTED the newer jar (the
+#  acas.view upload gate, the staged-source readiness probe, and Verify, which
+#  would have called every patched host STILL-VULNERABLE). The pin is now a
+#  FLOOR compared numerically, and the staged filename is DISCOVERED at runtime -
+#  so a bump is a one-token change per site and a newer jar needs no change at all.
+#
+#  This asserts AGREEMENT rather than a value, so it stays true across every
+#  future bump and fails the moment one site is left behind.
 #
 #  Run:  .\Run-Tests.ps1 -Area log4j    (or Invoke-Pester on this file)
 # =============================================================================
 $script:Root = Split-Path $PSScriptRoot -Parent
 
-# Live files that hardcode the jar version. Acas.Log4j.Tests.ps1 is deliberately
-# NOT here: it names old vulnerable versions (2.10.0, 2.17.0) as fixtures.
+# Live files that carry the floor. Acas.Log4j*.Tests.ps1 are deliberately NOT here:
+# they name concrete jar filenames (2.17.0, 2.10.0, the staged pair) as fixtures.
 $script:Log4jFiles = @(
     'modules\JanetWeb.acas.psm1'
     'modules\JanetWeb.wpt.psm1'
@@ -39,65 +37,88 @@ $script:Log4jFiles = @(
     'web\js\views\acas.view.js'
 )
 
-function Get-Log4jJarVersions {
-    param([string]$RelPath)
-    $full = Join-Path $script:Root $RelPath
-    if (-not (Test-Path -LiteralPath $full)) { return @() }
-    $src = (Get-Content -LiteralPath $full -Raw) -replace '\\\.', '.'
-    return @([regex]::Matches($src, 'log4j-(?:api|core)-(\d+(?:\.\d+)+)\.jar') |
-             ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+function Get-L4jSrc { param([string]$Rel) Get-Content -LiteralPath (Join-Path $script:Root $Rel) -Raw }
+
+# First in-block floor literal in a module - the value every other site must match.
+function Get-L4jBlockFloor { param([string]$Rel)
+    [regex]::Match((Get-L4jSrc $Rel), "\`$l4jFloor\s*=\s*'([\d.]+)'").Groups[1].Value
 }
 
-Describe 'Log4j replacement jar version agrees everywhere' {
+Describe 'Log4j patched-version floor agrees everywhere' {
 
-    It 'every file that names a log4j jar names the SAME version' {
-        $all = @()
-        foreach ($f in $script:Log4jFiles) { $all += Get-Log4jJarVersions $f }
-        $distinct = @($all | Sort-Object -Unique)
-        # Joined so a failure names the offending versions, not just a count.
-        ($distinct -join ', ') | Should Not BeNullOrEmpty
-        $distinct.Count | Should Be 1
-    }
-
-    It 'all five files still carry the literal (none silently lost it)' {
-        foreach ($f in $script:Log4jFiles) {
-            (Get-Log4jJarVersions $f).Count | Should Not Be 0
-        }
-    }
-
-    It 'the Verify regex tests for the SAME version the profile copies in' {
-        # The specific pairing that broke: $newApi/$newCore name what gets copied,
-        # the escaped -notmatch decides what counts as still-vulnerable.
+    It 'all four in-block literals (acas + wpt, Script + Verify) carry the SAME floor' {
+        $vals = @()
         foreach ($f in @('modules\JanetWeb.acas.psm1', 'modules\JanetWeb.wpt.psm1')) {
-            $src = (Get-Content -LiteralPath (Join-Path $script:Root $f) -Raw)
-            $copied = [regex]::Match($src, "\`$newCore\s*=\s*'log4j-core-(\d+(?:\.\d+)+)\.jar'").Groups[1].Value
-            $verify = [regex]::Match($src, "\^log4j-\(api\|core\)-([\d\\.]+)\\\.jar\`$").Groups[1].Value -replace '\\', ''
-            $copied | Should Not BeNullOrEmpty
-            $verify | Should Not BeNullOrEmpty
-            $verify | Should Be $copied
+            $vals += @([regex]::Matches((Get-L4jSrc $f), "\`$l4jFloor\s*=\s*'([\d.]+)'") |
+                       ForEach-Object { $_.Groups[1].Value })
+        }
+        # Two blocks per module. A Script/Verify pair that drifts is the exact failure
+        # that made the last bump report patched hosts as STILL-VULNERABLE.
+        $vals.Count | Should Be 4
+        ($vals -join ', ') | Should Not BeNullOrEmpty
+        (@($vals | Sort-Object -Unique)).Count | Should Be 1
+    }
+
+    It 'the acas module constant matches its in-block literals' {
+        $const = [regex]::Match((Get-L4jSrc 'modules\JanetWeb.acas.psm1'), "\`$script:AcasLog4jFloor\s*=\s*'([\d.]+)'").Groups[1].Value
+        $const | Should Not BeNullOrEmpty
+        $const | Should Be (Get-L4jBlockFloor 'modules\JanetWeb.acas.psm1')
+    }
+
+    It 'the acas staging-FAIL text names the same floor' {
+        # That message lives in $script:AcasUpdateWorker - a bare pool runspace with no
+        # module scope, so it must hardcode the value rather than read the constant.
+        $fail = [regex]::Match((Get-L4jSrc 'modules\JanetWeb.acas.psm1'),
+                               'Log4j staging source not available \(drop log4j-api/core jars at or above ([\d.]+) ').Groups[1].Value
+        $fail | Should Not BeNullOrEmpty
+        $fail | Should Be (Get-L4jBlockFloor 'modules\JanetWeb.acas.psm1')
+    }
+
+    It 'the wpt scanner classifier (Get-WptLog4jVulnState) uses the same floor' {
+        # The Log4j Scanner tab and the remediation must agree on what "Patched" means,
+        # or the scan flags hosts the fix considers done.
+        $fn = [regex]::Match((Get-L4jSrc 'modules\JanetWeb.wpt.psm1'), "(?s)function Get-WptLog4jVulnState \{.*?\n\}").Value
+        $fn | Should Not BeNullOrEmpty
+        [regex]::Match($fn, "\[version\]'([\d.]+)'").Groups[1].Value | Should Be (Get-L4jBlockFloor 'modules\JanetWeb.wpt.psm1')
+    }
+
+    It 'the acas.view upload gate accepts the floor the module enforces' {
+        # The gate rejecting a jar the module would have accepted is what stranded the
+        # operator: the fix could not be staged from the UI at all.
+        $view = [regex]::Match((Get-L4jSrc 'web\js\views\acas.view.js'), "L4J_FLOOR\s*=\s*'([\d.]+)'").Groups[1].Value
+        $view | Should Not BeNullOrEmpty
+        $view | Should Be (Get-L4jBlockFloor 'modules\JanetWeb.acas.psm1')
+    }
+
+    It 'the operator-facing text (help + staging README) names the same floor' {
+        $floor = Get-L4jBlockFloor 'modules\JanetWeb.acas.psm1'
+        foreach ($f in @('web\js\help-content.js', 'server\JanetWeb.Server.ps1')) {
+            ($f + ': ' + [bool]((Get-L4jSrc $f) -like ('*' + $floor + '*'))) | Should Be ($f + ': True')
         }
     }
 
-    # This file carries the EXACT pins for the 2026-07-30 bump, per the convention
-    # that the newest bump pins exactly and older tests demote to a floor
-    # (Acas.ClientVerify 1.11.22 and Wpt.C2rVerify 6.10.5 were demoted for it).
-    # acas keeps the EXACT pin (1.11.23 is still the log4j bump). wpt's was demoted
-    # to a floor on 2026-08-02 when 6.10.7 landed for an unrelated fix (healer-wu-reset)
-    # - this file guards the jar sweep, not wpt's version, and an exact pin here would
-    # make every future wpt bump fail a log4j test for no reason.
-    It 'acas is at or past 1.11.23 and wpt at or past 6.10.6 (both floors)' {
-        $acas = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.acas.psm1') -Raw), "version\s+=\s+'([0-9.]+)'").Groups[1].Value
-        $wpt  = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:Root 'modules\JanetWeb.wpt.psm1')  -Raw), "version\s+=\s+'([0-9.]+)'").Groups[1].Value
-        # acas exact pin demoted to a floor 2026-08-04: 1.11.24 is the registry-mtime fix,
-        # not a log4j change. This file guards the JAR SWEEP, not acas's version number.
-        ([version]$acas -ge [version]'1.11.23') | Should Be $true
-        ([version]$wpt -ge [version]'6.10.6') | Should Be $true
+    It 'no live file pins an exact replacement-jar FILENAME any more' {
+        # Under the floor the staged filename is discovered at runtime, so there is
+        # nothing left to sweep. A reintroduced literal (the shape that got half-swept
+        # last time, and that rejected the 2.26.1 jars this time) fails here.
+        # Dots are unescaped first so the regex-escaped form is caught by the same pass.
+        foreach ($f in $script:Log4jFiles) {
+            $hits = @([regex]::Matches(((Get-L4jSrc $f) -replace '\\\.', '.'), 'log4j-(?:api|core)-\d+(?:\.\d+)+\.jar') |
+                      ForEach-Object { $_.Value } | Sort-Object -Unique)
+            # Compared as a string so a failure names the file AND the offending literals.
+            ($f + ' -> ' + ($hits -join ', ')) | Should Be ($f + ' -> ')
+        }
     }
+}
 
-    It 'the acas.view upload gate accepts the version the module copies in' {
-        $modVer  = @(Get-Log4jJarVersions 'modules\JanetWeb.acas.psm1')[0]
-        $viewVer = @(Get-Log4jJarVersions 'web\js\views\acas.view.js')
-        $viewVer -contains $modVer | Should Be $true
-        @($viewVer).Count | Should Be 1
+# EXACT pins for this bump, per the convention that the newest bump pins exactly and
+# older tests demote to a floor (Platform.NoRegistryMtime's 1.11.26 / 6.10.10 exact pins
+# were demoted for this one).
+Describe 'manifest EXACT pins for the Log4j floor bump (acas 1.11.27, wpt 6.10.11)' {
+    It 'acas is exactly 1.11.27' {
+        [regex]::Match((Get-L4jSrc 'modules\JanetWeb.acas.psm1'), "version\s+=\s+'([0-9.]+)'").Groups[1].Value | Should Be '1.11.27'
+    }
+    It 'wpt is exactly 6.10.11' {
+        [regex]::Match((Get-L4jSrc 'modules\JanetWeb.wpt.psm1'), "version\s+=\s+'([0-9.]+)'").Groups[1].Value | Should Be '6.10.11'
     }
 }

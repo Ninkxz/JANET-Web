@@ -275,13 +275,13 @@
           "Click 'APPLY (ALL TARGETS)' to apply across all targets, or check rows and click 'Apply to Selected' for a subset.",
           "Confirm the danger dialog. The action runs and each host streams its result (Updated/Failed/Partial/Skipped with Detail)."
         ],
-        "patch": "<b>Verify</b> (read-only): queries the target's registry/file/service state per profile (e.g. Office C2R config key, Defender service state, Chrome update GUID, Java installation folder). Returns Version, LastUpdated, Verified (Yes/No/n/a), Detail. Verified uses per-product recency window (Defender <24h, Office <7d, browsers <14d, Java <30d). <b>Apply</b> (destructive): runs the profile on each target. Profiles are product-specific: Office \u2192 triggers C2R update agent, Defender \u2192 downloads/applies definitions, Chrome \u2192 Software Center install (MECM-cycle fallback) or a verified direct Google Update trigger, Edge \u2192 runs its Update exe, Java \u2192 triggers Software Center install, MSXML 4.0 \u2192 msiexec /x, Office VBA AccessVBOM \u2192 edits HKEY_USERS hives (logged-on users only), Unquoted Service Path \u2192 rewrites HKLM ImagePath and backs original to HKLM:\\SOFTWARE\\JANET\\Nemesis\\UnquotedSvcPath, Log4j \u2192 replaces vulnerable .jars (requires staged 2.25.5 jars). Result row shows OK/Pending/Skipped/Partial/Failed with Detail. Pending = the trigger fired and the update is staged or still downloading - re-verify later, not yet confirmed (excluded from OK, not booked a failure).",
+        "patch": "<b>Verify</b> (read-only): queries the target's registry/file/service state per profile (e.g. Office C2R config key, Defender service state, Chrome update GUID, Java installation folder). Returns Version, LastUpdated, Verified (Yes/No/n/a), Detail. Verified uses per-product recency window (Defender <24h, Office <7d, browsers <14d, Java <30d). <b>Apply</b> (destructive): runs the profile on each target. Profiles are product-specific: Office \u2192 triggers C2R update agent, Defender \u2192 downloads/applies definitions, Chrome \u2192 Software Center install (MECM-cycle fallback) or a verified direct Google Update trigger, Edge \u2192 runs its Update exe, Java \u2192 triggers Software Center install, MSXML 4.0 \u2192 msiexec /x, Office VBA AccessVBOM \u2192 edits HKEY_USERS hives (logged-on users only), Unquoted Service Path \u2192 rewrites HKLM ImagePath and backs original to HKLM:\\SOFTWARE\\JANET\\Nemesis\\UnquotedSvcPath, Log4j \u2192 replaces vulnerable .jars (requires staged replacement jars at 2.26.1 or later). Result row shows OK/Pending/Skipped/Partial/Failed with Detail. Pending = the trigger fired and the update is staged or still downloading - re-verify later, not yet confirmed (excluded from OK, not booked a failure).",
         "notes": [
           "Profile names must match exactly; unknown profile names return the list of valid ones.",
           "Custom Command runs arbitrary PowerShell as-is on every target\u2014review it carefully; there is no sandbox or dry-run.",
           "Office/Chrome/Edge updaters run asynchronously on the target; 'Version After' often shows 'unchanged' immediately after Apply\u2014re-run Verify later to confirm the bump.",
           "Office VBA AccessVBOM only edits currently logged-on user hives; re-run after other users log on to update their hives.",
-          "Log4j requires operator-staged replacement jars (log4j-api-2.25.5.jar, log4j-core-2.25.5.jar) on a share; the action fails if jars are missing.",
+          "Log4j requires operator-staged replacement jars (a log4j-api and a log4j-core jar at 2.26.1 or later) on a share; the version is a floor, so newer jars are accepted as-is and the action fails only if no qualifying pair is staged.",
           "Reboots are NOT issued by Apply profiles; some changes (SMB Signing, RDP NLA, registry edits) take effect after service restart or reboot."
         ],
         "flag": "destructive"
@@ -374,19 +374,19 @@
         "flag": "destructive"
       },
       "log4j": {
-        "what": "<b>Scan for vulnerable log4j JAR files.</b> Recursively searches common roots (Program Files, ProgramData, Users, Java/JDK/JRE, C:\\\\opt, C:\\\\apps) for log4j-*.jar and classifies each by version: Patched (2.25.5 and later), Vulnerable (known CVE versions), or Unknown (unparseable).",
+        "what": "<b>Scan for vulnerable log4j JAR files.</b> Recursively searches common roots (Program Files, ProgramData, Users, Java/JDK/JRE, C:\\\\opt, C:\\\\apps) for log4j-*.jar and classifies each by version: Patched (2.26.1 and later), Vulnerable (known CVE versions), or Unknown (unparseable).",
         "steps": [
           "Add hosts on Targets.",
           "Optionally adjust 'Parallel hosts' (default 12; this scan is disk-heavy).",
           "Click 'SCAN FOR LOG4J'. Each host recursively searches for log4j JAR files and streams one row per jar found.",
-          "Read the VulnerableVersion column: green = Patched (2.25.5+), orange = Vulnerable (known CVE versions), red = Unknown (unparseable).",
+          "Read the VulnerableVersion column: green = Patched (2.26.1+), orange = Vulnerable (known CVE versions), red = Unknown (unparseable).",
           "Any row not marked '(patched)' needs remediation. Use the App Updater tab with profile 'Apache Log4j - Replace Vulnerable Jars' to replace vulnerable jars (requires staged replacement jars on a share).",
           "Export CSV for audit/hand-off."
         ],
-        "patch": "<b>Scan</b> (read-only): recursively searches C:\\\\Program Files, Program Files (x86), ProgramData, Users, Java, JDK*/JRE*, C:\\\\opt, C:\\\\apps on each target for log4j-*.jar files. For each jar found, parses version and classifies as Patched (2.25.5+), Vulnerable (known CVE versions), Unknown (unparseable). Returns one row per jar with Host / JARPath / Filename / VulnerableVersion. No remediation is applied by this tab; use App Updater -> 'Apache Log4j - Replace Vulnerable Jars' to replace vulnerable jars (requires staged 2.25.5 jars on a share at \\\\\\\\dm-tn-01\\\\sh-usafe-automation$\\\\JANET\\\\Packages\\\\Log4j\\\\NewFiles).",
+        "patch": "<b>Scan</b> (read-only): recursively searches C:\\\\Program Files, Program Files (x86), ProgramData, Users, Java, JDK*/JRE*, C:\\\\opt, C:\\\\apps on each target for log4j-*.jar files. For each jar found, parses version and classifies as Patched (2.26.1+), Vulnerable (known CVE versions), Unknown (unparseable). Returns one row per jar with Host / JARPath / Filename / VulnerableVersion. No remediation is applied by this tab; use App Updater -> 'Apache Log4j - Replace Vulnerable Jars' to replace vulnerable jars (requires staged replacement jars at 2.26.1 or later on a share at \\\\\\\\dm-tn-01\\\\sh-usafe-automation$\\\\JANET\\\\Packages\\\\Log4j\\\\NewFiles).",
         "notes": [
           "Scan is read-only; no jars are replaced or deleted by this tab.",
-          "Only the patched build 2.25.5 is marked '(patched)'; any other parseable version is Vulnerable; unparseable names show '(unknown)'.",
+          "2.26.1 is a FLOOR, not an exact pin: 2.26.1 and anything newer is marked '(patched)'; any older parseable version is Vulnerable; unparseable names show '(unknown)'.",
           "Recursive search across large Program Files trees can take several minutes per host\u2014keep thread count modest.",
           "Offline hosts return Error='Offline' and contribute no rows.",
           "Remediation (jar replacement) requires staged replacement jars and uses the App Updater tab."

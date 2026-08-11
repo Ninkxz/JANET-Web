@@ -5,7 +5,7 @@
 #  vulnerable log4j jars ANYWHERE under the search roots (default C:\Program Files
 #  + C:\Program Files (x86)), but the Verify probed ONLY the two known service
 #  paths (HID Global, Adobe AEM) - and then reported the all-clean case as
-#  "All jars at 2.25.5 (recursive scan)".
+#  "All jars at <version> (recursive scan)".
 #
 #  "Recursive" was true only WITHIN those two folders. A host carrying a vulnerable
 #  jar under any other path - C:\Program Files\SomeApp\lib - verified CLEAN, booked
@@ -68,10 +68,21 @@ Describe 'Log4j verify - a vulnerable jar OUTSIDE the two service paths is found
     }
     It 'a current jar under an arbitrary app folder verifies clean' {
         Remove-Item -LiteralPath (Join-Path $rootA 'SomeApp\lib\log4j-core-2.17.0.jar') -Force
-        New-Jar -Dir (Join-Path $rootA 'SomeApp\lib') -Name 'log4j-core-2.25.5.jar'
+        New-Jar -Dir (Join-Path $rootA 'SomeApp\lib') -Name 'log4j-core-2.26.1.jar'
         $r = & $vb
         $r.Verified | Should Be $true
-        ([string]$r.Detail) | Should Match '2\.25\.5'
+        ([string]$r.Detail) | Should Match '2\.26\.1'
+    }
+    It 'a jar NEWER than the floor also verifies clean (floor, not an exact pin)' {
+        # The 2026-08-11 defect in miniature: an exact match called a newer jar vulnerable.
+        Remove-Item -LiteralPath (Join-Path $rootA 'SomeApp\lib\log4j-core-2.26.1.jar') -Force
+        New-Jar -Dir (Join-Path $rootA 'SomeApp\lib') -Name 'log4j-core-2.31.0.jar'
+        $r = & $vb
+        $r.Verified | Should Be $true
+        ([string]$r.Detail) | Should Not Match 'STILL-VULNERABLE'
+        # Restore the fixture the later cases in this Describe expect.
+        Remove-Item -LiteralPath (Join-Path $rootA 'SomeApp\lib\log4j-core-2.31.0.jar') -Force
+        New-Jar -Dir (Join-Path $rootA 'SomeApp\lib') -Name 'log4j-core-2.26.1.jar'
     }
     It 'a jar in the SECOND root (Program Files x86) is scanned too' {
         New-Jar -Dir (Join-Path $rootB 'Other\lib') -Name 'log4j-api-2.14.1.jar'
@@ -81,9 +92,9 @@ Describe 'Log4j verify - a vulnerable jar OUTSIDE the two service paths is found
     }
     It 'a jar found under BOTH a root and a named service path is counted once' {
         Remove-Item -LiteralPath (Join-Path $rootB 'Other\lib\log4j-api-2.14.1.jar') -Force
-        New-Jar -Dir (Join-Path $rootA 'HID Global\Credential Management Client\lib') -Name 'log4j-core-2.25.5.jar'
+        New-Jar -Dir (Join-Path $rootA 'HID Global\Credential Management Client\lib') -Name 'log4j-core-2.26.1.jar'
         $r = & $vb
-        # 'log4j-core-2.25.5.jar' appears in the arbitrary folder AND the service path;
+        # 'log4j-core-2.26.1.jar' appears in the arbitrary folder AND the service path;
         # Version is a unique-sorted list, so a de-dupe failure would not show here - the
         # real proof is that the verdict stays clean and nothing double-reports.
         $r.Verified | Should Be $true
@@ -109,7 +120,7 @@ Describe 'Log4j verify - an empty host is clean, and says what it scanned' {
 
 Describe 'Log4j verify - the source no longer claims more than it checked' {
     It 'the clean detail names the roots it actually walked' {
-        ($script:Src -match "All jars at 2\.25\.5 \(recursive scan of \`$\(\`$roots -join ' \+ '\)\)") | Should Be $true
+        ($script:Src -match "All jars at or above \`$l4jFloor \(recursive scan of \`$\(\`$roots -join ' \+ '\)\)") | Should Be $true
     }
     It 'an unreadable root downgrades the verdict instead of reading as clean' {
         ($script:Src -match 'Search root UNREADABLE - log4j presence NOT determined') | Should Be $true

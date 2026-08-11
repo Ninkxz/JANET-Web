@@ -415,9 +415,10 @@ function Start-JanetWebServer {
             Set-Content -LiteralPath $log4jReadme -Encoding UTF8 -ErrorAction SilentlyContinue -Value @(
                 'ACAS Nemesis - Log4j staging',
                 '',
-                'Drop the two patched jars here:',
-                '  log4j-api-2.25.5.jar',
-                '  log4j-core-2.25.5.jar',
+                'Drop the two patched jars here (2.26.1 or LATER - the version is a floor,',
+                'not an exact pin, so a newer Apache release drops straight in):',
+                '  log4j-api-<version>.jar',
+                '  log4j-core-<version>.jar',
                 '',
                 'This folder is the DEFAULT Log4j source for JANET Web - no need to set anything.',
                 'Grab the two jars from the desktop staging share and drop them here:',
