@@ -43,7 +43,7 @@ function Get-JanetToolManifest {
         id       = 'wpt'
         name     = 'Workstation Patching'
         category = 'Patching'
-        version  = '6.10.11'  # 2026-08-11: Log4j jar pin 2.25.5 -> FLOOR 2.26.1, kept in sync with JanetWeb.acas.psm1 1.11.27 (this file carries an independent copy of the same literals). Same root cause the operator hit in the ACAS portal: an EXACT filename/equality match rejected a NEWER staged jar. Get-WptLog4jVulnState is now a floor comparison (2.26.1+ = Patched) instead of `-eq '2.25.5'`, the replace profile discovers the staged api/core filenames instead of assuming them, and Verify version-compares rather than regex-matching one literal name. Prior 6.10.10 - audit 2026-08-02: healer-wu-reset could not fix the state that flags it. health-scan sets WuState='Disabled' from WuSvcStartup, driving Overall='Degraded' - but Start-Service THROWS on a Disabled service, so on exactly those hosts the healer renamed SoftwareDistribution and catroot2 (its destructive half) and then could not restart wuauserv. It failed loudly, so never a false green - but the repair was structurally unreachable for its own headline symptom. StartType is now restored to Automatic first, reusing the ChangeStartMode pattern already in Repair-WptWinRm. Prior 6.10.6 - 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5, kept in sync with JanetWeb.acas.psm1 1.11.23 (this file carries an independent copy of the same literals). Includes Get-WptLog4jVulnState, an EXACT equality classifier - a host left on 2.25.4 now reports Vulnerable rather than Patched. Prior 6.10.5 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 with the successes while nothing in that profile deleted the orphan Uninstall key - so the artifact the scanner reads survived and the run still returned removed=1. The correct verify-and-clean pattern exists in THIS FILE (the Remove App tail) and this profile never got it. Reclassified rather than made to delete, per that same tail's rule that the key may only go once the files are confirmed gone. Prior 6.10.4 - audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
+        version  = '6.10.12'  # 2026-10-05: the App Updater's Log4j profile now RUNS instead of refusing and pointing at ACAS. app-update-apply resolves a qualifying api/core pair host-side (Packages\Log4j\NewFiles, else the work share) and the worker copies the jars into each session (Copy-Item -ToSession) and redirects the Script's $sourceShare to that local temp - the same mechanism the ACAS worker uses, so no double-hop. Fails closed when no pair at or above the floor is staged. Prior 6.10.11 - 2026-08-11: Log4j jar pin 2.25.5 -> FLOOR 2.26.1, kept in sync with JanetWeb.acas.psm1 1.11.27 (this file carries an independent copy of the same literals). Same root cause the operator hit in the ACAS portal: an EXACT filename/equality match rejected a NEWER staged jar. Get-WptLog4jVulnState is now a floor comparison (2.26.1+ = Patched) instead of `-eq '2.25.5'`, the replace profile discovers the staged api/core filenames instead of assuming them, and Verify version-compares rather than regex-matching one literal name. Prior 6.10.10 - audit 2026-08-02: healer-wu-reset could not fix the state that flags it. health-scan sets WuState='Disabled' from WuSvcStartup, driving Overall='Degraded' - but Start-Service THROWS on a Disabled service, so on exactly those hosts the healer renamed SoftwareDistribution and catroot2 (its destructive half) and then could not restart wuauserv. It failed loudly, so never a false green - but the repair was structurally unreachable for its own headline symptom. StartType is now restored to Automatic first, reusing the ChangeStartMode pattern already in Repair-WptWinRm. Prior 6.10.6 - 2026-07-30: Log4j replacement jars 2.25.4 -> 2.25.5, kept in sync with JanetWeb.acas.psm1 1.11.23 (this file carries an independent copy of the same literals). Includes Get-WptLog4jVulnState, an EXACT equality classifier - a host left on 2.25.4 now reports Vulnerable rather than Patched. Prior 6.10.5 - audit 2026-07-28 (cross-fork drift slice): the MSXML 4.0 profile bucketed msiexec 1605 with the successes while nothing in that profile deleted the orphan Uninstall key - so the artifact the scanner reads survived and the run still returned removed=1. The correct verify-and-clean pattern exists in THIS FILE (the Remove App tail) and this profile never got it. Reclassified rather than made to delete, per that same tail's rule that the key may only go once the files are confirmed gone. Prior 6.10.4 - audit 2026-07-28 (cont): THREE inert registry-timestamp probes killed - the M365 C2R Verify and the Oracle Java Verify could never return Verified=$true (every reachable host audited Skipped, current or stale), and Health Scan's PendingDays was permanently 0 so the AGE column read a fabricated '<1d' and the ">14 days pending reboot" Degraded rule could never fire. All three read .LastWriteTime off a registry KEY, which has no such member. Prior 6.10.3 - audit 2026-07-28: single-host software-uninstall was the last destructive wpt action with no self-guard - it now runs its target through Remove-WptSelfTargets like the fleet path 'unsupported-uninstall' that drives the SAME worker block. Prior 6.10.2 - audit 2026-07-25 (fable re-audit follow-up): the fan-out's "EVERY host failed" banner no longer fires for an all-Skipped/all-Pending/cancelled run (only a genuine all-failure), and Skipped hosts get their own tally so the "Done. X ok, Y failed" line agrees with the audit trail. Prior 6.10.1 - audit 2026-07-24: bulk-scan now injects Test-WptRemoteNameMatch (its wrong-box guard was inert and every online host errored); fan-out flags an all-failed run (trend snapshot refuses it); kb-install skipped/unverified hosts audit Skipped, not VulnPatched Success; healer-ccm-repair got the wrong-box abort; fix-java's empty engine result fails closed; fix-java / spec-exec-scan / spec-exec-enable wired into the view (Vuln Fixes tab)
         summary  = 'MECM-driven bulk scan/patch, KB management, software uninstall, Software Center available-deployments picker, health diagnostics + healers (incl. CCM client repair + RDP listener rebind), single-host info + event-log triage, maintenance lock/unlock (banner + optional logon hard-lock), AD OU target import, reboot, disk + ccmcache cleanup, per-profile user-app cleanup, STIG reg-key fixes, app updates (incl. Trellix/McAfee) and Log4j scanning across many workstations in parallel (WinRM/DCOM).'
         actions  = @(
             @{
@@ -1791,9 +1791,10 @@ function Get-WptAppUpdateProfiles {
             }
         }
         'Apache Log4j - Replace Vulnerable Jars' = @{
-            # Requires controller-side staged jars; the JANET Web web host has no
-            # staging substitution, so auto-patch treats this as a coverage gap
-            # (NeedsStaging). Carried for manifest completeness / manual single runs.
+            # Requires controller-side staged jars (NeedsStaging): app-update-apply
+            # resolves them via Resolve-WptLog4jSource and WptAppUpdateBlock copies them
+            # into each session, rewriting the $sourceShare assignment below to that
+            # local temp. Keep it a single-quoted literal - the rewrite matches on it.
             NeedsStaging = $true
             Script = {
                 $sourceShare = '\\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles'
@@ -3827,7 +3828,7 @@ $script:WptRegApplyBlock = {
 
 # --- App Update Verify / Apply (btnAU2Verify:10760 / btnAU2Apply:10832) ---
 $script:WptAppUpdateBlock = {
-    param([string]$Computer, $Cred, [string]$Auth, [scriptblock]$Remote, [string]$Method, [string]$Arg, [bool]$IsVerify)
+    param([string]$Computer, $Cred, [string]$Auth, [scriptblock]$Remote, [string]$Method, [string]$Arg, [bool]$IsVerify, [string]$StageSource = '')
     $r = @{ Host=$Computer; Reachable=$false; Version=''; LastUpdated=''; Verified=$null; Status=''; Detail='' }
     # TCP reachability via the shared probe (audit 2026-07-23 deferred pass: inline
     # copy removed; Test-WptHostReachable is injected into the pool ISS).
@@ -3855,7 +3856,30 @@ $script:WptAppUpdateBlock = {
             $r.Status = 'DNS Mismatch'; $r.Detail = "dialed '$targetShort' but remote is '$($actualName.Trim())' - ABORTED, no action taken"
             return $r
         }
-        $res = Invoke-Command @splat -ScriptBlock $Remote -ArgumentList $Method, $Arg
+        if ($StageSource -and -not $IsVerify) {
+            # Staged profile (Log4j): the target cannot reach the jar share itself
+            # (Kerberos double-hop), so copy the controller-side jars INTO this session
+            # (Copy-Item -ToSession) and point the Script's $sourceShare at that local
+            # temp. Same mechanism as the ACAS worker. Any failure throws to the catch
+            # below -> Failed; the Script never runs against an un-staged source.
+            $remoteTemp = 'C:\Windows\Temp\JanetLog4j'
+            $stagedText = [regex]::Replace($Remote.ToString(), "\`$sourceShare\s*=\s*'[^']*'", { param($m) "`$sourceShare = '$remoteTemp'" })
+            if ($stagedText -eq $Remote.ToString()) { throw 'Log4j staging failed: profile Script has no $sourceShare assignment to redirect' }
+            $srcJars = @(Get-ChildItem -LiteralPath $StageSource -Filter 'log4j-*.jar' -File -ErrorAction Stop)
+            if ($srcJars.Count -eq 0) { throw "Log4j staging failed: no log4j-*.jar at staging source '$StageSource'" }
+            $sess = New-PSSession @splat
+            try {
+                Invoke-Command -Session $sess -ErrorAction Stop -ArgumentList $remoteTemp -ScriptBlock {
+                    param($d)
+                    if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Filter 'log4j-*.jar' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue }
+                    else { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+                } | Out-Null
+                foreach ($j in $srcJars) { Copy-Item -LiteralPath $j.FullName -Destination $remoteTemp -ToSession $sess -Force -ErrorAction Stop }
+                $res = Invoke-Command -Session $sess -ErrorAction Stop -ScriptBlock ([scriptblock]::Create($stagedText)) -ArgumentList $Method, $Arg
+            } finally { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue }
+        } else {
+            $res = Invoke-Command @splat -ScriptBlock $Remote -ArgumentList $Method, $Arg
+        }
         if ($IsVerify) {
             $r.Version = [string]$res.Version; $r.LastUpdated = [string]$res.LastUpdated
             $r.Verified = $res.Verified; $r.Detail = [string]$res.Detail
@@ -5235,6 +5259,37 @@ function Get-WptLog4jVulnState {
     }
     if ($Version -match '^\d+\.\d+') { return 'Vulnerable' }
     return 'Unknown'
+}
+
+# Controller-side Log4j jar source for the App Updater's Log4j profile: this host's own
+# Packages\Log4j\NewFiles, else the work share. Returns the first folder holding BOTH a
+# log4j-api and a log4j-core jar at or above the floor (Get-WptLog4jVulnState owns the
+# floor, so no new literal to keep in sync), or '' when neither location qualifies.
+# ponytail: two fixed locations - no override textbox and no recursive Packages auto-find
+# (ACAS has both). Add them here if operators start staging the jars anywhere else.
+function Resolve-WptLog4jSource {
+    param([string[]]$Candidates = @(
+        (Join-Path $PSScriptRoot '..\Packages\Log4j\NewFiles'),
+        '\\dm-tn-01\sh-usafe-automation$\JANET\Packages\Log4j\NewFiles'))
+    foreach ($p in $Candidates) {
+        if ($p -match '^\\\\([^\\]+)') {
+            # AFNET-safe reachability: TCP 445 (SMB), never ICMP. An unreachable share
+            # fast-fails here instead of blocking the dispatch on the SMB timeout.
+            $srv = $Matches[1]; $tcpOk = $false; $tc = $null
+            try {
+                $tc = New-Object System.Net.Sockets.TcpClient
+                $iar = $tc.BeginConnect($srv, 445, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(1500, $false) -and $tc.Connected) { $tcpOk = $true }
+            } catch {} finally { if ($tc) { try { $tc.Close() } catch {} } }
+            if (-not $tcpOk) { continue }
+        }
+        $kinds = @{}
+        foreach ($f in @(Get-ChildItem -LiteralPath $p -Filter 'log4j-*.jar' -File -ErrorAction SilentlyContinue)) {
+            if ($f.Name -match '^log4j-(api|core)-(\d+(?:\.\d+){1,3})\.jar$' -and (Get-WptLog4jVulnState $Matches[2]) -eq 'Patched') { $kinds[$Matches[1]] = $true }
+        }
+        if ($kinds['api'] -and $kinds['core']) { return $p }
+    }
+    return ''
 }
 
 # -----------------------------------------------------------------------------
@@ -6923,6 +6978,7 @@ function Invoke-JanetToolAction {
             $threads = Get-WptThreadCount $Params 16
             $profName = ([string]$Params['profile']).Trim()
             $remote = $null
+            $stageSource = ''   # set only for NeedsStaging profiles (Log4j): controller-side jar folder
             $cmdAuditTag = ''   # appended to each host's audit Detail for Custom Command forensics
             if ($profName -eq 'Custom Command') {
                 # audit 2026-07-24 (fable re-audit F2): server-side typed barrier for the
@@ -6972,12 +7028,16 @@ function Invoke-JanetToolAction {
                 }
                 # NeedsStaging profiles (e.g. Log4j) hard-code a controller-side UNC the
                 # remote host would reach back to itself - a Kerberos double-hop that
-                # silently fails or uses un-staged jars. WPT has no -ToSession staging
-                # path; refuse and point at the ACAS Auto-Patch flow, which stages the
-                # jars into each session correctly.
+                # silently fails. Resolve the jars HERE (host-side) and hand the folder
+                # to the worker, which Copy-Item -ToSession's them into each target.
+                # Fail closed: no qualifying pair staged = nothing runs on any host.
                 if ($profiles[$profName].NeedsStaging) {
-                    & $send @{ type='log'; level='err'; text="Profile '$profName' needs controller-side staging (the remote host can't reach the jar share directly - double-hop). Run it from ACAS Nemesis -> Remediation (Log4j), which stages the patched jars (2.26.1 or later) into each session." }
-                    return @{ rows=@(); summary=@{ total=$targets.Count; failed=$targets.Count } }
+                    $stageSource = Resolve-WptLog4jSource
+                    if (-not $stageSource) {
+                        & $send @{ type='log'; level='err'; text="Profile '$profName' needs the patched jars staged: no log4j-api + log4j-core pair at 2.26.1 or later was found in this host's Packages\Log4j\NewFiles or on the staging share. Nothing was run." }
+                        return @{ rows=@(); summary=@{ total=$targets.Count; failed=$targets.Count } }
+                    }
+                    & $send @{ type='log'; level='info'; text="Log4j jars will be staged into each session from $stageSource" }
                 }
                 $remote = $profiles[$profName].Script
             }
@@ -6985,7 +7045,7 @@ function Invoke-JanetToolAction {
             return Invoke-WptFanOut -Targets $targets -Threads $threads -ActionId $ActionId -Send $send `
                 -Work $script:WptAppUpdateBlock -AuditAction 'VulnPatched' `
                 -InjectFunctions 'Test-WptHostReachable','Test-WptRemoteNameMatch' `
-                -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $false) } `
+                -ArgFactory { param($h) ,@($h, $Credential, $auth, $remote, $method, $arg, $false, $stageSource) } `
                 -OkOf { param($r) ($r.Status -eq 'OK') } `
                 -AuditResultOf { param($r, $ok) if ($ok) { 'Success' } elseif ("$($r.Status)" -eq 'Pending' -or "$($r.Status)" -eq 'Skipped') { 'Skipped' } else { 'Failure' } } `
                 -AuditDetail ({ param($r) "$($r.Detail)$cmdAuditTag" }.GetNewClosure()) `

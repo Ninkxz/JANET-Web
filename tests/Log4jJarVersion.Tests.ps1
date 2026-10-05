@@ -118,7 +118,9 @@ Describe 'manifest EXACT pins for the Log4j floor bump (acas 1.11.27, wpt 6.10.1
     It 'acas is exactly 1.11.27' {
         [regex]::Match((Get-L4jSrc 'modules\JanetWeb.acas.psm1'), "version\s+=\s+'([0-9.]+)'").Groups[1].Value | Should Be '1.11.27'
     }
-    It 'wpt is exactly 6.10.11' {
-        [regex]::Match((Get-L4jSrc 'modules\JanetWeb.wpt.psm1'), "version\s+=\s+'([0-9.]+)'").Groups[1].Value | Should Be '6.10.11'
+    # wpt DEMOTED to a floor on 2026-10-05 (6.10.12, App Updater Log4j staging); its
+    # exact pin moved to Wpt.Log4jStaging.Tests.ps1. acas stays exact - not bumped since.
+    It 'wpt is at or past 6.10.11' {
+        ([version][regex]::Match((Get-L4jSrc 'modules\JanetWeb.wpt.psm1'), "version\s+=\s+'([0-9.]+)'").Groups[1].Value -ge [version]'6.10.11') | Should Be $true
     }
 }
