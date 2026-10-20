@@ -9,7 +9,7 @@
 
     This filters by FILE NAME instead, which needs no changes to 150+ files.
 
-    -Contract runs only the three Platform.*.Tests.ps1 contract files. Those are
+    -Contract runs only the Platform.*.Tests.ps1 contract files. Those are
     the ones that assert suite-wide invariants (manifests, guard parity, the view
     contract), so they are the fast pre-flight worth running before a commit.
 
