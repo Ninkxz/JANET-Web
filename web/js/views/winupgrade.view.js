@@ -1092,7 +1092,7 @@
             ctx.confirm({ title: 'No Low-Disk Hosts', body: 'No scanned host is under ' + MIN_FREE_GB + ' GB free. Scan Fleet first if the grid is empty.', okText: 'OK', cancelText: null });
             return;
           }
-          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(low, 'Windows Upgrade: low disk (<' + MIN_FREE_GB + ' GB free)'); } catch (e) {} }
+          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(low, 'Windows Upgrade: low disk (<' + MIN_FREE_GB + ' GB free)', null, 'wpt'); } catch (e) {} }
           log.append({ text: '[' + ts() + '] Handed ' + low.length + ' low-disk host(s) to Workstation Patching > Cleanup.', level: 'info' });
           ctx.openTool('wpt', 'cleanup');
         };

@@ -112,6 +112,8 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
   }
   document.addEventListener('keydown', function (e) {
+    // Confirm/arming dialogs own focus until the operator answers.
+    if (document.querySelector('.j-modal [aria-modal="true"]')) return;
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (openEl) close(); else open(); return; }
     // ? opens the cheatsheet, but never while typing into a field.
     if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTyping(e)) { e.preventDefault(); openCheat(); }

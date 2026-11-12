@@ -106,7 +106,10 @@
     excludeInput.type = 'text';
     excludeInput.placeholder = 'Exclude (substring, comma-separated)';
     excludeInput.title = 'Drop hosts whose name contains ANY of these comma/space-separated terms (e.g. test, kiosk, maint) before acting. Case-insensitive; plain substring, no wildcards.';
-    excludeInput.addEventListener('input', function () { refreshCount(); });
+    excludeInput.addEventListener('input', function () {
+      refreshCount();
+      if (opts.onFilterChange) opts.onFilterChange();
+    });
     bar.appendChild(excludeInput);
 
     var count = el('span', 'j-tg-count none', '0 ' + noun + '(s)');
@@ -176,17 +179,33 @@
     }
 
     // hosts handed off from another tool (e.g. WPT scan -> Restart)
-    var pend = Janet.handoff && Janet.handoff.peek && Janet.handoff.peek();
-    if (opts.groups !== false && pend && pend.hosts && pend.hosts.length) {
-      var ho = el('div', 'j-tg-handoff');
+    var handoff = Janet.handoff;
+    var ho = null, offHandoff = null;
+    function refreshHandoff() {
+      if (ho) { ho.remove(); ho = null; }
+      var pend = handoff && handoff.peek(opts.handoffTool);
+      if (opts.groups === false || !pend || !pend.hosts.length) return;
+      ho = el('div', 'j-tg-handoff');
       ho.appendChild(el('span', null, pend.hosts.length + ' host(s) from ' + (pend.label || 'another tool')));
       var loadHo = Janet.ui.button('Load', { variant: 'cyan', size: 'sm' });
-      loadHo.onclick = function () { var p = Janet.handoff.take(); if (p) { var a = appendText(p.hosts.join('\n')); if (opts.onImport) opts.onImport(a, 'handoff'); } ho.remove(); };
+      loadHo.onclick = function () {
+        if (handoff.peek(opts.handoffTool) !== pend) return;
+        handoff.take();
+        if (!offHandoff) refreshHandoff();
+        var added = appendText(pend.hosts.join('\n'));
+        if (opts.onImport) opts.onImport(added, 'handoff');
+      };
       var dis = Janet.ui.ghostButton('Dismiss', { size: 'sm' });
-      dis.onclick = function () { Janet.handoff.clear(); ho.remove(); };
+      dis.onclick = function () {
+        if (handoff.peek(opts.handoffTool) !== pend) return;
+        handoff.clear();
+        if (!offHandoff) refreshHandoff();
+      };
       ho.appendChild(loadHo); ho.appendChild(dis);
       root.appendChild(ho);
     }
+    refreshHandoff();
+    if (opts.handoffTool && handoff) offHandoff = handoff.onChange(refreshHandoff);
 
     // Extract the hostname/IP column from a CSV/TSV blob. Picks the first header
     // matching a known host/ip pattern; falls back to column 0. A single-logical-
@@ -268,7 +287,10 @@
       // Release the shared-model listener. A TargetManager bound to a long-lived
       // model (e.g. WPT -> ctx.targets) otherwise leaks a refreshCount closure (and
       // its DOM) on every mount; bespoke per-view models are GC'd with the view.
-      dispose: function () { if (offModelChange) { offModelChange(); offModelChange = null; } }
+      dispose: function () {
+        if (offModelChange) { offModelChange(); offModelChange = null; }
+        if (offHandoff) { offHandoff(); offHandoff = null; }
+      }
     };
   }
   Janet.components.TargetManager = TargetManager;

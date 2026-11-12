@@ -109,7 +109,7 @@ function Get-JanetToolManifest {
         # Windows ignored all three while the row booked FIXED); and fix-antimalware's MDE OrgId
         # read/compare now mirrors the scan (root-key fallback + brace/whitespace normalization),
         # so a scan-PASS host no longer trips the heal ladder and books IN PROGRESS/FAIL.
-        version  = '1.18.2' # loop 2026-08-04: an EMPTY AMRunningMode (engine Disabled/Not Running) no longer books NOCHANGE 'already protected' - empty is neither Active nor Passive so no fail gate fired and an unprotected host certified compliant-green; plus 4 TryParse-zeroing threads sites
+        version  = '1.19.0' # Structured read-only evidence for the Workstations compliance rules.
         category = 'Remediation'
         summary  = 'C2C Nemesis - Comply-to-Connect (AFI/MPTO rule 3.B.2.B) remediation: (1) IMPORT the Tanium "C2C Compliance Status" CSV export, de-duplicate per host, bucket each failing rule into a canonical pillar with a routing hint, and emit a run-all plan (each host + its own fixable failed pillars); the import drives one CARD PER FIXABLE PILLAR in the view (click its host count to review the flagged hosts); (2) PER-PILLAR FIX (destructive) - six individually runnable endpoint-fixable pillars, each dialing ONLY the hosts the imported CSV flagged for THAT pillar (server-re-derived from the CSV every call and intersected against the submitted host list as an allow-list - never the whole target list; a submitted host not flagged for the pillar is dropped), each with pillar-named result labels: Monitoring (verify Tanium SOFTWARE installed via uninstall registry AND heal the Tanium client service), Firewall (enable disabled profiles), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), Patches (kick the MECM cycle), Encryption (resume/ENABLE BitLocker across ALL FIXED VOLUMES - OS volume via FVE policy assert + TPM protector + Entra-first/AD-fallback recovery-key escrow + XtsAes256, and fixed DATA volumes via escrow-first RecoveryPassword protector + XtsAes256 + auto-unlock, removable/USB never touched), AntiMalware (heal Defender/MDE, honouring AMRunningMode so Passive / EDR Block Mode boxes primary-managed by MDE Sense are left protected, not force-RTP''d), and PkiRoots (install the DoD trust bundle .cer files ADDITIVELY into LocalMachine Root/CA/Disallowed via WinRM); (3) RUN ALL - re-derive the authoritative plan from the imported CSV server-side and fix every non-compliant host''s OWN failed pillars only in one pass, intersecting the submitted plan - the view sends the CHECKED pillar cards'' host sets (a client host/pillar pair the import did not flag is dropped); (4) READ-ONLY quarantine-predictor scan - fan out one consolidated WinRM probe per host, run 11 tiered C2C checks aligned to the TASKORD 26-0822 dashboard (5 QUARANTINE pillars scored, 2 AUDIT + 3 INFO advisory, Monitoring=ATTEST), flag each host READY / QUARANTINE RISK / NOT ATTESTING; (5) READ-ONLY VERSION CHECK - per host read the 64/32-bit uninstall registry for a product DisplayName substring and compare its DisplayVersion to an optional target (UP TO DATE / OUTDATED / NEWER / NOT INSTALLED). An opt-in RPC-based WinRM-heal pre-step (default off, often blocked) can recover a stopped remote WinRM service before the fix / version fan-out. Vuln -> ACAS/Reports/KEV, OS Version -> Windows Upgrade, STIG -> Reports. (6) FIX LOCK SCREEN / WALLPAPER CACHE (opt-in, destructive) - remediate the Windows 11 cached quarantine lock screen / desktop wallpaper by forcing the HKLM Personalization policy (LockScreenImage + DesktopImage*) to a default Windows image, only where no value is already set; a standalone utility fix, not a scored pillar and never in run-all. (7) FIX JAVA (opt-in, destructive) - remove Oracle/Sun Java older than 8u491 (installed products via msiexec, JavaSoft registry residue, Program Files folders; OpenJDK/Temurin/Corretto and UNKNOWN versions never touched); a standalone utility fix that clears vulnerability-scanner Java findings, not a scored pillar and never in run-all. (8) READ-ONLY BITLOCKER ESCROW AUDIT - per host, one consolidated WinRM round-trip enumerates the key protectors of every FIXED volume (removable/USB/network/optical never touched) and reconciles each RecoveryPassword protector''s KeyProtectorId GUID against the AD msFVE-RecoveryInformation escrow, flagging ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed (an unreadable protector list or AD search is UNKNOWN, never ESCROWED) and the recovery password is NEVER read or emitted anywhere.'
         actions  = @(
@@ -863,12 +863,75 @@ function Get-C2cVerdict {
     $rptLines = foreach ($c in $checks) { '[{0}] {1}: {2}' -f (Get-C2cDisplayTag $c.Name $c.Status), ('{0,-12}' -f [string]$c.Name), ([string]$c.Detail) }
     return @{ Status = $status; Ok = $ok; Detail = $detail; Report = ($rptLines -join "`r`n") }
 }
+
+# Only publish the known fields and types from a remoting reply.
+function ConvertTo-C2cScanEvidence {
+    param($Source)
+    if ($Source -isnot [System.Collections.IDictionary] -or $Source.ObservedAtUtc -isnot [string]) { return }
+    $observed = [datetime]::MinValue
+    if ($Source.ObservedAtUtc -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$' -or
+        -not [datetime]::TryParseExact($Source.ObservedAtUtc, 'o', [cultureinfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$observed)) { return }
+
+    $evidence = @{
+        ObservedAtUtc = $observed.ToString('o', [cultureinfo]::InvariantCulture)
+        ReportingStatus = 'Unknown'
+        IntuneEnrollmentStatus = 'Unknown'
+        FirefoxInventoryScope = 'Machine uninstall registry'
+    }
+    foreach ($field in @('DefenderEnabled', 'DefenderRealTimeProtectionEnabled', 'MdeSenseRunning',
+        'MecmClientRunning', 'RebootPending', 'FirefoxInstalled')) {
+        $evidence[$field] = if ($Source[$field] -is [bool]) { $Source[$field] } else { $null }
+    }
+
+    $serviceStates = @('Running', 'Stopped', 'Paused', 'StartPending', 'StopPending', 'ContinuePending', 'PausePending')
+    $enums = @{
+        DefenderRunningMode = @('Normal', 'Active', 'Passive', 'EDR Block Mode', 'SxS Passive Mode', 'Disabled', 'Not Running')
+        MdeOrgIdStatus = @('Match', 'Wrong', 'Missing', 'Present', 'Unknown')
+        LocalMdmEnrollmentEvidence = @('Present', 'Absent', 'Unknown')
+        WindowsUpdateServiceStatus = $serviceStates
+        BitsServiceStatus = $serviceStates
+    }
+    foreach ($field in $enums.Keys) {
+        $value = $Source[$field]
+        if ($value -is [string] -and $value -in $enums[$field]) {
+            $evidence[$field] = [string]($enums[$field] -eq $value)[0]
+        } elseif ($field -in @('MdeOrgIdStatus', 'LocalMdmEnrollmentEvidence')) {
+            $evidence[$field] = 'Unknown'
+        } else {
+            $evidence[$field] = $null
+        }
+    }
+
+    $numericLimits = @{
+        DefenderSignatureAgeHours = ([datetime]::MaxValue - [datetime]::MinValue).TotalHours
+        SystemDriveFreeGB = [uint64]::MaxValue / 1GB
+        SystemDriveFreePercent = 100
+        MecmPendingUpdates = [int]::MaxValue
+        MecmOverdueUpdates = [int]::MaxValue
+    }
+    foreach ($field in $numericLimits.Keys) {
+        $evidence[$field] = $null
+        $value = $Source[$field]
+        if ($null -eq $value -or $value.GetType().Name -notin @('Int32', 'Int64', 'UInt32', 'UInt64', 'Double', 'Single', 'Decimal')) { continue }
+        if ($value -ge 0 -and $value -le $numericLimits[$field]) {
+            if ($field -in @('MecmPendingUpdates', 'MecmOverdueUpdates')) {
+                if ($value -eq [math]::Floor($value)) { $evidence[$field] = [int]$value }
+            } else { $evidence[$field] = $value }
+        }
+    }
+    if ($null -ne $evidence.MecmOverdueUpdates -and $null -ne $evidence.MecmPendingUpdates -and
+        $evidence.MecmOverdueUpdates -gt $evidence.MecmPendingUpdates) {
+        $evidence.MecmOverdueUpdates = $null
+    }
+    return $evidence
+}
 '@
 # Dot-source in MODULE scope (admin-side use + unit tests). Each pool worker dot-sources it again.
 try { . ([scriptblock]::Create($script:C2cVerdictSrc)) } catch {}
 
 # --- Per-host probe worker (runs in a pool runspace; no module scope here) ---
-# Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks }. All 10 checks run
+# Returns @{ Host; Ping; Status; Detail; Ok; Report; Checks; Rules; Evidence }. The checks run
 # inside ONE Invoke-Command round-trip; the verdict is computed here (admin-side).
 $script:C2cProbeBlock = {
     param([string]$Computer, $Cred, [string]$Auth, [bool]$AttemptOffline, $Config, [string]$TaniumInstalledSrc, [string]$VerdictSrc)
@@ -929,7 +992,7 @@ $script:C2cProbeBlock = {
     $sess = $null
     try { $sess = New-PSSession @splat } catch { $r.Status = 'ERROR'; $r.Detail = "Session: $($_.Exception.Message)"; return $r }
 
-    # ---- The consolidated read-only probe: all 10 C2C checks in one round-trip. ----
+    # ---- The consolidated read-only probe: all C2C checks in one round-trip. ----
     $probeSb = {
         param($taniumService, $sigMaxAge, $sigMaxHours, $graceDays, $mdeOrgId, $secAgents, $dodRoots, $taniumInstalledSrc, $dodRootSrc)
         # Dot-source the single-source Tanium-installed probe (Get-C2cTaniumInstalled).
@@ -942,6 +1005,28 @@ $script:C2cProbeBlock = {
         $dodRoots     = @(@($dodRoots)     | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
         $checks = New-Object System.Collections.ArrayList
         $mk = { param($n,$s,$d) [void]$checks.Add([pscustomobject]@{ Name=$n; Status=$s; Detail=[string]$d }) }
+        $evidence = @{
+            ObservedAtUtc = $null
+            DefenderEnabled = $null
+            DefenderRunningMode = $null
+            DefenderRealTimeProtectionEnabled = $null
+            DefenderSignatureAgeHours = $null
+            MdeOrgIdStatus = 'Unknown'
+            MdeSenseRunning = $null
+            ReportingStatus = 'Unknown'
+            LocalMdmEnrollmentEvidence = 'Unknown'
+            IntuneEnrollmentStatus = 'Unknown'
+            SystemDriveFreeGB = $null
+            SystemDriveFreePercent = $null
+            MecmPendingUpdates = $null
+            MecmOverdueUpdates = $null
+            MecmClientRunning = $null
+            WindowsUpdateServiceStatus = $null
+            BitsServiceStatus = $null
+            RebootPending = $null
+            FirefoxInstalled = $null
+            FirefoxInventoryScope = 'Machine uninstall registry'
+        }
 
         # 1. Monitoring - Tanium SOFTWARE installed (uninstall registry) AND the Tanium
         #    client service Running. PASS needs BOTH; Detail states both facts.
@@ -995,12 +1080,39 @@ $script:C2cProbeBlock = {
         try {
             # Endpoint-read the MDE Org ID (Status\OrgId, else the ATP root OrgId).
             $foundOrg = ''
-            try { $st1 = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name 'OrgId' -ErrorAction SilentlyContinue; if ($st1) { $foundOrg = [string]$st1.OrgId } } catch {}
-            if (-not $foundOrg) { try { $st2 = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection' -Name 'OrgId' -ErrorAction SilentlyContinue; if ($st2) { $foundOrg = [string]$st2.OrgId } } catch {} }
+            $orgReadFailed = $false
+            $atpPath = 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection'
+            foreach ($orgPath in @("$atpPath\Status", $atpPath)) {
+                try {
+                    $orgProperty = Get-ItemProperty -Path $orgPath -Name 'OrgId' -ErrorAction Stop
+                    $foundOrg = [string]$orgProperty.OrgId
+                } catch {
+                    # The registry provider uses PSArgumentException for an absent named property.
+                    if ($_.FullyQualifiedErrorId -notmatch '^(PathNotFound|System\.Management\.Automation\.PSArgumentException),') {
+                        $orgReadFailed = $true
+                    }
+                }
+                if ($foundOrg) { break }
+            }
             $reqOrg = ([string]$mdeOrgId).Trim()
             $orgNorm = { param($g) (([string]$g) -replace '[{}\s]','').ToUpperInvariant() }
             $orgOk = ($reqOrg) -and ((& $orgNorm $foundOrg) -eq (& $orgNorm $reqOrg))
-            $orgTxt = if ($foundOrg) { "OrgId $foundOrg" } else { 'OrgId missing (not MDE-onboarded)' }
+            # A denied preferred-key read leaves the effective value unknown, even if the fallback can be read.
+            if (-not $orgReadFailed) {
+                $evidence.MdeOrgIdStatus = if (-not $foundOrg) { 'Missing' }
+                    elseif ($orgOk) { 'Match' }
+                    elseif ($reqOrg) { 'Wrong' }
+                    else { 'Present' }
+            }
+            $orgTxt = if ($foundOrg -and $orgOk) { 'OrgId matches required tenant' }
+                elseif ($foundOrg -and $reqOrg) { 'OrgId != required tenant' }
+                elseif ($foundOrg) { 'OrgId present' }
+                elseif ($orgReadFailed) { 'OrgId unreadable' }
+                else { 'OrgId missing (not MDE-onboarded)' }
+            try {
+                $sense = Get-Service -Name 'Sense' -ErrorAction Stop
+                if ($sense -and $sense.Status) { $evidence.MdeSenseRunning = ([string]$sense.Status -eq 'Running') }
+            } catch {}
 
             if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
                 $mp     = Get-MpComputerStatus -ErrorAction Stop
@@ -1008,9 +1120,19 @@ $script:C2cProbeBlock = {
                 $rtp    = [bool]$mp.RealTimeProtectionEnabled
                 $amProd = [string]$mp.AMProductVersion
                 $amEng  = [string]$mp.AMEngineVersion
+                if ($mp.AntivirusEnabled -is [bool]) { $evidence.DefenderEnabled = $mp.AntivirusEnabled }
+                if ($mp.RealTimeProtectionEnabled -is [bool]) { $evidence.DefenderRealTimeProtectionEnabled = $mp.RealTimeProtectionEnabled }
+                if ($mode -in @('Normal', 'Active', 'Passive', 'EDR Block Mode', 'SxS Passive Mode', 'Disabled', 'Not Running')) {
+                    $evidence.DefenderRunningMode = $mode
+                }
                 # Signature age in HOURS from AntivirusSignatureLastUpdated (fall back to
                 # AntivirusSignatureAge days * 24 when the timestamp is missing).
                 $lastUpd = $null; try { $lastUpd = $mp.AntivirusSignatureLastUpdated } catch { $lastUpd = $null }
+                $signatureTimestamp = $lastUpd -as [datetime]
+                if ($null -ne $signatureTimestamp -and $signatureTimestamp -gt [datetime]::MinValue) {
+                    $signatureAge = ([datetime]::UtcNow - $signatureTimestamp.ToUniversalTime()).TotalHours
+                    if ($signatureAge -ge 0) { $evidence.DefenderSignatureAgeHours = $signatureAge }
+                }
                 $ageHours = $null
                 if ($lastUpd -is [datetime]) { $ageHours = [math]::Round(((Get-Date) - $lastUpd).TotalHours, 1) }
                 elseif ($lastUpd -and ($lastUpd -as [datetime])) { $ageHours = [math]::Round(((Get-Date) - ([datetime]$lastUpd)).TotalHours, 1) }
@@ -1022,8 +1144,7 @@ $script:C2cProbeBlock = {
                 # advisory fleet budget only - a breach is noted, never failed.
                 $sigFresh = ($null -ne $ageHours) -and ($ageHours -lt 168)
                 # MDE Sense onboarded (advisory): Sense service Running OR OnboardingState reg = 1.
-                $senseOnboarded = $false
-                try { $ss = Get-Service -Name 'Sense' -ErrorAction SilentlyContinue; if ($ss -and $ss.Status -eq 'Running') { $senseOnboarded = $true } } catch {}
+                $senseOnboarded = ($evidence.MdeSenseRunning -eq $true)
                 if (-not $senseOnboarded) {
                     try {
                         $ob = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' -Name 'OnboardingState' -ErrorAction SilentlyContinue
@@ -1046,7 +1167,7 @@ $script:C2cProbeBlock = {
                 } else {
                     $why = New-Object System.Collections.ArrayList
                     if (-not $sigFresh) { [void]$why.Add("sig age $ageTxt >= 7 days") }
-                    if (-not $orgOk)    { [void]$why.Add(("MDE " + $(if ($foundOrg) { "OrgId $foundOrg != required $reqOrg (wrong tenant - needs MDE re-onboarding)" } else { 'not onboarded (OrgId missing)' }))) }
+                    if (-not $orgOk)    { [void]$why.Add("MDE $orgTxt") }
                     & $mk 'AntiMalware' 'FAIL' "$($why -join '; '); $baseDet$advTxt"
                 }
             } else {
@@ -1074,7 +1195,7 @@ $script:C2cProbeBlock = {
                     } else {
                         $why = New-Object System.Collections.ArrayList
                         if (-not ($enabled -and $current)) { [void]$why.Add("Defender enabled=$enabled up-to-date=$current") }
-                        if (-not $orgOk) { [void]$why.Add(("MDE " + $(if ($foundOrg) { "OrgId $foundOrg != required $reqOrg" } else { 'not onboarded (OrgId missing)' }))) }
+                        if (-not $orgOk) { [void]$why.Add("MDE $orgTxt") }
                         & $mk 'AntiMalware' 'FAIL' "SecurityCenter2 Defender ($names): $($why -join '; ')"
                     }
                 }
@@ -1100,6 +1221,8 @@ $script:C2cProbeBlock = {
                 elseif ($_.StartTime -is [datetime]) { $_.StartTime -lt $now.AddDays(-$graceDays) }
                 else                                 { $true }
             })
+            $evidence.MecmPendingUpdates = $pending.Count
+            $evidence.MecmOverdueUpdates = $overdue.Count
             $inGrace = $pending.Count - $overdue.Count
             $caveat = ' (MECM-deployed updates only; Tanium scans the full patch list independently)'
             if ($overdue.Count -eq 0) {
@@ -1231,6 +1354,7 @@ $script:C2cProbeBlock = {
         try {
             $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
             $ccmRun = ($ccm -and $ccm.Status -eq 'Running')
+            if ($ccm -and $ccm.Status) { $evidence.MecmClientRunning = $ccmRun }
             $secRun = New-Object System.Collections.ArrayList
             foreach ($s in @($secAgents)) {
                 $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
@@ -1300,7 +1424,89 @@ $script:C2cProbeBlock = {
         # base-specific (^MSEKL/^MSEKW), so it FALSE-flagged every host at other bases as
         # QUARANTINE RISK. The authoritative hostname verdict is ARAD-side anyway.)
 
-        return @{ RemoteName = $env:COMPUTERNAME; Checks = @($checks) }
+        # Local enrollment artifacts are an input to enterprise verification. They can
+        # be stale and do not identify current Intune enrollment or MDE reporting.
+        try {
+            $enrollmentPath = 'HKLM:\SOFTWARE\Microsoft\Enrollments'
+            $enrollmentFound = $false
+            if (Test-Path -LiteralPath $enrollmentPath -ErrorAction Stop) {
+                foreach ($key in @(Get-ChildItem -LiteralPath $enrollmentPath -ErrorAction Stop)) {
+                    $enrollmentId = [guid]::Empty
+                    if (-not [guid]::TryParse([string]$key.PSChildName, [ref]$enrollmentId)) { continue }
+                    try {
+                        $provider = Get-ItemProperty -LiteralPath $key.PSPath -Name 'ProviderID' -ErrorAction Stop
+                        if (-not [string]::IsNullOrWhiteSpace([string]$provider.ProviderID)) {
+                            $enrollmentFound = $true
+                            break
+                        }
+                    } catch {
+                        if ($_.FullyQualifiedErrorId -notmatch '^System\.Management\.Automation\.PSArgumentException,') { throw }
+                    }
+                }
+            }
+            $evidence.LocalMdmEnrollmentEvidence = if ($enrollmentFound) { 'Present' } else { 'Absent' }
+        } catch {}
+
+        if ($env:SystemDrive -match '^[A-Za-z]:$') {
+            try {
+                $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction Stop
+                if ($null -ne $disk.FreeSpace) {
+                    $freeBytes = [uint64]$disk.FreeSpace
+                    $evidence.SystemDriveFreeGB = $freeBytes / 1GB
+                    if ($disk.Size -and $freeBytes -le [uint64]$disk.Size) {
+                        $evidence.SystemDriveFreePercent = $freeBytes / [uint64]$disk.Size * 100
+                    }
+                }
+            } catch {}
+        }
+
+        foreach ($service in @(@{Name='wuauserv'; Field='WindowsUpdateServiceStatus'}, @{Name='BITS'; Field='BitsServiceStatus'})) {
+            try {
+                $state = [string](Get-Service -Name $service.Name -ErrorAction Stop).Status
+                if ($state -in @('Running', 'Stopped', 'Paused', 'StartPending', 'StopPending', 'ContinuePending', 'PausePending')) {
+                    $evidence[$service.Field] = $state
+                }
+            } catch {}
+        }
+        $rebootReads = @(
+            foreach ($marker in @(
+                'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+                'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+            )) {
+                try { Test-Path -LiteralPath $marker -ErrorAction Stop } catch { $null }
+            }
+            try {
+                $reboot = Invoke-CimMethod -Namespace 'root/CCM/ClientSDK' -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending -ErrorAction Stop
+                if ($reboot -and $null -ne $reboot.ReturnValue -and $reboot.ReturnValue -eq 0 -and
+                    $reboot.RebootPending -is [bool] -and $reboot.IsHardRebootPending -is [bool]) {
+                    $reboot.RebootPending -or $reboot.IsHardRebootPending
+                } else { $null }
+            } catch { $null }
+        )
+        if ($rebootReads -contains $true) { $evidence.RebootPending = $true }
+        elseif ($rebootReads.Count -eq 3 -and $rebootReads -notcontains $null) { $evidence.RebootPending = $false }
+
+        $firefoxFound = $false
+        $inventoryReadFailed = $false
+        foreach ($uninstallPath in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        )) {
+            try {
+                if (-not (Test-Path -LiteralPath $uninstallPath -ErrorAction Stop)) { continue }
+                foreach ($product in @(Get-ItemProperty -Path "$uninstallPath\*" -ErrorAction Stop)) {
+                    if ([string]$product.DisplayName -match '^(?:Mozilla\s+)?Firefox(?: ESR| Developer Edition| Nightly| Beta)?(?:\s*\(|\s+\d|$)') {
+                        $firefoxFound = $true
+                        break
+                    }
+                }
+            } catch { $inventoryReadFailed = $true }
+            if ($firefoxFound) { break }
+        }
+        if ($firefoxFound -or -not $inventoryReadFailed) { $evidence.FirefoxInstalled = $firefoxFound }
+
+        $evidence.ObservedAtUtc = [datetime]::UtcNow.ToString('o', [cultureinfo]::InvariantCulture)
+        return @{ RemoteName = $env:COMPUTERNAME; Checks = @($checks); Evidence = $evidence }
     }
 
     try {
@@ -1332,9 +1538,20 @@ $script:C2cProbeBlock = {
         return $r
     }
 
-    $checks = @($probe.Checks)
+    $checks = @($probe.Checks | Where-Object { $null -ne $_ })
     $r.Checks = $checks
     if ($checks.Count -eq 0) { $r.Status = 'ERROR'; $r.Detail = 'probe returned no checks'; return $r }
+
+    $r.Rules = @{}
+    foreach ($check in $checks) {
+        $checkName = [string]$check.Name
+        $checkStatus = ([string]$check.Status).ToUpperInvariant()
+        if ($script:C2cPillarTier.ContainsKey($checkName) -and $checkStatus -in @('PASS', 'FAIL', 'ERROR', 'EXT')) {
+            $r.Rules[$checkName] = @{ Status = $checkStatus; Tier = (Get-C2cPillarTier $checkName) }
+        }
+    }
+    $evidence = ConvertTo-C2cScanEvidence $probe.Evidence
+    if ($evidence) { $r.Evidence = $evidence }
 
     # TASKORD-tiered verdict + tagged report (single source; unit-tested).
     $v = Get-C2cVerdict -Checks $checks
@@ -2330,7 +2547,7 @@ $script:C2cFixBlock = {
                     Start-Sleep -Seconds 15
                     $orgNow = & $readOrg
                     $depTxt = if ($depNotes.Count -gt 0) { ' [deps: ' + ($depNotes -join ', ') + ']' } else { '' }
-                    $wasTxt = if ($orgId) { "OrgId was '$orgId' (mismatch)" } else { 'OrgId was missing' }
+                    $wasTxt = if ($orgId) { 'OrgId was mismatched' } else { 'OrgId was missing' }
                     if ((& $orgN $orgNow) -eq (& $orgN $MdeOrgId)) {
                         & $add 'MdeOnboard' 'onboard' 'FIXED' ("$wasTxt - MDE onboarded, OrgId now matches" + $(if ($usedLocalBlob) { ' (via local blob; the GPO asserts the same value)' } else { " ($gpNote)" }) + $depTxt)
                     } elseif (-not $gwOpen) {
@@ -4520,6 +4737,8 @@ function Invoke-JanetToolAction {
     $emitResult = {
         param($res)
         $row = @{ Host=[string]$res.Host; Ping=[string]$res.Ping; Status=[string]$res.Status; Detail=[string]$res.Detail }
+        if ($res.Rules) { $row['Rules'] = $res.Rules }
+        if ($res.Evidence) { $row['Evidence'] = $res.Evidence }
         # Normalize host-level evaluation failures to a status the shared view colours + counts
         # (match the SECRET engine): raw ERROR / DNS MISMATCH -> CHECK ERRORS. The Detail keeps
         # the reason. READY / QUARANTINE RISK / CHECK ERRORS / OFFLINE / Cancelled pass through.

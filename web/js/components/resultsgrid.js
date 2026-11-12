@@ -415,7 +415,8 @@
         }
         var src = (uctx && uctx.toolName) || opts.title || 'another tool';
         var label = src + ': ' + (cfg.source || opts.title || 'results') + ' (' + picked.scope.label.toLowerCase() + ')';
-        try { Janet.handoff.send(hosts, label); } catch (e) { return; }
+        var scope = (toolId === 'wpt' || toolId === 'c2c') ? toolId : null;
+        try { Janet.handoff.send(hosts, label, null, scope); } catch (e) { return; }
         if (uctx && typeof uctx.openTool === 'function') uctx.openTool(dest.id);
         else {
           Janet.components.ConfirmDialog({

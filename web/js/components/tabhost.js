@@ -34,7 +34,8 @@
     railEl.setAttribute('role', 'tablist');
     railEl.setAttribute('aria-orientation', rail === 'top' ? 'horizontal' : 'vertical');
     if (opts.ariaLabel) railEl.setAttribute('aria-label', opts.ariaLabel);
-    root.appendChild(railEl); root.appendChild(panelsEl);
+    if (!opts.external) root.appendChild(railEl);
+    root.appendChild(panelsEl);
 
     var state = {};   // id -> { tab, btn, panel, built }
     var order = [];   // tab ids in rail order (arrow-key navigation)
@@ -52,8 +53,9 @@
       railEl.appendChild(btn);
       var panel = el('div', 'j-tabpanel hidden');
       panel.id = uid + '-panel-' + tab.id;
-      panel.setAttribute('role', 'tabpanel');
-      panel.setAttribute('aria-labelledby', btn.id);
+      panel.setAttribute('role', opts.external ? 'region' : 'tabpanel');
+      if (opts.external) panel.setAttribute('aria-label', tab.label);
+      else panel.setAttribute('aria-labelledby', btn.id);
       panel.tabIndex = 0;   // the panel itself is the next Tab stop after its tab
       panelsEl.appendChild(panel);
       state[tab.id] = { tab: tab, btn: btn, panel: panel, built: false };
@@ -79,7 +81,7 @@
       var s = state[id]; if (!s) return;
       if (!s.built) { try { if (s.tab.build) s.tab.build(s.panel); } catch (e) { s.panel.appendChild(el('div', 'st-bad', 'panel "' + id + '" failed: ' + (e && e.message))); } s.built = true; }
       // refresh the shell's "How to use" box for this tab (no-op for tools without per-tab help)
-      if (opts.helpId && Janet.howtoTab) Janet.howtoTab(opts.helpId, id, s.tab.label);
+      if (!opts.external && opts.helpId && Janet.howtoTab) Janet.howtoTab(opts.helpId, id, s.tab.label);
       Object.keys(state).forEach(function (k) {
         var on = (k === id);
         state[k].panel.classList.toggle('hidden', !on);
@@ -87,11 +89,13 @@
         state[k].btn.setAttribute('aria-selected', on ? 'true' : 'false');
         state[k].btn.tabIndex = on ? 0 : -1;
       });
+      if (opts.onSelect) opts.onSelect(id);
     }
 
     // open the command-palette's requested tab if it belongs to this host, else the first
-    var initial = (Janet._pendingTab && state[Janet._pendingTab]) ? Janet._pendingTab : (tabs[0] && tabs[0].id);
-    Janet._pendingTab = null;
+    var requested = opts.external ? opts.initialTab : Janet._pendingTab;
+    var initial = (requested && state[requested]) ? requested : (tabs[0] && tabs[0].id);
+    if (!opts.external) Janet._pendingTab = null;
     if (initial) select(initial);
 
     return { el: root, select: select };

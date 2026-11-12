@@ -85,10 +85,24 @@
 
   // transient cross-tool handoff (in-memory, this page session only)
   var pending = null;
+  var handoffListeners = [];
+  function notifyHandoff() { handoffListeners.slice().forEach(function (listener) { listener(); }); }
   Janet.handoff = {
-    send: function (hosts, label, extra) { pending = { hosts: (hosts || []).filter(Boolean), label: label || '', stamp: (Janet.util && Janet.util.clockStr ? Janet.util.clockStr() : ''), extra: extra || null }; },
-    peek: function () { return pending; },
-    take: function () { var p = pending; pending = null; return p; },
-    clear: function () { pending = null; }
+    send: function (hosts, label, extra, toolId) {
+      pending = { hosts: (hosts || []).filter(Boolean), label: label || '', stamp: (Janet.util && Janet.util.clockStr ? Janet.util.clockStr() : ''), extra: extra || null, toolId: toolId || null };
+      notifyHandoff();
+    },
+    peek: function (toolId) {
+      return pending && (pending.toolId || null) === (toolId || null) ? pending : null;
+    },
+    take: function () { var p = pending; pending = null; notifyHandoff(); return p; },
+    clear: function () { pending = null; notifyHandoff(); },
+    onChange: function (listener) {
+      handoffListeners.push(listener);
+      return function () {
+        var i = handoffListeners.indexOf(listener);
+        if (i !== -1) handoffListeners.splice(i, 1);
+      };
+    }
   };
 })();

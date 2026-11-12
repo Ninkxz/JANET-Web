@@ -832,8 +832,9 @@
 
         // Copy a route's hosts to the clipboard and stage them on Janet.handoff so the
         // operator can paste/import them into acas/upr (which do not read ctx.targets).
-        function stageRouteHosts(hosts, bucket, extra) {
-          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'reports route: ' + bucket, extra || null); } catch (e) {} }
+        function stageRouteHosts(hosts, bucket, extra, toolId) {
+          var scope = (toolId === 'wpt' || toolId === 'c2c') ? toolId : null;
+          if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'reports route: ' + bucket, extra || null, scope); } catch (e) {} }
           if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(hosts.join('\n')).catch(function () {}); }
         }
 
@@ -856,7 +857,7 @@
           var pick = isRegKey ? (cvekey + ' registry fix') : ((prof && prof !== '-') ? (prof + ' profile') : (String(r.Action || '') + ' action'));
           var readsTargets = !!TARGETS_AWARE[toolId];
           var doIt = function () {
-            stageRouteHosts(hosts, r.Bucket, cvekey ? { cvekey: cvekey } : null);
+            stageRouteHosts(hosts, r.Bucket, cvekey ? { cvekey: cvekey } : null, toolId);
             if (readsTargets) {
               ctx.targets.set(hosts.join('\n'));
               log.append({ text: hosts.length + ' host(s) loaded into the shared target list (and copied to clipboard); opened ' + toolId + ' - select the ' + pick + '.', level: 'ok' });
@@ -1131,7 +1132,8 @@
           var pick = isRegKey ? (cvekey + ' registry fix') : (prof ? (prof + ' profile') : (String(r.RouteAction || '') + ' action'));
           var readsTargets = !!TP_TARGETS_AWARE[toolId];
           var doIt = function () {
-            if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'thirdparty: ' + r.Product, cvekey ? { cvekey: cvekey } : null); } catch (e) {} }
+            var scope = (toolId === 'wpt' || toolId === 'c2c') ? toolId : null;
+            if (window.Janet && Janet.handoff) { try { Janet.handoff.send(hosts, 'thirdparty: ' + r.Product, cvekey ? { cvekey: cvekey } : null, scope); } catch (e) {} }
             if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(hosts.join('\n')).catch(function () {}); }
             if (readsTargets) {
               ctx.targets.set(hosts.join('\n'));

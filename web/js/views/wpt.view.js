@@ -36,6 +36,8 @@
   JanetViews.register('wpt', {
     mount: function (host, ctx) {
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
+      var workspace = ctx.workspace;
+      var view = this;
 
       // -- per-view bookkeeping: every run unsubscribe so unmount() cleans up --
       var unsubs = [];                  // list of unsubscribe fns
@@ -64,6 +66,7 @@
         return keyUnsubs[actionId].unsub;
       }
       var rebootMonitorFn = null;       // set by the Reboot Countdown tab; called by Bulk "Reboot Selected" to monitor a host subset
+      var syncRegKeyHandoff = null;
 
       // ----------------------------------------------------------------------
       //  SESSION TELEMETRY  (desktop Track-Action -> $global:Stats /
@@ -202,6 +205,8 @@
       ctx.run = function (actionId, params, opts) { var h = _origRun(actionId, params, opts); try { Telemetry.attach(actionId, params, h); } catch (e) {} return h; };
 
       var root = el('div'); root.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)';
+      this._root = root;
+      this._unsub = function () { unsubs.forEach(function (u) { try { u(); } catch (e) {} }); unsubs = []; };
 
       // ----- small shared helpers -----
       function notice(title, body) { return ctx.confirm({ title: title, body: body, okText: 'OK', cancelText: null }); }
@@ -226,12 +231,12 @@
         opts = opts || {};
         var box = ui.card({});
         box.style.cssText += ';flex:0 0 300px;display:flex;flex-direction:column;min-height:0';
-        var h = el('div', 'j-section-h', 'TARGET WORKSTATIONS'); h.style.marginBottom = '6px';
+        var h = el('div', 'j-section-h', workspace ? 'Patching targets' : 'TARGET WORKSTATIONS'); h.style.marginBottom = '6px';
         box.insertBefore(h, box.firstChild);
         var note = el('div', 'muted', 'Shared host list - edit on any tab.'); note.style.cssText = 'font-size:11px;margin-bottom:6px';
         box.appendChild(note);
         var tm = C.TargetManager({
-          model: ctx.targets, countNoun: 'host', importLabel: 'Import TXT',
+          model: ctx.targets, countNoun: 'host', importLabel: 'Import TXT', handoffTool: 'wpt',
           importAccept: '.txt,.csv,.tsv',
           hint: opts.hint || 'Paste hostnames (line / comma / space separated)'
         });
@@ -239,6 +244,15 @@
         var holder = el('div'); holder.style.cssText = 'flex:1;min-height:120px;display:flex'; holder.appendChild(tm.el);
         box.appendChild(holder);
         return { box: box, tm: tm };
+      }
+
+      function appendTargetEditor(parent, card) {
+        if (!workspace) { parent.appendChild(card); return; }
+        parent.classList.add('j-ws-stacked');
+        var details = el('details', 'j-ws-disclosure');
+        details.appendChild(el('summary', null, 'Edit patching targets'));
+        details.appendChild(card);
+        parent.appendChild(details);
       }
 
       // a single-host picker bound to a small select that re-syncs from the shared list.
@@ -284,7 +298,7 @@
         var run = null;
         var counters = {};
 
-        var lay = el('div'); lay.style.cssText = 'display:flex;flex-direction:column;gap:12px;height:100%;min-height:0;padding:12px;box-sizing:border-box';
+        var lay = el('div', workspace ? 'j-ws-wpt-run' : null); lay.style.cssText = 'display:flex;flex-direction:column;gap:12px;height:100%;min-height:0;padding:12px;box-sizing:border-box';
         panel.appendChild(lay);
 
         // top work area: shared targets (left) + controls/results (right)
@@ -293,7 +307,7 @@
 
         // LEFT: shared targets
         var tg = sharedTargetsCard({ hint: spec.targetHint });
-        workRow.appendChild(tg.box);
+        appendTargetEditor(workRow, tg.box);
 
         // RIGHT column
         var right = el('div'); right.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;min-height:0';
@@ -302,9 +316,14 @@
         // settings + run bar card
         var ctlCard = ui.card({}); ctlCard.style.cssText += ';display:flex;flex-direction:column;gap:10px';
         var hdr = el('div', 'j-section-h', spec.title || spec.runLabel); ctlCard.appendChild(hdr);
-        if (spec.description) { var d = el('div', 'muted', spec.description); d.style.cssText = 'font-size:11.5px'; ctlCard.appendChild(d); }
+        var settingsPanel = ctlCard;
+        if (workspace && (spec.description || spec.settings)) {
+          settingsPanel = el('details', 'j-ws-disclosure');
+          settingsPanel.appendChild(el('summary', null, 'Scan and action settings'));
+        }
+        if (spec.description) { var d = el('div', 'muted', spec.description); d.style.cssText = 'font-size:11.5px'; settingsPanel.appendChild(d); }
         var settingsHolder = el('div'); settingsHolder.style.cssText = 'display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end';
-        ctlCard.appendChild(settingsHolder);
+        settingsPanel.appendChild(settingsHolder);
         var getSettings = spec.settings ? spec.settings(settingsHolder) : function () { return {}; };
 
         // RunBar
@@ -322,10 +341,12 @@
         var ctaHold = el('div'); ctaHold.style.minWidth = '240px'; ctaHold.appendChild(runbar.el);
         runRow.appendChild(ctaHold);
         ctlCard.appendChild(runRow);
+        if (settingsPanel !== ctlCard) ctlCard.appendChild(settingsPanel);
         right.appendChild(ctlCard);
 
         // RESULTS grid + progress
         var resCard = ui.card({}); resCard.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
+        if (workspace) resCard.classList.add('j-ws-wpt-results');
         grid = C.ResultsGrid({
           title: spec.runLabel + ' results',
           columns: spec.columns,
@@ -473,12 +494,12 @@
 
       // ---- TAB: Targets ----
       function buildTargets(panel) {
-        var lay = el('div'); lay.style.cssText = 'display:flex;gap:12px;height:100%;min-height:0;padding:14px;box-sizing:border-box';
+        var lay = el('div', workspace ? 'j-ws-wpt-targets' : null); lay.style.cssText = 'display:flex;gap:12px;height:100%;min-height:0;padding:14px;box-sizing:border-box';
         var card = ui.card({}); card.style.cssText += ';flex:0 0 420px;display:flex;flex-direction:column;min-height:0';
-        var h = el('div', 'j-section-h', 'TARGET WORKSTATIONS'); h.style.marginBottom = '6px'; card.appendChild(h);
-        card.appendChild((function () { var d = el('div', 'muted', 'This shared list feeds EVERY operational tab (the desktop $global:ComputerList). Paste one host per line, or import a TXT/CSV.'); d.style.cssText = 'font-size:11.5px;margin-bottom:8px'; return d; })());
+        var h = el('div', 'j-section-h', workspace ? 'Patching targets' : 'TARGET WORKSTATIONS'); h.style.marginBottom = '6px'; card.appendChild(h);
+        card.appendChild((function () { var d = el('div', 'muted', 'Paste hostnames or import a TXT or CSV file. This list feeds the patching pages.'); d.style.cssText = 'font-size:11.5px;margin-bottom:8px'; return d; })());
         var tm = C.TargetManager({
-          model: ctx.targets, countNoun: 'host', importLabel: 'Import TXT', importAccept: '.txt,.csv,.tsv',
+          model: ctx.targets, countNoun: 'host', importLabel: 'Import TXT', importAccept: '.txt,.csv,.tsv', handoffTool: 'wpt',
           hint: 'Paste hostnames (line / comma / space separated)',
           onImport: function (n, name) { /* count shown live */ }
         });
@@ -602,7 +623,7 @@
         var ih = el('div', 'j-section-h', 'HOW THE LIST IS USED'); info.appendChild(ih);
         var p = el('div', 'muted'); p.style.cssText = 'font-size:12px;line-height:1.6;margin-top:8px';
         p.innerHTML =
-          'The host list is <b>case-insensitively de-duplicated</b> and shared across all tabs.<br><br>' +
+          'The patching pages share this list and remove duplicate hostnames.<br><br>' +
           '&bull; Bulk Scan &amp; Patch fans the whole list out in parallel.<br>' +
           '&bull; Software Manager / Software Center pick a single host from the list.<br>' +
           '&bull; All destructive actions still require an admin session (Set Credentials, top-right).<br><br>' +
@@ -679,20 +700,35 @@
 
         // -------- Patch Selected / Reboot Selected action bar (below grid) --------
         // These run their OWN actions on the CHECKED hosts of the scan grid.
-        var actBar = el('div'); actBar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap';
-        // Patch posture: non-invasive (default; reboots suppressed, patch while users
-        // work) vs forced (reboot-if-needed, customer-affecting; for quarantined hosts).
+        var actBar = el('div', workspace ? 'j-ws-patch-actions' : null); actBar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap';
+        // App posture controls app install requests. MECM governs Windows updates.
         var patchModeSel = ui.select({ options: [
-          { value: 'noninvasive', label: 'Non-invasive (reboots suppressed)' },
-          { value: 'forced', label: 'FORCED (reboot if needed)' }
-        ], title: 'Non-invasive patches while users work and suppresses reboots. FORCED reboots the box when an install needs it — customer-affecting, for quarantined / no-user hosts.' });
+          { value: 'noninvasive', label: 'Non-invasive (suppress app restarts)' },
+          { value: 'forced', label: 'FORCED (app restart if needed)' }
+        ], title: 'Non-invasive mode suppresses restarts requested by app installs. Windows updates follow MECM restart policy. Forced mode allows app restarts when needed.' });
+        view.prepareManagedPatch = function () {
+          patchModeSel.value = 'noninvasive';
+          api.grid.clear();
+          api.prog.reset();
+          api.runbar.setStatus('Load the staged hosts, review the list, then scan.', 'st-info');
+          api.log.append({ text: 'Managed patching review: load staged hosts, review targets and scan before selecting hosts to patch.', level: 'info' });
+        };
         var patchBtn = ui.button('Patch Selected', { variant: 'gold', title: 'Trigger MECM updates + pending apps on the checked hosts, using the selected posture.' });
         var patchAllBtn = ui.button('Patch All Needing', { variant: 'gold', title: 'Select hosts with work, then patch them in one click (selected posture).' });
         var rebootBtn = ui.button('Reboot Selected', { variant: 'danger', title: 'Force an immediate reboot on the checked hosts.' });
         var pingBtn = ui.button('Ping Sweep', { variant: 'cyan', title: 'TCP reachability test (5985/5986/445) across the target list.' });
         var winrmBtn = ui.button('Repair WinRM', { variant: 'cyan', title: 'Bootstrap WinRM over DCOM on the checked (offline) hosts.' });
         actBar.appendChild(ui.eyebrow('POSTURE')); actBar.appendChild(patchModeSel);
-        [patchBtn, patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { actBar.appendChild(b); });
+        actBar.appendChild(patchBtn);
+        var extraActions = actBar;
+        if (workspace) {
+          var more = el('details', 'j-ws-disclosure');
+          more.appendChild(el('summary', null, 'More actions'));
+          extraActions = el('div', 'j-ws-extra-actions');
+          more.appendChild(extraActions);
+          actBar.appendChild(more);
+        }
+        [patchAllBtn, rebootBtn, pingBtn, winrmBtn].forEach(function (b) { extraActions.appendChild(b); });
         // place the action bar right after the results card's progress strip
         api.prog.el.parentNode.appendChild(actBar);
 
@@ -721,7 +757,8 @@
         async function followOnFleet(actionId, hosts, label) {
           if (!hosts || !hosts.length) { notice('Nothing Selected', 'Check at least one host in the grid first.'); return; }
           var act = findManifestAction(actionId);
-          var destructive = act && act.destructive;
+          if (!act) { notice('Action unavailable', 'This action is missing from the Workstation Patching manifest.'); return; }
+          var destructive = act.destructive;
           if (destructive && needCred()) return;
           var patchMode = (actionId === 'bulk-patch') ? (patchModeSel.value || 'noninvasive') : null;
           var patchForced = (patchMode === 'forced');
@@ -732,8 +769,8 @@
               : (actionId === 'winrm-bootstrap')
                 ? 'Repair WinRM on <b>' + hosts.length + '</b> host(s)? Sets the service Automatic, starts it, runs winrm quickconfig over DCOM, re-probes 5985.'
                 : patchForced
-                  ? 'Patch <b>' + hosts.length + '</b> workstation(s) — <b>FORCED</b> posture. App installs will <b>REBOOT the box when an install needs it</b> (customer-affecting). Use for quarantined / no-user hosts only.'
-                  : 'Patch <b>' + hosts.length + '</b> workstation(s) — <b>non-invasive</b> posture. Triggers MECM updates + pending app installs; <b>reboots are suppressed</b> so patching runs while users work.';
+                  ? 'Patch <b>' + hosts.length + '</b> workstation(s) in <b>FORCED app mode</b>. App installs may restart the device when needed. Windows updates follow MECM restart policy.'
+                  : 'Trigger eligible MECM apps and updates on <b>' + hosts.length + '</b> workstation(s). Non-invasive mode suppresses app restart requests. <b>Windows updates follow MECM restart policy.</b> Verify the results after dispatch.';
             var ok = await ctx.confirm({ title: 'Confirm ' + label + (patchMode ? (' · ' + (patchForced ? 'FORCED' : 'non-invasive')) : ''), danger: danger, body: body, list: hosts.slice(0, 6), preflight: { targets: hosts, actionLabel: label }, okText: danger ? (patchForced ? 'Force patch' : 'Reboot') : 'Proceed', cancelText: 'Cancel' });
             if (!ok) { api.log.append({ text: label + ' cancelled by operator.', level: 'warn' }); return; }
           }
@@ -1564,11 +1601,15 @@
         // staging a cvekey on Janet.handoff. Pre-select it if it names a known fix. We
         // only PEEK (do not take) so the Targets tab still offers the host handoff; the
         // affected hosts were already loaded into the shared target list by the router.
-        try {
-          var _ho = (window.Janet && Janet.handoff && Janet.handoff.peek) ? Janet.handoff.peek() : null;
+        var appliedHandoff = null;
+        syncRegKeyHandoff = function () {
+          var _ho = Janet.handoff && Janet.handoff.peek('wpt');
+          if (!_ho || _ho === appliedHandoff) return;
+          appliedHandoff = _ho;
           var _ck = (_ho && _ho.extra && _ho.extra.cvekey) ? String(_ho.extra.cvekey) : '';
           if (_ck && fixSel && FIXES.indexOf(_ck) !== -1) { fixSel.value = _ck; }
-        } catch (e) {}
+        };
+        syncRegKeyHandoff();
 
         // APPLY bar
         var bar = el('div'); bar.style.cssText = 'display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap';
@@ -1931,7 +1972,7 @@
         panel.appendChild(lay);
 
         var tg = sharedTargetsCard({ hint: 'Hosts to schedule for reboot' });
-        lay.appendChild(tg.box);
+        appendTargetEditor(lay, tg.box);
 
         var right = el('div'); right.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;min-height:0';
         lay.appendChild(right);
@@ -2158,7 +2199,7 @@
         panel.appendChild(lay);
 
         var tg = sharedTargetsCard({});
-        lay.appendChild(tg.box);
+        appendTargetEditor(lay, tg.box);
 
         var right = el('div'); right.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;min-height:0';
         lay.appendChild(right);
@@ -2792,17 +2833,35 @@
         { id: 'logs', label: 'Logs', build: buildLogs }
       ];
 
-      var tabHost = C.TabHost({ rail: 'left', helpId: 'wpt', tabs: tabs });
+      var tabHost = C.TabHost({
+        rail: 'left', helpId: 'wpt', tabs: tabs, external: !!workspace,
+        initialTab: workspace && workspace.initialTab, onSelect: workspace && workspace.onSelect
+      });
       var tabWrap = el('div'); tabWrap.style.cssText = 'flex:1;min-height:0;display:flex';
       tabWrap.appendChild(tabHost.el);
       root.appendChild(tabWrap);
 
-      // open Targets first (the desktop's gate-after, list-build-first flow)
-      tabHost.select('targets');
+      function revealStagedTargets() {
+        var pending = root.querySelector('.j-tabpanel:not(.hidden) .j-tg-handoff');
+        var editor = pending && pending.closest('details');
+        if (editor) editor.open = true;
+      }
+      this.selectTab = function (id) {
+        tabHost.select(id);
+        if (id === 'regkey' && syncRegKeyHandoff) syncRegKeyHandoff();
+        revealStagedTargets();
+      };
+      if (workspace) {
+        function showScope() {
+          var n = ctx.targets.count();
+          workspace.setScope('Patching targets · ' + n + (n === 1 ? ' host' : ' hosts'));
+        }
+        track(ctx.targets.onChange(showScope));
+        showScope();
+      }
 
       host.appendChild(root);
-      this._root = root;
-      this._unsub = function () { unsubs.forEach(function (u) { try { u(); } catch (e) {} }); unsubs = []; };
+      if (workspace) revealStagedTargets();
     }
   });
 })();

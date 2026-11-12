@@ -247,11 +247,12 @@
       return null;   // caller assigns a sequence key
     }
     function freshRun(key, toolId, actionId, opts) {
-      var rs = runs[key] || (runs[key] = {});
+      var rs = runs[key] = {};
       rs.key = key; rs.toolId = toolId; rs.actionId = actionId;
       rs.rows = {}; rs.order = []; rs.log = [];
       rs.status = 'starting...'; rs.progress = 0; rs.done = 0; rs.total = 0;
       rs.jobId = null; rs.since = 0; rs.active = true; rs.terminal = false; rs._rowSeq = 0;
+      rs.cancelRequested = false;
       rs.summary = null; rs.result = null; rs.error = null;
       rs.destructive = !!(opts && opts.destructive);
       rs.keyOf = (opts && opts.keyOf) || defaultKeyOf;
@@ -260,6 +261,9 @@
     function listFor(key) { return subs[key] || (subs[key] = []); }
     function dispatch(key, type, payload) {
       (subs[key] || []).forEach(function (h) { if (typeof h[type] === 'function') { try { h[type](payload); } catch (e) {} } });
+      if (type === 'reset' || type === 'active' || type === 'status') {
+        if (current && current.workspace) current.view.refreshRuns();
+      }
     }
     function upsert(rs, ev) {
       var k = rs.keyOf(ev);
@@ -331,8 +335,24 @@
           replay(runs[key], handlers);   // late binder still paints the run so far
           return function () { var i = list.indexOf(handlers); if (i >= 0) list.splice(i, 1); };
         },
-        cancel: function () { var rs = runs[key]; if (rs && rs.jobId) api('POST', '/job/' + rs.jobId + '/cancel').catch(function () {}); }
+        cancel: function () { requestCancel(runs[key]); }
       };
+    }
+    function postCancel(rs) {
+      api('POST', '/job/' + rs.jobId + '/cancel').catch(function () {
+        // A transient failure should leave the visible cancel control retryable.
+        if (runs[rs.key] !== rs || !rs.active) return;
+        rs.cancelRequested = false;
+        dispatch(rs.key, 'status', rs.status);
+      });
+    }
+    function requestCancel(rs) {
+      if (!rs || !rs.active || rs.cancelRequested) return false;
+      rs.cancelRequested = true;
+      rs.status = 'cancelling...';
+      dispatch(rs.key, 'status', rs.status);
+      if (rs.jobId) postCancel(rs);
+      return true;
     }
     function start(toolId, actionId, params, opts) {
       opts = opts || {};
@@ -346,11 +366,14 @@
       (async function () {
         try {
           var r = await api('POST', '/tool/' + toolId + '/action/' + actionId, params || {});
+          rs.jobId = r.jobId;
+          // A cancel requested while the start response was pending still belongs
+          // to this job, even if another run has since reused its client key.
+          if (rs.cancelRequested) postCancel(rs);
           // A newer start() for this key already superseded us while the POST was in
           // flight (audit#17): its job is the one to track. Don't overwrite its jobId
           // or start a stale poller (which would also double-run a destructive job).
           if (gen[key] !== g) return;
-          rs.jobId = r.jobId;
           poll(key, g);
         } catch (e) {
           if (gen[key] !== g) return;   // superseded; don't stomp the current run's state
@@ -409,6 +432,11 @@
       attach: attach,
       get: function (key) { return runs[key]; },
       handle: makeHandle,
+      activeFor: function (toolIds) {
+        return Object.keys(runs).filter(function (k) {
+          return runs[k].active && toolIds.indexOf(runs[k].toolId) !== -1;
+        }).map(makeHandle);
+      },
       // Is some live run already following this server job? Keeps the shell's
       // reattach banner from nagging about a run the open tab is already showing.
       tracking: function (jobId) {
@@ -419,11 +447,9 @@
         var hit = [];
         Object.keys(runs).forEach(function (k) {
           var rs = runs[k];
-          if (!rs.active || !rs.destructive || !rs.jobId) return;
+          if (!rs.active || !rs.destructive) return;
           if (toolId && rs.toolId !== toolId) return;
-          api('POST', '/job/' + rs.jobId + '/cancel').catch(function () {});
-          rs.status = 'cancelling...'; dispatch(k, 'status', rs.status);
-          hit.push(rs.actionId);
+          if (requestCancel(rs)) hit.push(rs.actionId);
         });
         return hit;
       }
@@ -723,6 +749,9 @@
     // main column: top bar (breadcrumb + universal cred + clock) + body (hub OR tool host)
     var main = el('div'); main.id = 'j-main';
     var top = el('div'); top.id = 'j-topbar';
+    var toolsBtn = Janet.ui.ghostButton('All tools', { size: 'sm', onClick: backToHub });
+    toolsBtn.classList.add('j-ws-all-tools');
+    top.appendChild(toolsBtn);
     var crumb = el('div', 'j-crumb');
     dom.crumbCat = el('span', 'j-crumb-cat', 'Home');
     dom.crumbSep = el('span', 'j-crumb-sep'); dom.crumbSep.textContent = iconGlyph('E76C'); dom.crumbSep.style.display = 'none';
@@ -946,7 +975,7 @@
 
     var toolSel = el('select', 'j-select');
     (TOOLS || []).forEach(function (t) { toolSel.appendChild(new Option(t.name, t.id)); });
-    if (current && current.tool) toolSel.value = current.tool.id;
+    if (current && current.tool) toolSel.value = current.workspace ? howtoCtx.toolId : current.tool.id;
     var filter = el('input', 'j-audit-filter'); filter.type = 'text'; filter.placeholder = 'Filter...';
     var closeB = Janet.ui.ghostButton('Close', { size: 'sm' });
     head.appendChild(modeWrap); head.appendChild(toolSel); head.appendChild(filter); head.appendChild(closeB);
@@ -1058,6 +1087,25 @@
     return card;
   }
 
+  var workstationIds = ['wpt', 'c2c'];
+  function registeredTool(id) { return TOOLS.find(function (tool) { return tool.id === id; }); }
+  function workstationTool(id) {
+    return workstationIds.indexOf(id) >= 0 && workstationIds.every(registeredTool);
+  }
+  function workstationEntry() {
+    return {
+      id: 'workstations', icon: registeredTool('wpt').icon, category: 'Remediation',
+      name: 'C2C', summary: 'Comply to Connect checks and workstation remediation.',
+      searchAliases: 'workstation patching wpt comply to connect c2c c2c nemesis'
+    };
+  }
+  function visibleTools() {
+    if (!workstationTool('wpt')) return TOOLS;
+    return TOOLS.filter(function (tool) { return tool.id !== 'c2c'; }).map(function (tool) {
+      return tool.id === 'wpt' ? workstationEntry() : tool;
+    });
+  }
+
   function renderHub() {
     var hub = dom.hub; hub.innerHTML = '';
     var inner = el('div', 'j-hub-inner');
@@ -1067,7 +1115,7 @@
     // one launchpad tile per tool, in catalog order (no scroll until it overflows)
     var scroll = el('div', 'j-hub-scroll');
     var grid = el('div', 'j-launchpad');
-    TOOLS.forEach(function (t) { grid.appendChild(makeToolCard(t)); });
+    visibleTools().forEach(function (t) { grid.appendChild(makeToolCard(t)); });
     scroll.appendChild(grid);
     inner.appendChild(scroll);
     hub.appendChild(inner);
@@ -1078,7 +1126,7 @@
   var navCollapsed = {};      // category -> true if collapsed
   function navCatOrder() {    // categories in registry order of first appearance
     var seen = [], s = {};
-    TOOLS.forEach(function (t) { var c = t.category || 'Other'; if (!s[c]) { s[c] = 1; seen.push(c); } });
+    visibleTools().forEach(function (t) { var c = t.category || 'Other'; if (!s[c]) { s[c] = 1; seen.push(c); } });
     return seen;
   }
   function renderNav(filterStr) {
@@ -1086,10 +1134,11 @@
     var q = (filterStr || '').trim().toLowerCase();
     dom.navList.innerHTML = '';
     navCatOrder().forEach(function (cat) {
-      var items = TOOLS.filter(function (t) {
+      var items = visibleTools().filter(function (t) {
         if ((t.category || 'Other') !== cat) return false;
         if (!q) return true;
-        return ((t.name || '').toLowerCase().indexOf(q) >= 0) || (cat.toLowerCase().indexOf(q) >= 0);
+        return ((t.name || '').toLowerCase().indexOf(q) >= 0) || (cat.toLowerCase().indexOf(q) >= 0)
+          || ((t.searchAliases || '').indexOf(q) >= 0);
       });
       if (!items.length) return;
       var group = el('div', 'j-cat-group' + (navCollapsed[cat] ? ' collapsed' : ''));
@@ -1199,6 +1248,67 @@
   var current = null;   // { tool, view, ctx }
   var openGen = 0;      // bumped per openTool call; guards against out-of-order async mounts
 
+  function leaveCurrent() {
+    if (!current) return;
+    var leaving = current;
+    current = null;
+    (leaving.workspace ? workstationIds : [leaving.tool.id]).forEach(RunController.cancelDestructive);
+    try { if (leaving.view && leaving.view.unmount) leaving.view.unmount(); } catch (e) {}
+  }
+
+  function openWorkstations(toolId, tab) {
+    if (current && current.workspace) {
+      if (toolId) current.view.select(toolId, tab);
+      return;
+    }
+    ++openGen;
+    leaveCurrent();
+    Janet._pendingTab = null;
+    var entry = workstationEntry();
+    setNavActive(entry.id);
+    dom.crumbCat.textContent = entry.category;
+    dom.crumbTool.textContent = entry.name;
+    dom.crumbSep.style.display = '';
+    dom.hub.classList.add('hidden');
+    dom.tool.classList.remove('hidden');
+    dom.tool.classList.add('j-workstations-tool');
+    qs('#j-shell').classList.add('j-workstations-active');
+    dom.viewHost.innerHTML = '';
+    var view = Janet.components.Workstations({
+      toolName: function (id) { return id === 'c2c' ? 'C2C' : registeredTool(id).name; },
+      activeRuns: function () { return RunController.activeFor(workstationIds); },
+      load: async function (id) {
+        var pair = await Promise.all([loadView(id), fetchManifest(id)]);
+        return { view: pair[0], ctx: buildCtx(registeredTool(id), pair[1]) };
+      },
+      onPage: function (id, page, label) {
+        currentToolName = registeredTool(id).name;
+        Janet.howtoTab(id, page, label);
+      },
+      help: function () {
+        if (guideFor(howtoCtx)) openHowtoModal();
+        else {
+          var h = (window.JANETWEB_HELP || {})[howtoCtx.toolId];
+          Janet.components.ConfirmDialog({
+            title: howtoCtx.label || currentToolName,
+            body: (typeof h === 'string' ? h : (h && (h[howtoCtx.tabId] || h._overview))) || 'Use the controls on this page to choose targets and review results.',
+            okText: 'Got it', cancelText: null
+          });
+        }
+      }
+    });
+    current = { tool: entry, view: view, workspace: true };
+    dom.viewHost.appendChild(view.el);
+    view.refreshRuns();
+    if (toolId) view.select(toolId, tab);
+    else view.showRule('overview');
+  }
+
+  function clearWorkstationShell() {
+    dom.tool.classList.remove('j-workstations-tool');
+    qs('#j-shell').classList.remove('j-workstations-active');
+  }
+
   // Manifest fetch, FAIL CLOSED. This used to be `.catch(-> null)` inline in
   // openTool, which meant one dropped request silently opened the tool with every
   // manifest-derived safety gate removed: ctx.run's destructive default collapses to
@@ -1212,10 +1322,17 @@
   // /action posts with the same 'tool manifest unavailable'. (audit 2026-07-24 P2)
   async function fetchManifest(toolId) {
     var path = '/tool/' + toolId + '/manifest';
-    try { return await api('GET', path); }
+    async function read() {
+      var manifest = await api('GET', path);
+      if (!manifest || manifest.id !== toolId || !Array.isArray(manifest.actions)) {
+        throw new Error('the safety manifest did not match ' + toolId);
+      }
+      return manifest;
+    }
+    try { return await read(); }
     catch (e1) {
       await sleep(400);
-      try { return await api('GET', path); }
+      try { return await read(); }
       catch (e2) {
         var e = new Error('its safety manifest did not load (' + e2.message + '). Refusing to open the tool without its guards - retry when the server responds.');
         e.status = e2.status; throw e;
@@ -1223,6 +1340,10 @@
     }
   }
   async function openTool(tool, pendingTab) {
+    if (tool.id === 'workstations' || workstationTool(tool.id)) {
+      openWorkstations(tool.id === 'workstations' ? null : tool.id, pendingTab);
+      return;
+    }
     // Re-clicking the tool that is already open (sidebar row / command palette) must
     // NOT tear down its in-flight destructive run. No-op unless a deep-link tab was
     // requested (that still needs to route the TabHost).
@@ -1230,11 +1351,8 @@
     var gen = ++openGen;
     // Tear down the outgoing view first (mirrors backToHub egress): cancel any
     // running destructive op and unmount so its listeners / detached DOM do not leak.
-    if (current) {
-      RunController.cancelDestructive(current.tool.id);
-      try { if (current.view && current.view.unmount) current.view.unmount(); } catch (e) {}
-      current = null;
-    }
+    leaveCurrent();
+    clearWorkstationShell();
     Janet._pendingTab = pendingTab || null;   // consumed by the view's TabHost on mount (command palette deep-link)
     dom.thIcon.textContent = iconGlyph(tool.icon);
     dom.thName.textContent = tool.name;
@@ -1262,6 +1380,7 @@
       var pair = await Promise.all([loadView(tool.id), fetchManifest(tool.id)]);
       view = pair[0]; manifest = pair[1];
     } catch (e) {
+      if (gen !== openGen) return;
       dom.viewHost.innerHTML = '';
       var errBox = el('div'); errBox.style.padding = '24px';
       var err = el('div', 'st-bad');
@@ -1296,13 +1415,9 @@
     }
   }
   function backToHub() {
-    if (current) {
-      // a running destructive op in this tool is cancelled on egress (mirrors JANET ONE),
-      // read-only/streaming runs keep going in the background.
-      RunController.cancelDestructive(current.tool.id);
-      try { if (current.view && current.view.unmount) current.view.unmount(); } catch (e) {}
-      current = null;
-    }
+    ++openGen;
+    leaveCurrent();
+    clearWorkstationShell();
     dom.tool.classList.add('hidden');
     dom.hub.classList.remove('hidden');
     dom.viewHost.innerHTML = '';
@@ -1506,8 +1621,24 @@
   function humanizeTab(id) { return TAB_LABEL[id] || (id.charAt(0).toUpperCase() + id.slice(1)); }
   function paletteItems() {
     var items = [{ label: 'Audit log', sub: 'view', run: openAuditViewer }];
+    if (workstationTool('wpt')) {
+      items.push({ label: 'C2C', sub: 'Comply to Connect overview', run: function () { if (current && current.workspace) current.view.showRule('overview'); else openWorkstations(); } });
+      Janet.components.Compliance.pages.slice(1).forEach(function (rule) {
+        items.push({ label: 'C2C → ' + rule.label, sub: 'Compliance rule', run: function () {
+          openWorkstations();
+          current.view.showRule(rule.id);
+        } });
+      });
+      Janet.components.Workstations.groups.forEach(function (group) {
+        group.pages.forEach(function (page) {
+          var tool = registeredTool(page[0]);
+          items.push({ label: tool.name + ' → ' + page[2], sub: group.label, run: function () { openTool(tool, page[1]); } });
+        });
+      });
+    }
     (TOOLS || []).forEach(function (t) {
       items.push({ label: t.name, sub: t.category || 'Tool', run: function () { openTool(t); } });
+      if (workstationTool(t.id)) return;
       var help = (window.JANETWEB_HELP || {})[t.id];
       if (help && typeof help === 'object') {
         Object.keys(help).forEach(function (tab) {

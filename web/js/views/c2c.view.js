@@ -164,9 +164,12 @@
   JanetViews.register('c2c', {
     mount: function (host, ctx) {
       var ui = ctx.ui, C = ctx.components, el = ctx.util.el;
+      var workspace = ctx.workspace;
+      var assessment = workspace && workspace.assessment;
 
       // ---- run/result state ----
-      var run = null, unsub = null, offTargets = null;
+      var run = null, unsub = null, offTargets = null, refreshWorkspaceScope = null;
+      var uploading = false, disposed = false;
       var lastImport = null;             // last import summary
       var importCsvPath = null;          // server-side path of the last uploaded C2C CSV (drives ALL per-pillar + run-all targeting)
       var pillarCards = {};              // pillar key -> { hosts, via, cb, fixBtn, enableCb?, bundleInput? } for the per-pillar fix cards
@@ -182,6 +185,13 @@
 
       // =================== layout ===================
       var root = el('div'); root.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)';
+      this._root = root;
+      this._unsub = function () {
+        disposed = true;
+        if (unsub) unsub();
+        if (offTargets) offTargets();
+        if (targets) targets.dispose();
+      };
 
       var body = el('div'); body.style.cssText = 'flex:1;min-height:0;display:flex;gap:14px;padding:14px 16px 0';
       root.appendChild(body);
@@ -191,17 +201,19 @@
       body.appendChild(left);
 
       // --- TARGET COMPUTERS (TargetManager) - the ONE list that drives scan AND fixes ---
-      var compCard = sectionCard('TARGET COMPUTERS');
+      var compCard = sectionCard(workspace ? 'C2C targets' : 'TARGET COMPUTERS');
       compCard.style.cssText += ';flex:0 0 auto;display:flex;flex-direction:column';
       var compHint = el('div'); compHint.style.cssText = 'font-size:11.5px;line-height:1.4;color:var(--muted);margin:-2px 0 8px';
-      compHint.textContent = 'The single host list for BOTH the read-only Scan / Version Check and the destructive FIX cards below. Type / paste / Import TXT, or Import a C2C CSV (optional) to auto-load the non-compliant hosts. Every fixer is verify-first, so a host already compliant reports NO CHANGE.';
+      compHint.textContent = 'This list is used for C2C scans, audits and manual fixes. You can paste hosts, import TXT or add hosts from a C2C report.';
       compCard.appendChild(compHint);
       var targets = C.TargetManager({
         model: ctx.util.targetModel(''),
         hint: 'One host per line - comma/space/semicolon ok; # starts a comment. Drives the Scan, the Version Check and every Fix.',
         placeholder: 'WS-0001\nWS-0002\n# lab row\nWS-0003',
         importLabel: 'Import TXT', importAccept: '.txt',
+        handoffTool: 'c2c',
         countNoun: 'computer',
+        onFilterChange: function () { updateTargetButtons(); updateFixCounts(); },
         onImport: function (n, name) { log.append({ text: '[' + ts() + '] Added ' + n + ' computer(s) from ' + name, level: 'info' }); }
       });
       var tgHolder = el('div'); tgHolder.style.cssText = 'flex:1;min-height:0;display:flex'; tgHolder.appendChild(targets.el);
@@ -210,6 +222,8 @@
 
       // --- FIX PILLARS (dual-mode: manual Target list OR import-flagged; destructive; admin session) ---
       var fixCard = sectionCard('FIX PILLARS (per pillar - manual or import-scoped)', 'cyan');
+      var fixHeading = fixCard.firstChild;
+      var fullFixHeading = fixHeading.textContent;
       var fixIntro = el('div'); fixIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
       fixIntro.textContent = 'DUAL MODE. With NO import (MANUAL): each pillar card fixes the hosts in Target Computers - load machines, type FIX, then Fix a pillar or check cards and RUN ALL. Import the C2C compliance CSV to switch to IMPORT-SCOPED: one card per flagged pillar, dialing ONLY the hosts the import flagged for that pillar (never the whole list) - click a host count to review them. Every fixer is verify-first (NO CHANGE where a host is already compliant). Requires an admin session.';
       fixCard.appendChild(fixIntro);
@@ -236,7 +250,8 @@
 
       var ctlRow2 = el('div'); ctlRow2.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
       ctlRow2.appendChild(ui.label('Confirm:'));
-      var confirmInput = ui.input({ title: 'Type FIX (exactly) to arm any per-card fix or the run-all.' }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '110px';
+      var fullConfirmHint = 'Type FIX (exactly) to arm any per-card fix or the run-all.';
+      var confirmInput = ui.input({ title: fullConfirmHint }); confirmInput.placeholder = 'type FIX'; confirmInput.style.width = '110px';
       ctlRow2.appendChild(confirmInput);
       ctlRow2.appendChild(ui.label('Max concurrent:'));
       var fixThreads = ui.number({ value: 8, min: 1, max: 16, title: 'Parallel hosts (1-16).' }); fixThreads.style.width = '68px';
@@ -272,7 +287,7 @@
       // --- LOCKSCREEN / WALLPAPER CACHE FIX (opt-in, destructive; admin session required) ---
       var lockCard = sectionCard('LOCKSCREEN / WALLPAPER CACHE FIX (opt-in, destructive)');
       var lockIntro = el('div'); lockIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      lockIntro.textContent = 'Clears the stuck quarantine lock screen / wallpaper after unquarantine: writes the Windows DEFAULT image into HKLM Personalization policy on each Target Computer - ONLY where no value is already set. Not a scored pillar; never part of the run-all. Uses the Type-FIX confirm, Max concurrent and offline options in FIX PILLARS above.';
+      lockIntro.textContent = 'Clears the stuck quarantine lock screen / wallpaper after unquarantine: writes the Windows DEFAULT image into HKLM Personalization policy on each Target Computer - ONLY where no value is already set. Not a scored pillar; never part of the run-all. Uses the FIX confirmation and execution settings.';
       lockCard.appendChild(lockIntro);
       var lockArm = ui.checkbox('Arm the cache fix (writes HKLM policy only where unset - never overwrites)', { title: "Opt-in. On each target: LockScreenImage (lock screen) under HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization + DesktopImagePath/Url/Status (wallpaper) under HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP, pointed at the target's own default image (LockScreen.jpg -> img100.jpg; wallpaper img0.jpg). A value already set by an operator or GPO is NEVER overwritten." });
       lockArm.style.margin = '0 0 8px';
@@ -291,7 +306,7 @@
       // --- JAVA CLEANUP (opt-in, destructive; admin session required) ---
       var javaCard = sectionCard('JAVA CLEANUP - REMOVE OUTDATED (opt-in, destructive)');
       var javaIntro = el('div'); javaIntro.style.cssText = 'font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:8px';
-      javaIntro.textContent = 'Removes Oracle/Sun Java OLDER than 8u491 from each Target Computer: installed products (msiexec, Oracle/Sun publisher only), JavaSoft registry residue (stale keys that keep vulnerability scanners flagging a host after Java is gone) and Program Files\\Java folders. OpenJDK / Temurin / Corretto and unparseable (UNKNOWN) versions are NEVER touched. Not a scored pillar; never part of the run-all. Uses the Type-FIX confirm, Max concurrent and offline options in FIX PILLARS above.';
+      javaIntro.textContent = 'Removes Oracle/Sun Java OLDER than 8u491 from each Target Computer: installed products (msiexec, Oracle/Sun publisher only), JavaSoft registry residue (stale keys that keep vulnerability scanners flagging a host after Java is gone) and Program Files\\Java folders. OpenJDK / Temurin / Corretto and unparseable (UNKNOWN) versions are NEVER touched. Not a scored pillar; never part of the run-all. Uses the FIX confirmation and execution settings.';
       javaCard.appendChild(javaIntro);
       var javaArm = ui.checkbox('Arm the Java cleanup (uninstall + registry + folder removal of OLD Oracle/Sun Java only)', { title: 'Opt-in. OLD = below 1.8.0_491 (legacy 1.x families included). Uninstall via msiexec /x {GUID} /qn /norestart (no forced reboots; 3010 = reboot pending). Registry: old version subkeys under HKLM JavaSoft (native + WOW6432Node) removed, CurrentVersion repaired. Folders: old dirs under Program Files\\Java (in-use folders report FAILED). OpenJDK/Temurin/Corretto and UNKNOWN versions are never removed.' });
       javaArm.style.margin = '0 0 8px';
@@ -465,7 +480,7 @@
       // ---------- RIGHT: RESULTS ----------
       var right = el('div'); right.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;min-height:0';
       var resultsCard = ui.card({}); resultsCard.style.cssText += ';flex:1;min-height:0;display:flex;flex-direction:column';
-      var resHdr = el('div', 'j-section-h', 'RESULTS'); resHdr.style.marginBottom = '6px';
+      var resHdr = el('div', 'j-section-h', workspace ? 'C2C results' : 'RESULTS'); resHdr.style.marginBottom = '6px';
       resultsCard.appendChild(resHdr);
       var grid = C.ResultsGrid({
         title: 'C2C Nemesis results',
@@ -525,7 +540,7 @@
         return box;
       }
       function ts() { return ctx.util.clockStr(); }
-      function isRunning() { return !!(run && run.state && run.state.active); }
+      function isRunning() { return uploading || !!(run && run.state && run.state.active); }
       function threads() { return Math.max(1, Math.min(64, parseInt(threadsInput.value, 10) || 16)); }
       function threadsFix() { return Math.max(1, Math.min(16, parseInt(fixThreads.value, 10) || 8)); }
       var esc = Janet.util.esc;   // the single shared escaper (audit: local copy duplicated it)
@@ -594,12 +609,14 @@
         var hostCount = Object.keys(union).length;
         runAllBtn.textContent = 'RUN ALL - ' + hostCount + ' host' + (hostCount === 1 ? '' : 's') + ' / ' + totalPairs + ' pillar fix' + (totalPairs === 1 ? '' : 'es');
         runAllBtn.disabled = locked || totalPairs === 0;
+        if (refreshWorkspaceScope) refreshWorkspaceScope();
         return { union: union, totalPairs: totalPairs, hostCount: hostCount, manual: manual };
       }
 
       // Lockscreen / scan / version still key off the Target Computers count (unchanged).
       function updateTargetButtons() {
         var n = targets.count();
+        if (assessment) assessment.setTargets(targets.hosts());
         var locked = isRunning();
         lockBtn.textContent = 'APPLY LOCKSCREEN / WALLPAPER FIX (' + n + ' host' + (n === 1 ? '' : 's') + ')';
         lockBtn.disabled = locked || n === 0 || !lockArm._cb.checked;
@@ -658,8 +675,9 @@
 
       // ---- C2C Readiness Scan (read-only; no admin session, no confirm) ----
       function doRun() {
-        if (isRunning()) return;
+        if (isRunning()) return false;
         var hosts = targets.hosts();
+        if (!hosts.length) return false;
         grid.clear(); prog.reset(); countLine.textContent = '0 / ' + hosts.length;
         hosts.forEach(function (h) { grid.upsert({ Host: h, Ping: '', Status: 'Queued', Detail: 'Queued' }); });
         log.banner('C2C Readiness Scan on ' + hosts.length + ' computer(s)');
@@ -670,6 +688,8 @@
           threads: threads()
         }, { keyOf: keyByHost, destructive: false });
         bindRun('C2C Readiness Scan');
+        if (assessment) assessment.assess(run, hosts);
+        return true;
       }
 
       // ---- Version Check (read-only; no admin session, no confirm) ----
@@ -813,7 +833,12 @@
         }
         importStatus.textContent = 'Uploading ' + f.name + ' ...'; importStatus.className = 'st-info';
         log.banner('Import C2C Compliance CSV: ' + f.name);
+        uploading = true;
+        lockInputs(true);
+        fixCancelBtn.disabled = true;
         ctx.uploadFile(f).then(function (p) {
+          if (disposed) return;
+          uploading = false;
           log.append({ text: 'Uploaded to host: ' + p, level: 'dim' });
           // Hold the uploaded path LOCALLY until the parse actually applies. It only becomes
           // importCsvPath (re-sent with every per-pillar fix + run-all) once the summary is
@@ -822,6 +847,7 @@
           var pendingCsvPath = p;
           importStatus.textContent = 'Parsing ' + f.name + ' ...'; importStatus.className = 'st-info';
           run = ctx.run('import', { csvPath: p });
+          lockInputs(true);
           if (unsub) unsub();
           unsub = run.subscribe({
             status: function (t) { importStatus.textContent = t; },
@@ -834,7 +860,7 @@
               // and rebuild the MANUAL cards so UI and dispatch state agree.
               importCsvPath = null; clearImportBtn.style.display = 'none'; showFixPlaceholder();
             },
-            active: function (a) { importBtn.disabled = a; },
+            active: function (a) { if (!a) lockInputs(false); },
             // The run bus delivers the action's return value ({rows,summary}) as the
             // 'final' payload (RunController.reduce -> dispatch(key,'final',ev.result)),
             // so res.summary is the import summary. Guarded so a bad/empty payload logs
@@ -854,6 +880,9 @@
             }
           });
         }).catch(function (e) {
+          uploading = false;
+          if (disposed) return;
+          lockInputs(false);
           importStatus.textContent = 'Upload failed: ' + (e && e.message); importStatus.className = 'st-bad';
           log.append({ text: 'Upload failed: ' + (e && e.message), level: 'err' });
         });
@@ -910,6 +939,7 @@
           return c > 0 ? (m.label + ' ' + c + ' -> ' + m.route) : null;
         }).filter(Boolean);
         if (routedTxt.length) log.append({ text: '[' + ts() + '] Routed elsewhere: ' + routedTxt.join('  |  '), level: 'info' });
+        if (assessment) assessment.setReport(s);
       }
 
       // MANUAL-mode fix cards, shown whenever NO C2C CSV is imported. Every fixable pillar gets
@@ -917,6 +947,7 @@
       // and RUN ALL dial exactly those. This is the "load machines + run a manual C2C patch"
       // path; the backend runs in manual mode (no import allow-list) when no csvPath is sent.
       function showFixPlaceholder() {
+        if (assessment) assessment.setReport(null);
         fixBody.innerHTML = ''; pillarCards = {};
         // Entering MANUAL mode (mount / FAILED re-import / explicit Clear import) RE-ARMS from
         // scratch: clear the FIX confirm word and the persisted ENABLE-BitLocker tick. Without this
@@ -1020,7 +1051,7 @@
         r1.appendChild(right);
         box.appendChild(r1);
 
-        var entry = pillarCards[key] = { hosts: hosts.slice(), via: via, manual: !!manual, cb: cb, fixBtn: null, hostLbl: hostLbl, enableCb: null, bundleInput: null };
+        var entry = pillarCards[key] = { box: box, title: titleLbl, hosts: hosts.slice(), via: via, manual: !!manual, cb: cb, fixBtn: null, hostLbl: hostLbl, enableCb: null, bundleInput: null };
 
         // Encryption extra: the ENABLE-BitLocker opt-in (stays on its pillar's card)
         if (key === 'Encryption') {
@@ -1408,8 +1439,113 @@
       log.append({ text: 'Read-only side (no import needed): C2C Readiness Scan + Version Check across the Target Computers list (11 TASKORD-tiered checks: 5 QUARANTINE, 2 AUDIT, 3 INFO, Monitoring=ATTEST). The full per-check report streams here.', level: 'dim' });
       log.append({ text: 'Also read-only: BITLOCKER ESCROW AUDIT - reconciles each fixed volume RecoveryPassword protector GUIDs against the AD msFVE-RecoveryInformation escrow. ESCROWED (AD) / NOT ESCROWED / TPM-ONLY - LOCKOUT RISK / ESCROW UNKNOWN / NOT ENCRYPTED. Fail-closed: an unreadable protector list or AD search is UNKNOWN, never ESCROWED. The recovery password is never read or emitted.', level: 'dim' });
 
+      if (workspace) {
+        log.append({ text: 'Assessment and remediation activity appears here.', level: 'dim' });
+        this.startAssessment = doRun;
+        var pillarNote = el('p', 'muted hidden');
+        fixCard.insertBefore(pillarNote, fixIntro);
+        var defenderIntro = el('div', 'muted hidden');
+        defenderIntro.style.marginBottom = '8px';
+        fixCard.insertBefore(defenderIntro, fixIntro);
+        this.focusPillar = function (key) {
+          var prior = root.querySelector('.j-ws-pillar-focus');
+          if (prior) prior.classList.remove('j-ws-pillar-focus');
+          var card = pillarCards[key] && pillarCards[key].box;
+          if (!card) {
+            var meta = FIX_META[key];
+            if (importCsvPath && meta) {
+              pillarNote.textContent = 'The imported report did not flag any hosts for the ' + meta.label + ' fix.';
+              pillarNote.classList.remove('hidden');
+            }
+            return;
+          }
+          card.classList.add('j-ws-pillar-focus');
+          card.tabIndex = -1;
+          card.focus({ preventScroll: true });
+          card.scrollIntoView({ block: 'nearest' });
+        };
+        root.classList.add('j-ws-c2c');
+        var options = el('details', 'j-ws-disclosure');
+        options.appendChild(el('summary', null, 'Scan settings'));
+        options.appendChild(optCard);
+        var checks = el('details', 'j-ws-disclosure');
+        checks.appendChild(el('summary', null, 'Checks and verdicts'));
+        checks.appendChild(infoCard);
+        left.appendChild(options);
+        left.appendChild(checks);
+        progCard.appendChild(fixCancelBtn);
+        ctlRow1.remove();
+
+        var sections = {
+          targets: [compCard],
+          import: [importCard],
+          readiness: [actionCard, options, checks],
+          version: [verCard, options],
+          escrow: [escCard, options],
+          fixes: [fixCard],
+          defenderfix: [fixCard],
+          lockscreen: [lockCard],
+          java: [javaCard]
+        };
+        var section = null;
+        var cards = [compCard, importCard, actionCard, options, checks, verCard, escCard, fixCard, lockCard, javaCard];
+        refreshWorkspaceScope = function () {
+          var n = targets.count();
+          var scope = 'C2C targets · ' + n + (n === 1 ? ' host' : ' hosts');
+          var defenderOnly = section === 'defenderfix';
+          var defender = pillarCards.AntiMalware;
+          // Reapply after every target or import update because import replaces the card nodes.
+          fixHeading.textContent = defenderOnly ? 'Defender / MDE fix' : fullFixHeading;
+          confirmInput.title = defenderOnly ? 'Type FIX (exactly) to arm this Defender / MDE fix.' : fullConfirmHint;
+          fixIntro.classList.toggle('hidden', defenderOnly);
+          defenderIntro.classList.toggle('hidden', !defenderOnly);
+          fixCardsHdr.classList.toggle('hidden', defenderOnly);
+          fixControls.classList.toggle('hidden', defenderOnly && !defender);
+          Array.prototype.forEach.call(fixBody.children, function (child) {
+            child.classList.toggle('hidden', defenderOnly && (!defender || child !== defender.box));
+          });
+          if (defender) {
+            defender.title.textContent = defenderOnly ? 'Defender / MDE' : PILLAR_TAB.AntiMalware;
+            defender.cb.classList.toggle('hidden', defenderOnly);
+          }
+          if (defenderOnly) {
+            var hosts = shortUniq(importCsvPath ? (defender ? defender.hosts : []) : targets.hosts());
+            var hostCount = hosts.length + (hosts.length === 1 ? ' host' : ' hosts');
+            scope = importCsvPath
+              ? 'Defender / MDE · ' + hostCount + ' flagged by the imported report'
+              : 'Defender / MDE · ' + hostCount + ' from C2C targets (manual)';
+            defenderIntro.textContent = importCsvPath && !defender
+              ? 'The imported report did not flag any hosts for Defender / MDE remediation.'
+              : 'This action can update Defender signatures and repair Defender or MDE. Review the host list and type FIX to confirm.';
+            if (defender) defender.fixBtn.textContent = 'Fix Defender / MDE on ' + hostCount;
+          }
+          if (section === 'fixes') {
+            scope = importCsvPath
+              ? 'C2C pillar fixes · Hosts flagged by the imported report'
+              : scope + ' · Manual pillar fixes';
+          }
+          workspace.setScope(scope);
+        };
+        this.selectTab = function (id) {
+          var shown = sections[id];
+          if (!shown) return;
+          if (section && (section === 'defenderfix') !== (id === 'defenderfix')) confirmInput.value = '';
+          section = id;
+          pillarNote.classList.add('hidden');
+          var prior = root.querySelector('.j-ws-pillar-focus');
+          if (prior) prior.classList.remove('j-ws-pillar-focus');
+          shown.forEach(function (card) { left.appendChild(card); });
+          cards.forEach(function (card) { card.classList.toggle('hidden', shown.indexOf(card) === -1); });
+          // The companions use the same FIX and execution settings as pillar fixes.
+          if (id === 'lockscreen') lockCard.insertBefore(fixControls, lockBtn);
+          else if (id === 'java') javaCard.insertBefore(fixControls, javaBtn);
+          else fixCard.insertBefore(fixControls, fixCardsHdr);
+          runAllRow.classList.toggle('hidden', id !== 'fixes');
+          updateFixCounts();
+        };
+        this.selectTab(workspace.initialTab);
+      }
       host.appendChild(root);
-      this._root = root; this._unsub = function () { if (unsub) unsub(); if (offTargets) offTargets(); };
     }
   });
 })();
